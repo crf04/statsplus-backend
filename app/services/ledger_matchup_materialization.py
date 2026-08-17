@@ -22,7 +22,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE
-from app.domain.utc import assume_utc
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
@@ -50,6 +50,7 @@ from app.services.team_matchup_publications import (
     publication_lineage,
     publication_metric_identity,
     publication_stream,
+    resolve_governed_l15_game_ids,
     validate_publication_rows,
 )
 from app.services.team_matchup_repository import (
@@ -110,6 +111,7 @@ class LedgerMatchupMaterializationService:
         matchup_repository: TeamMatchupRepository,
         *,
         publication_reader=None,
+        l15_expectation_resolver=None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(repository, CanonicalGameLedgerRepository):
@@ -119,6 +121,7 @@ class LedgerMatchupMaterializationService:
         self.repository = repository
         self.matchup_repository = matchup_repository
         self.publication_reader = publication_reader
+        self.l15_expectation_resolver = l15_expectation_resolver
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def materialize(
@@ -251,6 +254,10 @@ class LedgerMatchupMaterializationService:
         )
         publication_backed = any(
             item.publication is not None
+            and (
+                not hasattr(item, "status")
+                or item.status == "available"
+            )
             for _, facts, observations in snapshots
             for item in (*facts, *observations)
         )
@@ -349,8 +356,8 @@ class LedgerMatchupMaterializationService:
             for stream_key in stream_keys
         }
 
-    @staticmethod
     def _publication_surface(
+        self,
         base: str,
         stream_key: str,
         read,
@@ -384,6 +391,28 @@ class LedgerMatchupMaterializationService:
                 unavailable_reason=cutoff_reason,
                 publication=lineage,
             )
+        if expected_l15_game_ids is not None:
+            try:
+                publication_cutoff = (
+                    assume_utc(read.cutoff)
+                    if isinstance(read.cutoff, datetime)
+                    else parse_utc_iso(str(read.cutoff))
+                )
+                if read.season != season:
+                    raise ValueError("publication_governance_unavailable")
+                if self.l15_expectation_resolver is not None:
+                    expected_l15_game_ids = resolve_governed_l15_game_ids(
+                        self.l15_expectation_resolver,
+                        read.season,
+                        publication_cutoff,
+                    )
+            except Exception:
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_governance_unavailable",
+                    publication=lineage,
+                )
         try:
             rows = tuple(getattr(read, "decoded", None) or decode_team_window(
                 read.payload,

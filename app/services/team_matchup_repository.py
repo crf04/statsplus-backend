@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -51,17 +52,15 @@ class PublicationWriteCapability:
             items = (*facts, *observations)
             window = "l15" if scope.window_games is not None else "season"
             for item in items:
-                publication = item.publication
                 surface = item.base if hasattr(item, "base") else item.surface
                 if surface not in NBA_PUBLICATION_BASES:
                     continue
+                if hasattr(item, "status") and item.status != "available":
+                    # Missing/unavailable surfaces carry diagnostic lineage,
+                    # not facts authorized for a governed write.
+                    continue
+                publication = item.publication
                 if publication is None or not publication.publication_id:
-                    if getattr(item, "status", None) != "available":
-                        # An unavailable NBA publication is still part of a
-                        # governed snapshot, but it has no immutable version
-                        # to authorize.  Its absence must not block the
-                        # ledger-owned surfaces in the same transaction.
-                        continue
                     raise ValueError("publication_write_capability_required")
                 stream_key = publication_stream(surface, window)
                 version = connection.execute(
@@ -99,6 +98,94 @@ class PublicationWriteCapability:
                     and status in {"active", "rollback"}
                 )
                 if status != "candidate" and not active:
+                    raise ValueError("publication_write_context_invalid")
+        self._verify_payload_bindings(connection, snapshots)
+
+    @staticmethod
+    def _verify_payload_bindings(connection, snapshots) -> None:
+        """Bind every governed fact to the exact immutable payload value."""
+
+        from app.services.database_first_activation import (
+            PublicationPayloadError,
+            _reject_duplicate_json_keys,
+            decode_team_window,
+        )
+        from app.services.team_matchup_publications import (
+            publication_metric_identity,
+            validate_publication_rows,
+        )
+
+        for scope, facts, observations in snapshots:
+            window = "l15" if scope.window_games is not None else "season"
+            for surface in NBA_PUBLICATION_BASES:
+                surface_facts = tuple(fact for fact in facts if fact.base == surface)
+                if not surface_facts:
+                    continue
+                publication_ids = {
+                    fact.publication.publication_id
+                    for fact in surface_facts
+                    if fact.publication is not None
+                }
+                if len(publication_ids) != 1:
+                    raise ValueError("publication_write_context_invalid")
+                publication_id = next(iter(publication_ids))
+                stream_key = publication_stream(surface, window)
+                version = connection.execute(
+                    select(PublicationVersion.__table__).where(
+                        PublicationVersion.publication_id == publication_id,
+                        PublicationVersion.stream_key == stream_key,
+                    )
+                ).mappings().one_or_none()
+                try:
+                    if hashlib.sha256(version["payload"].encode()).hexdigest() != version[
+                        "checksum"
+                    ]:
+                        raise ValueError("publication checksum mismatch")
+                    document = json.loads(
+                        version["payload"],
+                        object_pairs_hook=_reject_duplicate_json_keys,
+                    )
+                    rows = decode_team_window(document, stream_key=stream_key)
+                    metric_keys = validate_publication_rows(surface, rows)
+                except (
+                    AttributeError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    PublicationPayloadError,
+                ):
+                    raise ValueError("publication_write_context_invalid") from None
+                expected = {
+                    (
+                        row.team_id,
+                        *publication_metric_identity(surface, metric_key),
+                    ): (float(row.per48[metric_key]), frozenset(row.game_ids))
+                    for row in rows
+                    for metric_key in metric_keys
+                }
+                actual = {}
+                for fact in surface_facts:
+                    if fact.denominator_unit != "minutes" or fact.denominator_value <= 0:
+                        raise ValueError("publication_write_context_invalid")
+                    key = (fact.team_id, fact.slice_key, fact.stat_key)
+                    if key in actual:
+                        raise ValueError("publication_write_context_invalid")
+                    actual[key] = (
+                        float(fact.raw_value) / float(fact.denominator_value) * 48.0,
+                        frozenset(fact.game_ids),
+                    )
+                if actual != expected:
+                    raise ValueError("publication_write_context_invalid")
+                available = tuple(
+                    observation
+                    for observation in observations
+                    if observation.surface == surface
+                    and observation.status == "available"
+                )
+                expected_game_ids = tuple(sorted({
+                    game_id for row in rows for game_id in row.game_ids
+                }))
+                if len(available) != 1 or tuple(available[0].game_ids) != expected_game_ids:
                     raise ValueError("publication_write_context_invalid")
 
 

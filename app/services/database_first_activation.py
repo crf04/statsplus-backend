@@ -872,6 +872,8 @@ class DatabaseFirstPublicationReader:
                 ),
                 checksum=(publication.checksum if publication is not None else None),
             )
+        retrieved_at = _utc(publication.created_at)
+        age = max(0, int((now - retrieved_at).total_seconds()))
         if season is not None and publication.season != season:
             return self._missing(
                 stream_key,
@@ -882,11 +884,10 @@ class DatabaseFirstPublicationReader:
                 season=publication.season,
                 cutoff=_utc(publication.cutoff).isoformat(),
                 version=int(publication.version),
-                retrieved_at=_utc(publication.created_at),
+                retrieved_at=retrieved_at,
                 checksum=publication.checksum,
+                age_seconds=age,
             )
-        retrieved_at = _utc(publication.created_at)
-        age = max(0, int((now - retrieved_at).total_seconds()))
         threshold = self.freshness_seconds.get(str(stream.freshness_rule))
         freshness = "fresh" if threshold is not None and age <= threshold else "stale"
         if not hydrate_payload:
@@ -931,6 +932,7 @@ class DatabaseFirstPublicationReader:
                 retrieved_at=retrieved_at,
                 checksum=publication.checksum,
                 freshness=freshness,
+                age_seconds=age,
             )
         try:
             decoded = _decode_known_publication_payload(
@@ -952,6 +954,7 @@ class DatabaseFirstPublicationReader:
                 retrieved_at=retrieved_at,
                 checksum=publication.checksum,
                 freshness=freshness,
+                age_seconds=age,
             )
         return PublicationRead(
             stream_key=stream_key,
@@ -991,6 +994,7 @@ class DatabaseFirstPublicationReader:
         retrieved_at: datetime | None = None,
         checksum: str | None = None,
         freshness: str | None = None,
+        age_seconds: int | None = None,
     ) -> PublicationRead:
         return PublicationRead(
             stream_key=stream_key,
@@ -1003,7 +1007,7 @@ class DatabaseFirstPublicationReader:
                 freshness
                 or ("missing" if status == "missing" else "unavailable")
             ),
-            age_seconds=None,
+            age_seconds=age_seconds,
             payload=None,
             retrieved_at=retrieved_at,
             checksum=checksum,

@@ -370,6 +370,7 @@ def build_dependencies(
                     canonical_game_ledger_repository,
                     team_matchup_repository,
                     publication_reader=publication_reader,
+                    l15_expectation_resolver=l15_expectation_resolver,
                 )
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)

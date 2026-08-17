@@ -45,6 +45,7 @@ from app.services.team_matchup_publications import (
     NBA_PUBLICATION_TAXONOMY,
     PublicationLineage,
     PublicationValidationError,
+    publication_metric_identity,
     validate_publication_rows,
 )
 from tests.services.test_ledger_derivations import _league_games
@@ -118,34 +119,61 @@ def _engine(tmp_path):
     run_migrations(engine)
     cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
     with engine.begin() as connection:
-        for stream_key in (
-            "synergy_play_types_opponent_season",
-            "synergy_play_types_opponent_l15",
-            "grouped_shot_types_opponent_season",
-            "grouped_shot_types_opponent_l15",
-            "exact_shot_zones_opponent_season",
-            "exact_shot_zones_opponent_l15",
-        ):
-            publication_id = f"publication-{stream_key}"
-            connection.execute(PublicationVersion.__table__.insert().values(
-                publication_id=publication_id,
-                stream_key=stream_key,
-                season="2025-26",
-                cutoff=cutoff,
-                version=2,
-                status="active",
-                checksum="0" * 64,
-                payload="{}",
-                created_at=cutoff,
-                fence=1,
-            ))
-            connection.execute(PublicationPointer.__table__.insert().values(
-                stream_key=stream_key,
-                active_publication_id=publication_id,
-                previous_publication_id=None,
-                fence=1,
-                updated_at=cutoff,
-            ))
+        _, governed_l15, _ = _governance(_canonical_league_games())
+        for base, template in NBA_PUBLICATION_STREAMS.items():
+            for window in ("season", "l15"):
+                stream_key = template.format(window=window)
+                metric_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+                payload = {
+                    "rows": [
+                        {
+                            "team_id": team_id,
+                            "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
+                            "game_ids": list(
+                                governed_l15[team_id]
+                                if window == "l15"
+                                else (f"game-{team_id}",)
+                            ),
+                            "game_count": (
+                                len(governed_l15[team_id])
+                                if window == "l15"
+                                else 1
+                            ),
+                            "per48": {key: float(team_id) for key in metric_keys},
+                            "league_average": {
+                                key: 15.5 for key in metric_keys
+                            },
+                            "population_sigma": {
+                                key: 8.655 for key in metric_keys
+                            },
+                            "competition_rank": {
+                                key: team_id for key in metric_keys
+                            },
+                        }
+                        for team_id in CANONICAL_TEAM_IDS
+                    ]
+                }
+                encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+                publication_id = f"publication-{stream_key}"
+                connection.execute(PublicationVersion.__table__.insert().values(
+                    publication_id=publication_id,
+                    stream_key=stream_key,
+                    season="2025-26",
+                    cutoff=cutoff,
+                    version=2,
+                    status="active",
+                    checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                    payload=encoded,
+                    created_at=cutoff,
+                    fence=1,
+                ))
+                connection.execute(PublicationPointer.__table__.insert().values(
+                    stream_key=stream_key,
+                    active_publication_id=publication_id,
+                    previous_publication_id=None,
+                    fence=1,
+                    updated_at=cutoff,
+                ))
     return engine
 
 
@@ -178,6 +206,10 @@ def _candidate_payload(expected_l15, *, mode="valid"):
         rows[0]["team_id"] = 999
     elif mode == "duplicate_ids":
         rows.append(dict(rows[0]))
+    elif mode == "missing_metric":
+        rows[0]["per48"].pop(next(iter(rows[0]["per48"])))
+    elif mode == "wrong_game_set":
+        rows[0]["game_ids"] = [f"wrong-{index}" for index in range(15)]
     return {"rows": rows}
 
 
@@ -313,6 +345,7 @@ def _reader(
     freshness_by_stream: dict[str, str] | None = None,
     game_ids_by_stream: dict[str, dict[int, tuple[str, ...]]] | None = None,
     contradict_statistics: bool = False,
+    unavailable_lineage_by_stream: dict[str, tuple[str, str, str]] | None = None,
 ):
     stream_bases = {
         template.format(window=window): base
@@ -322,12 +355,17 @@ def _reader(
     reads = {}
     for stream_key, base in stream_bases.items():
         if stream_key in unavailable:
+            unavailable_lineage = (unavailable_lineage_by_stream or {}).get(
+                stream_key
+            )
             reads[stream_key] = PublicationRead(
                 stream_key=stream_key,
-                publication_id=None,
-                season="2025-26",
-                cutoff=None,
-                version=None,
+                publication_id=(
+                    unavailable_lineage[0] if unavailable_lineage else None
+                ),
+                season=(unavailable_lineage[1] if unavailable_lineage else "2025-26"),
+                cutoff=(unavailable_lineage[2] if unavailable_lineage else None),
+                version=2 if unavailable_lineage else None,
                 status="unavailable",
                 freshness="unavailable",
                 age_seconds=None,
@@ -626,6 +664,192 @@ def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
     assert wrong_observation.status == "unavailable"
     assert wrong_observation.unavailable_reason == "publication_game_set_mismatch"
     assert not any(fact.base == "shot_zones" for fact in wrong_snapshot.facts)
+
+
+def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path):
+    engine = _engine(tmp_path)
+    games = _canonical_league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    expected_game_ids, current_l15, team_ids = _governance(games)
+    prior_l15 = {
+        team_id: frozenset(f"prior-{team_id}-{index}" for index in range(15))
+        for team_id in CANONICAL_TEAM_IDS
+    }
+    cutoffs = {
+        "synergy_play_types_opponent_l15": "2025-10-14T00:00:00+00:00",
+        "grouped_shot_types_opponent_l15": "2025-10-15T00:00:00+00:00",
+        "exact_shot_zones_opponent_l15": "2025-10-14T00:00:00+00:00",
+    }
+    governed = {date(2025, 10, 14): prior_l15, AS_OF: current_l15}
+    reader = _reader(
+        cutoff_by_stream=cutoffs,
+        game_ids_by_stream={
+            stream_key: {
+                team_id: tuple(game_ids)
+                for team_id, game_ids in governed[
+                    date.fromisoformat(cutoff[:10])
+                ].items()
+            }
+            for stream_key, cutoff in cutoffs.items()
+        },
+    )
+    with engine.begin() as connection:
+        for stream_key, cutoff in cutoffs.items():
+            publication_id = f"publication-{stream_key}"
+            encoded = connection.execute(
+                PublicationVersion.__table__.select().where(
+                    PublicationVersion.publication_id == publication_id
+                )
+            ).mappings().one()["payload"]
+            payload = json.loads(encoded)
+            game_ids = governed[date.fromisoformat(cutoff[:10])]
+            for row in payload["rows"]:
+                row["game_ids"] = list(game_ids[row["team_id"]])
+                row["game_count"] = len(row["game_ids"])
+            encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            connection.execute(
+                PublicationVersion.__table__.update().where(
+                    PublicationVersion.publication_id == publication_id
+                ).values(
+                    cutoff=datetime.fromisoformat(cutoff),
+                    payload=encoded,
+                    checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                )
+            )
+    calls = []
+
+    def resolve(season, cutoff):
+        calls.append((season, cutoff))
+        return governed[cutoff.date()]
+
+    service = LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=reader,
+        l15_expectation_resolver=resolve,
+        clock=lambda: RETRIEVED_AT,
+    )
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=current_l15,
+        team_ids=team_ids,
+    )
+
+    snapshot = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
+    )
+    assert {
+        observation.surface
+        for observation in snapshot.observations
+        if observation.status == "available"
+    } >= {"play_types", "shot_types", "shot_zones", "traditional"}
+    assert {cutoff.date() for _, cutoff in calls} == {date(2025, 10, 14), AS_OF}
+
+
+def test_prior_season_unavailable_nba_lineage_does_not_rollback_ledger_facts(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    games = _canonical_league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    unavailable = frozenset(
+        template.format(window=window)
+        for template in NBA_PUBLICATION_STREAMS.values()
+        for window in ("season", "l15")
+    )
+    reader = _reader(
+        unavailable=unavailable,
+        unavailable_lineage_by_stream={
+            stream_key: (
+                f"prior-{stream_key}",
+                "2024-25",
+                "2025-04-15T00:00:00+00:00",
+            )
+            for stream_key in unavailable
+        },
+    )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+
+    LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=reader,
+        clock=lambda: RETRIEVED_AT,
+    ).materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+
+    snapshot = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF)
+    )
+    assert any(fact.base == "traditional" for fact in snapshot.facts)
+    assert all(
+        observation.status == "unavailable"
+        for observation in snapshot.observations
+        if observation.surface in NBA_PUBLICATION_STREAMS
+    )
+
+
+def test_future_cutoff_nba_surface_degrades_without_rolling_back_other_facts(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    games = _canonical_league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+    future_cutoff = "2025-10-16T00:00:00+00:00"
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == f"publication-{stream_key}"
+            ).values(cutoff=datetime.fromisoformat(future_cutoff))
+        )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+
+    LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=_reader(
+            cutoff_by_stream={stream_key: future_cutoff},
+        ),
+        clock=lambda: RETRIEVED_AT,
+    ).materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+
+    snapshot = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF)
+    )
+    observations = {item.surface: item for item in snapshot.observations}
+    assert observations["shot_zones"].status == "unavailable"
+    assert observations["shot_zones"].unavailable_reason == (
+        "publication_cutoff_after_as_of"
+    )
+    assert observations["shot_types"].status == "available"
+    assert any(fact.base == "traditional" for fact in snapshot.facts)
+    assert any(fact.base == "shot_types" for fact in snapshot.facts)
 
 
 @pytest.mark.parametrize(
@@ -938,6 +1162,134 @@ def test_latest_l15_query_uses_governance_without_a_legacy_snapshot(tmp_path):
     ).status == "available"
 
 
+def test_l15_query_resolves_each_publication_at_its_immutable_cutoff(tmp_path):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(engine)
+    cutoffs = {
+        "synergy_play_types_opponent_l15": "2025-10-14T00:00:00+00:00",
+        "grouped_shot_types_opponent_l15": "2025-10-15T00:00:00+00:00",
+        "exact_shot_zones_opponent_l15": "2025-10-14T00:00:00+00:00",
+    }
+    governed_by_date = {
+        day: {
+            team_id: frozenset(
+                f"{day}-game-{team_id}-{index}" for index in range(15)
+            )
+            for team_id in CANONICAL_TEAM_IDS
+        }
+        for day in ("2025-10-14", "2025-10-15")
+    }
+    reader = _reader(
+        cutoff_by_stream=cutoffs,
+        game_ids_by_stream={
+            stream_key: {
+                team_id: tuple(game_ids)
+                for team_id, game_ids in governed_by_date[cutoff[:10]].items()
+            }
+            for stream_key, cutoff in cutoffs.items()
+        },
+    )
+    calls = []
+
+    def resolve(season, cutoff):
+        calls.append((season, cutoff.isoformat()))
+        return governed_by_date[cutoff.date().isoformat()]
+
+    window = TeamMatchupQueryService(
+        repository,
+        publication_reader=reader,
+        l15_expectation_resolver=resolve,
+        clock=lambda: datetime(2025, 10, 16, 12, tzinfo=timezone.utc),
+    ).get_latest_window("2025-26", window_games=15)
+
+    assert {
+        observation.surface
+        for observation in window.observations
+        if observation.status == "available"
+    } >= {"play_types", "shot_types", "shot_zones"}
+    assert {cutoff[:10] for _, cutoff in calls} == {"2025-10-14", "2025-10-15"}
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ("one_game_one_team", "missing_metric", "wrong_game_set"),
+)
+def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(
+    tmp_path, mode
+):
+    engine = _engine(tmp_path)
+    expected = {
+        team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
+        for team_id in CANONICAL_TEAM_IDS
+    }
+    publications = PublicationService(
+        engine,
+        l15_expectation_resolver=lambda season, cutoff: expected,
+    )
+    stream_key = "exact_shot_zones_opponent_l15"
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("l15",),
+        enabled=True,
+    )
+    with engine.connect() as connection:
+        before = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose(
+            stream_key,
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            payload=_candidate_payload(expected, mode=mode),
+            expected_fence=before["fence"],
+        )
+
+    with engine.connect() as connection:
+        after = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+    assert after["active_publication_id"] == before["active_publication_id"]
+    assert after["fence"] == before["fence"]
+
+
+def test_invalid_active_publication_retains_computed_age(tmp_path):
+    engine = _engine(tmp_path)
+    publications = PublicationService(engine)
+    stream_key = "exact_shot_zones_opponent_season"
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        enabled=True,
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == f"publication-{stream_key}"
+            ).values(payload="{}")
+        )
+
+    read = DatabaseFirstPublicationReader(
+        engine, clock=lambda: RETRIEVED_AT
+    ).read(stream_key, season="2025-26")
+
+    assert read.status == "unavailable"
+    assert read.unavailable_reason == "publication_payload_invalid"
+    assert read.age_seconds == 122400
+
+
 def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(
@@ -1160,6 +1512,12 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
             raise ValueError("legacy_write_fenced")
 
     lineage = PublicationLineage(candidate_id, cutoff.isoformat(), "fresh", 1)
+    governed_game_ids = {
+        team_id: tuple(
+            f"governed-{team_id}-{index}" for index in range(15)
+        )
+        for team_id in CANONICAL_TEAM_IDS
+    }
     snapshots = (
         (
             TeamMatchupSnapshotScope("2025-26", AS_OF, 15),
@@ -1167,18 +1525,27 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
                 TeamMatchupFact(
                     team_id=team_id,
                     base="shot_zones",
-                    slice_key="Restricted Area",
-                    stat_key="FGM",
+                    slice_key=publication_metric_identity("shot_zones", metric_key)[0],
+                    stat_key=publication_metric_identity("shot_zones", metric_key)[1],
                     raw_value=1,
                     denominator_value=48,
                     denominator_unit="minutes",
                     provider="nba_publication",
+                    game_ids=governed_game_ids[team_id],
                     publication=lineage,
                 )
                 for team_id in CANONICAL_TEAM_IDS
+                for metric_key in sorted(NBA_PUBLICATION_TAXONOMY["shot_zones"])
             ],
             [TeamMatchupObservation(
-                "shot_zones", "available", publication=lineage
+                "shot_zones",
+                "available",
+                game_ids=tuple(sorted({
+                    game_id
+                    for game_ids in governed_game_ids.values()
+                    for game_id in game_ids
+                })),
+                publication=lineage,
             )],
         ),
     )
@@ -1208,3 +1575,11 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
     assert repository.get_snapshot(
         TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
     ).facts
+
+    scope, facts, observations = snapshots[0]
+    invented = (replace(facts[0], raw_value=999), *facts[1:])
+    with pytest.raises(ValueError, match="publication_write_context_invalid"):
+        repository.replace_governed_publication_snapshots(
+            ((scope, invented, observations),),
+            retrieved_at=RETRIEVED_AT,
+        )

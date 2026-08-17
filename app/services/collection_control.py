@@ -2661,6 +2661,25 @@ class PublicationService(_SessionService):
                 session, stream, season=season, cutoff=_aware(cutoff),
                 manifest_id=manifest_id,
             )
+            expected_l15_game_ids = None
+            if stream_key in NBA_PUBLICATION_STREAM_KEYS:
+                if _requires_l15_expectation(stream_key):
+                    try:
+                        expected_l15_game_ids = resolve_governed_l15_game_ids(
+                            self.l15_expectation_resolver,
+                            season,
+                            _aware(cutoff),
+                        )
+                    except Exception as error:
+                        raise ControlPlaneError(
+                            "publication_governance_unavailable"
+                        ) from error
+                _validate_activation_candidate_payload(
+                    stream_key,
+                    encoded,
+                    season=season,
+                    expected_l15_game_ids=expected_l15_game_ids,
+                )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
             ).with_for_update())

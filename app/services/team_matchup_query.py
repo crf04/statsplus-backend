@@ -10,7 +10,7 @@ from math import isfinite
 from statistics import fmean, pstdev
 from zoneinfo import ZoneInfo
 
-from app.domain.utc import assume_utc
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.team_matchup_repository import (
     StoredTeamMatchupFact,
     StoredTeamMatchupObservation,
@@ -106,19 +106,12 @@ class TeamMatchupQueryService:
             season, window_games=window_games, as_of=cutoff
         )
         if observation_scope is None:
-            expected_l15_game_ids = self._governed_l15_ids(
-                season, cutoff, (), required=window_games is not None
-            )
             return self._database_first_window(
                 season,
                 cutoff=cutoff,
                 window_games=window_games,
                 legacy=None,
                 publication_snapshot=publication_snapshot,
-                expected_l15_game_ids=expected_l15_game_ids,
-                expected_team_ids=(
-                    set(expected_l15_game_ids) if expected_l15_game_ids else None
-                ),
             )
         observation_snapshot = self.repository.get_snapshot(observation_scope)
         observations = observation_snapshot.observations
@@ -148,17 +141,12 @@ class TeamMatchupQueryService:
             facts=facts,
             observations=observations,
         )
-        expected_l15_game_ids = self._governed_l15_ids(
-            season, cutoff, facts, required=window_games is not None
-        )
         return self._database_first_window(
             season,
             cutoff=cutoff,
             window_games=window_games,
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
-            expected_l15_game_ids=expected_l15_game_ids,
-            expected_team_ids=(set(expected_l15_game_ids) if expected_l15_game_ids else None),
         )
 
     def get_window(
@@ -171,20 +159,12 @@ class TeamMatchupQueryService:
             facts=snapshot.facts,
             observations=snapshot.observations,
         )
-        expected_l15_game_ids = self._governed_l15_ids(
-            scope.season,
-            scope.as_of,
-            snapshot.facts,
-            required=scope.window_games is not None,
-        )
         return self._database_first_window(
             scope.season,
             cutoff=scope.as_of,
             window_games=scope.window_games,
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
-            expected_l15_game_ids=expected_l15_game_ids,
-            expected_team_ids=(set(expected_l15_game_ids) if expected_l15_game_ids else None),
         )
 
     def _database_first_window(
@@ -195,8 +175,6 @@ class TeamMatchupQueryService:
         window_games: int | None,
         legacy: TeamMatchupWindow | None,
         publication_snapshot=None,
-        expected_l15_game_ids=None,
-        expected_team_ids=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
@@ -269,8 +247,12 @@ class TeamMatchupQueryService:
             if not read.available:
                 base_windows[base] = None
                 continue
+            publication_l15_game_ids = None
             if window_games is not None and base in NBA_PUBLICATION_BASES:
-                if expected_l15_game_ids is None:
+                publication_l15_game_ids = self._publication_l15_ids(
+                    read, requested_season=season
+                )
+                if publication_l15_game_ids is None:
                     base_windows[base] = None
                     validation_failures[base] = "publication_governance_unavailable"
                     continue
@@ -287,9 +269,15 @@ class TeamMatchupQueryService:
                     validate_publication_rows(
                         base,
                         rows,
-                        expected_team_ids=expected_team_ids,
+                        expected_team_ids=(
+                            set(publication_l15_game_ids)
+                            if publication_l15_game_ids is not None
+                            else None
+                        ),
                         expected_l15_game_ids=(
-                            expected_l15_game_ids if window_games is not None else None
+                            publication_l15_game_ids
+                            if window_games is not None
+                            else None
                         ),
                     )
             except PublicationPayloadError as error:
@@ -498,41 +486,29 @@ class TeamMatchupQueryService:
             observations=(observation,),
         )
 
-    @staticmethod
-    def _expected_l15_game_ids(facts):
-        expected = {}
-        for fact in facts:
-            if fact.base == "traditional" and fact.game_ids:
-                expected[fact.team_id] = frozenset(fact.game_ids)
-        return expected
+    def _publication_l15_ids(self, read, *, requested_season: str):
+        """Resolve governance at this immutable publication's own boundary."""
 
-    def _governed_l15_ids(self, season, cutoff, facts, *, required: bool):
-        """Resolve L15 identity from independent governance when requested."""
-
-        source = self._l15_expectation_resolver
-        if source is not None:
-            try:
-                return resolve_governed_l15_game_ids(source, season, cutoff)
-            except Exception:
-                return None
-        source = self._expected_l15_game_ids_source
-        if source is not None:
-            try:
-                if callable(source):
-                    try:
-                        source = source(season, cutoff)
-                    except TypeError:
-                        source = source()
-                return resolve_governed_l15_game_ids(lambda *_: source, season, cutoff)
-            except Exception:
-                return None
-        if required and self._publication_reader is not None:
-            # A public L15 publication read must never infer its game set from
-            # the same disposable facts it is meant to govern.
+        if read.season != requested_season or read.cutoff is None:
             return None
-        # Legacy-only callers retain their pre-publication behavior.  The
-        # production graph always injects ``l15_expectation_resolver`` above.
-        return self._expected_l15_game_ids(facts)
+        try:
+            cutoff = (
+                assume_utc(read.cutoff)
+                if isinstance(read.cutoff, datetime)
+                else parse_utc_iso(str(read.cutoff))
+            )
+            source = (
+                self._l15_expectation_resolver
+                if self._l15_expectation_resolver is not None
+                else self._expected_l15_game_ids_source
+            )
+            return resolve_governed_l15_game_ids(
+                source,
+                read.season,
+                cutoff,
+            )
+        except Exception:
+            return None
 
     def _build_window(
         self,
