@@ -2,12 +2,19 @@
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 
 import pytest
 from sqlalchemy import create_engine, select, update
 
 from app.migrations import run_migrations
-from app.models.collection_control import ActiveSeason, CollectionManifest, CompositionJob
+from app.models.collection_control import (
+    ActiveSeason,
+    CatalogPublication,
+    CollectionManifest,
+    CompositionJob,
+)
 from app.models.event_catalog import EventCatalogEntry
 from app.services.ledger_runtime import (
     ActiveManifestLedgerGovernanceReader,
@@ -45,6 +52,36 @@ def _catalog_events(games, cutoff):
         ),
         "last_seen_at": cutoff,
     } for game in games]
+
+
+def _immutable_event_catalog(events, cutoff, *, published_at=None):
+    payload = {
+        "events": [
+            {
+                "nba_game_id": event["nba_game_id"],
+                "home_team_id": event["home_team_id"],
+                "away_team_id": event["away_team_id"],
+                "phase": event.get("classification", "Regular Season"),
+                "status": event.get("status_text", "Scheduled"),
+                "status_code": event.get("status_code"),
+                "scheduled_at": event["scheduled_at"].isoformat(),
+            }
+            for event in events
+        ]
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return {
+        "publication_id": f"event-catalog-{cutoff.timestamp()}",
+        "season": "2025-26",
+        "catalog_type": "event",
+        "cutoff": cutoff,
+        "version": "event-v1",
+        "checksum": hashlib.sha256(encoded.encode()).hexdigest(),
+        "payload": encoded,
+        "complete": True,
+        "published_at": published_at or cutoff - timedelta(minutes=1),
+        "expires_at": None,
+    }
 
 
 def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
@@ -88,6 +125,23 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
                 "last_seen_at": cutoff,
             })
         teams = [teams[0], teams[-1], *teams[1:-1]]
+    retrospective = {
+        "nba_game_id": "retrospective-final",
+        "season": "2025-26",
+        "home_team_id": 1,
+        "home_team_name": "Team 1",
+        "home_team_tricode": "T01",
+        "away_team_id": 30,
+        "away_team_name": "Team 30",
+        "away_team_tricode": "T30",
+        "scheduled_at": cutoff - timedelta(days=1),
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "classification": "Regular Season",
+        "first_seen_at": cutoff - timedelta(days=1),
+        "last_seen_at": cutoff,
+    }
+    events.append(retrospective)
     with engine.begin() as connection:
         events[0]["status_code"] = None
         connection.execute(ActiveSeason.__table__.insert().values(
@@ -101,6 +155,11 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                **_immutable_event_catalog(events, cutoff)
+            )
+        )
 
     reader = ActiveManifestLedgerGovernanceReader(
         engine, clock=lambda: cutoff - timedelta(hours=1)
@@ -136,15 +195,27 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
 
     with engine.begin() as connection:
         connection.execute(update(EventCatalogEntry).where(
+            EventCatalogEntry.nba_game_id == retrospective["nba_game_id"],
+        ).values(status_text="Final", status_code=3))
+        connection.execute(update(EventCatalogEntry).where(
             EventCatalogEntry.nba_game_id == events[0]["nba_game_id"],
         ).values(postponed_status="postponed"))
-    incomplete = ActiveManifestLedgerGovernanceReader(
+    unchanged = ActiveManifestLedgerGovernanceReader(
         engine, clock=lambda: cutoff - timedelta(hours=1)
     ).read("2025-26", cutoff)
-    assert len(incomplete.expected_l15_game_ids) == 30
-    assert sorted(
-        len(game_ids) for game_ids in incomplete.expected_l15_game_ids.values()
-    ) == [14, 14, *([15] * 28)]
+    assert unchanged.expected_game_ids == governance.expected_game_ids
+    assert unchanged.expected_l15_game_ids == governance.expected_l15_game_ids
+    assert retrospective["nba_game_id"] not in unchanged.expected_game_ids
+    with engine.begin() as connection:
+        connection.execute(
+            update(CatalogPublication).values(checksum="0" * 64)
+        )
+    with pytest.raises(ValueError, match="immutable Event Catalog"):
+        reader.read("2025-26", cutoff)
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.delete())
+    with pytest.raises(ValueError, match="immutable Event Catalog"):
+        reader.read("2025-26", cutoff)
 
 
 def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_path):
@@ -329,6 +400,11 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                **_immutable_event_catalog(events, cutoff)
+            )
+        )
         connection.execute(CompositionJob.__table__.insert().values(
             job_id="matchup", stream_key="traditional_opponent_season",
             manifest_id="manifest", season="2025-26", cutoff=cutoff, status="queued",
@@ -410,6 +486,11 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                **_immutable_event_catalog(events, cutoff)
+            )
+        )
         connection.execute(CompositionJob.__table__.insert(), [{
             "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
             "season": "2025-26", "cutoff": cutoff, "status": "queued",
@@ -493,6 +574,11 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
             status="active", created_at=cutoff,
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                **_immutable_event_catalog(events, cutoff)
+            )
+        )
         connection.execute(CompositionJob.__table__.insert(), [{
             "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
             "season": "2025-26", "cutoff": cutoff, "status": "queued",
@@ -580,6 +666,16 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'authorization.sqlite3'}")
     run_migrations(engine)
     now = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    events = [{
+        "nba_game_id": "game-1", "season": "2025-26",
+        "home_team_id": 1, "home_team_name": "Team 1",
+        "home_team_tricode": "T01",
+        "away_team_id": 2, "away_team_name": "Team 2",
+        "away_team_tricode": "T02",
+        "scheduled_at": now - timedelta(days=1), "status_text": "Final",
+        "status_code": 3, "classification": "Regular Season",
+        "first_seen_at": now - timedelta(days=1), "last_seen_at": now,
+    }]
     with engine.begin() as connection:
         connection.execute(ActiveSeason.__table__.insert().values(
             season="2025-26", phase="Regular Season", status="active",
@@ -591,16 +687,12 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
             scopes='["canonical_game_ledger"]', checksum="manifest",
             status="active", created_at=now,
         ))
-        connection.execute(EventCatalogEntry.__table__.insert(), [{
-            "nba_game_id": "game-1", "season": "2025-26",
-            "home_team_id": 1, "home_team_name": "Team 1",
-            "home_team_tricode": "T01",
-            "away_team_id": 2, "away_team_name": "Team 2",
-            "away_team_tricode": "T02",
-            "scheduled_at": now - timedelta(days=1), "status_text": "Final",
-            "status_code": 3, "classification": "Regular Season",
-            "first_seen_at": now - timedelta(days=1), "last_seen_at": now,
-        }])
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
+        connection.execute(
+            CatalogPublication.__table__.insert().values(
+                **_immutable_event_catalog(events, now)
+            )
+        )
 
     class Backfill:
         calls = 0

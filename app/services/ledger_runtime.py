@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from typing import Mapping, Protocol
 
 from sqlalchemy import select, update
 
-from app.models.collection_control import ActiveSeason, CollectionManifest, CompositionJob
-from app.models.event_catalog import EventCatalogEntry
-from app.domain.nba_events import is_final_event, is_postponed_event
+from app.models.collection_control import (
+    ActiveSeason,
+    CatalogPublication,
+    CollectionManifest,
+    CompositionJob,
+)
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
@@ -163,11 +167,6 @@ class ActiveManifestLedgerGovernanceReader:
             manifest = connection.execute(
                 manifest_query.order_by(CollectionManifest.created_at.desc()).limit(1)
             ).mappings().one_or_none()
-            events = connection.execute(select(EventCatalogEntry).where(
-                EventCatalogEntry.season == season,
-                EventCatalogEntry.classification == "Regular Season",
-                EventCatalogEntry.scheduled_at <= cutoff,
-            ).order_by(EventCatalogEntry.scheduled_at, EventCatalogEntry.nba_game_id)).mappings().all()
         if (
             active is None
             or manifest is None
@@ -175,10 +174,7 @@ class ActiveManifestLedgerGovernanceReader:
             or 1 not in set(json.loads(manifest["accepted_versions"]))
         ):
             raise ValueError("active manifest and completed Event Catalog governance are required")
-        events = tuple(
-            event for event in events
-            if is_final_event(event) and not is_postponed_event(event)
-        )
+        events = self._immutable_catalog_events(manifest)
         if not events:
             raise ValueError("completed Regular Season Event Catalog governance is required")
         team_ids = frozenset(
@@ -213,6 +209,93 @@ class ActiveManifestLedgerGovernanceReader:
             ),
             accepted_versions=frozenset(int(value) for value in json.loads(manifest["accepted_versions"])),
         )
+
+    def _immutable_catalog_events(self, manifest) -> tuple[Mapping[str, object], ...]:
+        """Read the exact Event Catalog snapshot that preceded this manifest."""
+
+        with self.engine.connect() as connection:
+            catalog = connection.execute(
+                select(CatalogPublication.__table__).where(
+                    CatalogPublication.season == manifest["season"],
+                    CatalogPublication.catalog_type == "event",
+                    CatalogPublication.cutoff == manifest["cutoff"],
+                    CatalogPublication.complete.is_(True),
+                    CatalogPublication.published_at <= manifest["created_at"],
+                ).order_by(CatalogPublication.published_at.desc()).limit(1)
+            ).mappings().one_or_none()
+        if catalog is None:
+            raise ValueError(
+                "active manifest and immutable Event Catalog governance are required"
+            )
+        payload = catalog["payload"]
+        if (
+            not isinstance(payload, str)
+            or hashlib.sha256(payload.encode()).hexdigest() != catalog["checksum"]
+        ):
+            raise ValueError("immutable Event Catalog governance is inconsistent")
+        try:
+            document = json.loads(payload)
+            rows = document.get("events", document.get("games"))
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            raise ValueError("immutable Event Catalog governance is inconsistent") from None
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("immutable Event Catalog governance is inconsistent")
+        manifest_cutoff = manifest["cutoff"]
+        if manifest_cutoff.tzinfo is None:
+            manifest_cutoff = manifest_cutoff.replace(tzinfo=timezone.utc)
+        seen: set[str] = set()
+        eligible = []
+        for row in rows:
+            try:
+                raw_game_id = row.get(
+                    "nba_game_id", row.get("game_id", row.get("id"))
+                )
+                if raw_game_id in (None, ""):
+                    raise ValueError("event identity required")
+                game_id = str(raw_game_id).strip()
+                home_team_id = int(row["home_team_id"])
+                away_team_id = int(row["away_team_id"])
+                phase = str(
+                    row.get("phase", row.get("season_phase", row.get("season_type")))
+                ).strip().lower().replace("_", " ")
+                scheduled_text = row.get(
+                    "scheduled_at", row.get("date", row.get("game_date"))
+                )
+                scheduled_at = datetime.fromisoformat(
+                    str(scheduled_text).replace("Z", "+00:00")
+                )
+            except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+                raise ValueError(
+                    "immutable Event Catalog governance is inconsistent"
+                ) from None
+            if (
+                not game_id
+                or game_id in seen
+                or home_team_id <= 0
+                or away_team_id <= 0
+                or home_team_id == away_team_id
+                or phase not in {"regular season", "regular"}
+                or scheduled_at.tzinfo is None
+            ):
+                raise ValueError("immutable Event Catalog governance is inconsistent")
+            seen.add(game_id)
+            status = str(row.get("status", row.get("status_text", ""))).strip().lower()
+            status_code = row.get("status_code")
+            postponed = status in {"postponed", "canceled", "cancelled"}
+            completed = bool(row.get("completed")) or status in {
+                "final", "finished", "completed", "closed", "game over", "3",
+            } or status.startswith("final") or status_code in {3, "3"}
+            if completed and not postponed and scheduled_at <= manifest_cutoff:
+                eligible.append({
+                    "nba_game_id": game_id,
+                    "home_team_id": home_team_id,
+                    "away_team_id": away_team_id,
+                    "scheduled_at": scheduled_at,
+                })
+        return tuple(sorted(
+            eligible,
+            key=lambda event: (event["scheduled_at"], event["nba_game_id"]),
+        ))
 
     def read_for_collection(self, season: str) -> LedgerGovernance:
         """Resolve the newest executable manifest before any provider I/O."""

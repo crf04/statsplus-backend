@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from statistics import fmean, pstdev
@@ -29,10 +29,18 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
 )
-from app.models.collection_control import PublicationPointer, PublicationVersion
+from app.models.collection_control import (
+    ActiveSeason,
+    CatalogPublication,
+    CollectionManifest,
+    PublicationPointer,
+    PublicationVersion,
+)
+from app.models.event_catalog import EventCatalogEntry
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.team_matchup_query import TeamMatchupQueryService
 from app.services.team_matchup_repository import (
     create_publication_write_capability,
@@ -414,6 +422,185 @@ def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
         ).mappings().one()
     assert after["active_publication_id"] == before["active_publication_id"]
     assert after["fence"] == before["fence"]
+
+
+def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    games = _canonical_league_games()
+    events = [
+        {
+            "nba_game_id": game.game_id,
+            "season": "2025-26",
+            "home_team_id": game.home_team_id,
+            "home_team_name": f"Team {game.home_team_id}",
+            "home_team_tricode": game.home_team_tricode,
+            "away_team_id": game.away_team_id,
+            "away_team_name": f"Team {game.away_team_id}",
+            "away_team_tricode": game.away_team_tricode,
+            "scheduled_at": datetime.combine(
+                game.game_date, datetime.min.time(), timezone.utc
+            ),
+            "status_text": "Final",
+            "status_code": 3,
+            "classification": "Regular Season",
+            "first_seen_at": cutoff,
+            "last_seen_at": cutoff,
+        }
+        for game in games
+    ]
+    retrospective_id = "retrospective-final"
+    retrospective = {
+        "nba_game_id": retrospective_id,
+        "season": "2025-26",
+        "home_team_id": CANONICAL_TEAM_IDS[0],
+        "home_team_name": "Retrospective Home",
+        "home_team_tricode": NBA_TEAM_ID_TO_TRICODE[CANONICAL_TEAM_IDS[0]],
+        "away_team_id": CANONICAL_TEAM_IDS[-1],
+        "away_team_name": "Retrospective Away",
+        "away_team_tricode": NBA_TEAM_ID_TO_TRICODE[CANONICAL_TEAM_IDS[-1]],
+        "scheduled_at": cutoff - timedelta(days=1),
+        "status_text": "Scheduled",
+        "status_code": 1,
+        "classification": "Regular Season",
+        "first_seen_at": cutoff,
+        "last_seen_at": cutoff,
+    }
+    events.append(retrospective)
+    catalog_payload = {
+        "events": [
+            {
+                "nba_game_id": event["nba_game_id"],
+                "home_team_id": event["home_team_id"],
+                "away_team_id": event["away_team_id"],
+                "phase": event["classification"],
+                "status": event["status_text"],
+                "status_code": event["status_code"],
+                "scheduled_at": event["scheduled_at"].isoformat(),
+            }
+            for event in events
+        ]
+    }
+    encoded_catalog = json.dumps(
+        catalog_payload, separators=(",", ":"), sort_keys=True
+    )
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26",
+            phase="Regular Season",
+            status="active",
+            cutoff=cutoff,
+            activated_at=cutoff,
+            activated_by="test",
+        ))
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="immutable-event-catalog",
+            season="2025-26",
+            catalog_type="event",
+            cutoff=cutoff,
+            version="event-v1",
+            checksum=hashlib.sha256(encoded_catalog.encode()).hexdigest(),
+            payload=encoded_catalog,
+            complete=True,
+            published_at=cutoff - timedelta(minutes=1),
+            expires_at=None,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="immutable-manifest",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="immutable-manifest",
+            status="active",
+            created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
+    resolver = ActiveManifestLedgerGovernanceReader(engine)
+    before = resolver.resolve_team_game_ids("2025-26", cutoff, window="season")
+    assert retrospective_id not in frozenset().union(*before.values())
+    with engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__.update().where(
+                EventCatalogEntry.nba_game_id == retrospective_id
+            ).values(status_text="Final", status_code=3)
+        )
+    assert resolver.resolve_team_game_ids(
+        "2025-26", cutoff, window="season"
+    ) == before
+
+    wrong = {team_id: tuple(game_ids) for team_id, game_ids in before.items()}
+    wrong[CANONICAL_TEAM_IDS[0]] = (
+        *wrong[CANONICAL_TEAM_IDS[0]], retrospective_id
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+    publications = PublicationService(
+        engine, l15_expectation_resolver=resolver
+    )
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=False,
+    )
+    payload = _candidate_payload(wrong)
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    candidate_id = "retrospective-season-candidate"
+    with engine.begin() as connection:
+        pointer_before = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=candidate_id,
+            stream_key=stream_key,
+            season="2025-26",
+            cutoff=cutoff,
+            version=3,
+            status="candidate",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            created_at=cutoff,
+            fence=0,
+        ))
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.activate_stream(
+            stream_key,
+            actor="operator",
+            reason="reject retrospective final",
+            season="2025-26",
+            cutoff=cutoff,
+            candidate_publication_id=candidate_id,
+        )
+    with engine.connect() as connection:
+        pointer_after = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+    assert pointer_after["active_publication_id"] == pointer_before[
+        "active_publication_id"
+    ]
+
+    query = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        publication_reader=_reader(
+            game_ids_by_stream={stream_key: wrong},
+        ),
+        l15_expectation_resolver=resolver,
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+    observation = next(
+        item for item in query.observations if item.surface == "shot_zones"
+    )
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_game_set_mismatch"
 
 
 def _rows(
