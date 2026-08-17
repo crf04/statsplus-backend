@@ -439,32 +439,32 @@ def build_dependencies(
             max_markets=settings.providers.projection_archive_max_markets,
         )
     )
-    projection_record_providers = (
-        settings.providers.dfs_enabled_providers
-        or (settings.features.projection_archive_read_provider,)
-    )
-    projection_record_scopes = tuple(
+    projection_query = NBAMarketQuery(season=settings.nba.current_season)
+    projection_read_scopes = tuple(
         ProjectionArchiveReadScope(
             provider=provider,
-            query=NBAMarketQuery(season=settings.nba.current_season),
-        )
-        for provider in projection_record_providers
-    )
-    projection_record_scopes_by_provider = {
-        scope.provider: scope for scope in projection_record_scopes
-    }
-    projection_read_scopes = tuple(
-        projection_record_scopes_by_provider.get(provider)
-        or ProjectionArchiveReadScope(
-            provider=provider,
-            query=NBAMarketQuery(season=settings.nba.current_season),
+            query=projection_query,
         )
         for provider in (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
     )
+    projection_read_scopes_by_provider = {
+        scope.provider: scope for scope in projection_read_scopes
+    }
+    projection_record_scopes = tuple(
+        projection_read_scopes_by_provider[provider]
+        for provider in settings.providers.dfs_enabled_providers
+    )
+    projection_record_default_scope = projection_read_scopes_by_provider[
+        settings.features.projection_archive_read_provider
+    ]
     projection_recorder = (
         None
         if projection_archive is None
-        else ProjectionRecordingService(projection_archive, projection_record_scopes)
+        else ProjectionRecordingService(
+            projection_archive,
+            projection_record_scopes,
+            default_scope=projection_record_default_scope,
+        )
     )
     projection_player_pool_reader = (
         LatestProjectionPlayerPoolReader(

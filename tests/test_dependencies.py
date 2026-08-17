@@ -224,13 +224,18 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
             environment="testing",
             auth={"firebase_admin_disabled": True},
             database={"url": "sqlite:///:memory:"},
-            features=FeatureSettings(projection_archive_read_enabled=True),
+            features=FeatureSettings(
+                projection_archive_read_enabled=True,
+                projection_archive_read_provider="prizepicks",
+            ),
             providers={"dfs_enabled_providers": ("dabble",)},
         )
     )
     assert enabled.projection_player_pool_reader.required_providers == frozenset(
         {"dabble"}
     )
+    assert set(enabled.projection_recorder.scopes) == {"dabble"}
+    assert enabled.projection_recorder.default_scope.provider == "prizepicks"
 
     dependencies = build_dependencies(settings)
     reader = dependencies.projection_player_pool_reader
@@ -241,6 +246,8 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.projection_archive.max_markets == 2
     assert isinstance(dependencies.projection_recorder, ProjectionRecordingService)
     assert dependencies.projection_recorder.archive is dependencies.projection_archive
+    assert dependencies.projection_recorder.scopes == {}
+    assert dependencies.projection_recorder.default_scope is reader.scope
     assert dependencies.projection_recorder.scope is reader.scope
     assert dependencies.projection_recorder.scope.query_key == reader.scope.query_key
     assert reader.scope.provider == "dabble"

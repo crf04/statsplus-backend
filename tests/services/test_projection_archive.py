@@ -66,6 +66,84 @@ def _reader(
     )
 
 
+def test_recorder_authorizes_exactly_enabled_scopes_including_empty(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-recording-auth.sqlite3'}")
+    run_migrations(engine)
+    archive = ProjectionArchive(engine, StatisticCatalog.load_default())
+    query = NBAMarketQuery(season=SEASON)
+    dabble_scope = ProjectionArchiveReadScope(provider="dabble", query=query)
+    prizepicks_scope = ProjectionArchiveReadScope(provider="prizepicks", query=query)
+
+    def empty_snapshot(provider: str, retrieved_at: datetime) -> ProviderSnapshot:
+        return ProviderSnapshot(
+            provider=provider,
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+            retrieved_at=retrieved_at,
+        )
+
+    disabled = ProjectionRecordingService(
+        archive,
+        (),
+        default_scope=dabble_scope,
+    )
+    for provider in ("dabble", "prizepicks"):
+        with pytest.raises(ValueError, match="outside the configured recording scope"):
+            disabled.record_complete_snapshot(
+                empty_snapshot(provider, OBSERVED_AT),
+                query=query,
+                accepted_at=OBSERVED_AT,
+            )
+        with pytest.raises(ValueError, match="outside the configured recording scope"):
+            disabled.record_failed_poll(
+                provider=provider,
+                query=query,
+                completed_at=OBSERVED_AT,
+                failure_reason="access_denied",
+            )
+
+    enabled = ProjectionRecordingService(
+        archive,
+        (dabble_scope,),
+        default_scope=prizepicks_scope,
+    )
+    accepted = enabled.record_complete_snapshot(
+        empty_snapshot("dabble", OBSERVED_AT),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        enabled.record_complete_snapshot(
+            empty_snapshot("prizepicks", OBSERVED_AT + timedelta(minutes=1)),
+            query=query,
+            accepted_at=OBSERVED_AT + timedelta(minutes=1),
+        )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        enabled.record_failed_poll(
+            provider="prizepicks",
+            query=query,
+            completed_at=OBSERVED_AT + timedelta(minutes=1),
+            failure_reason="access_denied",
+        )
+
+    assert disabled.scopes == {}
+    assert disabled.default_scope is dabble_scope
+    assert disabled.scope is dabble_scope
+    assert set(enabled.scopes) == {"dabble"}
+    assert enabled.default_scope is prizepicks_scope
+    assert enabled.scope is prizepicks_scope
+    assert accepted.changed is True
+    with engine.connect() as connection:
+        assert len(connection.execute(select(ProviderPoll)).all()) == 1
+        assert connection.execute(select(LatestPlayerProjection)).all() == []
+
+
 def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-archive.sqlite3'}")
     run_migrations(engine)
@@ -136,7 +214,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         provider="dabble", query=NBAMarketQuery(season=SEASON)
     )
     recorder = ProjectionRecordingService(archive, scope)
-    with pytest.raises(ValueError, match="query is outside the configured read scope"):
+    with pytest.raises(ValueError, match="query is outside the configured recording scope"):
         recorder.record_complete_snapshot(
             snapshot,
             query=NBAMarketQuery(
@@ -151,7 +229,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         market_id="prize-market-7",
         statistic_match=replace(market.statistic_match, provider="prizepicks"),
     )
-    with pytest.raises(ValueError, match="provider is outside the configured read scope"):
+    with pytest.raises(ValueError, match="provider is outside the configured recording scope"):
         recorder.record_complete_snapshot(
             replace(
                 snapshot,

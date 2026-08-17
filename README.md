@@ -88,7 +88,7 @@ the most important variables:
 | `PROJECTION_ARCHIVE_MAX_MARKETS` | No | `10000`; independent pre-persistence ceiling for one normalized provider snapshot |
 | `INJURY_REPORT_ENABLED` / `ROTOWIRE_PERMISSION_GRANTED` | No | Both `false`; RotoWire collection exists only when both explicit gates are true |
 | `PROJECTION_ARCHIVE_READ_ENABLED` | No | `false`; selects the database-only projection reader and requires an application database with the archive schema |
-| `PROJECTION_ARCHIVE_READ_PROVIDER` | No | `dabble`; recorder compatibility scope when `DFS_ENABLED_PROVIDERS` is empty; readers still scan every supported archive-provider scope, and this setting does not enable reads or failure fallback |
+| `PROJECTION_ARCHIVE_READ_PROVIDER` | No | Deprecated compatibility/default recorder identity (`dabble`); it never authorizes recording or enables reads/failure fallback. Historical reads still scan every supported archive-provider scope; only `DFS_ENABLED_PROVIDERS` authorizes application writes |
 | `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` / `ROTOWIRE_READ_TIMEOUT_SECONDS` | No | `3` / `8`; typed connect/read caps for the injury-table GET |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |

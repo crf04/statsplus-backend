@@ -1503,12 +1503,14 @@ class ProjectionSelectionPlayerPoolReader:
 
 
 class ProjectionRecordingService:
-    """Record provider outcomes only into the application's selected read scopes."""
+    """Record provider outcomes only into explicitly enabled write scopes."""
 
     def __init__(
         self,
         archive: ProjectionArchive,
         scope: ProjectionArchiveReadScope | Iterable[ProjectionArchiveReadScope],
+        *,
+        default_scope: ProjectionArchiveReadScope | None = None,
     ) -> None:
         self.archive = archive
         scopes = (
@@ -1516,22 +1518,21 @@ class ProjectionRecordingService:
             if isinstance(scope, ProjectionArchiveReadScope)
             else tuple(scope)
         )
-        if not scopes:
-            raise ValueError("projection recorder requires at least one scope")
         self.scopes = {item.provider: item for item in scopes}
-        self.scope = scopes[0]
+        self.default_scope = default_scope or (scopes[0] if scopes else None)
+        self.scope = self.default_scope
 
     def _scope_for(self, provider: str, query: NBAMarketQuery) -> ProjectionArchiveReadScope:
         normalized_provider = provider.strip().casefold()
         scope = self.scopes.get(normalized_provider)
         if scope is None:
             raise ValueError(
-                "projection snapshot provider is outside the configured read scope: "
+                "projection snapshot provider is outside the configured recording scope: "
                 f"received {normalized_provider!r}"
             )
         if _query_key(query) != scope.query_key:
             raise ValueError(
-                "projection snapshot query is outside the configured read scope"
+                "projection snapshot query is outside the configured recording scope"
             )
         return scope
 
@@ -1560,12 +1561,12 @@ class ProjectionRecordingService:
         poll_started_at: datetime | None,
         require_complete: bool,
     ) -> ProjectionArchiveResult:
-        require_projection_archive_schema(self.archive.engine)
         if require_complete and snapshot.status is not SnapshotStatus.COMPLETE:
             raise ValueError(
                 "only complete provider snapshots may enter this archive path"
             )
         self._scope_for(snapshot.provider, query)
+        require_projection_archive_schema(self.archive.engine)
         return self.archive.ingest_snapshot(
             snapshot,
             query=query,
@@ -1598,8 +1599,8 @@ class ProjectionRecordingService:
         poll_started_at: datetime | None = None,
         failure_reason: str,
     ) -> ProjectionPollResult:
-        require_projection_archive_schema(self.archive.engine)
         self._scope_for(provider, query)
+        require_projection_archive_schema(self.archive.engine)
         return self.archive.record_failed_poll(
             provider=provider,
             query=query,

@@ -467,10 +467,14 @@ freeze freshness.
 always retains read scopes for every supported archive provider (`dabble`,
 `prizepicks`, and `underdog`), independently of the enabled set, so rebuilding
 the graph cannot hide a just-disabled provider. Removing the final provider
-leaves those historical read scopes and the compatibility record scope intact
-for expiry and audit, but no provider is required and none receives the failure
-fallback beyond the 15-minute live window. A targetable row
-requires the canonical athlete's name as well as its governed IDs; an ID is
+leaves those historical read scopes intact for expiry and audit, but the
+application recording service owns an empty authorization set: every snapshot
+and failure submission is rejected before persistence. With a partial enabled
+set it authorizes only those provider/query scopes. The deprecated
+`PROJECTION_ARCHIVE_READ_PROVIDER` supplies a compatibility/default recorder
+identity only and never adds write authority. No disabled provider is required
+or receives the failure fallback beyond the 15-minute live window. A targetable
+row requires the canonical athlete's name as well as its governed IDs; an ID is
 never displayed as a fabricated name. A game with current evidence reports
 `state: live` and its oldest included `observed_at`; a game without current
 evidence reports `state: missing` and `observed_at: null`. Latest rows and their

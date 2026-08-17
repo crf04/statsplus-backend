@@ -72,6 +72,7 @@ from app.services.player_game_log_repository import (
 from app.services.player_pool import StoredPlayerPoolReader
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
+    ProjectionRecordingService,
     ProjectionSelectionPlayerPoolReader,
 )
 from app.services.player_pool_snapshot_repository import (
@@ -1550,7 +1551,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
                 ).all()
             ),
         )
-    with pytest.raises(ValueError, match="outside the configured read scope"):
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
         assembled.projection_recorder.record_complete_snapshot(
             _recorded_projection_snapshot(catalog, provider="underdog"),
             query=query,
@@ -1757,13 +1758,65 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     )
     all_disabled_dependencies = build_dependencies(all_disabled_settings)
     all_disabled_pool = all_disabled_dependencies.projection_player_pool_reader
+    all_disabled_recorder = all_disabled_dependencies.projection_recorder
     assert isinstance(all_disabled_pool, LatestProjectionPlayerPoolReader)
+    assert isinstance(all_disabled_recorder, ProjectionRecordingService)
+    assert all_disabled_recorder.scopes == {}
     assert {scope.provider for scope in all_disabled_pool.scopes} == {
         "dabble",
         "prizepicks",
         "underdog",
     }
     assert all_disabled_pool.required_providers == frozenset()
+    with engine.connect() as connection:
+        before_disabled_rejections = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                        LatestPlayerProjection.confirmed_at,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    rejected_at = disabled_at + timedelta(minutes=14)
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        for _attempt in range(2):
+            with pytest.raises(
+                ValueError,
+                match="outside the configured recording scope",
+            ):
+                all_disabled_recorder.record_complete_snapshot(
+                    replace(snapshot, retrieved_at=rejected_at),
+                    query=query,
+                    accepted_at=rejected_at,
+                )
+            with pytest.raises(
+                ValueError,
+                match="outside the configured recording scope",
+            ):
+                all_disabled_recorder.record_failed_poll(
+                    provider=snapshot.provider,
+                    query=query,
+                    completed_at=rejected_at,
+                    failure_reason="access_denied",
+                )
+    with engine.connect() as connection:
+        after_disabled_rejections = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                        LatestPlayerProjection.confirmed_at,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    assert after_disabled_rejections == before_disabled_rejections
     route_dependencies = app.extensions["dependencies"]
     route_dependencies.slate_service.player_pool = all_disabled_pool
     route_dependencies.matchup_service.player_pool = all_disabled_pool
@@ -1811,11 +1864,6 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert all_disabled_selection.status_code == 503
     assert all_disabled_selection.get_json()["error"]["code"] == "provider_unavailable"
 
-    assembled.projection_recorder.record_complete_snapshot(
-        replace(recorded_snapshot, retrieved_at=all_disabled_at),
-        query=query,
-        accepted_at=all_disabled_at,
-    )
     partially_enabled_settings = settings.model_copy(
         update={
             "providers": settings.providers.model_copy(
@@ -1825,13 +1873,34 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     )
     partially_enabled_dependencies = build_dependencies(partially_enabled_settings)
     partially_enabled_pool = partially_enabled_dependencies.projection_player_pool_reader
+    partially_enabled_recorder = partially_enabled_dependencies.projection_recorder
     assert isinstance(partially_enabled_pool, LatestProjectionPlayerPoolReader)
+    assert isinstance(partially_enabled_recorder, ProjectionRecordingService)
+    assert set(partially_enabled_recorder.scopes) == {"dabble"}
     assert {scope.provider for scope in partially_enabled_pool.scopes} == {
         "dabble",
         "prizepicks",
         "underdog",
     }
     assert partially_enabled_pool.required_providers == frozenset({"dabble"})
+    partially_enabled_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=all_disabled_at),
+        query=query,
+        accepted_at=all_disabled_at,
+    )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        partially_enabled_recorder.record_complete_snapshot(
+            replace(prizepicks_snapshot, retrieved_at=all_disabled_at),
+            query=query,
+            accepted_at=all_disabled_at,
+        )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        partially_enabled_recorder.record_failed_poll(
+            provider="prizepicks",
+            query=query,
+            completed_at=all_disabled_at,
+            failure_reason="access_denied",
+        )
     partially_enabled_pool.clock = lambda: all_disabled_at
     route_dependencies.matchup_service.player_pool = partially_enabled_pool
     partially_enabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
@@ -1874,7 +1943,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert durable_counts == {
         "snapshots": 11,
         "polls": 17,
-        "generations": 13,
-        "observations": 9,
+        "generations": 14,
+        "observations": 10,
         "latest": 2,
     }
