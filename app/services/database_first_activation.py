@@ -20,7 +20,7 @@ from typing import Any, Callable, Protocol
 from sqlalchemy import exists, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, defer, sessionmaker
 
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
@@ -788,7 +788,9 @@ class DatabaseFirstPublicationReader:
                 .where(PublicationStream.stream_key.in_(keys))
             )
             if projection_only:
-                statement = statement.add_columns(
+                statement = statement.options(
+                    defer(PublicationVersion.payload, raiseload=True)
+                ).add_columns(
                     exists(
                         select(PublicationPlayerGameLog.publication_id).where(
                             PublicationPlayerGameLog.publication_id
@@ -949,25 +951,12 @@ class DatabaseFirstPublicationReader:
                     ),
                     event_catalog_checksum=publication.event_catalog_checksum,
                 )
-        if not publication_payload_matches_checksum(
-            publication.payload,
-            publication.checksum,
-        ):
-            return self._missing(
-                stream_key,
-                "unavailable",
-                reason="publication_checksum_mismatch",
-                fence=pointer.fence,
-                publication_id=publication.publication_id,
-                season=publication.season,
-                cutoff=_utc(publication.cutoff).isoformat(),
-                version=int(publication.version),
-                retrieved_at=retrieved_at,
-                checksum=publication.checksum,
-                freshness=freshness,
-                age_seconds=age,
-            )
         if not hydrate_payload:
+            # Projection rows, the active/rollback status, pointer fence, and
+            # publication checksum metadata are written in the same activation
+            # transaction.  The indexed read is bound to that exact immutable
+            # publication ID; payload-consuming paths still recompute the
+            # payload checksum below.
             if not projection_ready:
                 return self._missing(
                     stream_key,
@@ -996,6 +985,24 @@ class DatabaseFirstPublicationReader:
                     publication.event_catalog_publication_id
                 ),
                 event_catalog_checksum=publication.event_catalog_checksum,
+            )
+        if not publication_payload_matches_checksum(
+            publication.payload,
+            publication.checksum,
+        ):
+            return self._missing(
+                stream_key,
+                "unavailable",
+                reason="publication_checksum_mismatch",
+                fence=pointer.fence,
+                publication_id=publication.publication_id,
+                season=publication.season,
+                cutoff=_utc(publication.cutoff).isoformat(),
+                version=int(publication.version),
+                retrieved_at=retrieved_at,
+                checksum=publication.checksum,
+                freshness=freshness,
+                age_seconds=age,
             )
         try:
             payload = json.loads(publication.payload, object_pairs_hook=_reject_duplicate_json_keys)

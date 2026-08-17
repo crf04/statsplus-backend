@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import timedelta
+import hashlib
 import json
 from unittest.mock import Mock
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, event, insert, text
+from sqlalchemy import create_engine, event, inspect, insert, text
+from sqlalchemy.exc import InvalidRequestError
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.migrations import run_migrations
@@ -448,7 +450,7 @@ def test_active_player_log_read_uses_indexed_publication_projection(
             cutoff=RETRIEVED_AT,
             version=1,
             status="active",
-            checksum="a" * 64,
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
             payload=encoded,
             created_at=RETRIEVED_AT,
             reason="projection regression",
@@ -485,6 +487,16 @@ def test_active_player_log_read_uses_indexed_publication_projection(
     reader = DatabaseFirstPublicationReader(
         engine, clock=lambda: RETRIEVED_AT
     )
+    original_read_row = reader._read_row
+
+    def assert_payload_is_raiseloaded(stream_key, **kwargs):
+        publication = kwargs["publication"]
+        assert "payload" in inspect(publication).unloaded
+        with pytest.raises(InvalidRequestError):
+            publication.payload
+        return original_read_row(stream_key, **kwargs)
+
+    monkeypatch.setattr(reader, "_read_row", assert_payload_is_raiseloaded)
     repository = PlayerGameLogRepository(
         engine,
         statistic_catalog=StatisticCatalog.load_default(),
@@ -517,6 +529,9 @@ def test_active_player_log_read_uses_indexed_publication_projection(
     )
 
     snapshot = repository.read_publication_snapshot(SEASON)
+    assert snapshot.read("player_game_logs").checksum == hashlib.sha256(
+        encoded.encode()
+    ).hexdigest()
     rows = repository.list_player_rows(
         SEASON, 101, publication_snapshot=snapshot
     )

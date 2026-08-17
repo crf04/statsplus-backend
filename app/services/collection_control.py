@@ -53,6 +53,7 @@ from app.services.team_matchup_publications import (
     PublicationGovernanceUnavailable,
     publication_base_for_stream,
     publication_stream,
+    resolve_governed_l15_date_from_by_team,
     resolve_governed_team_game_ids,
 )
 
@@ -224,7 +225,12 @@ SURFACE_REGISTRY: tuple[SurfaceDefinition, ...] = tuple(
 )
 
 
-def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> list[dict[str, Any]]:
+def _collector_scope_descriptors(
+    scopes: Iterable[str],
+    cutoff: datetime,
+    *,
+    l15_date_from_by_team: Mapping[int, str] | None = None,
+) -> list[dict[str, Any]]:
     """Expand frozen surface authority into exact, executable NBA requests."""
 
     authorized = {str(value) for value in scopes}
@@ -274,8 +280,17 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
     date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
+            if window == "l15" and (
+                l15_date_from_by_team is not None
+                and team_id not in l15_date_from_by_team
+            ):
+                continue
             governed = {"window": window, "subject": "opponent", "team_id": team_id,
-                        "date_from": None, "date_to": date_to,
+                        "date_from": (
+                            l15_date_from_by_team.get(team_id)
+                            if window == "l15" and l15_date_from_by_team is not None
+                            else None
+                        ), "date_to": date_to,
                         "per_mode": "Per48", "value_mode": "per48"}
             if opponent_shots and window in shot_stream_windows:
                 descriptors.extend({"scope": opponent_shots, "parameters": {
@@ -286,6 +301,20 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
             if opponent_zones and window in zone_stream_windows:
                 descriptors.append({"scope": opponent_zones, "parameters": dict(governed)})
     return descriptors
+
+
+def _manifest_l15_date_from_by_team(
+    engine: Engine,
+    manifest: CollectionManifest,
+) -> dict[int, str]:
+    """Resolve endpoint boundaries from the manifest's immutable catalog."""
+
+    from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+
+    governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
+        manifest.season, _aware(manifest.cutoff), manifest.manifest_id,
+    )
+    return governance.expected_l15_date_from_by_team
 
 
 def _surface_definition(surface: str) -> SurfaceDefinition | None:
@@ -429,6 +458,7 @@ def _compose_nba_observation_payload(
     manifest_id: str,
     provenance_ids: set[str],
     expected_game_ids_by_team: Mapping[int, frozenset[str]],
+    expected_l15_date_from_by_team: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """Derive one governed NBA payload only from immutable observations."""
 
@@ -477,6 +507,12 @@ def _compose_nba_observation_payload(
             )
         ):
             raise ValueError("publication observation integrity mismatch")
+        scoped_team_id = scope.get("team_id")
+        if scoped_team_id is not None:
+            try:
+                scoped_team_id = int(scoped_team_id)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError("publication scope team invalid") from error
         expected_value_mode = (
             "totals_with_minutes"
             if base in {"play_types", "shot_types"}
@@ -497,10 +533,17 @@ def _compose_nba_observation_payload(
                 raise _ProviderWindowUnavailable("provider_unbounded_as_of")
         else:
             endpoint_window = scope.get("endpoint_window")
+            expected_date_from = (
+                (expected_l15_date_from_by_team or {}).get(scoped_team_id)
+                if window == "l15"
+                else None
+            )
             if (
                 not isinstance(endpoint_window, Mapping)
                 or int(endpoint_window.get("last_n_games", -1))
                 != (15 if window == "l15" else 0)
+                or (window == "l15" and expected_date_from is None)
+                or endpoint_window.get("date_from") != expected_date_from
                 or endpoint_window.get("date_to")
                 != slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
                 or scope.get("season") != season
@@ -510,12 +553,6 @@ def _compose_nba_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
-        scoped_team_id = scope.get("team_id")
-        if scoped_team_id is not None:
-            try:
-                scoped_team_id = int(scoped_team_id)
-            except (TypeError, ValueError, OverflowError) as error:
-                raise ValueError("publication scope team invalid") from error
         sources.append({
             "observation_id": observation.observation_id,
             "checksum": observation.checksum,
@@ -1807,7 +1844,21 @@ class CollectionControlService(_SessionService):
                     ):
                         authorized_scopes.update(frozen_scopes.intersection(_surface_names(definition)))
                 if authorized_scopes:
-                    scope_descriptors = _collector_scope_descriptors(authorized_scopes, manifest.cutoff)
+                    scope_descriptors = _collector_scope_descriptors(
+                        authorized_scopes,
+                        manifest.cutoff,
+                        l15_date_from_by_team=(
+                            _manifest_l15_date_from_by_team(self.engine, manifest)
+                            if any(
+                                scope in {
+                                    "shot_types_opponent", "shot_zones_opponent",
+                                }
+                                or scope.endswith("_opponent_l15")
+                                for scope in authorized_scopes
+                            )
+                            else {}
+                        ),
+                    )
                     visible_manifests.append({
                         "manifest_id": manifest.manifest_id,
                         "season": manifest.season,
@@ -2070,7 +2121,21 @@ class CollectionControlService(_SessionService):
                 if not authorized_scopes:
                     raise ControlPlaneError("scope_denied")
                 row._authorized_scopes = sorted(authorized_scopes)
-                row._scope_descriptors = _collector_scope_descriptors(authorized_scopes, row.cutoff)
+                row._scope_descriptors = _collector_scope_descriptors(
+                    authorized_scopes,
+                    row.cutoff,
+                    l15_date_from_by_team=(
+                        _manifest_l15_date_from_by_team(self.engine, row)
+                        if any(
+                            scope in {
+                                "shot_types_opponent", "shot_zones_opponent",
+                            }
+                            or scope.endswith("_opponent_l15")
+                            for scope in authorized_scopes
+                        )
+                        else {}
+                    ),
+                )
             return row
 
     def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
@@ -2562,6 +2627,15 @@ class ObservationIngestionService(_SessionService):
                     observation_type=observation_type,
                     season=str(envelope["season"]),
                     cutoff=_aware(manifest.cutoff),
+                    l15_date_from_by_team=(
+                        _manifest_l15_date_from_by_team(self.engine, manifest)
+                        if observation_type in {
+                            "shot_types_opponent", "shot_zones_opponent",
+                        }
+                        and isinstance(scope_value, Mapping)
+                        and str(scope_value.get("window", "")).casefold() == "l15"
+                        else {}
+                    ),
                 )
                 allowed_scopes = set(json.loads(manifest.scopes))
                 if observation_type not in allowed_scopes and "*" not in allowed_scopes:
@@ -3019,7 +3093,8 @@ class PublicationService(_SessionService):
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None,
                 manifest_id: str | None = None,
-                session: Session | None = None) -> PublicationVersion:
+                session: Session | None = None,
+                _derive_fence_from_lock: bool = False) -> PublicationVersion:
         now = self.clock()
         with self._session_scope(session) as session:
             stream = session.get(PublicationStream, stream_key)
@@ -3030,6 +3105,7 @@ class PublicationService(_SessionService):
                 manifest_id=manifest_id,
             )
             expected_game_ids_by_team = None
+            expected_l15_date_from_by_team = None
             authority = None
             if stream_key in NBA_PUBLICATION_STREAM_KEYS:
                 try:
@@ -3064,6 +3140,26 @@ class PublicationService(_SessionService):
                         raise ControlPlaneError(
                             "publication_governance_unavailable"
                         ) from error
+                if stream_key.endswith("_l15") and provenance_ids:
+                    try:
+                        expected_l15_date_from_by_team = (
+                            resolve_governed_l15_date_from_by_team(
+                                self.l15_expectation_resolver,
+                                season,
+                                _aware(cutoff),
+                                manifest_id=authority.manifest_id,
+                                event_catalog_publication_id=(
+                                    authority.event_catalog_publication_id
+                                ),
+                                event_catalog_checksum=(
+                                    authority.event_catalog_checksum
+                                ),
+                            )
+                        )
+                    except PublicationGovernanceUnavailable as error:
+                        raise ControlPlaneError(
+                            "publication_governance_unavailable"
+                        ) from error
                 try:
                     derived_payload = _compose_nba_observation_payload(
                         session,
@@ -3074,6 +3170,9 @@ class PublicationService(_SessionService):
                         manifest_id=authority.manifest_id,
                         provenance_ids=provenance_ids,
                         expected_game_ids_by_team=expected_game_ids_by_team or {},
+                        expected_l15_date_from_by_team=(
+                            expected_l15_date_from_by_team
+                        ),
                     )
                 except _ProviderWindowUnavailable as error:
                     raise ControlPlaneError(str(error)) from error
@@ -3094,9 +3193,11 @@ class PublicationService(_SessionService):
                 )
             else:
                 encoded = _json(payload)
-            pointer = session.scalar(select(PublicationPointer).where(
-                PublicationPointer.stream_key == stream_key
-            ).with_for_update())
+            pointer = session.scalar(
+                select(PublicationPointer).where(
+                    PublicationPointer.stream_key == stream_key
+                ).with_for_update().execution_options(populate_existing=True)
+            )
             if pointer is None:
                 if expected_fence not in (None, 0):
                     raise ControlPlaneError("stale_composition")
@@ -3106,6 +3207,8 @@ class PublicationService(_SessionService):
                     session.flush()
                 except IntegrityError as error:
                     raise ControlPlaneError("stale_composition") from error
+            elif _derive_fence_from_lock:
+                expected_fence = int(pointer.fence)
             elif expected_fence is None:
                 raise ControlPlaneError("expected_fence_required")
             if expected_fence is not None and pointer.fence != expected_fence:
@@ -3380,12 +3483,10 @@ class PublicationService(_SessionService):
         if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
             raise ControlPlaneError("stream_unsupported")
         with self._session_scope(session) as session:
-            pointer = session.get(PublicationPointer, stream_key)
-            expected_fence = pointer.fence if pointer is not None else None
             return self.compose(
                 stream_key, season=season, cutoff=cutoff, payload=None,
-                expected_fence=expected_fence, manifest_id=manifest_id,
-                session=session,
+                manifest_id=manifest_id, session=session,
+                _derive_fence_from_lock=True,
             )
 
     def current(self, stream_key: str) -> PublicationVersion | None:
@@ -4483,6 +4584,7 @@ def _validate_opponent_window_scope(
     observation_type: str,
     season: str,
     cutoff: datetime,
+    l15_date_from_by_team: Mapping[int, str],
 ) -> None:
     """Bind team-window observations to the exact issued endpoint window."""
 
@@ -4499,6 +4601,19 @@ def _validate_opponent_window_scope(
         if observation_type == "shot_types_opponent"
         else "per48"
     )
+    try:
+        team_id = int(scope.get("team_id"))
+    except (TypeError, ValueError, OverflowError):
+        raise ControlPlaneError("manifest_scope_mismatch") from None
+    expected_date_from = (
+        l15_date_from_by_team.get(team_id) if window == "l15" else None
+    )
+    if window == "l15" and (
+        expected_date_from is None
+        or not isinstance(endpoint_window, Mapping)
+        or endpoint_window.get("date_from") != expected_date_from
+    ):
+        raise ControlPlaneError("provider_window_unverified")
     if (
         expected_last_n is None
         or scope.get("season") != season
@@ -4507,7 +4622,7 @@ def _validate_opponent_window_scope(
         or scope.get("value_mode") != expected_value_mode
         or not isinstance(endpoint_window, Mapping)
         or endpoint_window.get("last_n_games") != expected_last_n
-        or endpoint_window.get("date_from") is not None
+        or endpoint_window.get("date_from") != expected_date_from
         or endpoint_window.get("date_to") != expected_date_to
     ):
         raise ControlPlaneError("manifest_scope_mismatch")

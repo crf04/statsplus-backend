@@ -13,6 +13,7 @@ import pytest
 import pandas as pd
 from sqlalchemy import create_engine, delete, select, update
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session
 
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
@@ -39,6 +40,7 @@ from app.collector.runner import (
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
 )
+from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import (
     CollectionObservation,
     CompositionJob,
@@ -374,15 +376,27 @@ def test_outbox_hard_limit_preserves_current_work_and_non_overlap(tmp_path: Path
 def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     from app.services.collection_control import NBA_TEAM_IDS, _collector_scope_descriptors
 
+    l15_boundaries = {
+        int(team_id): "07/30/2026" for team_id in NBA_TEAM_IDS
+    }
     descriptors = _collector_scope_descriptors({
         "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
-    }, NOW)
+    }, NOW, l15_date_from_by_team=l15_boundaries)
     opponent = [item for item in descriptors if item["parameters"].get("subject") == "opponent"]
     team_scoped = [item for item in opponent if "team_id" in item["parameters"]]
     assert {str(item["parameters"]["team_id"]) for item in team_scoped} == NBA_TEAM_IDS
     assert {item["parameters"]["window"] for item in team_scoped} == {"season", "l15"}
     assert {item["parameters"]["date_to"] for item in team_scoped} == {"08/13/2026"}
-    assert all(item["parameters"]["date_from"] is None for item in team_scoped)
+    assert {
+        item["parameters"]["date_from"]
+        for item in team_scoped
+        if item["parameters"]["window"] == "season"
+    } == {None}
+    assert {
+        item["parameters"]["date_from"]
+        for item in team_scoped
+        if item["parameters"]["window"] == "l15"
+    } == {"07/30/2026"}
     assert {
         item["parameters"]["per_mode"] for item in team_scoped
         if item["scope"] == "shot_types_opponent"
@@ -404,14 +418,18 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     assert not any(item["scope"] in {"grouped_shot_types", "exact_shot_zones"} for item in opponent)
 
     l15_only = _collector_scope_descriptors(
-        {"grouped_shot_types_opponent_l15"}, NOW
+        {"grouped_shot_types_opponent_l15"}, NOW,
+        l15_date_from_by_team=l15_boundaries,
     )
     assert {item["parameters"]["window"] for item in l15_only} == {"l15"}
     assert {item["scope"] for item in l15_only} == {"shot_types_opponent"}
 
     utc_evening = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
     prior_slate = _collector_scope_descriptors(
-        {"shot_zones_opponent"}, utc_evening
+        {"shot_zones_opponent"}, utc_evening,
+        l15_date_from_by_team={
+            int(team_id): "10/15/2025" for team_id in NBA_TEAM_IDS
+        },
     )
     assert {
         item["parameters"]["date_to"]
@@ -430,6 +448,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
         ("mixed_governance_runtime_error", 2),
         ("mixed_governance_db_error", 2),
         ("backdated_synergy", 4),
+        ("l15_boundary_mismatch", 4),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -487,7 +506,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     )
     manifest_scopes = set(json.loads(manifest.scopes))
     assert observation_types <= manifest_scopes
-    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff)
+    l15_date_from = slate_date_for_instant(
+        cutoff - timedelta(days=15, hours=1)
+    ).strftime("%m/%d/%Y")
+    descriptors = _collector_scope_descriptors(
+        manifest_scopes,
+        cutoff,
+        l15_date_from_by_team={
+            int(team_id): l15_date_from for team_id in team_ids
+        },
+    )
     discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
         "manifest_id": manifest.manifest_id, "season": "2025-26",
         "cutoff": cutoff.isoformat(),
@@ -510,6 +538,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
             assert kwargs["per_mode_simple"] == "Totals"
             assert kwargs["date_to"] == cutoff.strftime("%m/%d/%Y")
+            assert _date_from == (
+                l15_date_from if kwargs["last_n_games"] == 15 else None
+            )
             return [{
                 "team_id": kwargs["team_id"], "category": category,
                 "GP": 14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15,
@@ -519,6 +550,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
 
         def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
             assert kwargs["per_mode_detailed"] == "Per48"
+            assert _date_from == (
+                l15_date_from if kwargs["last_n_games"] == 15 else None
+            )
             return [{
                 "team_id": kwargs["team_id"],
                 "GP": 15,
@@ -597,6 +631,18 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     ).encode()
     with pytest.raises(ControlPlaneError, match="manifest_scope_mismatch"):
         ingestion.ingest(claims, replayed_cutoff, replayed_payload)
+    replayed_l15 = json.loads(json.dumps(next(
+        document for document in uploaded
+        if document["observation_type"] == "shot_types_opponent"
+        and document["scope"]["window"] == "l15"
+    )))
+    replayed_l15["client_observation_id"] += "-wrong-l15-boundary"
+    replayed_l15["scope"]["endpoint_window"]["date_from"] = "01/01/1900"
+    replayed_l15_payload = json.dumps(
+        replayed_l15.pop("payload"), sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ControlPlaneError, match="provider_window_unverified"):
+        ingestion.ingest(claims, replayed_l15, replayed_l15_payload)
     for observation_type in ("shot_types_opponent", "shot_zones_opponent"):
         mismatched = json.loads(json.dumps(next(
             document
@@ -672,6 +718,20 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                     CollectionObservation.observation_id
                     == observation["observation_id"]
                 ).values(scope=json.dumps(scope, sort_keys=True)))
+    if evidence_mode == "l15_boundary_mismatch":
+        with control_db.begin() as connection:
+            observations = connection.execute(select(CollectionObservation).where(
+                CollectionObservation.observation_type == "shot_types_opponent"
+            )).mappings().all()
+            target = next(
+                row for row in observations
+                if json.loads(row["scope"])["window"] == "l15"
+            )
+            scope = json.loads(target["scope"])
+            scope["endpoint_window"]["date_from"] = "01/01/1900"
+            connection.execute(update(CollectionObservation).where(
+                CollectionObservation.observation_id == target["observation_id"]
+            ).values(scope=json.dumps(scope, sort_keys=True)))
     with control_db.connect() as connection:
         assert {
             row.stream_key
@@ -845,6 +905,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             ) or (
                 evidence_mode == "permuted"
                 and stream_key != "synergy_play_types_opponent_season"
+            ) or (
+                evidence_mode == "l15_boundary_mismatch"
+                and stream_key == "grouped_shot_types_opponent_l15"
             )
             else "succeeded"
         )
@@ -900,6 +963,11 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             "grouped_shot_types_opponent_season", season="2025-26"
         ).available
     if evidence_mode == "gp14":
+        expected_values.pop("grouped_shot_types_opponent_l15")
+        assert not reader.read(
+            "grouped_shot_types_opponent_l15", season="2025-26"
+        ).available
+    if evidence_mode == "l15_boundary_mismatch":
         expected_values.pop("grouped_shot_types_opponent_l15")
         assert not reader.read(
             "grouped_shot_types_opponent_l15", season="2025-26"
@@ -985,6 +1053,48 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                     row.status
                     for row in connection.execute(select(CompositionJob))
                 } == {"succeeded"}
+        if evidence_mode == "complete":
+            stream_key = "grouped_shot_types_opponent_season"
+            stale_session = Session(control_db, expire_on_commit=False)
+            advancing_session = Session(control_db, expire_on_commit=False)
+            try:
+                stale_pointer = stale_session.get(PublicationPointer, stream_key)
+                assert stale_pointer is not None
+                initial_fence = stale_pointer.fence
+                initial_active = stale_pointer.active_publication_id
+                with advancing_session.begin():
+                    concurrent = publications.compose_from_observations(
+                        stream_key, season="2025-26", cutoff=cutoff,
+                        manifest_id=manifest.manifest_id,
+                        session=advancing_session,
+                    )
+                final = publications.compose_from_observations(
+                    stream_key, season="2025-26", cutoff=cutoff,
+                    manifest_id=manifest.manifest_id,
+                    session=stale_session,
+                )
+                stale_session.commit()
+            finally:
+                stale_session.close()
+                advancing_session.close()
+            with control_db.connect() as connection:
+                pointer = connection.execute(select(PublicationPointer).where(
+                    PublicationPointer.stream_key == stream_key
+                )).one()
+                versions = connection.execute(select(PublicationVersion).where(
+                    PublicationVersion.stream_key == stream_key
+                )).all()
+            assert pointer.fence == initial_fence + 2
+            assert pointer.previous_publication_id == concurrent.publication_id
+            assert pointer.active_publication_id == final.publication_id
+            assert {
+                row.publication_id for row in versions if row.status == "active"
+            } == {final.publication_id}
+            assert all(
+                row.status == "superseded"
+                for row in versions
+                if row.publication_id in {initial_active, concurrent.publication_id}
+            )
     with control_db.connect() as connection:
         assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)
     outbox.close()

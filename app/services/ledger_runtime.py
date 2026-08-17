@@ -57,6 +57,23 @@ class LedgerGovernance:
             for team_id in self.team_ids
         }
 
+    @property
+    def expected_l15_date_from_by_team(self) -> dict[int, str]:
+        """Inclusive NBA endpoint boundary for each exact governed L15."""
+
+        boundaries: dict[int, str] = {}
+        for team_id, game_ids in self.expected_l15_game_ids.items():
+            if len(game_ids) != 15:
+                continue
+            dates = [
+                slate_date_for_instant(event["scheduled_at"])
+                for event in self.events
+                if str(event["nba_game_id"]) in game_ids
+            ]
+            if len(dates) == 15:
+                boundaries[team_id] = min(dates).strftime("%m/%d/%Y")
+        return boundaries
+
 
 class LedgerGovernanceReader(Protocol):
     def read_for_collection(self, season: str) -> LedgerGovernance: ...
@@ -137,6 +154,29 @@ class ActiveManifestLedgerGovernanceReader:
         raise PublicationGovernanceUnavailable(
             "active manifest and completed Event Catalog governance are required"
         )
+
+    def resolve_l15_date_from_by_team(
+        self,
+        season: str,
+        cutoff: date | datetime,
+        *,
+        manifest_id: str | None = None,
+        event_catalog_publication_id: str | None = None,
+        event_catalog_checksum: str | None = None,
+    ) -> dict[int, str]:
+        governance = self._governance_at_cutoff(
+            season, cutoff, manifest_id=manifest_id,
+        )
+        if (
+            event_catalog_publication_id is not None
+            and governance.event_catalog_publication_id
+            != event_catalog_publication_id
+        ) or (
+            event_catalog_checksum is not None
+            and governance.event_catalog_checksum != event_catalog_checksum
+        ):
+            raise PublicationGovernanceUnavailable()
+        return governance.expected_l15_date_from_by_team
 
     def resolve_season_game_ids(self, season: str, cutoff: date | datetime):
         return self.resolve_team_game_ids(season, cutoff, window="season")

@@ -216,6 +216,40 @@ def resolve_governed_team_game_ids(
     return normalized
 
 
+def resolve_governed_l15_date_from_by_team(
+    resolver,
+    season: str,
+    cutoff: date | datetime,
+    *,
+    manifest_id: str,
+    event_catalog_publication_id: str,
+    event_catalog_checksum: str,
+) -> dict[int, str]:
+    """Resolve exact inclusive endpoint boundaries from bound governance."""
+
+    operation = getattr(resolver, "resolve_l15_date_from_by_team", None)
+    if not callable(operation):
+        raise PublicationGovernanceUnavailable()
+    result = operation(
+        season,
+        cutoff,
+        manifest_id=manifest_id,
+        event_catalog_publication_id=event_catalog_publication_id,
+        event_catalog_checksum=event_catalog_checksum,
+    )
+    if not isinstance(result, Mapping):
+        raise PublicationGovernanceUnavailable()
+    try:
+        normalized = {
+            int(team_id): str(date_from)
+            for team_id, date_from in result.items()
+            if str(date_from)
+        }
+    except (TypeError, ValueError, OverflowError):
+        raise PublicationGovernanceUnavailable() from None
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationLineage:
     """Immutable source identity carried with one composed matchup surface."""
@@ -309,5 +343,6 @@ __all__ = [
     "publication_stream",
     "resolve_governed_l15_game_ids",
     "resolve_governed_team_game_ids",
+    "resolve_governed_l15_date_from_by_team",
     "validate_publication_rows",
 ]
