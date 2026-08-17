@@ -25,33 +25,68 @@ SHOT_TYPE_DISPLAY_TO_STORED = {
     "Pullups": "pullups",
     "Less Than 10 ft": "less_than_10_ft",
 }
-SHOT_TYPE_STATS = frozenset({"FG2M", "FG2A", "FG3M", "FG3A"})
-SHOT_ZONE_SLICES = frozenset(
-    {
-        "Restricted Area",
-        "In The Paint (Non-RA)",
-        "Mid-Range",
-        "Corner 3",
-        "Above the Break 3",
-    }
+SHOT_TYPE_STORED_TO_DISPLAY = {
+    stored: display for display, stored in SHOT_TYPE_DISPLAY_TO_STORED.items()
+}
+SHOT_TYPE_SLICES = tuple(SHOT_TYPE_DISPLAY_TO_STORED.values())
+SHOT_TYPE_STATS = ("FG2M", "FG2A", "FG3M", "FG3A")
+SHOT_ZONE_SLICES = (
+    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3",
+    "Above the Break 3",
 )
-NBA_PUBLICATION_TAXONOMY = {
-    "play_types": frozenset(
-        f"{slice_key}_{stat_key}"
-        for slice_key in PLAY_TYPES
-        for stat_key in ("PTS", "POSS")
+SHOT_ZONE_STATS = ("FGM", "FGA")
+PLAY_TYPE_STATS = ("PTS", "POSS")
+_PUBLICATION_TAXONOMY = {
+    "play_types": tuple(
+        f"{slice_key}_{stat_key}" for slice_key in PLAY_TYPES for stat_key in PLAY_TYPE_STATS
     ),
-    "shot_types": frozenset(
-        f"{slice_key}_{stat_key}"
-        for slice_key in SHOT_TYPE_DISPLAY_TO_STORED.values()
-        for stat_key in SHOT_TYPE_STATS
+    "shot_types": tuple(
+        f"{slice_key}_{stat_key}" for slice_key in SHOT_TYPE_SLICES for stat_key in SHOT_TYPE_STATS
     ),
-    "shot_zones": frozenset(
-        f"{slice_key}_{stat_key}"
-        for slice_key in SHOT_ZONE_SLICES
-        for stat_key in ("FGM", "FGA")
+    "shot_zones": tuple(
+        f"{slice_key}_{stat_key}" for slice_key in SHOT_ZONE_SLICES for stat_key in SHOT_ZONE_STATS
     ),
 }
+NBA_PUBLICATION_TAXONOMY = {
+    base: frozenset(keys) for base, keys in _PUBLICATION_TAXONOMY.items()
+}
+
+
+class PublicationValidationError(ValueError):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def publication_base_for_stream(stream_key: str) -> str | None:
+    for base, template in NBA_PUBLICATION_STREAMS.items():
+        if stream_key in {template.format(window=window) for window in NBA_PUBLICATION_WINDOWS}:
+            return base
+    return None
+
+
+def validate_publication_rows(
+    base: str,
+    rows,
+    *,
+    expected_l15_game_ids=None,
+) -> tuple[str, ...]:
+    """Apply the governed league, taxonomy, and optional L15 game-set rules."""
+    expected_keys = tuple(_PUBLICATION_TAXONOMY[base])
+    if len(rows) != 30 or len({row.team_id for row in rows}) != 30:
+        raise PublicationValidationError("publication_surface_incomplete")
+    expected = set(expected_keys)
+    for row in rows:
+        for values in (row.per48, row.league_average, row.population_sigma, row.competition_rank):
+            raw_keys = tuple(values)
+            if len(raw_keys) != len(set(raw_keys)) or set(raw_keys) != expected:
+                raise PublicationValidationError("publication_metric_taxonomy_mismatch")
+    if expected_l15_game_ids is not None:
+        if {row.team_id for row in rows} != set(expected_l15_game_ids) or any(
+            set(row.game_ids) != set(expected_l15_game_ids[row.team_id]) for row in rows
+        ):
+            raise PublicationValidationError("publication_game_set_mismatch")
+    return expected_keys
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +151,8 @@ def publication_stream(base: str, window: str) -> str:
     return NBA_PUBLICATION_STREAMS[base].format(window=window)
 
 
-def publication_metric_keys(base: str) -> frozenset[str]:
-    return NBA_PUBLICATION_TAXONOMY[base]
+def publication_metric_keys(base: str) -> tuple[str, ...]:
+    return _PUBLICATION_TAXONOMY[base]
 
 
 __all__ = [
@@ -126,11 +161,20 @@ __all__ = [
     "NBA_PUBLICATION_STREAM_KEYS",
     "NBA_PUBLICATION_TAXONOMY",
     "NBA_PUBLICATION_WINDOWS",
+    "PLAY_TYPE_STATS",
     "PublicationLineage",
+    "PublicationValidationError",
+    "SHOT_TYPE_SLICES",
+    "SHOT_TYPE_STATS",
+    "SHOT_TYPE_STORED_TO_DISPLAY",
+    "SHOT_ZONE_SLICES",
+    "SHOT_ZONE_STATS",
+    "publication_base_for_stream",
     "publication_cutoff",
     "publication_cutoff_reason",
     "publication_lineage",
     "publication_metric_identity",
     "publication_metric_keys",
     "publication_stream",
+    "validate_publication_rows",
 ]

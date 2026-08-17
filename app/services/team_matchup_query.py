@@ -29,6 +29,8 @@ from app.services.team_matchup_publications import (
     publication_cutoff_reason,
     publication_lineage,
     publication_metric_identity,
+    publication_metric_keys,
+    validate_publication_rows,
 )
 
 
@@ -132,12 +134,14 @@ class TeamMatchupQueryService:
             facts=facts,
             observations=observations,
         )
+        expected_l15_game_ids = self._expected_l15_game_ids(facts)
         return self._database_first_window(
             season,
             cutoff=cutoff,
             window_games=window_games,
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
+            expected_l15_game_ids=expected_l15_game_ids,
         )
 
     def get_window(
@@ -150,12 +154,14 @@ class TeamMatchupQueryService:
             facts=snapshot.facts,
             observations=snapshot.observations,
         )
+        expected_l15_game_ids = self._expected_l15_game_ids(snapshot.facts)
         return self._database_first_window(
             scope.season,
             cutoff=scope.as_of,
             window_games=scope.window_games,
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
+            expected_l15_game_ids=expected_l15_game_ids,
         )
 
     def _database_first_window(
@@ -166,6 +172,7 @@ class TeamMatchupQueryService:
         window_games: int | None,
         legacy: TeamMatchupWindow | None,
         publication_snapshot=None,
+        expected_l15_game_ids=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
@@ -244,8 +251,20 @@ class TeamMatchupQueryService:
                     else decode_team_window(
                         read.payload, stream_key=stream_by_base[base]
                     )
-                )
+                    )
+                if base in NBA_PUBLICATION_BASES:
+                    rows = tuple(rows)
+                    validate_publication_rows(
+                        base,
+                        rows,
+                        expected_l15_game_ids=(
+                            expected_l15_game_ids if window_games is not None else None
+                        ),
+                    )
             except PublicationPayloadError:
+                base_windows[base] = None
+                continue
+            except ValueError:
                 base_windows[base] = None
                 continue
             base_windows[base] = self._publication_base_window(
@@ -351,7 +370,7 @@ class TeamMatchupQueryService:
             # ``Isolation_PTS``).  Do not substitute the legacy surface when
             # one of those streams is active; project exactly the keys the
             # immutable payload supplied.
-            keys = tuple(sorted(rows[0].league_average))
+            keys = publication_metric_keys(base)
             identities = tuple(
                 (
                     *publication_metric_identity(base, key),
@@ -420,6 +439,14 @@ class TeamMatchupQueryService:
             team_metrics={team_id: tuple(metrics) for team_id, metrics in team_metrics.items()},
             observations=(observation,),
         )
+
+    @staticmethod
+    def _expected_l15_game_ids(facts):
+        expected = {}
+        for fact in facts:
+            if fact.base == "traditional" and fact.game_ids:
+                expected[fact.team_id] = frozenset(fact.game_ids)
+        return expected
 
     def _build_window(
         self,

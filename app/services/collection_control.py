@@ -31,6 +31,7 @@ from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
 from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
+from app.services.team_matchup_publications import publication_stream
 
 from app.models.collection_control import (
     ActiveSeason,
@@ -178,12 +179,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     # Opponent grouped surfaces are independent publications from their
     # player Diet counterparts.  Keeping a stream per subject/window is what
     # lets a cutover fence only the exact legacy table being refreshed.
-    {"stream_key": "synergy_play_types_opponent_season", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "synergy_play_types_opponent_l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
-    {"stream_key": "grouped_shot_types_opponent_season", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "grouped_shot_types_opponent_l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": "exact_shot_zones_opponent_season", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "exact_shot_zones_opponent_l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
+    {"stream_key": publication_stream("play_types", "season"), "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": publication_stream("play_types", "l15"), "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy_opponent",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
+    {"stream_key": publication_stream("shot_types", "season"), "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": publication_stream("shot_types", "l15"), "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_types_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
+    {"stream_key": publication_stream("shot_zones", "season"), "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": publication_stream("shot_zones", "l15"), "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("shot_zones_opponent",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
     {"stream_key": "dfs_boards", "provider": "railway", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": False},
     {"stream_key": "injury_reports", "provider": "rotowire", "owner": "request_time", "scope": "pregame", "required": (), "schema": (1,), "complete": "provider_readable", "strategy": "request_time", "freshness": "request_time", "windows": ("pregame",), "enabled": False},
     {"stream_key": "synergy:l15", "provider": "nba", "owner": "residential_collector", "scope": "l15", "required": ("synergy",), "schema": (1, 2), "complete": "unsupported", "strategy": "never_schedule", "freshness": "unavailable", "windows": ("l15",), "enabled": False, "reason": "provider_window_unsupported"},
@@ -288,12 +289,11 @@ def _validate_activation_candidate_payload(
         "traditional_opponent_l15": "traditional_opponent_l15",
         "assist_locations_season": "assist_locations_season",
         "assist_locations_l15": "assist_locations_l15",
-        "synergy_play_types_opponent_season": "synergy_play_types_opponent_season",
-        "synergy_play_types_opponent_l15": "synergy_play_types_opponent_l15",
-        "grouped_shot_types_opponent_season": "grouped_shot_types_opponent_season",
-        "grouped_shot_types_opponent_l15": "grouped_shot_types_opponent_l15",
-        "exact_shot_zones_opponent_season": "exact_shot_zones_opponent_season",
-        "exact_shot_zones_opponent_l15": "exact_shot_zones_opponent_l15",
+        **{stream: stream for stream in (
+            publication_stream(base, window)
+            for base in ("play_types", "shot_types", "shot_zones")
+            for window in ("season", "l15")
+        )}
     }
     diet_bases = {
         "synergy_play_types": "play_types",

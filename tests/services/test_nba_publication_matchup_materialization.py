@@ -406,6 +406,33 @@ def test_publication_requires_exact_registered_metric_taxonomy(tmp_path, metric_
     assert not any(fact.base == "shot_types" for fact in snapshot.facts)
 
 
+def test_publication_rejects_normalized_alias_for_registered_key(tmp_path):
+    keys = set(NBA_PUBLICATION_TAXONOMY["shot_types"])
+    keys.remove("catch_and_shoot_FG2A")
+    keys.add("Catch and Shoot_FG2A")
+    engine = _engine(tmp_path)
+    games = _league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(engine)
+    service = LedgerMatchupMaterializationService(
+        ledger, repository,
+        publication_reader=_reader(metric_keys_by_stream={
+            "grouped_shot_types_opponent_season": tuple(keys),
+        }),
+        clock=lambda: RETRIEVED_AT,
+    )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    service.materialize(
+        "2025-26", as_of=AS_OF, expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids, team_ids=team_ids,
+    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
+    observation = next(item for item in snapshot.observations if item.surface == "shot_types")
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_metric_taxonomy_mismatch"
+
+
 def test_nba_unavailable_surfaces_do_not_retain_pbp_fallback(tmp_path):
     engine = _engine(tmp_path)
     games = _league_games()

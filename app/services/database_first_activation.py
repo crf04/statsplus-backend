@@ -31,7 +31,11 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
 )
-from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+    publication_base_for_stream,
+    validate_publication_rows,
+)
 
 
 UTC = timezone.utc
@@ -451,6 +455,12 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
         raise PublicationPayloadError(f"{stream_key} publication repeats a team")
     if any(row.game_count != len(row.game_ids) for row in decoded):
         raise PublicationPayloadError(f"{stream_key} publication game count is inconsistent")
+    base = publication_base_for_stream(stream_key)
+    if base is not None:
+        try:
+            validate_publication_rows(base, tuple(decoded))
+        except ValueError as exc:
+            raise PublicationPayloadError(str(exc)) from exc
     return tuple(decoded)
 
 

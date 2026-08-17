@@ -1040,7 +1040,12 @@ an accepted `CollectionObservation`; its durable ID is the ledger source and
 the only provenance allowed on an inactive candidate. Candidate truth is
 independent for player game logs Season, traditional opponent Season/L15,
 assist locations Season/L15, and player per-36 Regular Season. Missing assist
-primitives retain only the assist last-good candidates. Migration
+primitives retain only the assist last-good candidates.
+NBA-owned opponent play-type and shot publications use this same database-first
+read seam as independent surfaces: immutable rows are validated and composed
+alongside ledger-owned facts, never substituted from PBP or another NBA
+surface. Exact taxonomy, 30-team completeness, and governed Last-15 game-set
+checks apply before activation and on public reads. Migration
 `025_ledger_parity_artifacts` stores mandatory parity evidence, and pending
 adjudication blocks ledger stream activation.
 Migration `026_repair_publication_provenance_foreign_keys` removes the
