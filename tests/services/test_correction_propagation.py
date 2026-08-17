@@ -8,7 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
@@ -49,6 +49,83 @@ def _engine(tmp_path, name: str = "correction.sqlite3"):
     engine = create_engine(f"sqlite:///{tmp_path / name}")
     run_migrations(engine)
     return engine
+
+
+def _boundary_observation_values(game, *, cutoff, manifest_id):
+    facts_by_team = {fact.team_id: fact for fact in game.team_facts}
+
+    def diagnostic(team_id):
+        fact = facts_by_team[team_id]
+        return {
+            "TeamId": team_id,
+            "Points": fact.points,
+            "FG2M": fact.two_pointers_made,
+            "FG2A": fact.two_pointers_attempted,
+            "FG3M": fact.three_pointers_made,
+            "FG3A": fact.three_pointers_attempted,
+            "FtPoints": fact.free_throws_made,
+            "FTA": fact.free_throws_attempted,
+            "OffRebounds": fact.offensive_rebounds,
+            "DefRebounds": fact.defensive_rebounds,
+            "Rebounds": fact.rebounds,
+            "Assists": fact.assists,
+            "Turnovers": fact.turnovers,
+            "Steals": fact.steals,
+            "Blocks": fact.blocks,
+            "Fouls": fact.personal_fouls,
+        }
+
+    payload_document = {
+        "stats": {
+            side: {
+                "FullGame": [
+                    dict(row.payload)
+                    for row in game.raw_rows
+                    if row.side == side
+                ],
+            }
+            for side in ("Home", "Away")
+        },
+        "team_results": {
+            "Home": {"FullGame": diagnostic(game.home_team_id)},
+            "Away": {"FullGame": diagnostic(game.away_team_id)},
+        },
+        "home_team_abbreviation": game.home_team_tricode,
+        "away_team_abbreviation": game.away_team_tricode,
+        "date": game.game_date.isoformat(),
+        "participant_ids_by_team": {
+            str(team_id): [
+                player.player_id
+                for player in game.player_facts
+                if player.team_id == team_id
+            ]
+            for team_id in (game.home_team_id, game.away_team_id)
+        },
+    }
+    payload = json.dumps(
+        payload_document, sort_keys=True, separators=(",", ":")
+    )
+    return {
+        "observation_id": game.source_observation_id,
+        "client_observation_id": game.source_observation_id,
+        "collector_id": "railway-ledger",
+        "manifest_id": manifest_id,
+        "environment": "server",
+        "provider": "pbp",
+        "observation_type": "canonical_game_ledger",
+        "scope": json.dumps(
+            {"game_id": game.game_id, "surface": "canonical_game_ledger"},
+            sort_keys=True,
+        ),
+        "season": game.season,
+        "cutoff": cutoff,
+        "schema_version": 1,
+        "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+        "payload": payload,
+        "payload_bytes": len(payload.encode()),
+        "retrieved_at": game.retrieved_at,
+        "accepted_at": game.retrieved_at,
+    }
 
 
 def test_correction_jobs_record_target_lineage_and_replay_is_idempotent(tmp_path):
@@ -470,6 +547,328 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
     assert all(job["status"] == "succeeded" for job in jobs)
     assert all(
         corrected.source_observation_id in json.loads(job["source_observation_ids"])
+        for job in jobs
+    )
+
+
+def test_correction_changes_exact_l15_boundary(tmp_path):
+    """A newly completed governed game rolls the exact L15 boundary forward."""
+    engine = _engine(tmp_path, "boundary.sqlite3")
+    manifest_id = "boundary-manifest"
+    cutoff = AS_OF + timedelta(days=1, hours=5, minutes=22)
+    runtime_now = cutoff + timedelta(hours=18)
+    games = _league_games()
+    base_game = games[0]
+    boundary_game_id = "boundary-game-16"
+
+    def boundary_game(*, source_observation_id, retrieved_at, rebounds):
+        home_fact = replace(
+            base_game.team_facts[0],
+            opponent_team_id=2,
+            opponent_team_tricode="T02",
+        )
+        away_fact = replace(
+            base_game.team_facts[1],
+            team_id=2,
+            team_tricode="T02",
+            opponent_team_id=1,
+            opponent_team_tricode="T01",
+            defensive_rebounds=rebounds - 1,
+            rebounds=rebounds,
+        )
+        away_player = replace(
+            base_game.player_facts[1],
+            team_id=2,
+            team_tricode="T02",
+        )
+        candidate = replace(
+            base_game,
+            game_id=boundary_game_id,
+            game_date=base_game.game_date + timedelta(days=15),
+            away_team_id=2,
+            away_team_tricode="T02",
+            team_facts=(home_fact, away_fact),
+            player_facts=(base_game.player_facts[0], away_player),
+            source_observation_id=source_observation_id,
+            retrieved_at=retrieved_at,
+            participant_ids_by_team=((1, (1001,)), (2, (1030,))),
+        )
+        return replace(
+            candidate,
+            raw_rows=raw_rows_from_facts(candidate),
+        ).with_checksum()
+
+    first_boundary_game = boundary_game(
+        source_observation_id="obs:boundary:first",
+        retrieved_at=cutoff + timedelta(hours=1),
+        rebounds=14,
+    )
+    corrected_boundary_game = boundary_game(
+        source_observation_id="obs:boundary:corrected",
+        retrieved_at=cutoff + timedelta(hours=2),
+        rebounds=15,
+    )
+
+    def event_values(game, *, status_text, status_code):
+        scheduled_at = datetime.combine(game.game_date, datetime.min.time(), UTC)
+        return {
+            "nba_game_id": game.game_id,
+            "season": game.season,
+            "home_team_id": game.home_team_id,
+            "home_team_name": f"Team {game.home_team_id}",
+            "home_team_tricode": game.home_team_tricode,
+            "away_team_id": game.away_team_id,
+            "away_team_name": f"Team {game.away_team_id}",
+            "away_team_tricode": game.away_team_tricode,
+            "scheduled_at": scheduled_at,
+            "status_text": status_text,
+            "status_code": status_code,
+            "classification": "Regular Season",
+            "first_seen_at": cutoff,
+            "last_seen_at": cutoff,
+        }
+
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id, season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum=manifest_id,
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), [
+            *(
+                event_values(game, status_text="Final", status_code=3)
+                for game in games
+            ),
+            event_values(
+                first_boundary_game,
+                status_text="Scheduled",
+                status_code=1,
+            ),
+        ])
+
+    publications = PublicationService(engine, clock=lambda: runtime_now)
+    publications.register_default_streams()
+    for stream_key, windows in (
+        ("traditional_opponent_season", ("season",)),
+        ("traditional_opponent_l15", ("l15",)),
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            supported_windows=windows,
+            enabled=True,
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+        )
+
+    queue = LedgerCorrectionQueue(
+        clock=lambda: runtime_now,
+        require_governance=True,
+    )
+    ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    ledger.replace_games_atomic(
+        games,
+        accepted_observations={
+            game.source_observation_id: _boundary_observation_values(
+                game, cutoff=cutoff, manifest_id=manifest_id
+            )
+            for game in games
+        },
+    )
+    matchup = TeamMatchupRepository(engine)
+    matchup_materialization = LedgerMatchupMaterializationService(
+        ledger, matchup, clock=lambda: runtime_now
+    )
+    materialization = LedgerMaterializationService(
+        ledger,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=LegacyParityDiagnosticReader(engine),
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+    governance_reader = ActiveManifestLedgerGovernanceReader(
+        engine, clock=lambda: runtime_now
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=ledger,
+        materialization=materialization,
+        governance=governance_reader,
+        matchup_materialization=matchup_materialization,
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+
+    before_governance = governance_reader.read_for_composition(
+        "2025-26", cutoff, manifest_id
+    )
+    assert boundary_game_id not in before_governance.expected_game_ids
+    assert len(before_governance.expected_game_ids) == len(games)
+    assert len(before_governance.expected_l15_game_ids[1]) == 15
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+
+    query = TeamMatchupQueryService(matchup, clock=lambda: runtime_now)
+    l15_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+    season_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    before_l15 = matchup.get_snapshot(l15_scope)
+    before_l15_fact = next(
+        fact
+        for fact in before_l15.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    before_l15_observation = next(
+        observation
+        for observation in before_l15.observations
+        if observation.surface == "traditional"
+    )
+    before_season = matchup.get_snapshot(season_scope)
+    before_season_observation = next(
+        observation
+        for observation in before_season.observations
+        if observation.surface == "traditional"
+    )
+    before_l15_metric = next(
+        metric
+        for metric in query.get_window(l15_scope).team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    before_selected_ids = frozenset(before_l15_fact.game_ids)
+    before_governed_ids = frozenset(before_governance.expected_l15_game_ids[1])
+    assert before_selected_ids == before_governed_ids
+    assert len(before_selected_ids) == 15
+    assert boundary_game_id not in before_selected_ids
+    assert before_l15_fact.raw_value == 75
+    assert before_l15_metric.allowed_per_48 == 5.0
+    assert before_l15_fact.game_set_checksum == (
+        "5df170f5cd61b6674db39e5e2bb4c3ff7e5baf7d2a0c2ededfc2970eb216ccc9"
+    )
+    assert before_l15_observation.game_set_checksum
+    assert before_l15_observation.ledger_checksum
+    assert len(before_season_observation.game_ids) == len(games)
+
+    with engine.begin() as connection:
+        connection.execute(
+            update(EventCatalogEntry)
+            .where(EventCatalogEntry.nba_game_id == boundary_game_id)
+            .values(status_text="Final", status_code=3, last_seen_at=runtime_now)
+        )
+    after_governance = governance_reader.read_for_composition(
+        "2025-26", cutoff, manifest_id
+    )
+    after_governed_ids = frozenset(after_governance.expected_l15_game_ids[1])
+    assert boundary_game_id in after_governance.expected_game_ids
+    assert boundary_game_id in after_governed_ids
+    assert len(after_governance.expected_game_ids) == len(games) + 1
+    assert len(after_governed_ids) == 15
+    assert len(before_governed_ids & after_governed_ids) == 14
+
+    first_result = ledger.replace_games_atomic(
+        (first_boundary_game,),
+        accepted_observations={
+            first_boundary_game.source_observation_id: _boundary_observation_values(
+                first_boundary_game, cutoff=cutoff, manifest_id=manifest_id
+            ),
+        },
+    )
+    correction_result = ledger.replace_games_atomic(
+        (corrected_boundary_game,),
+        accepted_observations={
+            corrected_boundary_game.source_observation_id: _boundary_observation_values(
+                corrected_boundary_game,
+                cutoff=cutoff,
+                manifest_id=manifest_id,
+            ),
+        },
+    )
+    assert first_result[0].inserted
+    assert correction_result[0].replaced
+    assert correction_result[0].checksum == corrected_boundary_game.checksum
+    assert correction_result[0].checksum != first_result[0].checksum
+
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+    after_l15 = matchup.get_snapshot(l15_scope)
+    after_l15_fact = next(
+        fact
+        for fact in after_l15.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    after_l15_observation = next(
+        observation
+        for observation in after_l15.observations
+        if observation.surface == "traditional"
+    )
+    after_season = matchup.get_snapshot(season_scope)
+    after_season_fact = next(
+        fact
+        for fact in after_season.facts
+        if fact.team_id == 1
+        and fact.base == "traditional"
+        and fact.stat_key == "OPP_REB"
+    )
+    after_season_observation = next(
+        observation
+        for observation in after_season.observations
+        if observation.surface == "traditional"
+    )
+    after_l15_metric = next(
+        metric
+        for metric in query.get_window(l15_scope).team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    after_l15_union = frozenset(after_governance.expected_game_ids)
+    assert frozenset(after_l15_fact.game_ids) == after_governed_ids
+    assert frozenset(after_l15_fact.game_ids) != before_selected_ids
+    assert after_l15_fact.raw_value == 85
+    assert after_l15_metric.allowed_per_48 == pytest.approx(17 / 3)
+    assert after_l15_fact.game_set_checksum == (
+        "899e6e47627677b3ea20ef7a231dac681f87629586854744c025c55189ea36e7"
+    )
+    assert after_l15_observation.game_ids == tuple(sorted(after_l15_union))
+    assert after_l15_observation.game_set_checksum != before_l15_observation.game_set_checksum
+    assert after_l15_observation.ledger_checksum != before_l15_observation.ledger_checksum
+    assert corrected_boundary_game.source_observation_id in after_l15_fact.source_observation_ids
+    assert after_l15_fact.game_set_checksum != before_l15_fact.game_set_checksum
+    assert after_l15_fact.ledger_checksum != before_l15_fact.ledger_checksum
+    assert after_l15_observation.recomposition_reason == "correction"
+
+    assert after_season_observation.status == "available"
+    assert after_season_observation.game_ids == tuple(
+        sorted(after_governance.expected_game_ids)
+    )
+    assert len(after_season_observation.game_ids) == len(games) + 1
+    assert after_season_fact.raw_value == 90
+    assert corrected_boundary_game.source_observation_id in after_season_fact.source_observation_ids
+    assert after_season_observation.ledger_checksum != before_season_observation.ledger_checksum
+    assert after_season_observation.recomposition_reason == "correction"
+
+    assert publications.current("traditional_opponent_l15") is not None
+    assert publications.current("traditional_opponent_season") is not None
+    assert publications.current("traditional_opponent_l15").reason == "correction"
+    assert publications.current("traditional_opponent_season").reason == "correction"
+    stored_boundary_game = ledger.get_game(boundary_game_id)
+    assert stored_boundary_game is not None
+    assert stored_boundary_game.source_observation_id == corrected_boundary_game.source_observation_id
+    assert stored_boundary_game.checksum == corrected_boundary_game.checksum
+    with engine.connect() as connection:
+        jobs = connection.execute(select(CompositionJob)).mappings().all()
+    assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
+    assert all(job["status"] == "succeeded" for job in jobs)
+    assert all(job["recomposition_reason"] == "correction" for job in jobs)
+    assert all(
+        corrected_boundary_game.source_observation_id
+        in json.loads(job["source_observation_ids"])
         for job in jobs
     )
 
