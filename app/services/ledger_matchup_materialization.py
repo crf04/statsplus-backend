@@ -43,6 +43,12 @@ from app.services.database_first_activation import (
     PublicationRead,
     decode_team_window,
 )
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAMS,
+    publication_cutoff_reason,
+    publication_lineage,
+    publication_metric_identity,
+)
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -59,17 +65,7 @@ ROSTER_INCOMPLETE_REASON = "governed_team_roster_incomplete"
 INSUFFICIENT_GAMES_REASON = "insufficient_governed_games"
 ASSIST_INCOMPLETE_REASON = "assist_location_evidence_incomplete"
 
-NBA_PUBLICATION_STREAMS = {
-    "play_types": "synergy_play_types_opponent_{window}",
-    "shot_types": "grouped_shot_types_opponent_{window}",
-    "shot_zones": "exact_shot_zones_opponent_{window}",
-}
 NBA_PUBLICATION_SOURCE = "nba_publication"
-SHOT_TYPE_DISPLAY_TO_STORED = {
-    "Catch and Shoot": "catch_and_shoot",
-    "Pullups": "pullups",
-    "Less Than 10 ft": "less_than_10_ft",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,16 +337,7 @@ class LedgerMatchupMaterializationService:
     ) -> tuple[tuple[TeamMatchupFact, ...], TeamMatchupObservation]:
         """Decode one NBA publication without borrowing another surface."""
 
-        source = {
-            "publication_id": getattr(read, "publication_id", None),
-            "publication_cutoff": (
-                getattr(read, "cutoff", None).isoformat()
-                if isinstance(getattr(read, "cutoff", None), datetime)
-                else getattr(read, "cutoff", None)
-            ),
-            "publication_freshness": getattr(read, "freshness", None),
-            "publication_version": getattr(read, "version", None),
-        }
+        lineage = publication_lineage(read)
         status = getattr(read, "status", "missing")
         available = bool(getattr(read, "available", False))
         if not available:
@@ -362,26 +349,16 @@ class LedgerMatchupMaterializationService:
                     getattr(read, "unavailable_reason", None)
                     or f"publication_{status}"
                 ),
-                **source,
+                publication=lineage,
             )
-        cutoff = source["publication_cutoff"]
-        if cutoff is not None:
-            try:
-                cutoff_date = datetime.fromisoformat(str(cutoff)).date()
-            except ValueError:
-                return (), TeamMatchupObservation(
-                    surface=base,
-                    status="unavailable",
-                    unavailable_reason="publication_cutoff_invalid",
-                    **source,
-                )
-            if cutoff_date > as_of:
-                return (), TeamMatchupObservation(
-                    surface=base,
-                    status="unavailable",
-                    unavailable_reason="publication_cutoff_after_as_of",
-                    **source,
-                )
+        cutoff_reason = publication_cutoff_reason(read, as_of)
+        if cutoff_reason is not None:
+            return (), TeamMatchupObservation(
+                surface=base,
+                status="unavailable",
+                unavailable_reason=cutoff_reason,
+                publication=lineage,
+            )
         try:
             rows = tuple(getattr(read, "decoded", None) or decode_team_window(
                 read.payload,
@@ -392,24 +369,24 @@ class LedgerMatchupMaterializationService:
                 surface=base,
                 status="unavailable",
                 unavailable_reason="publication_payload_invalid",
-                **source,
+                publication=lineage,
             )
         if len(rows) != 30:
             return (), TeamMatchupObservation(
                 surface=base,
                 status="unavailable",
                 unavailable_reason="publication_surface_incomplete",
-                **source,
+                publication=lineage,
             )
-        metric_keys = tuple(rows[0].per48)
+        metric_keys = tuple(sorted(rows[0].per48))
         if not metric_keys or any(
-            tuple(row.per48) != metric_keys for row in rows
+            set(row.per48) != set(metric_keys) for row in rows
         ):
             return (), TeamMatchupObservation(
                 surface=base,
                 status="unavailable",
                 unavailable_reason="publication_surface_incomplete",
-                **source,
+                publication=lineage,
             )
         game_ids = tuple(sorted({game_id for row in rows for game_id in row.game_ids}))
         facts = tuple(
@@ -418,38 +395,25 @@ class LedgerMatchupMaterializationService:
                 base=base,
                 slice_key=metric_identity[0],
                 stat_key=metric_identity[1],
-                raw_value=float(row.per48[metric_key]) * 48,
+                raw_value=float(row.per48[metric_key]),
                 denominator_value=48.0,
                 denominator_unit="minutes",
                 provider=NBA_PUBLICATION_SOURCE,
                 game_ids=tuple(row.game_ids),
-                **source,
+                publication=lineage,
             )
             for row in rows
             for metric_key in metric_keys
             for metric_identity in (
-                LedgerMatchupMaterializationService._publication_metric_identity(
-                    base, metric_key
-                ),
+                publication_metric_identity(base, metric_key),
             )
         )
         return facts, TeamMatchupObservation(
             surface=base,
             status="available",
             game_ids=game_ids,
-            **source,
+            publication=lineage,
         )
-
-    @staticmethod
-    def _publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
-        """Split a registered publication metric into taxonomy and stat."""
-
-        if "_" not in metric_key:
-            return metric_key, metric_key
-        slice_key, stat_key = metric_key.rsplit("_", 1)
-        if base == "shot_types":
-            slice_key = SHOT_TYPE_DISPLAY_TO_STORED.get(slice_key, slice_key)
-        return slice_key, stat_key
 
     def _load_games(
         self, season: str, as_of: date

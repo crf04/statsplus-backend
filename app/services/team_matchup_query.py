@@ -22,17 +22,16 @@ from app.services.database_first_activation import (
     PublicationRead,
     decode_team_window,
 )
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_BASES,
+    PublicationLineage,
+    publication_cutoff_reason,
+    publication_lineage,
+    publication_metric_identity,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
-
-NBA_PUBLICATION_BASES = frozenset({"play_types", "shot_types", "shot_zones"})
-SHOT_TYPE_DISPLAY_TO_STORED = {
-    "Catch and Shoot": "catch_and_shoot",
-    "Pullups": "pullups",
-    "Less Than 10 ft": "less_than_10_ft",
-}
-
 
 @dataclass(frozen=True, slots=True)
 class LeagueMatchupMetric:
@@ -226,7 +225,7 @@ class TeamMatchupQueryService:
             return legacy
         base_windows: dict[str, TeamMatchupWindow | None] = {}
         for base, read in active.items():
-            cutoff_reason = self._publication_cutoff_reason(read, cutoff)
+            cutoff_reason = publication_cutoff_reason(read, cutoff)
             if cutoff_reason is not None:
                 read = replace(
                     read,
@@ -254,10 +253,7 @@ class TeamMatchupQueryService:
                 base=base,
                 rows=rows,
                 retrieved_at=read.retrieved_at or self._clock(),
-                publication_id=read.publication_id,
-                publication_cutoff=read.cutoff,
-                publication_freshness=read.freshness,
-                publication_version=read.version,
+                publication=publication_lineage(read),
             )
         scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
             season=season, as_of=cutoff, window_games=window_games
@@ -297,10 +293,7 @@ class TeamMatchupQueryService:
                         read.unavailable_reason or f"publication_{read.status}"
                     ),
                     retrieved_at=read.retrieved_at or self._clock(),
-                    publication_id=read.publication_id,
-                    publication_cutoff=read.cutoff,
-                    publication_freshness=read.freshness,
-                    publication_version=read.version,
+                    publication=publication_lineage(read),
                 ))
                 continue
             league.extend(window.league_metrics)
@@ -324,26 +317,6 @@ class TeamMatchupQueryService:
         )
 
     @staticmethod
-    def _publication_cutoff_reason(read, cutoff: date) -> str | None:
-        """Reject a publication whose facts are newer than the requested window."""
-
-        value = getattr(read, "cutoff", None)
-        if value is None:
-            return None
-        try:
-            if isinstance(value, datetime):
-                publication_date = value.date()
-            else:
-                publication_date = datetime.fromisoformat(str(value)).date()
-        except ValueError:
-            return "publication_cutoff_invalid"
-        return (
-            "publication_cutoff_after_as_of"
-            if publication_date > cutoff
-            else None
-        )
-
-    @staticmethod
     def _publication_base_window(
         season: str,
         *,
@@ -352,10 +325,7 @@ class TeamMatchupQueryService:
         base: str,
         rows,
         retrieved_at: datetime,
-        publication_id: str | None = None,
-        publication_cutoff: str | None = None,
-        publication_freshness: str | None = None,
-        publication_version: int | None = None,
+        publication: PublicationLineage | None = None,
     ) -> TeamMatchupWindow:
         stat_names = {
             "traditional": {
@@ -379,10 +349,10 @@ class TeamMatchupQueryService:
             # ``Isolation_PTS``).  Do not substitute the legacy surface when
             # one of those streams is active; project exactly the keys the
             # immutable payload supplied.
-            keys = tuple(rows[0].league_average)
+            keys = tuple(sorted(rows[0].league_average))
             identities = tuple(
                 (
-                    *TeamMatchupQueryService._publication_metric_identity(base, key),
+                    *publication_metric_identity(base, key),
                     key,
                 )
                 for key in keys
@@ -438,10 +408,7 @@ class TeamMatchupQueryService:
             game_ids=tuple(sorted({
                 game_id for row in rows for game_id in row.game_ids
             })),
-            publication_id=publication_id,
-            publication_cutoff=publication_cutoff,
-            publication_freshness=publication_freshness,
-            publication_version=publication_version,
+            publication=publication,
         )
         return TeamMatchupWindow(
             scope=scope,
@@ -451,18 +418,6 @@ class TeamMatchupQueryService:
             team_metrics={team_id: tuple(metrics) for team_id, metrics in team_metrics.items()},
             observations=(observation,),
         )
-
-
-    @staticmethod
-    def _publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
-        """Split one NBA publication key into registered taxonomy and stat."""
-
-        if "_" not in metric_key:
-            return metric_key, metric_key
-        slice_key, stat_key = metric_key.rsplit("_", 1)
-        if base == "shot_types":
-            slice_key = SHOT_TYPE_DISPLAY_TO_STORED.get(slice_key, slice_key)
-        return slice_key, stat_key
 
     def _build_window(
         self,
@@ -486,9 +441,7 @@ class TeamMatchupQueryService:
                 (observation := observations_by_surface.get(surface)) is not None
                 and observation.status != "available"
                 and (
-                    observation.publication_id is not None
-                    or observation.publication_freshness
-                    in {"missing", "unavailable", "legacy_fallback"}
+                    observation.publication is not None
                 )
             )
         }

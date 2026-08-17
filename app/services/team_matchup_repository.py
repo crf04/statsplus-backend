@@ -18,6 +18,7 @@ from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
+from app.services.team_matchup_publications import PublicationLineage
 from app.utils.db import is_demo_database_url
 
 
@@ -64,34 +65,7 @@ class TeamMatchupFact:
     #: collected legacy facts leave both empty.
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
-    publication_id: str | None = None
-    publication_cutoff: str | None = None
-    publication_freshness: str | None = None
-    publication_version: int | None = None
-
-    @property
-    def source_publication_id(self) -> str | None:
-        return self.publication_id
-
-    @property
-    def source_cutoff(self) -> str | None:
-        return self.publication_cutoff
-
-    @property
-    def source_publication_cutoff(self) -> str | None:
-        return self.publication_cutoff
-
-    @property
-    def source_freshness(self) -> str | None:
-        return self.publication_freshness
-
-    @property
-    def source_publication_freshness(self) -> str | None:
-        return self.publication_freshness
-
-    @property
-    def source_version(self) -> int | None:
-        return self.publication_version
+    publication: PublicationLineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,34 +75,7 @@ class TeamMatchupObservation:
     unavailable_reason: str | None = None
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
-    publication_id: str | None = None
-    publication_cutoff: str | None = None
-    publication_freshness: str | None = None
-    publication_version: int | None = None
-
-    @property
-    def source_publication_id(self) -> str | None:
-        return self.publication_id
-
-    @property
-    def source_cutoff(self) -> str | None:
-        return self.publication_cutoff
-
-    @property
-    def source_publication_cutoff(self) -> str | None:
-        return self.publication_cutoff
-
-    @property
-    def source_freshness(self) -> str | None:
-        return self.publication_freshness
-
-    @property
-    def source_publication_freshness(self) -> str | None:
-        return self.publication_freshness
-
-    @property
-    def source_version(self) -> int | None:
-        return self.publication_version
+    publication: PublicationLineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,10 +230,7 @@ class TeamMatchupRepository:
                         # lineage is already the authorized immutable source.
                         if (
                             observation.surface in NBA_PUBLICATION_SURFACES
-                            and (
-                                observation.publication_id is not None
-                                or observation.publication_freshness is not None
-                            )
+                            and observation.publication is not None
                         ):
                             continue
                         stream_keys = stream_by_surface.get(observation.surface, ())
@@ -335,10 +279,7 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(fact.game_ids),
                                 "ledger_checksum": fact.ledger_checksum,
-                                "publication_id": fact.publication_id,
-                                "publication_cutoff": fact.publication_cutoff,
-                                "publication_freshness": fact.publication_freshness,
-                                "publication_version": fact.publication_version,
+                                **_publication_columns(fact.publication),
                             }
                             for fact in changed_fact_rows
                         ],
@@ -360,10 +301,7 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(observation.game_ids),
                                 "ledger_checksum": observation.ledger_checksum,
-                                "publication_id": observation.publication_id,
-                                "publication_cutoff": observation.publication_cutoff,
-                                "publication_freshness": observation.publication_freshness,
-                                "publication_version": observation.publication_version,
+                                **_publication_columns(observation.publication),
                             }
                             for observation in changed_observations
                         ],
@@ -385,10 +323,7 @@ class TeamMatchupRepository:
             assume_utc(row["retrieved_at"]),
             _parse_game_ids(row["game_ids"]),
             row["ledger_checksum"],
-            row["publication_id"],
-            row["publication_cutoff"],
-            row["publication_freshness"],
-            row["publication_version"],
+            _publication_from_row(row),
         )
 
     @classmethod
@@ -411,10 +346,7 @@ class TeamMatchupRepository:
             or _parse_game_ids(existing_observation["game_ids"])
             != observation.game_ids
             or existing_observation["ledger_checksum"] != observation.ledger_checksum
-            or existing_observation["publication_id"] != observation.publication_id
-            or existing_observation["publication_cutoff"] != observation.publication_cutoff
-            or existing_observation["publication_freshness"] != observation.publication_freshness
-            or existing_observation["publication_version"] != observation.publication_version
+            or _publication_from_row(existing_observation) != observation.publication
         ):
             return True
         if observation.status != "available":
@@ -435,10 +367,7 @@ class TeamMatchupRepository:
                     observed_at,
                     fact.game_ids,
                     fact.ledger_checksum,
-                    fact.publication_id,
-                    fact.publication_cutoff,
-                    fact.publication_freshness,
-                    fact.publication_version,
+                    fact.publication,
                 )
                 for fact in facts
             )
@@ -578,10 +507,7 @@ class TeamMatchupRepository:
                     window_end_date=row["window_end_date"],
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
-                    publication_id=row["publication_id"],
-                    publication_cutoff=row["publication_cutoff"],
-                    publication_freshness=row["publication_freshness"],
-                    publication_version=row["publication_version"],
+                    publication=_publication_from_row(row),
                 )
                 for row in fact_rows
             ),
@@ -593,10 +519,7 @@ class TeamMatchupRepository:
                     retrieved_at=assume_utc(row["retrieved_at"]),
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
-                    publication_id=row["publication_id"],
-                    publication_cutoff=row["publication_cutoff"],
-                    publication_freshness=row["publication_freshness"],
-                    publication_version=row["publication_version"],
+                    publication=_publication_from_row(row),
                 )
                 for row in observation_rows
             ),
@@ -678,6 +601,34 @@ def _parse_game_ids(value: str | None) -> tuple[str, ...]:
     ):
         return ()
     return tuple(parsed)
+
+
+def _publication_columns(
+    publication: PublicationLineage | None,
+) -> dict[str, object]:
+    if publication is None:
+        return {
+            "publication_id": None,
+            "publication_cutoff": None,
+            "publication_freshness": None,
+            "publication_version": None,
+        }
+    return {
+        "publication_id": publication.publication_id,
+        "publication_cutoff": publication.cutoff,
+        "publication_freshness": publication.freshness,
+        "publication_version": publication.version,
+    }
+
+
+def _publication_from_row(row) -> PublicationLineage | None:
+    values = (
+        row["publication_id"],
+        row["publication_cutoff"],
+        row["publication_freshness"],
+        row["publication_version"],
+    )
+    return PublicationLineage(*values) if any(value is not None for value in values) else None
 
 
 __all__ = [
