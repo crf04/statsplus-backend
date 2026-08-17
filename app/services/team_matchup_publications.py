@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from app.models.catalogs import PLAY_TYPES
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 
 
 NBA_PUBLICATION_STREAMS = {
@@ -77,6 +78,8 @@ def validate_publication_rows(
         raise PublicationValidationError("publication_surface_incomplete")
     expected = set(expected_keys)
     for row in rows:
+        if row.team_id in NBA_TEAM_ID_TO_TRICODE and row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]:
+            raise PublicationValidationError("publication_team_identity_mismatch")
         for values in (row.per48, row.league_average, row.population_sigma, row.competition_rank):
             raw_keys = tuple(values)
             if len(raw_keys) != len(set(raw_keys)) or set(raw_keys) != expected:
