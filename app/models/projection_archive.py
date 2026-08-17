@@ -24,7 +24,7 @@ class ProviderPoll(Base):
     provider = Column(String(64), nullable=False)
     season = Column(String(7), nullable=False)
     query_key = Column(String(72), nullable=False)
-    started_at = Column(DateTime(timezone=True), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=False)
     outcome = Column(String(24), nullable=False)
     snapshot_id = Column(
@@ -145,6 +145,7 @@ class LatestPlayerProjection(Base):
 
     provider = Column(String(64), primary_key=True)
     season = Column(String(7), primary_key=True)
+    query_key = Column(String(72), primary_key=True)
     canonical_game_id = Column(String(32), primary_key=True)
     canonical_player_id = Column(Integer, primary_key=True)
     market_reference = Column(String(72), primary_key=True)

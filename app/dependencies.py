@@ -11,7 +11,7 @@ from flask import current_app
 from sqlalchemy.engine import Engine
 from sqlalchemy import inspect
 
-from app.config.settings import RuntimeSettings
+from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
 
 
@@ -60,7 +60,6 @@ class ApplicationDependencies:
     ledger_backfill_service: Any | None = None
     ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
-    projection_archive: Any | None = None
     projection_player_pool_reader: Any | None = None
 
 
@@ -97,7 +96,6 @@ def build_dependencies(
     from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
-        ProjectionArchive,
     )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -140,6 +138,10 @@ def build_dependencies(
 
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
+    if demo_database and settings.features.projection_archive_read_enabled:
+        raise ConfigurationError(
+            "PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database"
+        )
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     publication_reader = None
     write_fence = None
@@ -418,17 +420,12 @@ def build_dependencies(
         statistic_catalog,
         snapshot_repository=player_pool_snapshot_repository,
     )
-    projection_archive = (
-        None if demo_database else ProjectionArchive(engine, statistic_catalog)
-    )
     projection_player_pool_reader = (
-        None if demo_database else LatestProjectionPlayerPoolReader(engine)
-    )
-    slate_player_pool = (
-        projection_player_pool_reader
+        LatestProjectionPlayerPoolReader(engine)
         if settings.features.projection_archive_read_enabled
-        else player_pool_service
+        else None
     )
+    slate_player_pool = projection_player_pool_reader or player_pool_service
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
@@ -481,9 +478,7 @@ def build_dependencies(
         else None
     )
     matchup_player_pool_reader = (
-        projection_player_pool_reader
-        if settings.features.projection_archive_read_enabled
-        else stored_player_pool_reader
+        projection_player_pool_reader or stored_player_pool_reader
     )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
@@ -549,7 +544,6 @@ def build_dependencies(
         ledger_backfill_service=ledger_backfill_service,
         ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
-        projection_archive=projection_archive,
         projection_player_pool_reader=projection_player_pool_reader,
     )
 

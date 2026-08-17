@@ -304,10 +304,16 @@ During projection-archive expansion, `PROJECTION_ARCHIVE_READ_ENABLED=true`
 selects one database-only reader for Slate, Matchup, and Matchup Selection.
 Each Slate game then adds `projection_state` with `state: live | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
-`observed_at` fields. Fresh archived Latest Player Projections produce `live`;
-absent or expired evidence produces `missing` with zero targetable players.
+`observed_at` fields. Archived Latest Player Projections through an inclusive
+15-minute maximum age produce `live`; absent or expired evidence produces
+`missing` with zero targetable players. For a multi-game request with both live
+and missing games, `freshness.pool.status` is omitted and each game's
+`projection_state` is authoritative; the pool retains `state: live` because it
+contains live rows. Aggregate and per-provider observation times are the oldest
+included times, so neither understates the age of evidence in the union.
 The request does not fall back to the legacy Player Pool or call a projection
-provider. With the gate left at its default `false`, the existing response and
+provider. Enabling the gate with the read-only demo database is refused at
+startup. With the gate left at its default `false`, the existing response and
 legacy reader remain unchanged during expansion.
 
 A stale but populated schedule remains a `200` with

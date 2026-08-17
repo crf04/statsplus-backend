@@ -94,6 +94,7 @@ class ProjectionArchive:
         *,
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
+        poll_started_at: datetime | None = None,
     ) -> ProjectionArchiveResult:
         if not isinstance(snapshot, ProviderSnapshot):
             raise TypeError("snapshot must be ProviderSnapshot")
@@ -105,6 +106,9 @@ class ProjectionArchive:
             raise ValueError("projection archive queries require a canonical season")
 
         accepted = assume_utc(accepted_at or datetime.now(timezone.utc))
+        poll_started = None if poll_started_at is None else assume_utc(poll_started_at)
+        if poll_started is not None and poll_started > accepted:
+            raise ValueError("projection poll cannot start after it completes")
         source = _source_snapshot(snapshot)
         query_key = _query_key(query)
         document = serialize_provider_snapshot(source, query)
@@ -123,6 +127,18 @@ class ProjectionArchive:
                 )
             ).scalar_one_or_none()
             if existing is not None:
+                self._record_poll(
+                    connection,
+                    poll_id=poll_id,
+                    snapshot=snapshot,
+                    season=query.season,
+                    query_key=query_key,
+                    started_at=poll_started,
+                    completed_at=accepted,
+                    outcome="unchanged",
+                    snapshot_id=str(existing),
+                    observation_count=len(snapshot.markets),
+                )
                 return ProjectionArchiveResult(
                     snapshot_id=str(existing),
                     generation_id=generation_id,
@@ -162,21 +178,22 @@ class ProjectionArchive:
             self._advance_latest(
                 connection,
                 observation_rows,
+                provider=snapshot.provider,
                 season=query.season,
+                query_key=query_key,
                 generation_id=generation_id,
             )
-            connection.execute(
-                insert(ProviderPoll.__table__).values(
-                    poll_id=poll_id,
-                    provider=snapshot.provider,
-                    season=query.season,
-                    query_key=query_key,
-                    started_at=accepted,
-                    completed_at=accepted,
-                    outcome="changed",
-                    snapshot_id=snapshot_id,
-                    observation_count=len(observation_rows),
-                )
+            self._record_poll(
+                connection,
+                poll_id=poll_id,
+                snapshot=snapshot,
+                season=query.season,
+                query_key=query_key,
+                started_at=poll_started,
+                completed_at=accepted,
+                outcome="changed",
+                snapshot_id=snapshot_id,
+                observation_count=len(observation_rows),
             )
 
         return ProjectionArchiveResult(
@@ -212,6 +229,34 @@ class ProjectionArchive:
             raise ValueError("archived projection snapshot checksum is invalid")
         return deserialize_provider_snapshot(document)
 
+    @staticmethod
+    def _record_poll(
+        connection: Any,
+        *,
+        poll_id: str,
+        snapshot: ProviderSnapshot,
+        season: str,
+        query_key: str,
+        started_at: datetime | None,
+        completed_at: datetime,
+        outcome: str,
+        snapshot_id: str,
+        observation_count: int,
+    ) -> None:
+        connection.execute(
+            insert(ProviderPoll.__table__).values(
+                poll_id=poll_id,
+                provider=snapshot.provider,
+                season=season,
+                query_key=query_key,
+                started_at=started_at,
+                completed_at=completed_at,
+                outcome=outcome,
+                snapshot_id=snapshot_id,
+                observation_count=observation_count,
+            )
+        )
+
     def _observation_rows(
         self, snapshot: ProviderSnapshot, snapshot_id: str
     ) -> list[dict[str, Any]]:
@@ -224,18 +269,23 @@ class ProjectionArchive:
                 if canonical_statistic_id is None
                 else self.market_categories.get(canonical_statistic_id)
             )
-            canonical_player_id = (
-                None if market.athlete is None else market.athlete.canonical_id
+            canonical_player_id, canonical_player_name, athlete_team_id = (
+                self._canonical_athlete_fields(market)
             )
             canonical_game_id = (
                 None if market.event is None else market.event.canonical_id
             )
-            canonical_team_id = self._canonical_team_id(market)
+            canonical_team_id = (
+                market.team.canonical_id
+                if market.team is not None and market.team.canonical_id is not None
+                else athlete_team_id
+            )
             targetable = (
                 market.status is MarketStatus.AVAILABLE
                 and market.variant is MarketVariant.STANDARD
                 and market.scoring_period is ScoringPeriod.FULL_GAME
                 and canonical_player_id is not None
+                and canonical_player_name is not None
                 and canonical_game_id is not None
                 and canonical_team_id is not None
                 and category is not None
@@ -258,9 +308,7 @@ class ProjectionArchive:
                     "scoring_period": market.scoring_period.value,
                     "targetable": targetable,
                     "observed_at": snapshot.retrieved_at,
-                    "canonical_player_name": (
-                        None if market.athlete is None else market.athlete.name
-                    ),
+                    "canonical_player_name": canonical_player_name,
                 }
             )
         return rows
@@ -273,46 +321,48 @@ class ProjectionArchive:
         return match.canonical_id
 
     @staticmethod
-    def _canonical_team_id(market: PlayerProjectionMarket) -> int | None:
-        if market.team is not None and market.team.canonical_id is not None:
-            return market.team.canonical_id
-        if market.athlete is not None and market.athlete.team is not None:
-            return market.athlete.team.canonical_id
-        return None
+    def _canonical_athlete_fields(
+        market: PlayerProjectionMarket,
+    ) -> tuple[int | None, str | None, int | None]:
+        athlete = market.athlete
+        if athlete is None:
+            return None, None, None
+        athlete_team_id = None if athlete.team is None else athlete.team.canonical_id
+        return athlete.canonical_id, athlete.name, athlete_team_id
 
     @staticmethod
     def _advance_latest(
         connection: Any,
         observation_rows: list[dict[str, Any]],
         *,
+        provider: str,
         season: str,
+        query_key: str,
         generation_id: str,
     ) -> None:
         table = LatestPlayerProjection.__table__
+        connection.execute(
+            delete(table).where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+            )
+        )
         for row in observation_rows:
             if not row["targetable"]:
                 continue
-            identity = (
-                (table.c.provider == row["provider"])
-                & (table.c.season == season)
-                & (table.c.canonical_game_id == row["canonical_game_id"])
-                & (table.c.canonical_player_id == row["canonical_player_id"])
-                & (table.c.market_reference == row["market_reference"])
-            )
-            connection.execute(delete(table).where(identity))
             connection.execute(
                 insert(table).values(
                     provider=row["provider"],
                     season=season,
+                    query_key=query_key,
                     canonical_game_id=row["canonical_game_id"],
                     canonical_player_id=row["canonical_player_id"],
                     market_reference=row["market_reference"],
                     observation_id=row["observation_id"],
                     generation_id=generation_id,
                     canonical_team_id=row["canonical_team_id"],
-                    canonical_player_name=(
-                        row["canonical_player_name"] or str(row["canonical_player_id"])
-                    ),
+                    canonical_player_name=row["canonical_player_name"],
                     canonical_statistic_id=row["canonical_statistic_id"],
                     market_category=row["market_category"],
                     observed_at=row["observed_at"],
@@ -408,12 +458,20 @@ class LatestProjectionPlayerPoolReader:
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
         observed_at = min(assume_utc(row["observed_at"]) for row in fresh_rows)
+        provider_observed_at: dict[str, datetime] = {}
+        for row in fresh_rows:
+            provider = str(row["provider"])
+            row_observed_at = assume_utc(row["observed_at"])
+            provider_observed_at[provider] = min(
+                provider_observed_at.get(provider, row_observed_at),
+                row_observed_at,
+            )
         providers = {
-            str(row["provider"]): {
+            provider: {
                 "status": "fresh",
-                "retrieved_at": assume_utc(row["observed_at"]).isoformat(),
+                "retrieved_at": provider_observed_at[provider].isoformat(),
             }
-            for row in sorted(fresh_rows, key=lambda value: str(value["provider"]))
+            for provider in sorted(provider_observed_at)
         }
         freshness = {
             "status": "fresh",
@@ -422,6 +480,8 @@ class LatestProjectionPlayerPoolReader:
             "retrieved_at": observed_at.isoformat(),
             "providers": providers,
         }
+        if any(state["state"] == "missing" for state in game_states.values()):
+            freshness.pop("status")
         return PlayerPool(players, team_counts, freshness, game_states)
 
     @staticmethod
@@ -433,13 +493,7 @@ class LatestProjectionPlayerPoolReader:
 
     @staticmethod
     def _missing_freshness() -> dict[str, Any]:
-        return {
-            "status": "unavailable",
-            "state": "missing",
-            "observed_at": None,
-            "retrieved_at": None,
-            "providers": {},
-        }
+        return PlayerPool.missing_projection_freshness()
 
 
 __all__ = [

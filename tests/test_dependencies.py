@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.config.settings import FeatureSettings, RuntimeSettings
+from app.config.settings import ConfigurationError, FeatureSettings, RuntimeSettings
 from app.domain.freshness import time_window_timedelta
 
 
@@ -218,6 +218,23 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.matchup_selection_service.player_pool is reader
     assert not hasattr(reader, "board_service")
     assert not hasattr(reader, "provider_registry")
+
+
+def test_projection_archive_gate_refuses_the_read_only_demo_database(monkeypatch):
+    from app.dependencies import build_dependencies
+
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(name="demo_engine"))
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        features=FeatureSettings(projection_archive_read_enabled=True),
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match="PROJECTION_ARCHIVE_READ_ENABLED.*demo database",
+    ):
+        build_dependencies(settings)
 
 
 def test_route_imports_do_not_construct_runtime_dependencies(monkeypatch):

@@ -67,6 +67,13 @@ The read-only demo database cannot satisfy the durable snapshot prerequisite,
 so even a locally forced pair of gates makes no request and reports the only
 applicable closed reason, `unavailable/fetch_failed`.
 
+The projection archive reader also requires an application database whose
+migrations include the archive schema. Setting
+`PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
+tracked read-only demo fixture is refused at startup. The gate defaults to
+`false`; when enabled on an application database, one database-only reader is
+used by Slate, Matchup, and Matchup Selection.
+
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and
 `DFS_ENABLED_PROVIDERS` says which providers it may call; either alone

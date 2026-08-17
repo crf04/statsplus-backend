@@ -97,6 +97,14 @@ class PlayerPool:
     def unavailable_freshness() -> dict[str, Any]:
         return {"status": "unavailable", "retrieved_at": None, "providers": {}}
 
+    @staticmethod
+    def missing_projection_freshness() -> dict[str, Any]:
+        """Extend unavailable freshness with the archive reader's public state."""
+
+        freshness = PlayerPool.unavailable_freshness()
+        freshness.update({"state": "missing", "observed_at": None})
+        return freshness
+
 
 @dataclass(slots=True)
 class _PlayerContribution:
