@@ -13,8 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
+from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.slate_time import slate_date_for_instant
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import PublicationPointer, PublicationVersion
+from app.services.publication_authority import verify_publication_authority
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+    PublicationGovernanceUnavailable,
+)
 
 
 UTC = timezone.utc
@@ -314,10 +321,22 @@ class HistoricalRehearsalRunner:
             row = by_id[publication_id]
             if row.stream_key != stream_key:
                 raise ValueError("rehearsal publication stream does not match its key")
-            if row.season != season or row.cutoff.date() != cutoff:
+            if (
+                row.season != season
+                or slate_date_for_instant(row.cutoff) != cutoff
+            ):
                 raise ValueError("rehearsal publication season/cutoff mismatch")
             if row.status not in {"candidate", "active", "rollback"}:
                 raise ValueError("rehearsal publication is not retained evidence")
+            if not publication_payload_matches_checksum(row.payload, row.checksum):
+                raise ValueError("rehearsal publication checksum mismatch")
+            if stream_key in NBA_PUBLICATION_STREAM_KEYS:
+                try:
+                    verify_publication_authority(session, row)
+                except PublicationGovernanceUnavailable as error:
+                    raise ValueError(
+                        "rehearsal publication authority mismatch"
+                    ) from error
             self._validate_publication_payload(
                 stream_key, row.payload, season=season
             )
@@ -434,13 +453,7 @@ class HistoricalRehearsalRunner:
         decoder_streams = {
             "traditional_opponent_season", "traditional_opponent_l15",
             "assist_locations_season", "assist_locations_l15",
-            "synergy_play_types_opponent_season",
-            "synergy_play_types_opponent_l15",
-            "grouped_shot_types_opponent_season",
-            "grouped_shot_types_opponent_l15",
-            "exact_shot_zones_opponent_season",
-            "exact_shot_zones_opponent_l15",
-        }
+        } | NBA_PUBLICATION_STREAM_KEYS
         diet_bases = {
             "synergy_play_types": "play_types",
             "grouped_shot_types": "shot_types",

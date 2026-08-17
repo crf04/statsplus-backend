@@ -306,6 +306,8 @@ def normalize_whole_season_schedule(
         raw_status_code = row.get("gameStatus")
         status_code = pd.to_numeric(raw_status_code, errors="coerce")
         status_code_value = None if pd.isna(status_code) else int(status_code)
+        if status_code_value == 3:
+            status_text = "Final"
         postponed_status = _text_value(row.get("postponedStatus")) or None
         game_id = _text_value(row["gameId"])
         provider_classification = (

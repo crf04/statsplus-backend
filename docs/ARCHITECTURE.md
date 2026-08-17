@@ -602,8 +602,9 @@ translation into API `retrieved_at` and freshness status. Railway runs
 PBP-backed player-game-log ingestion path, reads the governed Event and Athlete
 Catalogs from Postgres, and never constructs or calls the NBA Stats adapter.
 A failure is retried once and preserves the prior complete game-log
-publication. NBA-owned catalogs and statistical surfaces remain
-residential-collector work.
+publication. NBA-owned catalogs and statistical surfaces remain residential
+collector inputs; their governed team-window publications are later consumed
+by the database-first ledger materialization seam described below.
 
 The legacy operator mode without `--hosted-only` runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog
@@ -1040,7 +1041,12 @@ an accepted `CollectionObservation`; its durable ID is the ledger source and
 the only provenance allowed on an inactive candidate. Candidate truth is
 independent for player game logs Season, traditional opponent Season/L15,
 assist locations Season/L15, and player per-36 Regular Season. Missing assist
-primitives retain only the assist last-good candidates. Migration
+primitives retain only the assist last-good candidates.
+NBA-owned opponent play-type and shot publications use this same database-first
+read seam as independent surfaces: immutable rows are validated and composed
+alongside ledger-owned facts, never substituted from PBP or another NBA
+surface. Exact taxonomy, 30-team completeness, and governed Last-15 game-set
+checks apply before activation and on public reads. Migration
 `025_ledger_parity_artifacts` stores mandatory parity evidence, and pending
 adjudication blocks ledger stream activation.
 Migration `026_repair_publication_provenance_foreign_keys` removes the
@@ -1049,12 +1055,46 @@ its publication cascade and accepted-observation restrict links.
 Migration `027_bind_ledger_parity_to_publications` binds each new parity
 artifact to the exact inactive PublicationVersion and payload checksum it
 rehearsed; pre-binding artifacts are retired and cannot authorize cutover.
+Migration `038_bind_manifests_to_event_catalog_publications` gives every new
+manifest an exact Event Catalog publication ID and checksum. It backfills only
+legacy rows whose prior timestamp rule identifies one snapshot and leaves the
+rest unbound, so governance fails closed instead of guessing. Season and L15
+game sets both come from that checksummed snapshot; later mutable catalog
+status changes and same-clock catalog republications cannot reinterpret an
+existing cutoff.
+Migration `039_bind_publication_versions_to_manifest_authority` also binds each
+governed NBA PublicationVersion to the exact manifest and Event Catalog
+publication/checksum that authorized it. Compose records that identity and
+activation, rehearsal, materialization, and reads verify it, so a later
+same-cutoff manifest cannot reinterpret an older candidate. Legacy versions
+are backfilled only when one relevant manifest, one complete Event Catalog,
+and any normalized observation provenance agree on the same authority;
+ambiguous or unbound rows remain unbound and fail closed. Runtime converts
+immutable UTC cutoffs to their DST-aware Eastern slate date before ledger
+selection and matchup materialization. Governed game sets use the shared NBA
+final/non-postponed semantics, including strict boolean completion evidence
+and structured postponement fields.
+Provider numeric NBA status codes are normalized to canonical status text, and
+stored-versus-incoming catalog comparisons use that same strict predicate so
+identical non-final or postponed snapshots remain idempotent.
+Explicit boolean `completed: true` is persisted as canonical `Final`/status
+code 3 only when structured postponement evidence is absent; postponed and
+non-final rows remain excluded on both first publication and replay.
+Publication
+authority additionally requires the manifest's canonical-ledger scope and
+schema version 1. Governed activation always resolves the exact game set from
+that bound authority; caller-supplied game maps cannot replace a missing
+resolver. Collector request bounds and rehearsal dates use the same Eastern
+slate-day conversion as materialization.
 PBP responses
 remain staged until complete-game and identity validation succeeds; acceptance,
 ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime
-expectations come only from the active manifest and completed Regular Season
-Event Catalog entries. Traditional Season/L15 candidates contain complete
-30-team per-48, league-average, population-sigma, and ascending-rank payloads.
+expectations come only from the active manifest and its bound, completed
+Regular Season Event Catalog publication. NBA-owned Season/L15 candidates
+contain complete 30-team per-48 payloads; league mean, population sigma,
+deviation, and ascending rank are always derived in the backend from that
+exact raw value set. Legacy derived fields remain readable but are never
+authoritative.
 Each valid game commits independently, so a later failed target cannot erase
 earlier accepted progress. Governance requires an active, unexpired manifest
 at the shared cutoff with exact `canonical_game_ledger` scope and envelope
@@ -1418,7 +1458,9 @@ hide yesterday's valid values. Each surface reports both the scope and
 the same Slate Date. Consumers can therefore label stale-served metrics
 without overstating their freshness. Future cutoffs are rejected and the default
 cutoff is the injected clock's current ET date, so future-dated rows cannot
-shadow current data.
+shadow current data. Publication instants are compared with the exclusive end
+of that America/New_York Slate Date, including DST transitions; an evening UTC
+date rollover that remains on the requested Eastern day is not future data.
 
 Rolling boundaries come only from completed, governed `event_catalog` games.
 The resolver excludes postponed, preseason, All-Star, non-final, and
@@ -1430,7 +1472,7 @@ window crossing those phases is retained as canonical evidence but published
 unavailable because the approved aggregate providers cannot represent that
 exact mixed game set in one request.
 
-NBA Stats surfaces are queried per team with `LastNGames=15`, `TeamID`, the
+The legacy provider refresh path queries NBA Stats surfaces per team with `LastNGames=15`, `TeamID`, the
 team-specific `DateFrom`, common `DateTo`, and matching phase. NBA dates use
 the provider's `MM/DD/YYYY` format. The traditional and shot-type aggregate
 responses must identify the requested team and report exactly 15 games; the
@@ -1537,9 +1579,10 @@ denominator. No PBP or NBA traditional/assist aggregate endpoint is called;
 the service has no provider collaborators at all, so it cannot trigger one.
 Player and team authority follow the approved #113 model unchanged: team facts
 from team-summary rows, player facts from player rows. NBA-owned shot and play
-surfaces are deliberately outside this seam — their independent refresh writes
-the same disposable read model, and a failed or unavailable NBA-owned surface
-cannot prevent the valid ledger-owned surfaces from materializing.
+surfaces are composed through the same injected database-first seam as
+independent publications. Their refresh and validation are separate, so a
+failed or unavailable NBA-owned surface cannot prevent valid ledger-owned
+surfaces from materializing, and ledger facts cannot substitute for it.
 
 The two windows share one cutoff. A Season that is not league complete (fewer
 than 30 governed teams) publishes fact-free
@@ -1564,6 +1607,31 @@ and corrected ledger checksum so targeted Season/L15 recomposition can be
 retried without reconstructing the original acceptance request. The additive
 compatibility upgrade runs with the existing migration head; no public route
 contract changes.
+Migration 037 adds nullable publication ID, version, cutoff, and
+freshness lineage to those same rows. The existing authenticated Matchups and
+player-game-log HTTP contracts are unchanged and remain provider-free at
+request time.
+
+### Governed NBA team-window publications (#115)
+
+The same materialization seam may receive a request-scoped
+`DatabaseFirstPublicationReader` generation for the NBA-owned team-window
+streams: exact shot zones, grouped shot types, and Season Synergy play types.
+Each available publication row is projected into the existing
+`team_matchup_facts` read model with its registered taxonomy and the source
+publication ID, version, coverage cutoff, freshness label, and publication
+game IDs. Ledger-owned traditional and assist facts retain their own ledger
+lineage; the two authorities are never blended.
+
+Publication reads are independent per surface. A missing, stale-invalid, or
+unsupported publication records only that surface's unavailable/missing
+observation and never falls back to a PBP fact. Synergy Last-15 remains
+`unavailable/provider_window_unsupported`, and Season values are never copied
+into that window. The database-first Matchups query keeps this fence even for
+legacy-fallback-shaped readers, while preserving the existing compatibility
+fallback for ledger-owned traditional and assist surfaces. Publication
+provenance and mixed freshness/cutoff metadata remain additive and request
+time provider-free.
 
 ### Canonical athlete catalog
 

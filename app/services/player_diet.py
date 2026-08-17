@@ -13,6 +13,7 @@ import pandas as pd
 from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import Engine
 
+from app.domain.team_matchup_taxonomy import SHOT_ZONE_SLICES
 from app.domain.utc import assume_utc
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.models.player_diet import (
@@ -34,13 +35,7 @@ PLAYER_DIET_BASES = (
     "shot_types",
     "shot_zones",
 )
-_SHOT_ZONE_SLICES = (
-    "Restricted Area",
-    "In The Paint (Non-RA)",
-    "Mid-Range",
-    "Corner 3",
-    "Above the Break 3",
-)
+_SHOT_ZONE_SLICES = SHOT_ZONE_SLICES
 _ASSIST_SLICES = (
     "Arc3Assists",
     "Corner3Assists",

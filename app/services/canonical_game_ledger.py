@@ -14,8 +14,8 @@ import hashlib
 import json
 import math
 import uuid
-from contextlib import nullcontext
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable
@@ -2375,7 +2375,11 @@ class CanonicalGameLedgerRepository:
         if not records:
             return
         table = LedgerPublication.__table__
-        if connection is not None:
+        with (
+            nullcontext(connection)
+            if connection is not None
+            else self.engine.begin()
+        ) as connection:
             for publication in records:
                 values = asdict(publication)
                 values["retrieved_at"] = assume_utc(publication.retrieved_at)
@@ -2388,8 +2392,6 @@ class CanonicalGameLedgerRepository:
                 ))
                 connection.execute(insert(table).values(values))
             return
-        with self.engine.begin() as owned_connection:
-            self.publish_metadata_batch(records, connection=owned_connection)
 
     def get_publication(
         self,

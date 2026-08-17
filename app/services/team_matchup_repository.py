@@ -12,15 +12,28 @@ from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
-from app.domain.utc import assume_utc
+from app.domain.utc import assume_utc, parse_utc_iso
+from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.slate_time import publication_cutoff_is_after_slate_day
 from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
-from app.models.collection_control import CompositionJob
+from app.models.collection_control import (
+    CatalogPublication,
+    CompositionJob,
+    CollectionManifest,
+    PublicationPointer,
+    PublicationVersion,
+)
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_BASES,
+    PublicationLineage,
+    publication_stream,
+)
 from app.utils.db import is_demo_database_url
 
 
@@ -50,6 +63,218 @@ class _IssuedLedgerAuthority:
     cutoff: datetime
     manifest_id: str | None
     required_surfaces: frozenset[tuple[int, str]]
+
+
+_PUBLICATION_CAPABILITY_TOKEN = object()
+
+
+class PublicationWriteCapability:
+    """Opaque authorization for one transactionally checked publication write."""
+
+    __slots__ = ("engine", "_token")
+
+    def __init__(self, engine, token) -> None:
+        if token is not _PUBLICATION_CAPABILITY_TOKEN:
+            raise TypeError("publication write capability is not constructible")
+        self.engine = engine
+        self._token = token
+
+    def verify(self, connection, snapshots) -> None:
+        """Authorize and bind each NBA surface once inside the write transaction."""
+
+        for scope, facts, observations in snapshots:
+            window = "l15" if scope.window_games is not None else "season"
+            for surface in NBA_PUBLICATION_BASES:
+                surface_facts = tuple(fact for fact in facts if fact.base == surface)
+                available = tuple(
+                    observation
+                    for observation in observations
+                    if observation.surface == surface
+                    and observation.status == "available"
+                )
+                governed_items = (*surface_facts, *available)
+                if not governed_items:
+                    # Missing/unavailable observations are diagnostic state,
+                    # not publication facts requiring authorization.
+                    continue
+                if any(
+                    item.publication is None
+                    or not item.publication.publication_id
+                    for item in governed_items
+                ):
+                    raise ValueError("publication_write_capability_required")
+                lineages = {item.publication for item in governed_items}
+                if len(lineages) != 1:
+                    raise ValueError("publication_write_context_invalid")
+                publication = next(iter(lineages))
+                if publication.cutoff is None or publication.version is None:
+                    raise ValueError("publication_write_context_invalid")
+                stream_key = publication_stream(surface, window)
+                version = connection.execute(
+                    select(PublicationVersion.__table__).where(
+                        PublicationVersion.publication_id == publication.publication_id,
+                        PublicationVersion.stream_key == stream_key,
+                    ).with_for_update()
+                ).mappings().one_or_none()
+                if version is None:
+                    raise ValueError("publication_write_context_invalid")
+                self._verify_authority_binding(connection, version)
+                if version["season"] != scope.season:
+                    raise ValueError("publication_write_context_invalid")
+                if publication.version is not None and int(publication.version) != int(version["version"]):
+                    raise ValueError("publication_write_context_invalid")
+                if publication.cutoff is None:
+                    raise ValueError("publication_write_context_invalid")
+                try:
+                    version_cutoff = assume_utc(version["cutoff"])
+                    lineage_cutoff = parse_utc_iso(publication.cutoff)
+                except (TypeError, ValueError, AttributeError, OverflowError):
+                    raise ValueError("publication_write_context_invalid") from None
+                if lineage_cutoff != version_cutoff:
+                    raise ValueError("publication_write_context_invalid")
+                if publication_cutoff_is_after_slate_day(
+                    version_cutoff, scope.as_of
+                ):
+                    raise ValueError("publication_write_context_invalid")
+                pointer = connection.execute(
+                    select(PublicationPointer.__table__).where(
+                        PublicationPointer.stream_key == stream_key,
+                    ).with_for_update()
+                ).mappings().one_or_none()
+                status = version["status"]
+                active = (
+                    pointer is not None
+                    and pointer["active_publication_id"] == publication.publication_id
+                    and status in {"active", "rollback"}
+                )
+                if status != "candidate" and not active:
+                    raise ValueError("publication_write_context_invalid")
+                self._verify_payload_binding(
+                    surface,
+                    stream_key,
+                    version,
+                    surface_facts,
+                    available,
+                )
+
+    @staticmethod
+    def _verify_authority_binding(connection, version) -> None:
+        manifest_id = version.get("manifest_id")
+        catalog_id = version.get("event_catalog_publication_id")
+        catalog_checksum = version.get("event_catalog_checksum")
+        if not manifest_id or not catalog_id or not catalog_checksum:
+            raise ValueError("publication_write_context_invalid")
+        manifest = connection.execute(
+            select(CollectionManifest.__table__).where(
+                CollectionManifest.manifest_id == manifest_id
+            )
+        ).mappings().one_or_none()
+        catalog = connection.execute(
+            select(CatalogPublication.__table__).where(
+                CatalogPublication.publication_id == catalog_id
+            )
+        ).mappings().one_or_none()
+        try:
+            manifest_scopes = set(json.loads(manifest["scopes"]))
+            accepted_versions = {
+                int(value)
+                for value in json.loads(manifest["accepted_versions"])
+            }
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            raise ValueError("publication_write_context_invalid") from None
+        if (
+            manifest is None
+            or catalog is None
+            or manifest["season"] != version["season"]
+            or assume_utc(manifest["cutoff"]) != assume_utc(version["cutoff"])
+            or manifest["event_catalog_publication_id"] != catalog_id
+            or manifest["event_catalog_checksum"] != catalog_checksum
+            or "canonical_game_ledger" not in manifest_scopes
+            or 1 not in accepted_versions
+            or catalog["season"] != version["season"]
+            or catalog["catalog_type"] != "event"
+            or assume_utc(catalog["cutoff"]) != assume_utc(version["cutoff"])
+            or not catalog["complete"]
+            or catalog["checksum"] != catalog_checksum
+            or not publication_payload_matches_checksum(
+                catalog["payload"], catalog["checksum"]
+            )
+        ):
+            raise ValueError("publication_write_context_invalid")
+
+    @staticmethod
+    def _verify_payload_binding(
+        surface, stream_key, version, surface_facts, available
+    ) -> None:
+        """Bind one authorized surface to its exact immutable payload."""
+
+        from app.services.database_first_activation import (
+            PublicationPayloadError,
+            _reject_duplicate_json_keys,
+            decode_team_window,
+        )
+        from app.services.team_matchup_publications import (
+            publication_metric_identity,
+            validate_publication_rows,
+        )
+
+        try:
+            if not publication_payload_matches_checksum(
+                version["payload"], version["checksum"]
+            ):
+                raise ValueError("publication checksum mismatch")
+            document = json.loads(
+                version["payload"],
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+            rows = decode_team_window(document, stream_key=stream_key)
+            metric_keys = validate_publication_rows(surface, rows)
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            PublicationPayloadError,
+        ):
+            raise ValueError("publication_write_context_invalid") from None
+        expected = {
+            (
+                row.team_id,
+                *publication_metric_identity(surface, metric_key),
+            ): (float(row.per48[metric_key]), frozenset(row.game_ids))
+            for row in rows
+            for metric_key in metric_keys
+        }
+        actual = {}
+        for fact in surface_facts:
+            if (
+                fact.denominator_unit != "minutes"
+                or fact.denominator_value != 48.0
+                or not isfinite(float(fact.raw_value))
+            ):
+                raise ValueError("publication_write_context_invalid")
+            key = (fact.team_id, fact.slice_key, fact.stat_key)
+            if key in actual:
+                raise ValueError("publication_write_context_invalid")
+            actual[key] = (float(fact.raw_value), frozenset(fact.game_ids))
+        if actual != expected:
+            raise ValueError("publication_write_context_invalid")
+        expected_game_ids = tuple(sorted({
+            game_id for row in rows for game_id in row.game_ids
+        }))
+        if len(available) != 1 or tuple(available[0].game_ids) != expected_game_ids:
+            raise ValueError("publication_write_context_invalid")
+
+
+def create_publication_write_capability(engine) -> PublicationWriteCapability:
+    """Create the only capability accepted by governed publication writes."""
+
+    return PublicationWriteCapability(engine, _PUBLICATION_CAPABILITY_TOKEN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +320,7 @@ class TeamMatchupFact:
     game_set_checksum: str | None = None
     cutoff: datetime | None = None
     recomposition_reason: str | None = None
+    publication: PublicationLineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +334,7 @@ class TeamMatchupObservation:
     game_set_checksum: str | None = None
     cutoff: datetime | None = None
     recomposition_reason: str | None = None
+    publication: PublicationLineage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +363,7 @@ class TeamMatchupRepository:
         engine: Engine,
         *,
         write_fence=None,
+        publication_write_capability: PublicationWriteCapability | None = None,
     ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
@@ -144,6 +372,7 @@ class TeamMatchupRepository:
         self._issued_authorities: dict[
             _LedgerRecompositionAuthority, _IssuedLedgerAuthority
         ] = {}
+        self._publication_write_capability = publication_write_capability
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -168,16 +397,49 @@ class TeamMatchupRepository:
         affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
         affected_team_ids: frozenset[int] | None = None,
         session: Session | None = None,
+        connection: Connection | None = None,
     ) -> None:
-        """Replace related windows in one transaction after collection."""
+        """Replace legacy/provider snapshots behind the normal write fence."""
 
-        self._replace_snapshots(
+        return self._replace_snapshots(
             snapshots,
             retrieved_at=retrieved_at,
             affected_team_ids_by_scope=affected_team_ids_by_scope,
             affected_team_ids=affected_team_ids,
             session=session,
+            connection=connection,
             enforce_legacy_fence=True,
+        )
+
+    def replace_governed_publication_snapshots(
+        self,
+        snapshots: Iterable[
+            tuple[
+                TeamMatchupSnapshotScope,
+                Iterable[TeamMatchupFact],
+                Iterable[TeamMatchupObservation],
+            ]
+        ],
+        *,
+        retrieved_at: datetime,
+        affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
+        affected_team_ids: frozenset[int] | None = None,
+        capability: PublicationWriteCapability | None = None,
+        session: Session | None = None,
+        connection: Connection | None = None,
+    ) -> None:
+        """Replace snapshots after checking active/candidate publication state."""
+
+        return self._replace_snapshots(
+            snapshots,
+            retrieved_at=retrieved_at,
+            affected_team_ids_by_scope=affected_team_ids_by_scope,
+            affected_team_ids=affected_team_ids,
+            session=session,
+            governed_publication=True,
+            capability=capability,
+            connection=connection,
+            enforce_legacy_fence=False,
         )
 
     def replace_ledger_snapshots(
@@ -349,7 +611,11 @@ class TeamMatchupRepository:
             return False
         submitted_surfaces = set()
         for scope, facts, observations in snapshots:
-            if scope.season != state.season or scope.as_of != state.cutoff.date():
+            allowed_as_of = {
+                state.cutoff.date(),
+                state.cutoff.astimezone(EASTERN).date(),
+            }
+            if scope.season != state.season or scope.as_of not in allowed_as_of:
                 return False
             expected_surfaces = {
                 surface
@@ -399,6 +665,9 @@ class TeamMatchupRepository:
         ] | None,
         affected_team_ids: frozenset[int] | None,
         session: Session | None,
+        governed_publication: bool = False,
+        capability: PublicationWriteCapability | None = None,
+        connection: Connection | None = None,
         enforce_legacy_fence: bool,
     ) -> None:
 
@@ -424,7 +693,16 @@ class TeamMatchupRepository:
         )
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        with self._connection_scope(session) as connection:
+        with self._connection_scope(session, connection) as connection:
+            if governed_publication:
+                capability = capability or self._publication_write_capability
+                if capability is None:
+                    raise ValueError("publication_write_capability_required")
+                if not isinstance(capability, PublicationWriteCapability):
+                    raise ValueError("publication_write_capability_required")
+                if capability.engine is not self.engine:
+                    raise ValueError("publication_write_capability_required")
+                capability.verify(connection, received)
             scoped_changes = []
             for scope, fact_rows, observation_rows, replace_surfaces in prepared:
                 existing_observations = {
@@ -539,11 +817,28 @@ class TeamMatchupRepository:
                             else "exact_shot_zones_opponent_season",
                         ),
                     }
+                    stream_by_surface.update({
+                        surface: (
+                            publication_stream(
+                                surface,
+                                "l15" if scope.window_games is not None else "season",
+                            ),
+                        )
+                        for surface in NBA_PUBLICATION_BASES
+                    })
                     # Lock/check only the stream(s) represented by this
                     # snapshot.  A season write must not fence L15, and a
                     # traditional-only write must not fence assist locations.
                     for observation in observation_rows:
                         if observation.surface not in changed_surfaces:
+                            continue
+                        # Only the distinct governed publication method may
+                        # bypass the legacy fence, and it has already checked
+                        # the active/candidate publication context above.
+                        if (
+                            governed_publication
+                            and observation.surface in NBA_PUBLICATION_BASES
+                        ):
                             continue
                         stream_keys = stream_by_surface.get(observation.surface, ())
                         for stream_key in stream_keys:
@@ -606,6 +901,7 @@ class TeamMatchupRepository:
                                 "game_set_checksum": fact.game_set_checksum,
                                 "cutoff": fact.cutoff,
                                 "recomposition_reason": fact.recomposition_reason,
+                                **_publication_columns(fact.publication),
                             }
                             for fact in changed_fact_rows
                         ],
@@ -638,6 +934,7 @@ class TeamMatchupRepository:
                                 game_set_checksum=fact.game_set_checksum,
                                 cutoff=fact.cutoff,
                                 recomposition_reason=fact.recomposition_reason,
+                                **_publication_columns(fact.publication),
                             )
                         )
                 changed_observations = tuple(
@@ -663,13 +960,23 @@ class TeamMatchupRepository:
                                 "game_set_checksum": observation.game_set_checksum,
                                 "cutoff": observation.cutoff,
                                 "recomposition_reason": observation.recomposition_reason,
+                                **_publication_columns(observation.publication),
                             }
                             for observation in changed_observations
                         ],
                     )
 
     @contextmanager
-    def _connection_scope(self, session: Session | None):
+    def _connection_scope(
+        self,
+        session: Session | None = None,
+        connection: Connection | None = None,
+    ):
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
+        if connection is not None:
+            yield connection
+            return
         if session is not None:
             yield session.connection()
             return
@@ -696,6 +1003,7 @@ class TeamMatchupRepository:
             row["game_set_checksum"],
             _optional_aware(row["cutoff"]),
             row["recomposition_reason"],
+            _publication_from_row(row),
         )
 
     @classmethod
@@ -724,6 +1032,7 @@ class TeamMatchupRepository:
             or existing_observation["game_set_checksum"] != observation.game_set_checksum
             or _optional_aware(existing_observation["cutoff"]) != _optional_aware(observation.cutoff)
             or existing_observation["recomposition_reason"] != observation.recomposition_reason
+            or _publication_from_row(existing_observation) != observation.publication
         ):
             return True
         if observation.status != "available":
@@ -748,6 +1057,7 @@ class TeamMatchupRepository:
                     fact.game_set_checksum,
                     _optional_aware(fact.cutoff),
                     fact.recomposition_reason,
+                    fact.publication,
                 )
                 for fact in facts
                 if affected_team_ids is None or fact.team_id in affected_team_ids
@@ -901,6 +1211,7 @@ class TeamMatchupRepository:
                     game_set_checksum=row["game_set_checksum"],
                     cutoff=_optional_aware(row["cutoff"]),
                     recomposition_reason=row["recomposition_reason"],
+                    publication=_publication_from_row(row),
                 )
                 for row in fact_rows
             ),
@@ -918,6 +1229,7 @@ class TeamMatchupRepository:
                     game_set_checksum=row["game_set_checksum"],
                     cutoff=_optional_aware(row["cutoff"]),
                     recomposition_reason=row["recomposition_reason"],
+                    publication=_publication_from_row(row),
                 )
                 for row in observation_rows
             ),
@@ -1031,7 +1343,36 @@ def _optional_aware(value: datetime | None) -> datetime | None:
     return None if value is None else assume_utc(value)
 
 
+def _publication_columns(
+    publication: PublicationLineage | None,
+) -> dict[str, object]:
+    if publication is None:
+        return {
+            "publication_id": None,
+            "publication_cutoff": None,
+            "publication_freshness": None,
+            "publication_version": None,
+        }
+    return {
+        "publication_id": publication.publication_id,
+        "publication_cutoff": publication.cutoff,
+        "publication_freshness": publication.freshness,
+        "publication_version": publication.version,
+    }
+
+
+def _publication_from_row(row) -> PublicationLineage | None:
+    values = (
+        row["publication_id"],
+        row["publication_cutoff"],
+        row["publication_freshness"],
+        row["publication_version"],
+    )
+    return PublicationLineage(*values) if any(value is not None for value in values) else None
+
+
 __all__ = [
+    "PublicationWriteCapability",
     "StoredTeamMatchupFact",
     "StoredTeamMatchupObservation",
     "StoredTeamMatchupSnapshot",
@@ -1039,4 +1380,5 @@ __all__ = [
     "TeamMatchupObservation",
     "TeamMatchupRepository",
     "TeamMatchupSnapshotScope",
+    "create_publication_write_capability",
 ]

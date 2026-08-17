@@ -484,6 +484,10 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
         "game_set_checksum",
         "cutoff",
         "recomposition_reason",
+        "publication_id",
+        "publication_cutoff",
+        "publication_freshness",
+        "publication_version",
     } <= fact_columns
 
 

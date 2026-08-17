@@ -8,6 +8,8 @@ application, starting with the ``users`` table.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime as PythonDateTime, timezone
+import json
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -434,6 +436,37 @@ def _backfill_correction_lineage(connection: Connection) -> None:
             "generation": max(int(row.get("generation") or 0), 1),
         }
         connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
+
+
+def _add_team_matchup_publication_lineage(connection: Connection) -> None:
+    """Add immutable NBA publication lineage to matchup read models.
+
+    Publication-backed facts and observations retain the source publication,
+    coverage cutoff, freshness classification, and version that were used at
+    composition time.  Legacy and ledger-owned rows remain nullable.
+    """
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "publication_id": "VARCHAR(128)",
+        "publication_cutoff": "VARCHAR(64)",
+        "publication_freshness": "VARCHAR(32)",
+        "publication_version": "INTEGER",
+    }
+    for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        table = preparer.quote(table_name)
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        for name, type_sql in additions.items():
+            if name in existing:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE {table} ADD COLUMN "
+                    f"{preparer.quote(name)} {type_sql}"
+                )
+            )
 
 
 def _backfill_governed_catalog_freshness(connection: Connection) -> None:
@@ -1137,6 +1170,227 @@ def _create_publication_player_game_log_projection(
             continue
 
 
+def _bind_manifests_to_event_catalog_publications(
+    connection: Connection,
+) -> None:
+    """Bind each manifest to the exact immutable Event Catalog it validated."""
+
+    from app.models.collection_control import CatalogPublication, CollectionManifest
+
+    preparer = connection.dialect.identifier_preparer
+    table_name = preparer.quote(CollectionManifest.__tablename__)
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            CollectionManifest.__tablename__
+        )
+    }
+    if "event_catalog_publication_id" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {table_name} ADD COLUMN "
+            "event_catalog_publication_id VARCHAR(36) REFERENCES "
+            "collection_catalog_publications(publication_id) ON DELETE RESTRICT"
+        ))
+    if "event_catalog_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {table_name} ADD COLUMN "
+            "event_catalog_checksum VARCHAR(64)"
+        ))
+
+    manifest_table = CollectionManifest.__table__
+    catalog_table = CatalogPublication.__table__
+    manifests = connection.execute(select(
+        manifest_table.c.manifest_id,
+        manifest_table.c.season,
+        manifest_table.c.cutoff,
+        manifest_table.c.created_at,
+        manifest_table.c.event_catalog_publication_id,
+    )).mappings()
+    for manifest in manifests:
+        if manifest["event_catalog_publication_id"]:
+            continue
+        catalogs = list(connection.execute(
+            select(
+                catalog_table.c.publication_id,
+                catalog_table.c.checksum,
+                catalog_table.c.published_at,
+            ).where(
+                catalog_table.c.season == manifest["season"],
+                catalog_table.c.catalog_type == "event",
+                catalog_table.c.cutoff == manifest["cutoff"],
+                catalog_table.c.complete.is_(True),
+            ).order_by(catalog_table.c.published_at.desc())
+        ).mappings())
+        eligible = [
+            catalog
+            for catalog in catalogs
+            if catalog["published_at"] <= manifest["created_at"]
+        ]
+        if len(eligible) != 1:
+            # Ambiguous legacy rows stay explicitly unbound and therefore
+            # fail closed in governance reads.
+            continue
+        catalog = eligible[0]
+        connection.execute(
+            manifest_table.update().where(
+                manifest_table.c.manifest_id == manifest["manifest_id"]
+            ).values(
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+            )
+        )
+
+
+def _bind_publication_versions_to_manifest_authority(
+    connection: Connection,
+) -> None:
+    """Bind governed versions to one unambiguous manifest/catalog authority."""
+
+    from app.models.collection_control import (
+        CatalogPublication,
+        CollectionManifest,
+        CollectionObservation,
+        PublicationObservation,
+        PublicationVersion,
+    )
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
+
+    preparer = connection.dialect.identifier_preparer
+    table_name = preparer.quote(PublicationVersion.__tablename__)
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            PublicationVersion.__tablename__
+        )
+    }
+    additions = (
+        (
+            "manifest_id",
+            "VARCHAR(36) REFERENCES collection_manifests(manifest_id) "
+            "ON DELETE RESTRICT",
+        ),
+        (
+            "event_catalog_publication_id",
+            "VARCHAR(36) REFERENCES "
+            "collection_catalog_publications(publication_id) ON DELETE RESTRICT",
+        ),
+        ("event_catalog_checksum", "VARCHAR(64)"),
+    )
+    for column_name, definition in additions:
+        if column_name not in columns:
+            connection.execute(text(
+                f"ALTER TABLE {table_name} ADD COLUMN "
+                f"{column_name} {definition}"
+            ))
+
+    version_table = PublicationVersion.__table__
+    manifest_table = CollectionManifest.__table__
+    catalog_table = CatalogPublication.__table__
+
+    def normalized_cutoff(value):
+        if isinstance(value, str):
+            value = PythonDateTime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    versions = connection.execute(select(
+        version_table.c.publication_id,
+        version_table.c.season,
+        version_table.c.cutoff,
+        version_table.c.manifest_id,
+        version_table.c.stream_key,
+    )).mappings()
+    for version in versions:
+        if (
+            version["manifest_id"]
+            or version["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+        ):
+            continue
+        manifests = list(connection.execute(
+            select(
+                manifest_table.c.manifest_id,
+                manifest_table.c.cutoff,
+                manifest_table.c.scopes,
+                manifest_table.c.accepted_versions,
+                manifest_table.c.event_catalog_publication_id,
+                manifest_table.c.event_catalog_checksum,
+            ).where(
+                manifest_table.c.season == version["season"],
+            )
+        ).mappings())
+        try:
+            manifests = [
+                manifest
+                for manifest in manifests
+                if (
+                    normalized_cutoff(manifest["cutoff"])
+                    == normalized_cutoff(version["cutoff"])
+                    and "canonical_game_ledger"
+                    in set(json.loads(manifest["scopes"]))
+                    and 1 in set(json.loads(manifest["accepted_versions"]))
+                )
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if len(manifests) != 1:
+            continue
+        manifest = manifests[0]
+        if (
+            not manifest["event_catalog_publication_id"]
+            or not manifest["event_catalog_checksum"]
+        ):
+            continue
+        catalogs = list(connection.execute(select(
+            catalog_table.c.publication_id,
+            catalog_table.c.cutoff,
+            catalog_table.c.checksum,
+        ).where(
+            catalog_table.c.season == version["season"],
+            catalog_table.c.catalog_type == "event",
+            catalog_table.c.complete.is_(True),
+        )).mappings())
+        catalogs = [
+            catalog
+            for catalog in catalogs
+            if normalized_cutoff(catalog["cutoff"])
+            == normalized_cutoff(version["cutoff"])
+        ]
+        if (
+            len(catalogs) != 1
+            or catalogs[0]["publication_id"]
+            != manifest["event_catalog_publication_id"]
+            or catalogs[0]["checksum"] != manifest["event_catalog_checksum"]
+        ):
+            continue
+        catalog = catalogs[0]
+        provenance_manifest_ids = set(connection.scalars(
+            select(CollectionObservation.manifest_id)
+            .select_from(
+                PublicationObservation.__table__.join(
+                    CollectionObservation.__table__,
+                    PublicationObservation.observation_id
+                    == CollectionObservation.observation_id,
+                )
+            )
+            .where(
+                PublicationObservation.publication_id
+                == version["publication_id"]
+            )
+        ))
+        if provenance_manifest_ids and provenance_manifest_ids != {
+            manifest["manifest_id"]
+        }:
+            continue
+        connection.execute(version_table.update().where(
+            version_table.c.publication_id == version["publication_id"]
+        ).values(
+            manifest_id=manifest["manifest_id"],
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+        ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -1188,6 +1442,21 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         36,
         "036_publication_player_game_log_projection",
         _create_publication_player_game_log_projection,
+    ),
+    Migration(
+        37,
+        "037_team_matchup_publication_lineage",
+        _add_team_matchup_publication_lineage,
+    ),
+    Migration(
+        38,
+        "038_bind_manifests_to_event_catalog_publications",
+        _bind_manifests_to_event_catalog_publications,
+    ),
+    Migration(
+        39,
+        "039_bind_publication_versions_to_manifest_authority",
+        _bind_publication_versions_to_manifest_authority,
     ),
 )
 

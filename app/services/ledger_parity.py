@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.models.canonical_game_ledger import LedgerParityArtifact
@@ -71,6 +71,7 @@ class LedgerParityArtifactRepository:
         publication_id: str,
         payload_checksum: str,
         session: Session | None = None,
+        connection: Connection | None = None,
     ) -> LedgerParityArtifact:
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
@@ -97,8 +98,12 @@ class LedgerParityArtifactRepository:
             column.name: getattr(row, column.name)
             for column in LedgerParityArtifact.__table__.columns
         }
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
         if session is not None:
             session.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        elif connection is not None:
+            connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
         else:
             with self.engine.begin() as connection:
                 connection.execute(LedgerParityArtifact.__table__.insert().values(**values))

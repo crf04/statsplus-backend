@@ -241,18 +241,32 @@ class LedgerMaterializationService:
             )
             for stream_key, payload, window_kind, window_games, status, reason in publication_specs
         )
+        publication_cutoff = None
+        if self.publication_service is not None:
+            # Metadata-only derivation is governed by its Eastern ``as_of``
+            # date. Minting an immutable publication additionally requires the
+            # exact manifest cutoff; fabricating UTC midnight would describe
+            # the prior Eastern slate for part of every day.
+            if (
+                cutoff is None
+                or cutoff.tzinfo is None
+                or cutoff.date() != as_of
+            ):
+                raise LedgerMaterializationUnavailable(
+                    "publication cutoff must be explicit, aware, and match "
+                    "the materialization date"
+                )
+            publication_cutoff = cutoff
         self.repository.publish_metadata_batch(
             publications,
             connection=session.connection() if session is not None else None,
         )
-        publication_cutoff = cutoff or datetime.combine(
-            as_of, datetime.min.time(), timezone.utc
-        )
-        if publication_cutoff.tzinfo is None or publication_cutoff.date() != as_of:
-            raise LedgerMaterializationUnavailable(
-                "publication cutoff must be aware and match the materialization date"
-            )
         if self.publication_service is not None:
+            assert publication_cutoff is not None
+            provenance = {
+                game.source_observation_id: game.game_id
+                for game in eligible
+            }
             candidates = []
             if season_window.complete:
                 candidates.extend((
