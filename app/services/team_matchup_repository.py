@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
@@ -11,7 +12,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.publication_integrity import publication_payload_matches_checksum
@@ -372,6 +373,7 @@ class TeamMatchupRepository:
         *,
         retrieved_at: datetime,
         capability: PublicationWriteCapability | None = None,
+        connection: Connection | None = None,
     ) -> None:
         """Replace snapshots after checking active/candidate publication state."""
 
@@ -380,6 +382,7 @@ class TeamMatchupRepository:
             retrieved_at=retrieved_at,
             governed_publication=True,
             capability=capability,
+            connection=connection,
         )
 
     def _replace_snapshots(
@@ -395,6 +398,7 @@ class TeamMatchupRepository:
         retrieved_at: datetime,
         governed_publication: bool = False,
         capability: PublicationWriteCapability | None = None,
+        connection: Connection | None = None,
     ) -> None:
         """Replace related windows in one transaction after collection."""
 
@@ -416,7 +420,11 @@ class TeamMatchupRepository:
         )
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        with self.engine.begin() as connection:
+        with (
+            nullcontext(connection)
+            if connection is not None
+            else self.engine.begin()
+        ) as connection:
             if governed_publication:
                 capability = capability or self._publication_write_capability
                 if capability is None:

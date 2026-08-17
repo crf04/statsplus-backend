@@ -27,6 +27,7 @@ from app.collector.normalizers import (
     normalize_zone_response,
 )
 from app.collector.outbox import OutboxBusy, OutboxFull, OutboxRepository
+from app.collector.provider import _StandaloneNBAProvider
 from app.collector.runner import (
     EXIT_NO_WORK,
     EXIT_NON_RETRYABLE,
@@ -37,7 +38,12 @@ from app.collector.runner import (
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
 )
-from app.models.collection_control import CollectionObservation, CompositionJob
+from app.models.collection_control import (
+    CollectionObservation,
+    CompositionJob,
+    PublicationPointer,
+    PublicationVersion,
+)
 from app.migrations import run_migrations
 from app.services.collection_control import (
     CollectorTokenService,
@@ -203,10 +209,13 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
     values = [1610612737, 15]
     for zone in (
         "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
-        "Corner 3", "Above the Break 3",
+        "Above the Break 3",
     ):
         columns.extend(((zone, "OPP_FGM"), (zone, "OPP_FGA")))
         values.extend((4, 8))
+    for zone in ("Left Corner 3", "Right Corner 3"):
+        columns.extend(((zone, "OPP_FGM"), (zone, "OPP_FGA")))
+        values.extend((2, 4))
     zone = normalize_opponent_zone_response(
         pd.DataFrame([values], columns=pd.MultiIndex.from_tuples(columns)),
         season="2025-26", cutoff=NOW, team_id=1610612737,
@@ -223,6 +232,26 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
             "Corner 3", "Above the Break 3",
         )
     }
+    bound = _StandaloneNBAProvider._bind_window_gp(
+        pd.DataFrame(
+            [values], columns=pd.MultiIndex.from_tuples(columns)
+        ).drop(columns=[("", "GP")]),
+        pd.DataFrame([{"TEAM_ID": 1610612737, "GP": 15}]),
+        team_id=1610612737,
+    )
+    assert bound["TEAM_ID"].tolist() == [1610612737]
+    assert bound["GP"].tolist() == [15]
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
+        normalize_opponent_zone_response(
+            pd.DataFrame(
+                [values + [4, 8]],
+                columns=pd.MultiIndex.from_tuples(
+                    columns
+                    + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
+                ),
+            ),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
     wrong_team_values = list(values)
     wrong_team_values[0] = 1610612738
     with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
@@ -383,7 +412,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     ("evidence_mode", "expected_composed"),
     (
         ("complete", 5), ("partial", 4), ("tampered", 4), ("gp14", 4),
-        ("permuted", 1),
+        ("permuted", 1), ("projection_failure", 5),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -474,10 +503,14 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                     f"{zone}_{stat}": value
                     for zone in (
                         "Restricted Area", "In The Paint (Non-RA)",
-                        "Mid-Range", "Corner 3", "Above the Break 3",
+                        "Mid-Range", "Above the Break 3",
                     )
                     for stat, value in (("OPP_FGM", 4), ("OPP_FGA", 8))
                 },
+                "Left Corner 3_OPP_FGM": 2,
+                "Left Corner 3_OPP_FGA": 4,
+                "Right Corner 3_OPP_FGM": 2,
+                "Right Corner 3_OPP_FGA": 4,
             }]
 
     collector, transport, outbox = _collector(
@@ -621,7 +654,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         )],
         retrieved_at=cutoff,
     )
-    matchup_materialization = LedgerMatchupMaterializationService(
+    class FailOnceMaterialization(LedgerMatchupMaterializationService):
+        fail_once = evidence_mode == "projection_failure"
+
+        def refresh_publication_surfaces(self, *args, **kwargs):
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("injected matchup projection failure")
+            return super().refresh_publication_surfaces(*args, **kwargs)
+
+    matchup_materialization = FailOnceMaterialization(
         CanonicalGameLedgerRepository(control_db),
         matchup_repository,
         publication_reader=DatabaseFirstPublicationReader(
@@ -639,7 +681,25 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         publication_service=publications,
         clock=lambda: NOW,
     )
-    assert runtime.compose_queued("2025-26") == expected_composed
+    if evidence_mode == "projection_failure":
+        assert runtime.compose_queued("2025-26") == 0
+        with control_db.connect() as connection:
+            assert {
+                row.status for row in connection.execute(select(CompositionJob))
+            } == {"queued"}
+            assert connection.execute(select(PublicationVersion)).all() == []
+            assert connection.execute(
+                select(PublicationPointer.__table__)
+            ).mappings().all() == []
+        failed_snapshot = matchup_repository.get_snapshot(preserved_scope)
+        assert {fact.base for fact in failed_snapshot.facts} == {"traditional"}
+    composed = runtime.compose_queued("2025-26")
+    with control_db.connect() as connection:
+        composition_diagnostics = [
+            (row.stream_key, row.status, row.last_error)
+            for row in connection.execute(select(CompositionJob))
+        ]
+    assert composed == expected_composed, composition_diagnostics
     with control_db.connect() as connection:
         job_statuses = {
             row.stream_key: row.status
@@ -665,6 +725,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         )
         for stream_key in publication_streams
     }
+    if evidence_mode == "projection_failure":
+        with control_db.connect() as connection:
+            assert len(connection.execute(select(PublicationVersion)).all()) == 5
     reader = DatabaseFirstPublicationReader(control_db, clock=lambda: NOW)
     expected_values = {
         "synergy_play_types_opponent_season": ("Transition_PTS", 12 * 48 / 750),
@@ -699,7 +762,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         assert read.available and len(read.decoded or ()) == 30
         assert (read.decoded or ())[0].per48[metric] == pytest.approx(expected)
         assert read.payload["source_observations"]
-    if evidence_mode == "complete":
+    if evidence_mode in {"complete", "projection_failure"}:
         season_snapshot = matchup_repository.get_snapshot(
             TeamMatchupSnapshotScope("2025-26", cutoff.date())
         )
@@ -721,6 +784,45 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             fact.base == "traditional" and fact.raw_value == 1
             for fact in season_snapshot.facts
         )
+        if evidence_mode == "projection_failure":
+            with control_db.connect() as connection:
+                prior_pointers = {
+                    row.stream_key: row.active_publication_id
+                    for row in connection.execute(
+                        select(PublicationPointer)
+                    )
+                }
+            with control_db.begin() as connection:
+                connection.execute(update(CompositionJob).values(
+                    status="queued", last_error=None,
+                ))
+            matchup_materialization.fail_once = True
+            assert runtime.compose_queued("2025-26") == 0
+            assert matchup_repository.get_snapshot(
+                TeamMatchupSnapshotScope("2025-26", cutoff.date())
+            ) == season_snapshot
+            with control_db.connect() as connection:
+                assert {
+                    row.stream_key: row.active_publication_id
+                    for row in connection.execute(select(PublicationPointer))
+                } == prior_pointers
+                assert len(connection.execute(select(PublicationVersion)).all()) == 5
+                assert {
+                    row.status
+                    for row in connection.execute(select(CompositionJob))
+                } == {"queued"}
+            assert runtime.compose_queued("2025-26") == 5
+            with control_db.connect() as connection:
+                versions_by_stream = {}
+                for version in connection.execute(select(PublicationVersion)):
+                    versions_by_stream[version.stream_key] = (
+                        versions_by_stream.get(version.stream_key, 0) + 1
+                    )
+                assert set(versions_by_stream.values()) == {2}
+                assert {
+                    row.status
+                    for row in connection.execute(select(CompositionJob))
+                } == {"succeeded"}
     with control_db.connect() as connection:
         assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)
     outbox.close()

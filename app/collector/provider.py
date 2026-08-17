@@ -12,6 +12,7 @@ from .contracts import NormalizedObservation, ProviderContractError
 from .normalizers import (
     PLAY_TYPES,
     SHOT_TYPES,
+    _flatten_frame_columns,
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
     normalize_opponent_synergy_response,
@@ -278,6 +279,8 @@ class _StandaloneNBAProvider:
     @staticmethod
     def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int) -> Any:
         try:
+            frame = _flatten_frame_columns(frame)
+            evidence = _flatten_frame_columns(evidence)
             rows = evidence.loc[evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP"]]
             if len(rows.index) != 1:
                 raise ProviderContractError("provider_window_unverified")

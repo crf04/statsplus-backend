@@ -50,17 +50,28 @@ def _canonical_event_kind(game_id: str, provider_classification: str) -> str:
     return provider_classification
 
 
+def _flatten_frame_columns(response: Any) -> Any:
+    """Return a frame whose grouped provider columns have stable flat names."""
+
+    if (
+        pd is not None
+        and isinstance(response, pd.DataFrame)
+        and isinstance(response.columns, pd.MultiIndex)
+    ):
+        response = response.copy()
+        response.columns = [
+            "_".join(
+                str(part).strip() for part in column
+                if str(part).strip() and str(part).strip().lower() != "nan"
+            )
+            for column in response.columns
+        ]
+    return response
+
+
 def _records(response: Any) -> list[dict[str, Any]]:
     if pd is not None and isinstance(response, pd.DataFrame):
-        if isinstance(response.columns, pd.MultiIndex):
-            response = response.copy()
-            response.columns = [
-                "_".join(
-                    str(part).strip() for part in column
-                    if str(part).strip() and str(part).strip().lower() != "nan"
-                )
-                for column in response.columns
-            ]
+        response = _flatten_frame_columns(response)
         return [dict(row) for row in response.to_dict(orient="records")]
     if isinstance(response, Mapping):
         result_sets = response.get("resultSets")
@@ -618,6 +629,24 @@ def _zone_response(
                 row, f"{zone}_OPP_FGA", f"{flattened}_OPP_FGA",
                 f"{zone}_FGA", f"{flattened}_FGA",
             )
+            if zone == "Corner 3":
+                left_makes = _value(row, "Left Corner 3_OPP_FGM")
+                left_attempts = _value(row, "Left Corner 3_OPP_FGA")
+                right_makes = _value(row, "Right Corner 3_OPP_FGM")
+                right_attempts = _value(row, "Right Corner 3_OPP_FGA")
+                side_values = (
+                    left_makes, left_attempts, right_makes, right_attempts
+                )
+                if makes is not None or attempts is not None:
+                    if makes is None or attempts is None or any(
+                        value is not None for value in side_values
+                    ):
+                        raise ProviderContractError("provider_schema_changed")
+                elif all(value is not None for value in side_values):
+                    makes = _number(left_makes) + _number(right_makes)
+                    attempts = _number(left_attempts) + _number(right_attempts)
+                else:
+                    raise ProviderContractError("provider_schema_changed")
             if makes is None or attempts is None:
                 raise ProviderContractError("provider_schema_changed")
             values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}

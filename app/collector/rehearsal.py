@@ -70,9 +70,13 @@ class SanitizedFixtureProvider:
             "GP": 15 if parameters.get("last_n_games") == 15 else 82,
             **{
                 f"{zone}_{stat}": 1
-                for zone in SHOT_ZONES
+                for zone in SHOT_ZONES if zone != "Corner 3"
                 for stat in ("OPP_FGM", "OPP_FGA")
             },
+            "Left Corner 3_OPP_FGM": 0.5,
+            "Left Corner 3_OPP_FGA": 0.5,
+            "Right Corner 3_OPP_FGM": 0.5,
+            "Right Corner 3_OPP_FGA": 0.5,
         }]
 
     @staticmethod

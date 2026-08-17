@@ -21,6 +21,8 @@ from datetime import date, datetime, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.orm import Session
+
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.canonical_game_ledger import (
@@ -291,6 +293,7 @@ class LedgerMatchupMaterializationService:
         expected_game_ids_by_team: Mapping[int, frozenset[str]],
         expected_l15_game_ids: Mapping[int, frozenset[str]],
         team_ids: frozenset[int],
+        session: Session | None = None,
     ) -> None:
         """Persist newly composed NBA surfaces without rebuilding ledger facts.
 
@@ -316,6 +319,7 @@ class LedgerMatchupMaterializationService:
                 for base in NBA_PUBLICATION_STREAMS
             ),
             canonical_season,
+            session=session,
         )
         snapshots = []
         for window, game_ids_by_team in (
@@ -340,6 +344,7 @@ class LedgerMatchupMaterializationService:
         self.matchup_repository.replace_governed_publication_snapshots(
             snapshots,
             retrieved_at=assume_utc(self._clock()),
+            connection=session.connection() if session is not None else None,
         )
 
     def _publication_read_model(
@@ -399,12 +404,15 @@ class LedgerMatchupMaterializationService:
         self,
         stream_keys: tuple[str, ...],
         season: str,
+        *,
+        session: Session | None = None,
     ) -> dict[str, object]:
         """Capture one publication generation when the reader supports it."""
 
         snapshot = getattr(self.publication_reader, "snapshot", None)
         if callable(snapshot):
-            captured = snapshot(stream_keys, season=season)
+            options = {} if session is None else {"session": session}
+            captured = snapshot(stream_keys, season=season, **options)
             reads = getattr(captured, "reads", None)
             if isinstance(reads, Mapping):
                 return dict(reads)

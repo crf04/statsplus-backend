@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from math import isfinite
@@ -19,7 +20,7 @@ from typing import Any, Callable, Protocol
 from sqlalchemy import exists, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
@@ -701,6 +702,7 @@ class DatabaseFirstPublicationReader:
         *,
         season: str | None = None,
         require_active: bool = True,
+        session: Session | None = None,
     ) -> dict[str, PublicationRead]:
         """Read all contributors from one database snapshot.
 
@@ -711,7 +713,8 @@ class DatabaseFirstPublicationReader:
 
         return dict(
             self.snapshot(
-                stream_keys, season=season, require_active=require_active
+                stream_keys, season=season, require_active=require_active,
+                session=session,
             ).reads
         )
 
@@ -721,6 +724,7 @@ class DatabaseFirstPublicationReader:
         *,
         season: str | None = None,
         require_active: bool = True,
+        session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture all requested pointers, payloads, and decoded facts once."""
 
@@ -729,6 +733,7 @@ class DatabaseFirstPublicationReader:
             season=season,
             require_active=require_active,
             projection_only=False,
+            session=session,
         )
 
     def snapshot_player_game_logs(
@@ -753,13 +758,17 @@ class DatabaseFirstPublicationReader:
         season: str | None,
         require_active: bool,
         projection_only: bool,
+        session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture one immutable generation through its selected read shape."""
 
         keys = tuple(sorted(set(str(key) for key in stream_keys)))
         if not keys:
             return PublicationReadSnapshot(season, {}, ())
-        with self._session() as session, session.begin():
+        with ExitStack() as stack:
+            if session is None:
+                session = stack.enter_context(self._session())
+                stack.enter_context(session.begin())
             # Keep stream, pointer, and immutable version in one SELECT.  A
             # PostgreSQL READ COMMITTED transaction takes a fresh snapshot per
             # statement, so three sequential SELECTs could otherwise label a

@@ -2989,9 +2989,10 @@ class PublicationService(_SessionService):
 
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None,
-                manifest_id: str | None = None) -> PublicationVersion:
+                manifest_id: str | None = None,
+                session: Session | None = None) -> PublicationVersion:
         now = self.clock()
-        with self.session() as session, session.begin():
+        with self._session_scope(session) as session:
             stream = session.get(PublicationStream, stream_key)
             if stream is None or not stream.enabled:
                 raise ControlPlaneError("stream_unavailable")
@@ -3340,19 +3341,20 @@ class PublicationService(_SessionService):
 
     def compose_from_observations(
         self, stream_key: str, *, season: str, cutoff: datetime,
-        manifest_id: str,
+        manifest_id: str, session: Session | None = None,
     ) -> PublicationVersion:
         """Compose a governed NBA publication from its accepted evidence."""
 
         if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
             raise ControlPlaneError("stream_unsupported")
-        with self.session() as session:
+        with self._session_scope(session) as session:
             pointer = session.get(PublicationPointer, stream_key)
             expected_fence = pointer.fence if pointer is not None else None
-        return self.compose(
-            stream_key, season=season, cutoff=cutoff, payload=None,
-            expected_fence=expected_fence, manifest_id=manifest_id,
-        )
+            return self.compose(
+                stream_key, season=season, cutoff=cutoff, payload=None,
+                expected_fence=expected_fence, manifest_id=manifest_id,
+                session=session,
+            )
 
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:

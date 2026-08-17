@@ -475,6 +475,101 @@ class LedgerRuntime:
                     self.repository.engine,
                     l15_expectation_resolver=self.governance,
                 )
+            ledger_jobs = [
+                row for row in slice_jobs
+                if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+            ]
+            if (
+                nba_jobs
+                and not ledger_jobs
+                and self.matchup_materialization is not None
+            ):
+                succeeded_jobs = []
+                failed_jobs = {}
+                try:
+                    with publication_service.session() as session, session.begin():
+                        # Establish the outer write transaction before SQLite
+                        # savepoints; otherwise releasing the first savepoint
+                        # can commit it independently of a later projection
+                        # rollback.
+                        session.execute(update(table).where(
+                            table.c.job_id.in_([
+                                job["job_id"] for job in nba_jobs
+                            ]),
+                        ).values(updated_at=self.clock()))
+                        for job in nba_jobs:
+                            try:
+                                if not manifest_id:
+                                    raise ControlPlaneError(
+                                        "publication_governance_unavailable"
+                                    )
+                                with session.begin_nested():
+                                    publication_service.compose_from_observations(
+                                        job["stream_key"], season=season,
+                                        cutoff=cutoff, manifest_id=manifest_id,
+                                        session=session,
+                                    )
+                            except (ControlPlaneError, ValueError) as error:
+                                failed_jobs[job["job_id"]] = str(error)[:255]
+                            else:
+                                succeeded_jobs.append(job)
+                        if succeeded_jobs:
+                            governance = self.governance.read_for_composition(
+                                season, cutoff, manifest_id,
+                            )
+                            self.matchup_materialization.refresh_publication_surfaces(
+                                season,
+                                as_of=slate_date_for_instant(cutoff),
+                                expected_game_ids_by_team=(
+                                    governance.expected_season_game_ids
+                                ),
+                                expected_l15_game_ids=(
+                                    governance.expected_l15_game_ids
+                                ),
+                                team_ids=governance.team_ids,
+                                session=session,
+                            )
+                        now = self.clock()
+                        if succeeded_jobs:
+                            session.execute(update(table).where(
+                                table.c.job_id.in_([
+                                    job["job_id"] for job in succeeded_jobs
+                                ]),
+                            ).values(
+                                status="succeeded", updated_at=now,
+                                last_error=None,
+                            ))
+                        for job_id, last_error in failed_jobs.items():
+                            session.execute(update(table).where(
+                                table.c.job_id == job_id,
+                            ).values(
+                                status="failed", updated_at=now,
+                                last_error=last_error,
+                            ))
+                except Exception as error:
+                    # Publication pointers, projections, and Matchups rows were
+                    # rolled back together.  Keep successfully composed jobs
+                    # queued so the existing unique job can be retried.
+                    with self.repository.engine.begin() as connection:
+                        if succeeded_jobs:
+                            connection.execute(update(table).where(
+                                table.c.job_id.in_([
+                                    job["job_id"] for job in succeeded_jobs
+                                ]),
+                            ).values(
+                                status="queued", updated_at=self.clock(),
+                                last_error=str(error)[:255],
+                            ))
+                        for job_id, last_error in failed_jobs.items():
+                            connection.execute(update(table).where(
+                                table.c.job_id == job_id,
+                            ).values(
+                                status="failed", updated_at=self.clock(),
+                                last_error=last_error,
+                            ))
+                else:
+                    completed += len(succeeded_jobs)
+                continue
             nba_succeeded = False
             for job in nba_jobs:
                 try:
@@ -497,10 +592,6 @@ class LedgerRuntime:
                         status=status, updated_at=self.clock(),
                         last_error=last_error,
                     ))
-            ledger_jobs = [
-                row for row in slice_jobs
-                if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
-            ]
             if not ledger_jobs:
                 if nba_succeeded and self.matchup_materialization is not None:
                     governance = self.governance.read_for_composition(
