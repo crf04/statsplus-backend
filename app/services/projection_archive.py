@@ -146,7 +146,7 @@ class ProjectionPollResult:
     outcome: "ProviderPollOutcome"
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _PreparedProjectionIngestion:
     snapshot: ProviderSnapshot
     query: NBAMarketQuery
@@ -164,11 +164,62 @@ class _PreparedProjectionIngestion:
 
 
 @dataclass(frozen=True, slots=True)
+class _ProjectionPollWrite:
+    poll_id: str
+    provider: str
+    season: str
+    query_key: str
+    started_at: datetime | None
+    completed_at: datetime
+    retrieved_at: datetime
+    outcome: ProviderPollOutcome
+    promoted: bool
+    snapshot_id: str
+    generation_id: str
+    observation_count: int
+
+    @classmethod
+    def from_ingestion(
+        cls,
+        prepared: _PreparedProjectionIngestion,
+        *,
+        outcome: ProviderPollOutcome,
+        promoted: bool,
+        snapshot_id: str,
+        generation_id: str,
+    ) -> "_ProjectionPollWrite":
+        return cls(
+            poll_id=prepared.poll_id,
+            provider=prepared.snapshot.provider,
+            season=prepared.query.season,
+            query_key=prepared.query_key,
+            started_at=prepared.poll_started_at,
+            completed_at=prepared.accepted_at,
+            retrieved_at=prepared.snapshot.retrieved_at,
+            outcome=outcome,
+            promoted=promoted,
+            snapshot_id=snapshot_id,
+            generation_id=generation_id,
+            observation_count=prepared.observation_count,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _ProjectionTransitionPlan:
     current: Any | None
     partial_transition: "_PartialLatestTransition | None"
     materialization_checksum: str
     outcome: MaterializationOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectionTransitionWrite:
+    snapshot_id: str
+    generation_id: str
+    provider_content_unchanged: bool
+    snapshot_exists: bool
+    generation_exists: bool
+    observation_rows: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,17 +511,13 @@ class ProjectionArchive:
         promoted = plan.outcome is MaterializationOutcome.ADVANCED
         self._record_poll(
             connection,
-            poll_id=prepared.poll_id,
-            snapshot=snapshot,
-            season=prepared.query.season,
-            query_key=prepared.query_key,
-            started_at=prepared.poll_started_at,
-            completed_at=prepared.accepted_at,
-            outcome=ProviderPollOutcome.UNCHANGED,
-            promoted=promoted,
-            snapshot_id=str(current["snapshot_id"]),
-            generation_id=str(current["generation_id"]),
-            observation_count=prepared.observation_count,
+            _ProjectionPollWrite.from_ingestion(
+                prepared,
+                outcome=ProviderPollOutcome.UNCHANGED,
+                promoted=promoted,
+                snapshot_id=str(current["snapshot_id"]),
+                generation_id=str(current["generation_id"]),
+            ),
         )
         if promoted:
             self._confirm_latest(
@@ -498,11 +545,45 @@ class ProjectionArchive:
     ) -> ProjectionArchiveResult:
         """Persist one planned non-current transition inside the caller's fence."""
 
+        write = self._resolve_transition_write(connection, prepared, plan)
+        if write.generation_exists:
+            self._record_poll(
+                connection,
+                _ProjectionPollWrite.from_ingestion(
+                    prepared,
+                    outcome=ProviderPollOutcome.UNCHANGED,
+                    promoted=False,
+                    snapshot_id=write.snapshot_id,
+                    generation_id=write.generation_id,
+                ),
+            )
+            return self._transition_result(
+                prepared,
+                write,
+                changed=False,
+                outcome=MaterializationOutcome.UNCHANGED,
+            )
+        self._persist_generation_evidence(connection, prepared, plan, write)
+        self._apply_transition_latest(connection, prepared, plan, write)
+        return self._transition_result(
+            prepared,
+            write,
+            changed=not write.provider_content_unchanged,
+            outcome=plan.outcome,
+        )
+
+    @staticmethod
+    def _resolve_transition_write(
+        connection: Any,
+        prepared: _PreparedProjectionIngestion,
+        plan: _ProjectionTransitionPlan,
+    ) -> _ProjectionTransitionWrite:
+        """Resolve durable identities and immutable observation writes."""
+
         snapshot = prepared.snapshot
-        current = plan.current
         provider_content_unchanged = (
-            current is not None
-            and current["content_checksum"] == prepared.content_checksum
+            plan.current is not None
+            and plan.current["content_checksum"] == prepared.content_checksum
         )
         snapshot_table = ProjectionProviderSnapshot.__table__
         existing = connection.execute(
@@ -511,7 +592,7 @@ class ProjectionArchive:
             )
         ).scalar_one_or_none()
         snapshot_id = (
-            str(current["snapshot_id"])
+            str(plan.current["snapshot_id"])
             if provider_content_unchanged
             else str(existing or prepared.evidence_snapshot_id)
         )
@@ -521,57 +602,61 @@ class ProjectionArchive:
             plan.materialization_checksum,
             assume_utc(snapshot.retrieved_at).isoformat(),
         )
-        if connection.execute(
+        generation_exists = connection.execute(
             select(ProjectionMaterializationGeneration.outcome).where(
                 ProjectionMaterializationGeneration.generation_id == generation_id
             )
-        ).scalar_one_or_none() is not None:
-            self._record_poll(
-                connection,
-                poll_id=prepared.poll_id,
-                snapshot=snapshot,
-                season=prepared.query.season,
-                query_key=prepared.query_key,
-                started_at=prepared.poll_started_at,
-                completed_at=prepared.accepted_at,
-                outcome=ProviderPollOutcome.UNCHANGED,
-                promoted=False,
-                snapshot_id=snapshot_id,
-                generation_id=generation_id,
-                observation_count=prepared.observation_count,
-            )
-            return ProjectionArchiveResult(
-                snapshot_id=snapshot_id,
-                generation_id=generation_id,
-                changed=False,
-                observation_count=prepared.observation_count,
-                materialization_outcome=MaterializationOutcome.UNCHANGED,
-            )
+        ).scalar_one_or_none() is not None
+        observation_rows = tuple(
+            {
+                **row,
+                "snapshot_id": snapshot_id,
+                "generation_id": generation_id,
+                "source_poll_id": prepared.poll_id,
+                "observation_id": _digest(
+                    "obs", generation_id, row["ordinal"], row["market_reference"]
+                ),
+            }
+            for row in prepared.observation_rows
+        )
+        return _ProjectionTransitionWrite(
+            snapshot_id=snapshot_id,
+            generation_id=generation_id,
+            provider_content_unchanged=provider_content_unchanged,
+            snapshot_exists=existing is not None,
+            generation_exists=generation_exists,
+            observation_rows=observation_rows,
+        )
 
-        if existing is None and not provider_content_unchanged:
-            connection.execute(insert(snapshot_table).values(
-                snapshot_id=snapshot_id,
-                provider=snapshot.provider,
-                season=prepared.query.season,
-                query_key=prepared.query_key,
-                contract_version=snapshot.contract_version,
-                snapshot_status=snapshot.status.value,
-                retrieved_at=snapshot.retrieved_at,
-                accepted_at=prepared.accepted_at,
-                checksum=prepared.evidence_checksum,
-                content_checksum=prepared.content_checksum,
-                evidence_document=prepared.evidence_document,
-            ))
-        for row in prepared.observation_rows:
-            row["snapshot_id"] = snapshot_id
-            row["generation_id"] = generation_id
-            row["source_poll_id"] = prepared.poll_id
-            row["observation_id"] = _digest(
-                "obs", generation_id, row["ordinal"], row["market_reference"]
+    def _persist_generation_evidence(
+        self,
+        connection: Any,
+        prepared: _PreparedProjectionIngestion,
+        plan: _ProjectionTransitionPlan,
+        write: _ProjectionTransitionWrite,
+    ) -> None:
+        """Persist snapshot evidence, poll, generation, then observations."""
+
+        snapshot = prepared.snapshot
+        if not write.snapshot_exists and not write.provider_content_unchanged:
+            connection.execute(
+                insert(ProjectionProviderSnapshot.__table__).values(
+                    snapshot_id=write.snapshot_id,
+                    provider=snapshot.provider,
+                    season=prepared.query.season,
+                    query_key=prepared.query_key,
+                    contract_version=snapshot.contract_version,
+                    snapshot_status=snapshot.status.value,
+                    retrieved_at=snapshot.retrieved_at,
+                    accepted_at=prepared.accepted_at,
+                    checksum=prepared.evidence_checksum,
+                    content_checksum=prepared.content_checksum,
+                    evidence_document=prepared.evidence_document,
+                )
             )
-        poll_outcome = (
+        outcome = (
             ProviderPollOutcome.REMATERIALIZED
-            if provider_content_unchanged
+            if write.provider_content_unchanged
             else (
                 ProviderPollOutcome.PARTIAL
                 if snapshot.status is SnapshotStatus.PARTIAL
@@ -580,25 +665,21 @@ class ProjectionArchive:
         )
         self._record_poll(
             connection,
-            poll_id=prepared.poll_id,
-            snapshot=snapshot,
-            season=prepared.query.season,
-            query_key=prepared.query_key,
-            started_at=prepared.poll_started_at,
-            completed_at=prepared.accepted_at,
-            outcome=poll_outcome,
-            promoted=plan.outcome is MaterializationOutcome.ADVANCED,
-            snapshot_id=snapshot_id,
-            generation_id=generation_id,
-            observation_count=prepared.observation_count,
+            _ProjectionPollWrite.from_ingestion(
+                prepared,
+                outcome=outcome,
+                promoted=plan.outcome is MaterializationOutcome.ADVANCED,
+                snapshot_id=write.snapshot_id,
+                generation_id=write.generation_id,
+            ),
         )
         connection.execute(
             insert(ProjectionMaterializationGeneration.__table__).values(
-                generation_id=generation_id,
+                generation_id=write.generation_id,
                 provider=snapshot.provider,
                 season=prepared.query.season,
                 query_key=prepared.query_key,
-                snapshot_id=snapshot_id,
+                snapshot_id=write.snapshot_id,
                 source_poll_id=prepared.poll_id,
                 created_at=prepared.accepted_at,
                 retrieved_at=snapshot.retrieved_at,
@@ -606,36 +687,65 @@ class ProjectionArchive:
                 outcome=plan.outcome.value,
             )
         )
-        if prepared.observation_rows:
+        if write.observation_rows:
             connection.execute(
-                insert(ProjectionObservation.__table__), prepared.observation_rows
+                insert(ProjectionObservation.__table__), write.observation_rows
             )
+
+    def _apply_transition_latest(
+        self,
+        connection: Any,
+        prepared: _PreparedProjectionIngestion,
+        plan: _ProjectionTransitionPlan,
+        write: _ProjectionTransitionWrite,
+    ) -> None:
+        """Apply one promoted generation to Latest after evidence is durable."""
+
         if plan.outcome is MaterializationOutcome.ADVANCED:
-            if snapshot.status is SnapshotStatus.COMPLETE:
+            if prepared.snapshot.status is SnapshotStatus.COMPLETE:
                 self._advance_latest(
                     connection,
-                    prepared.observation_rows,
-                    provider=snapshot.provider,
+                    write.observation_rows,
+                    provider=prepared.snapshot.provider,
                     season=prepared.query.season,
                     query_key=prepared.query_key,
-                    generation_id=generation_id,
+                    generation_id=write.generation_id,
                 )
             else:
                 assert plan.partial_transition is not None
+                decorated = {
+                    int(row["ordinal"]): row for row in write.observation_rows
+                }
+                partial_transition = replace(
+                    plan.partial_transition,
+                    selected_rows=tuple(
+                        decorated[int(row["ordinal"])]
+                        for row in plan.partial_transition.selected_rows
+                    ),
+                )
                 self._apply_partial_transition(
                     connection,
-                    plan.partial_transition,
-                    provider=snapshot.provider,
+                    partial_transition,
+                    provider=prepared.snapshot.provider,
                     season=prepared.query.season,
                     query_key=prepared.query_key,
-                    generation_id=generation_id,
+                    generation_id=write.generation_id,
                 )
+
+    @staticmethod
+    def _transition_result(
+        prepared: _PreparedProjectionIngestion,
+        write: _ProjectionTransitionWrite,
+        *,
+        changed: bool,
+        outcome: MaterializationOutcome,
+    ) -> ProjectionArchiveResult:
         return ProjectionArchiveResult(
-            snapshot_id=snapshot_id,
-            generation_id=generation_id,
-            changed=not provider_content_unchanged,
+            snapshot_id=write.snapshot_id,
+            generation_id=write.generation_id,
+            changed=changed,
             observation_count=prepared.observation_count,
-            materialization_outcome=plan.outcome,
+            materialization_outcome=outcome,
         )
 
     def _plan_transition(
@@ -1016,33 +1126,22 @@ class ProjectionArchive:
     @staticmethod
     def _record_poll(
         connection: Any,
-        *,
-        poll_id: str,
-        snapshot: ProviderSnapshot,
-        season: str,
-        query_key: str,
-        started_at: datetime | None,
-        completed_at: datetime,
-        outcome: ProviderPollOutcome,
-        promoted: bool,
-        snapshot_id: str,
-        generation_id: str,
-        observation_count: int,
+        request: _ProjectionPollWrite,
     ) -> None:
         connection.execute(
             insert(ProviderPoll.__table__).values(
-                poll_id=poll_id,
-                provider=snapshot.provider,
-                season=season,
-                query_key=query_key,
-                started_at=started_at,
-                completed_at=completed_at,
-                retrieved_at=snapshot.retrieved_at,
-                outcome=outcome.value,
-                promoted=promoted,
-                snapshot_id=snapshot_id,
-                generation_id=generation_id,
-                observation_count=observation_count,
+                poll_id=request.poll_id,
+                provider=request.provider,
+                season=request.season,
+                query_key=request.query_key,
+                started_at=request.started_at,
+                completed_at=request.completed_at,
+                retrieved_at=request.retrieved_at,
+                outcome=request.outcome.value,
+                promoted=request.promoted,
+                snapshot_id=request.snapshot_id,
+                generation_id=request.generation_id,
+                observation_count=request.observation_count,
             )
         )
 
