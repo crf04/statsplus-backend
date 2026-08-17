@@ -69,6 +69,7 @@ class TestBaseQueryParser(unittest.TestCase):
         """Test extraction of time periods and game counts"""
         test_cases = [
             ("LeBron last 10 games", ("recent", 10)),
+            ("LeBron James this year", ("season", None)),
             ("Curry past 15 games", ("recent", 15)),
             ("Giannis this season", ("season", None)),
             ("Durant last five games", ("recent", 5))
@@ -134,6 +135,13 @@ class TestBaseQueryParser(unittest.TestCase):
         self.assertIsNone(components.player_name)
         self.assertGreaterEqual(components.confidence, 0.0)
         self.assertLessEqual(components.confidence, 1.0)
+
+    def test_current_year_player_query_stays_on_deterministic_path(self):
+        components = self.parser.parse("LeBron James this year")
+
+        self.assertEqual(components.player_name, "LeBron James")
+        self.assertEqual(components.time_period, "season")
+        self.assertFalse(components.confidence_breakdown.should_use_llm)
     
     def test_query_preprocessing(self):
         """Test query preprocessing and normalization"""
