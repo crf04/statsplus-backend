@@ -1296,11 +1296,6 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert assembled.matchup_service.player_pool is assembled.projection_player_pool_reader
 
     catalog = StatisticCatalog.load_default()
-    assembled.projection_archive.ingest_complete_snapshot(
-        _recorded_projection_snapshot(catalog),
-        query=NBAMarketQuery(season=SEASON),
-        accepted_at=NOW,
-    )
     pool = assembled.projection_player_pool_reader
     event_catalog = _event_catalog(engine, settings)
     stats_freshness = StatsFreshnessRepository(engine)
@@ -1328,6 +1323,18 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         matchup_service=matchup_service,
     )
     client = app.test_client()
+
+    missing_selection = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert missing_selection.status_code == 503
+    assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
+
+    assembled.projection_archive.ingest_complete_snapshot(
+        _recorded_projection_snapshot(catalog),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=NOW,
+    )
 
     slate = client.get("/api/games/slate?date=2026-01-15")
     matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")

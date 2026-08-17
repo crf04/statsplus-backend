@@ -15,6 +15,16 @@ from sqlalchemy import (
 from . import Base
 
 
+class ProjectionArchiveScopeLock(Base):
+    """Stable row used to serialize one provider/query materialization scope."""
+
+    __tablename__ = "projection_archive_scope_locks"
+
+    provider = Column(String(64), primary_key=True)
+    season = Column(String(7), primary_key=True)
+    query_key = Column(String(72), primary_key=True)
+
+
 class ProviderPoll(Base):
     """One accepted attempt to archive a normalized provider observation."""
 
@@ -190,6 +200,7 @@ class LatestPlayerProjection(Base):
 
 __all__ = [
     "LatestPlayerProjection",
+    "ProjectionArchiveScopeLock",
     "ProjectionMaterializationGeneration",
     "ProjectionObservation",
     "ProjectionProviderSnapshot",

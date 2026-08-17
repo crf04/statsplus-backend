@@ -98,6 +98,7 @@ def build_dependencies(
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
+        ProjectionSelectionPlayerPoolReader,
     )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -485,9 +486,14 @@ def build_dependencies(
     matchup_player_pool_reader = (
         projection_player_pool_reader or stored_player_pool_reader
     )
+    selection_player_pool_reader = (
+        ProjectionSelectionPlayerPoolReader(projection_player_pool_reader)
+        if projection_player_pool_reader is not None
+        else stored_player_pool_reader
+    )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
-        player_pool=matchup_player_pool_reader,
+        player_pool=selection_player_pool_reader,
         player_logs=player_game_log_repository,
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,

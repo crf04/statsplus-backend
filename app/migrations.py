@@ -966,6 +966,7 @@ def _create_projection_archive_tables(connection: Connection) -> None:
 
     from app.models.projection_archive import (
         LatestPlayerProjection,
+        ProjectionArchiveScopeLock,
         ProjectionMaterializationGeneration,
         ProjectionObservation,
         ProjectionProviderSnapshot,
@@ -973,6 +974,7 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     )
 
     # Foreign-key dependencies determine the portable creation order.
+    ProjectionArchiveScopeLock.__table__.create(connection, checkfirst=True)
     ProjectionProviderSnapshot.__table__.create(connection, checkfirst=True)
     ProviderPoll.__table__.create(connection, checkfirst=True)
     ProjectionObservation.__table__.create(connection, checkfirst=True)

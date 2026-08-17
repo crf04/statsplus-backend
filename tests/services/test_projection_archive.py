@@ -1,7 +1,9 @@
 """Behavioral coverage for durable projection evidence and live Player Pools."""
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 from sqlalchemy import create_engine, select
 
@@ -9,6 +11,7 @@ from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
     LatestPlayerProjection,
+    ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
@@ -34,6 +37,7 @@ from app.providers.dfs import (
 from app.services.projection_archive import (
     LatestProjectionPlayerPoolReader,
     ProjectionArchive,
+    ProjectionSelectionPlayerPoolReader,
 )
 from app.services.statistic_catalog import StatisticCatalog
 
@@ -150,24 +154,48 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         },
     }
 
+    replayed = archive.ingest_complete_snapshot(
+        snapshot,
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT,
+    )
+    assert replayed == result
+
     repeated_retrieved_at = OBSERVED_AT.replace(minute=31)
     repeated = archive.ingest_complete_snapshot(
         replace(snapshot, retrieved_at=repeated_retrieved_at),
-        query=NBAMarketQuery(season=SEASON),
+        query=NBAMarketQuery(
+            season=SEASON,
+            market_statuses=(MarketStatus.SUSPENDED, MarketStatus.AVAILABLE),
+        ),
         accepted_at=OBSERVED_AT.replace(minute=32),
         poll_started_at=OBSERVED_AT.replace(minute=29),
     )
     assert repeated.changed is False
     assert repeated.snapshot_id == result.snapshot_id
+    distinct_attempt = archive.ingest_complete_snapshot(
+        replace(snapshot, retrieved_at=repeated_retrieved_at),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT.replace(minute=32),
+        poll_started_at=OBSERVED_AT.replace(minute=30),
+    )
+    assert distinct_attempt.changed is False
     with engine.connect() as connection:
         polls = (
             connection.execute(
-                select(ProviderPoll.__table__).order_by(ProviderPoll.completed_at)
+                select(ProviderPoll.__table__).order_by(
+                    ProviderPoll.completed_at,
+                    ProviderPoll.started_at,
+                )
             )
             .mappings()
             .all()
         )
-    assert [poll["outcome"] for poll in polls] == ["changed", "unchanged"]
+    assert [poll["outcome"] for poll in polls] == [
+        "changed",
+        "unchanged",
+        "unchanged",
+    ]
     assert polls[0]["started_at"] is None
     assert polls[1]["started_at"] == OBSERVED_AT.replace(minute=29, tzinfo=None)
     assert polls[1]["completed_at"] == OBSERVED_AT.replace(minute=32, tzinfo=None)
@@ -179,6 +207,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
             len(connection.execute(select(ProjectionMaterializationGeneration)).all())
             == 1
         )
+        assert len(connection.execute(select(ProjectionArchiveScopeLock)).all()) == 1
 
     later_observation = OBSERVED_AT + timedelta(minutes=2)
     archive.ingest_complete_snapshot(
@@ -515,3 +544,55 @@ def test_multi_game_pool_reports_partial_status_when_any_game_is_missing(tmp_pat
         "state": "missing",
         "observed_at": None,
     }
+
+
+def test_selection_reader_translates_only_missing_single_game_evidence(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'selection-missing.sqlite3'}")
+    run_migrations(engine)
+    reader = LatestProjectionPlayerPoolReader(engine)
+    selection_reader = ProjectionSelectionPlayerPoolReader(reader)
+
+    assert (
+        selection_reader.get_pool_for_game(
+            season=SEASON,
+            game_id=GAME_ID,
+        )
+        is None
+    )
+    assert (
+        reader.get_pool_for_game(
+            season=SEASON,
+            game_id=GAME_ID,
+        ).freshness["state"]
+        == "missing"
+    )
+
+
+def test_projection_scope_transaction_serializes_archive_instances(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'scope-lock.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    first_archive = ProjectionArchive(engine, catalog)
+    second_archive = ProjectionArchive(engine, catalog)
+    first_entered = Event()
+    release_first = Event()
+    second_entered = Event()
+
+    def hold_scope():
+        with first_archive._scope_transaction("dabble", SEASON, "query-scope"):
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+
+    def enter_same_scope():
+        with second_archive._scope_transaction("dabble", SEASON, "query-scope"):
+            second_entered.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(hold_scope)
+        assert first_entered.wait(timeout=2)
+        second = executor.submit(enter_same_scope)
+        assert not second_entered.wait(timeout=0.2)
+        release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+    assert second_entered.is_set()

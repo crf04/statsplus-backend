@@ -3,20 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import threading
 from typing import Any
 
 from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from app.domain.comparisons import market_reference
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
     LatestPlayerProjection,
+    ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
@@ -87,13 +91,16 @@ def _query_key(query: NBAMarketQuery) -> str:
         query.season,
         query.sport,
         query.league,
-        ",".join(status.value for status in query.market_statuses),
+        ",".join(sorted(status.value for status in query.market_statuses)),
         query.pregame_only,
     )
 
 
 class ProjectionArchive:
     """Accept a complete normalized snapshot as one atomic archive generation."""
+
+    _scope_locks: dict[tuple[int, str, str, str], threading.RLock] = {}
+    _scope_locks_guard = threading.Lock()
 
     def __init__(self, engine: Engine, statistic_catalog: StatisticCatalog) -> None:
         self.engine = engine
@@ -131,12 +138,24 @@ class ProjectionArchive:
         content_checksum = _snapshot_content_checksum(query_key, document)
         snapshot_id = f"psn_{checksum}"
         generation_id = _digest("gen", snapshot_id)
-        poll_id = _digest("poll", snapshot_id, accepted.isoformat())
+        poll_id = _digest(
+            "poll",
+            snapshot_id,
+            "" if poll_started is None else poll_started.isoformat(),
+            accepted.isoformat(),
+        )
         if accepted < assume_utc(snapshot.retrieved_at):
             raise ValueError("projection snapshot cannot be accepted before retrieval")
         snapshot_table = ProjectionProviderSnapshot.__table__
 
-        with self.engine.begin() as connection:
+        with self._scope_transaction(
+            snapshot.provider,
+            query.season,
+            query_key,
+        ) as connection:
+            replayed = self._replayed_result(connection, poll_id)
+            if replayed is not None:
+                return replayed
             current = self._current_materialization(
                 connection,
                 provider=snapshot.provider,
@@ -254,6 +273,82 @@ class ProjectionArchive:
             changed=True,
             observation_count=len(observation_rows),
             materialization_outcome=materialization_outcome,
+        )
+
+    @contextmanager
+    def _scope_transaction(
+        self,
+        provider: str,
+        season: str,
+        query_key: str,
+    ) -> Any:
+        key = (id(self.engine), provider, season, query_key)
+        with self._scope_locks_guard:
+            lock = self._scope_locks.setdefault(key, threading.RLock())
+        table = ProjectionArchiveScopeLock.__table__
+        with lock, self.engine.begin() as connection:
+            try:
+                with connection.begin_nested():
+                    connection.execute(
+                        insert(table).values(
+                            provider=provider,
+                            season=season,
+                            query_key=query_key,
+                        )
+                    )
+            except IntegrityError:
+                pass
+            connection.execute(
+                select(table)
+                .where(
+                    table.c.provider == provider,
+                    table.c.season == season,
+                    table.c.query_key == query_key,
+                )
+                .with_for_update()
+            ).one()
+            yield connection
+
+    @staticmethod
+    def _replayed_result(
+        connection: Any,
+        poll_id: str,
+    ) -> ProjectionArchiveResult | None:
+        poll_table = ProviderPoll.__table__
+        generation_table = ProjectionMaterializationGeneration.__table__
+        poll = (
+            connection.execute(
+                select(
+                    poll_table.c.snapshot_id,
+                    poll_table.c.outcome,
+                    poll_table.c.observation_count,
+                ).where(poll_table.c.poll_id == poll_id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if poll is None:
+            return None
+        snapshot_id = str(poll["snapshot_id"])
+        generation = (
+            connection.execute(
+                select(
+                    generation_table.c.generation_id,
+                    generation_table.c.outcome,
+                ).where(generation_table.c.snapshot_id == snapshot_id)
+            )
+            .mappings()
+            .one()
+        )
+        changed = poll["outcome"] == "changed"
+        return ProjectionArchiveResult(
+            snapshot_id=snapshot_id,
+            generation_id=str(generation["generation_id"]),
+            changed=changed,
+            observation_count=int(poll["observation_count"]),
+            materialization_outcome=(
+                str(generation["outcome"]) if changed else "unchanged"
+            ),
         )
 
     def load_source_snapshot(self, snapshot_id: str) -> ProviderSnapshot | None:
@@ -596,8 +691,27 @@ class LatestProjectionPlayerPoolReader:
         return {"state": "live", "observed_at": observed_at.isoformat()}
 
 
+class ProjectionSelectionPlayerPoolReader:
+    """Translate missing archive evidence to Selection's unavailable contract."""
+
+    def __init__(self, reader: LatestProjectionPlayerPoolReader) -> None:
+        self.reader = reader
+
+    def get_pool_for_game(
+        self,
+        *,
+        season: str,
+        game_id: str,
+    ) -> PlayerPool | None:
+        pool = self.reader.get_pool_for_game(season=season, game_id=game_id)
+        if pool.freshness.get("state") == "missing":
+            return None
+        return pool
+
+
 __all__ = [
     "LatestProjectionPlayerPoolReader",
     "ProjectionArchive",
     "ProjectionArchiveResult",
+    "ProjectionSelectionPlayerPoolReader",
 ]

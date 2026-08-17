@@ -345,6 +345,12 @@ may supply the actual poll
 start; otherwise `started_at` stays null rather than inventing a poll window,
 and the acceptance time is the completion time. Poll outcomes are `changed` or
 `unchanged`; unchanged evidence points at the existing immutable snapshot.
+The attempt identity is the exact evidence document, optional start, and
+completion time: replaying that recorded attempt returns its persisted result
+without adding a poll, while a different start, retrieval, or completion time
+is a distinct accepted poll. Query status filters are sorted exactly as the
+Provider Snapshot codec sorts them, so caller order cannot split one archive
+scope.
 Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An
@@ -354,6 +360,12 @@ document at the same provider/query observation time is archived with a
 `same_time_not_promoted` materialization outcome and cannot replace the current
 Latest set; `older_not_promoted` records the corresponding older-snapshot
 decision.
+Every write first enters a provider/season/query scope transaction. An
+in-process lock covers SQLite writers before a durable scope-lock row exists;
+that stable row is then selected `FOR UPDATE` on production databases. The
+change decision, evidence inserts, full Latest replacement, and poll commit
+therefore serialize as one transaction, and Latest can contain rows from only
+one generation for the scope.
 Thresholds, selections, modifiers, prices, provider labels, and source
 identity round-trip through the existing strict Provider Snapshot codec; raw
 upstream payloads are never stored. Governed identities and targetability are
@@ -377,9 +389,12 @@ never displayed as a fabricated name. A game with current evidence reports
 `state: live` and its oldest included `observed_at`; a game without current
 evidence reports `state: missing` and `observed_at: null`.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
-is enabled, dependency assembly gives the same archive reader to Slate,
-Matchup, and Matchup Selection; one request never combines archive and legacy
-facts. The gate is refused when the configured database is the read-only demo
+is enabled, dependency assembly gives the same archive reader to Slate and
+Matchup. Matchup Selection uses a thin adapter over that reader which translates
+a single game's explicit missing state to its established stored-pool
+unavailable contract; it does not select or call a legacy source. One request
+never combines archive and legacy facts. The gate is refused when the
+configured database is the read-only demo
 fixture, which cannot contain the archive schema. The legacy collection/reader
 behavior above remains selected while the gate is off. Scheduled collection,
 partial-snapshot transitions,

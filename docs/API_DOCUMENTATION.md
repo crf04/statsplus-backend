@@ -321,6 +321,10 @@ The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and
 legacy reader remain unchanged during expansion.
+Matchup Selection retains its existing missing stored-pool error contract under
+the gate: when its single game has no archive evidence, it returns
+`503 provider_unavailable`. Slate and Matchup still expose the explicit missing
+projection state described above.
 
 A stale but populated schedule remains a `200` with
 `freshness.schedule.status: "stale"`. Stored

@@ -199,6 +199,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
+        ProjectionSelectionPlayerPoolReader,
     )
 
     engine = create_engine("sqlite:///:memory:")
@@ -220,7 +221,17 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.projection_archive.engine is dependencies.engine
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
-    assert dependencies.matchup_selection_service.player_pool is reader
+    selection_reader = dependencies.matchup_selection_service.player_pool
+    assert isinstance(selection_reader, ProjectionSelectionPlayerPoolReader)
+    assert selection_reader.reader is reader
+    assert selection_reader.get_pool_for_game(
+        season=settings.nba.current_season,
+        game_id="missing-game",
+    ) is None
+    assert reader.get_pool_for_game(
+        season=settings.nba.current_season,
+        game_id="missing-game",
+    ).freshness["state"] == "missing"
     assert not hasattr(reader, "board_service")
     assert not hasattr(reader, "provider_registry")
 
