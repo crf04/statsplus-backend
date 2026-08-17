@@ -91,6 +91,7 @@ class LedgerMaterializationService:
         require_assist_locations: bool = False,
         activate: bool = False,
         recomposition_reason: str | None = None,
+        source_observation_ids_by_game: Mapping[str, str] | None = None,
         session: Session | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
@@ -276,7 +277,13 @@ class LedgerMaterializationService:
                     else season_window.governed_game_ids
                 )
                 provenance = {
-                    game.source_observation_id: game.game_id
+                    (
+                        source_observation_ids_by_game.get(
+                            game.game_id, game.source_observation_id
+                        )
+                        if source_observation_ids_by_game is not None
+                        else game.source_observation_id
+                    ): game.game_id
                     for game in eligible
                     if game.game_id in selected_game_ids
                 }

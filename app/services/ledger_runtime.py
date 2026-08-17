@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from app.models.collection_control import (
     ActiveSeason,
     CollectionManifest,
+    CollectionObservation,
     CompositionJob,
     ReconciliationItem,
 )
@@ -344,6 +345,39 @@ class LedgerRuntime:
                             if row.get("trigger_game_id")
                         )
                     trigger_game_id = next(iter(sorted(trigger_game_ids)), None)
+                    pending_source_observation_ids = {
+                        str(source_observation_id)
+                        for row in slice_jobs
+                        for source_observation_id in _json_list(
+                            row.get("source_observation_ids")
+                        )
+                    }
+                    source_observation_ids_by_game = {}
+                    if pending_source_observation_ids:
+                        source_rows = session.scalars(
+                            select(CollectionObservation).where(
+                                CollectionObservation.observation_id.in_(
+                                    pending_source_observation_ids
+                                )
+                            ).order_by(
+                                CollectionObservation.accepted_at,
+                                CollectionObservation.observation_id,
+                            )
+                        ).all()
+                        for source_row in source_rows:
+                            try:
+                                source_scope = json.loads(source_row.scope)
+                            except (TypeError, ValueError):
+                                continue
+                            if not isinstance(source_scope, Mapping):
+                                continue
+                            source_game_id = str(
+                                source_scope.get("game_id") or ""
+                            )
+                            if source_game_id:
+                                source_observation_ids_by_game[source_game_id] = (
+                                    str(source_row.observation_id)
+                                )
                     governance = self.governance.read_for_composition(
                         season,
                         cutoff,
@@ -398,17 +432,11 @@ class LedgerRuntime:
                         ):
                             raise ControlPlaneError("queued_ledger_evidence_stale")
                     if not trigger_game_ids:
-                        source_observation_ids = {
-                            str(source_observation_id)
-                            for row in slice_jobs
-                            for source_observation_id in _json_list(
-                                row.get("source_observation_ids")
-                            )
-                        }
                         trigger_game_ids = frozenset(
                             game.game_id
                             for game in games
-                            if game.source_observation_id in source_observation_ids
+                            if game.source_observation_id
+                            in pending_source_observation_ids
                         )
                         trigger_game_id = next(
                             iter(sorted(trigger_game_ids)), None
@@ -448,6 +476,9 @@ class LedgerRuntime:
                         team_ids=governance.team_ids,
                         activate=self.publication_service is not None,
                         recomposition_reason=reason,
+                        source_observation_ids_by_game=(
+                            source_observation_ids_by_game or None
+                        ),
                         session=session,
                     )
                     succeeded = set()

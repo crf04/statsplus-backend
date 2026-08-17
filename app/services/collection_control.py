@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -2716,8 +2716,16 @@ class PublicationService(_SessionService):
         worker the same CAS protection as the ingestion correction sink.
         """
         cutoff = _aware(cutoff)
+        # Import lazily to keep the correction queue's stream authority shared
+        # without introducing a module-load cycle (the queue publishes through
+        # this service).
+        from app.services.ledger_materialization import LedgerCorrectionQueue
+
         with self.session() as session, session.begin():
-            streams = session.scalars(select(PublicationStream).where(PublicationStream.enabled.is_(True))).all()
+            streams = session.scalars(select(PublicationStream).where(or_(
+                PublicationStream.enabled.is_(True),
+                PublicationStream.stream_key.in_(LedgerCorrectionQueue.STREAMS),
+            ))).all()
             candidates: list[tuple[str, str]] = []
             for stream in streams:
                 required = set(json.loads(stream.required_observations))
@@ -2964,13 +2972,19 @@ class PublicationService(_SessionService):
         expected_fence: int | None, reason: str | None,
         provenance_ids: set[str], now: datetime,
         provenance: Mapping[str, str | None] | None = None,
+        derive_expected_fence_from_lock: bool = False,
     ) -> PublicationVersion:
         stream = session.get(PublicationStream, stream_key)
         if stream is None or not stream.enabled:
             raise ControlPlaneError("stream_unavailable")
-        pointer = session.scalar(select(PublicationPointer).where(
-            PublicationPointer.stream_key == stream_key
-        ).with_for_update())
+        pointer = session.scalar(
+            select(PublicationPointer)
+            .where(PublicationPointer.stream_key == stream_key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if derive_expected_fence_from_lock:
+            expected_fence = pointer.fence if pointer is not None else 0
         if pointer is not None and pointer.active_publication_id:
             current = session.get(PublicationVersion, pointer.active_publication_id)
             if (
@@ -3015,10 +3029,15 @@ class PublicationService(_SessionService):
                     role="completeness_evidence",
                     created_at=now,
             ))
-        if old:
-            previous = session.get(PublicationVersion, old)
-            if previous is not None:
-                previous.status = "superseded"
+        stale_versions = session.scalars(select(PublicationVersion).where(
+            PublicationVersion.stream_key == stream_key,
+            PublicationVersion.season == season,
+            PublicationVersion.cutoff == _aware(cutoff),
+            PublicationVersion.publication_id != publication.publication_id,
+            PublicationVersion.status.in_(("active", "candidate")),
+        )).all()
+        for previous in stale_versions:
+            previous.status = "superseded"
         pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = old, publication.publication_id, now
         session.flush()
         return publication
@@ -3091,12 +3110,12 @@ class PublicationService(_SessionService):
                     session, season=item.season, cutoff=_aware(item.cutoff),
                     provenance=item.provenance, manifest_id=item.manifest_id,
                 )
-                pointer = session.get(PublicationPointer, item.stream_key)
                 results.append(self._compose_active_in_session(
                     session, stream_key=item.stream_key, season=item.season,
                     cutoff=item.cutoff, encoded=_json(item.payload), payload=item.payload,
-                    expected_fence=(pointer.fence if pointer is not None else 0), reason=item.reason,
+                    expected_fence=None, reason=item.reason,
                     provenance_ids=provenance_ids, provenance=item.provenance, now=now,
+                    derive_expected_fence_from_lock=True,
                 ))
             return tuple(results)
 
@@ -3122,12 +3141,13 @@ class PublicationService(_SessionService):
             self._assert_ledger_provenance(
                 session, season=season, cutoff=_aware(cutoff), provenance=provenance,
             )
-            existing = session.scalar(select(PublicationVersion).where(
+            replaceable = list(session.scalars(select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,
                 PublicationVersion.cutoff == _aware(cutoff),
                 PublicationVersion.status.in_(("candidate", "active")),
-            ).order_by(PublicationVersion.version.desc()).limit(1))
+            ).order_by(PublicationVersion.version.desc())))
+            existing = replaceable[0] if replaceable else None
             if (
                 existing is not None
                 and existing.checksum == _checksum(encoded)
@@ -3138,6 +3158,12 @@ class PublicationService(_SessionService):
                 )
             ):
                 return existing
+            # A corrected complete ledger envelope is the sole activatable
+            # truth for this governed cutoff. Preserve prior versions and
+            # their immutable audit, but remove every stale target from the
+            # candidate/active state machine before exposing the replacement.
+            for stale in replaceable:
+                stale.status = "superseded"
             next_version = session.scalar(
                 select(PublicationVersion.version).where(
                     PublicationVersion.stream_key == stream_key,

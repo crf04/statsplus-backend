@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import threading
+from types import SimpleNamespace
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -25,7 +27,7 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
-from app.services.collection_control import PublicationService
+from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.collection_control import LedgerPublicationComposition
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
@@ -761,7 +763,7 @@ def test_targeted_recomposition_retains_unaffected_team_facts(tmp_path):
     )
 
 
-def test_correction_changes_published_counts_and_rank(tmp_path):
+def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
     """A governed correction changes the active publication and public read."""
     engine = _engine(tmp_path, "counts.sqlite3")
     cutoff = AS_OF
@@ -850,7 +852,7 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
         ))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="ledger-manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
+            collect_before=cutoff + timedelta(days=1000), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
             status="active", created_at=cutoff,
         ))
@@ -871,8 +873,25 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
             "last_seen_at": cutoff,
         } for game in games])
 
-    publications = PublicationService(engine, clock=lambda: runtime_now)
-    publications.register_default_streams()
+    from app.config.settings import RuntimeSettings
+    from app.dependencies import build_dependencies
+
+    monkeypatch.setitem(
+        sys.modules,
+        "app.services.nl_service",
+        SimpleNamespace(NLService=lambda *args, **kwargs: object()),
+    )
+    monkeypatch.setattr("app.utils.db.get_engine", lambda settings: engine)
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", lambda settings: None
+    )
+    dependencies = build_dependencies(RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": str(engine.url)},
+    ))
+    publications = dependencies.publication_service
+    assert publications is not None
     for stream_key, windows in (
         ("traditional_opponent_season", ("season",)),
         ("traditional_opponent_l15", ("l15",)),
@@ -889,29 +908,19 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
             freshness_rule="cutoff_current",
         )
 
-    queue = LedgerCorrectionQueue(
-        clock=lambda: runtime_now,
-        require_governance=True,
-    )
-    ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    ledger = dependencies.canonical_game_ledger_repository
+    assert ledger is not None
     accepted = {
         game.source_observation_id: accepted_observation(game)
         for game in games
     }
     ledger.replace_games_atomic(games, accepted_observations=accepted)
 
-    matchup = TeamMatchupRepository(engine)
-    matchup_materialization = LedgerMatchupMaterializationService(
-        ledger, matchup, clock=lambda: runtime_now
-    )
-
-    materialization = LedgerMaterializationService(
-        ledger,
-        parity_repository=LedgerParityArtifactRepository(engine),
-        parity_reader=LegacyParityDiagnosticReader(engine),
-        publication_service=publications,
-        clock=lambda: runtime_now,
-    )
+    matchup_materialization = dependencies.ledger_matchup_materialization_service
+    materialization = dependencies.ledger_materialization_service
+    assert matchup_materialization is not None
+    assert materialization is not None
+    matchup = matchup_materialization.matchup_repository
     runtime = LedgerRuntime(
         backfill=None,
         repository=ledger,
@@ -944,6 +953,12 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
     assert before_fact.raw_value == 75
     assert before_metric.allowed_per_48 == 5.0
     assert before_metric.rank == 1
+
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        matchup.replace_snapshots(
+            ((scope, (replace(before_fact, raw_value=999),), before_snapshot.observations),),
+            retrieved_at=runtime_now,
+        )
 
     original = games[0]
     corrected_team_facts = tuple(
@@ -2352,16 +2367,19 @@ def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):
 
     assert publications.reconcile_pending(
         season="2025-26", cutoff=AS_OF,
-    ) == 1
+    ) == len(LedgerCorrectionQueue.STREAMS)
     with engine.connect() as connection:
-        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+        job = connection.execute(select(CompositionJob.__table__).where(
+            CompositionJob.stream_key == "traditional_opponent_season",
+        )).mappings().one()
     assert job["status"] == "queued"
     assert job["attempts"] == 2
     assert job["last_error"] is None
 
 
+@pytest.mark.parametrize("stream_enabled", [True, False], ids=("active", "inactive"))
 def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success(
-    tmp_path,
+    tmp_path, stream_enabled,
 ):
     """Reconciliation finds accepted evidence even when the prior job succeeded."""
     engine = _engine(tmp_path, "reconcile-lineage.sqlite3")
@@ -2421,7 +2439,7 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
     with engine.begin() as connection:
         connection.execute(PublicationStream.__table__.update().where(
             PublicationStream.stream_key == "traditional_opponent_season",
-        ).values(enabled=True))
+        ).values(enabled=stream_enabled))
         # An older publication proves the original accepted source was
         # composed, but must not hide a newer source that reconciliation still
         # needs to queue.
@@ -2463,9 +2481,11 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
     assert publications.reconcile_pending(
         season=game.season,
         cutoff=cutoff,
-    ) == 1
+    ) == len(LedgerCorrectionQueue.STREAMS)
     with engine.connect() as connection:
-        job = connection.execute(select(CompositionJob.__table__)).mappings().one()
+        job = connection.execute(select(CompositionJob.__table__).where(
+            CompositionJob.stream_key == "traditional_opponent_season",
+        )).mappings().one()
     assert job["status"] == "queued"
     assert job["generation"] == 2
     assert json.loads(job["trigger_game_ids"]) == [game.game_id]
@@ -2473,6 +2493,28 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
     assert set(json.loads(job["source_observation_ids"])) == {raw_only_source}
     assert json.loads(job["ledger_evidence"]) == {game.game_id: game.checksum}
     assert job["recomposition_reason"] == "correction"
+    if not stream_enabled:
+        rebuilt = publications.compose_inactive_ledger(
+            "traditional_opponent_season",
+            season=game.season,
+            cutoff=cutoff,
+            payload={"corrected": True},
+            provenance={raw_only_source: game.game_id},
+            reason="correction",
+        )
+        with publications.session() as session:
+            assert rebuilt.status == "candidate"
+            assert publications._publication_provenance_matches(
+                session,
+                rebuilt.publication_id,
+                {raw_only_source: game.game_id},
+            )
+            assert session.get(
+                PublicationVersion, "prior-reconcile-publication"
+            ).status == "superseded"
+            assert session.get(
+                PublicationStream, "traditional_opponent_season"
+            ).enabled is False
 
 
 def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_path):
@@ -2572,3 +2614,191 @@ def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_pa
         )).all()
     assert second_pointer.fence == first_pointer.fence
     assert len(second_count) == len(first_count)
+
+
+def test_ledger_batch_refreshes_cached_pointer_before_advancing_fence(tmp_path):
+    """A reused session advances from the row locked after its cache was populated."""
+    engine = _engine(tmp_path, "cached-pointer.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "ledger_cache_regression"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=True,
+    )
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="cached-pointer-manifest",
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1000),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="cached-pointer-manifest",
+            status="active",
+            created_at=AS_OF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="cached-pointer-observation",
+            client_observation_id="cached-pointer-observation",
+            collector_id="test",
+            manifest_id="cached-pointer-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "game-1",
+                "surface": "canonical_game_ledger",
+            }),
+            season="2025-26",
+            cutoff=AS_OF,
+            schema_version=1,
+            checksum="a" * 64,
+            payload="{}",
+            payload_bytes=2,
+            retrieved_at=AS_OF,
+            accepted_at=AS_OF,
+        ))
+    provenance = {"cached-pointer-observation": "game-1"}
+
+    first = publications.recompose_ledger_batch((LedgerPublicationComposition(
+        stream_key=stream_key,
+        season="2025-26",
+        cutoff=AS_OF,
+        payload={"revision": 1},
+        provenance=provenance,
+        reason="initial acceptance",
+    ),))[0]
+    stale_session = publications.session()
+    try:
+        cached_pointer = stale_session.get(PublicationPointer, stream_key)
+        assert cached_pointer is not None
+        assert cached_pointer.fence == first.fence
+        stale_session.commit()
+
+        second = publications.compose(
+            stream_key,
+            season="2025-26",
+            cutoff=AS_OF,
+            payload={"revision": 2},
+            expected_fence=first.fence,
+            reason="first concurrent advance",
+            ledger_provenance=provenance,
+        )
+        with stale_session.begin():
+            third = publications.recompose_ledger_batch(
+                (LedgerPublicationComposition(
+                    stream_key=stream_key,
+                    season="2025-26",
+                    cutoff=AS_OF,
+                    payload={"revision": 3},
+                    provenance=provenance,
+                    reason="cached session advance",
+                ),),
+                session=stale_session,
+            )[0]
+    finally:
+        stale_session.close()
+
+    with engine.connect() as connection:
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.stream_key == stream_key,
+        )).mappings().one()
+        versions = connection.execute(select(PublicationVersion.__table__).where(
+            PublicationVersion.stream_key == stream_key,
+        )).mappings().all()
+    assert third.fence == second.fence + 1
+    assert pointer["fence"] == third.fence
+    assert pointer["active_publication_id"] == third.publication_id
+    assert pointer["previous_publication_id"] == second.publication_id
+    assert [row["publication_id"] for row in versions if row["status"] == "active"] == [
+        third.publication_id
+    ]
+
+
+def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_path):
+    engine = _engine(tmp_path, "inactive-candidate.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "inactive_ledger_candidate"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="inactive-candidate-manifest",
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1000),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="inactive-candidate-manifest",
+            status="active",
+            created_at=AS_OF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": source_id,
+                "client_observation_id": source_id,
+                "collector_id": "test",
+                "manifest_id": "inactive-candidate-manifest",
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": "game-1",
+                    "surface": "canonical_game_ledger",
+                }),
+                "season": "2025-26",
+                "cutoff": AS_OF,
+                "schema_version": 1,
+                "checksum": checksum,
+                "payload": payload,
+                "payload_bytes": len(payload),
+                "retrieved_at": accepted_at,
+                "accepted_at": accepted_at,
+            }
+            for source_id, checksum, payload, accepted_at in (
+                ("inactive-old", "a" * 64, "{}", AS_OF),
+                (
+                    "inactive-correction",
+                    "b" * 64,
+                    '{"corrected":true}',
+                    AS_OF + timedelta(hours=1),
+                ),
+            )
+        ])
+
+    stale = publications.compose_inactive_ledger(
+        stream_key,
+        season="2025-26",
+        cutoff=AS_OF,
+        payload={"value": 1},
+        provenance={"inactive-old": "game-1"},
+        reason="initial acceptance",
+    )
+    corrected = publications.compose_inactive_ledger(
+        stream_key,
+        season="2025-26",
+        cutoff=AS_OF,
+        payload={"value": 2},
+        provenance={"inactive-correction": "game-1"},
+        reason="correction",
+    )
+
+    with publications.session() as session:
+        assert session.get(PublicationVersion, stale.publication_id).status == "superseded"
+        assert session.get(PublicationVersion, corrected.publication_id).status == "candidate"
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.activate_stream(
+            stream_key,
+            reason="attempt stale activation",
+            candidate_publication_id=stale.publication_id,
+        )

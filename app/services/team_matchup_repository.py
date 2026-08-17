@@ -102,14 +102,30 @@ class StoredTeamMatchupSnapshot:
     observations: tuple[StoredTeamMatchupObservation, ...]
 
 
+class _LedgerRecompositionWriteCapability:
+    """Opaque authority shared only by the production ledger runtime graph."""
+
+
+def _new_ledger_recomposition_write_capability(
+) -> _LedgerRecompositionWriteCapability:
+    return _LedgerRecompositionWriteCapability()
+
+
 class TeamMatchupRepository:
     """Replace or read one season/as-of/window snapshot transactionally."""
 
-    def __init__(self, engine: Engine, *, write_fence=None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        write_fence=None,
+        ledger_write_capability: _LedgerRecompositionWriteCapability | None = None,
+    ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
+        self._ledger_write_capability = ledger_write_capability
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -136,6 +152,69 @@ class TeamMatchupRepository:
         session: Session | None = None,
     ) -> None:
         """Replace related windows in one transaction after collection."""
+
+        self._replace_snapshots(
+            snapshots,
+            retrieved_at=retrieved_at,
+            affected_team_ids_by_scope=affected_team_ids_by_scope,
+            affected_team_ids=affected_team_ids,
+            session=session,
+            enforce_legacy_fence=True,
+        )
+
+    def replace_ledger_snapshots(
+        self,
+        snapshots: Iterable[
+            tuple[
+                TeamMatchupSnapshotScope,
+                Iterable[TeamMatchupFact],
+                Iterable[TeamMatchupObservation],
+            ]
+        ],
+        *,
+        retrieved_at: datetime,
+        capability: _LedgerRecompositionWriteCapability,
+        session: Session,
+        affected_team_ids_by_scope: Mapping[
+            TeamMatchupSnapshotScope, frozenset[int] | None
+        ] | None = None,
+        affected_team_ids: frozenset[int] | None = None,
+    ) -> None:
+        """Replace ledger-owned surfaces inside an authorized runtime transaction."""
+
+        if (
+            self._ledger_write_capability is None
+            or capability is not self._ledger_write_capability
+            or session is None
+        ):
+            raise PermissionError("ledger_recomposition_write_not_authorized")
+        self._replace_snapshots(
+            snapshots,
+            retrieved_at=retrieved_at,
+            affected_team_ids_by_scope=affected_team_ids_by_scope,
+            affected_team_ids=affected_team_ids,
+            session=session,
+            enforce_legacy_fence=False,
+        )
+
+    def _replace_snapshots(
+        self,
+        snapshots: Iterable[
+            tuple[
+                TeamMatchupSnapshotScope,
+                Iterable[TeamMatchupFact],
+                Iterable[TeamMatchupObservation],
+            ]
+        ],
+        *,
+        retrieved_at: datetime,
+        affected_team_ids_by_scope: Mapping[
+            TeamMatchupSnapshotScope, frozenset[int] | None
+        ] | None,
+        affected_team_ids: frozenset[int] | None,
+        session: Session | None,
+        enforce_legacy_fence: bool,
+    ) -> None:
 
         received = tuple(
             (scope, tuple(facts), tuple(observations))
@@ -231,7 +310,11 @@ class TeamMatchupRepository:
                         target_team_ids,
                     )
                 )
-            checker = getattr(self._write_fence, "assert_writable", None)
+            checker = (
+                getattr(self._write_fence, "assert_writable", None)
+                if enforce_legacy_fence
+                else None
+            )
             for (
                 scope,
                 fact_rows,
