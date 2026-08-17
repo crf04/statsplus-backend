@@ -39,7 +39,7 @@ from app.services.collection_control import (
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     publication_base_for_stream,
-    resolve_governed_l15_game_ids,
+    resolve_governed_team_game_ids,
     validate_publication_rows,
 )
 
@@ -1120,7 +1120,7 @@ class DatabaseFirstActivationService:
     def activate(self, stream_key: str, *, actor: str, reason: str, **kwargs: Any) -> Any:
         if not kwargs.get("candidate_publication_id"):
             raise ControlPlaneError("publication_candidate_required")
-        if stream_key in NBA_PUBLICATION_STREAM_KEYS and stream_key.endswith("_l15"):
+        if stream_key in NBA_PUBLICATION_STREAM_KEYS:
             season = kwargs.get("season")
             cutoff = kwargs.get("cutoff")
             if season is None or cutoff is None:
@@ -1129,10 +1129,11 @@ class DatabaseFirstActivationService:
                 # Do not trust a caller-supplied expectation.  The operator
                 # facade owns the season/cutoff governance lookup and always
                 # replaces the value passed to the lower publication seam.
-                kwargs["expected_l15_game_ids"] = resolve_governed_l15_game_ids(
+                kwargs["expected_game_ids_by_team"] = resolve_governed_team_game_ids(
                     self.l15_expectation_resolver,
                     season,
                     cutoff,
+                    window=("l15" if stream_key.endswith("_l15") else "season"),
                 )
             except Exception as error:
                 raise ControlPlaneError(

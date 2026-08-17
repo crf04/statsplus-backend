@@ -102,14 +102,21 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
         ))
         connection.execute(EventCatalogEntry.__table__.insert(), events)
 
-    governance = ActiveManifestLedgerGovernanceReader(
+    reader = ActiveManifestLedgerGovernanceReader(
         engine, clock=lambda: cutoff - timedelta(hours=1)
-    ).read("2025-26", cutoff)
+    )
+    governance = reader.read("2025-26", cutoff)
 
     assert governance.cutoff == cutoff
     assert len(governance.expected_game_ids) == 225
     assert len(governance.team_ids) == 30
     assert all(len(game_ids) == 15 for game_ids in governance.expected_l15_game_ids.values())
+    season_by_team = reader.resolve_team_game_ids(
+        "2025-26", cutoff, window="season"
+    )
+    assert set(season_by_team) == set(governance.team_ids)
+    assert all(len(game_ids) == 15 for game_ids in season_by_team.values())
+    assert frozenset().union(*season_by_team.values()) == governance.expected_game_ids
     assert ActiveManifestLedgerGovernanceReader(
         engine, clock=lambda: cutoff - timedelta(hours=1)
     ).read_for_collection("2025-26").expected_game_ids == governance.expected_game_ids

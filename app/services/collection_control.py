@@ -44,7 +44,7 @@ from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     publication_base_for_stream,
     publication_stream,
-    resolve_governed_l15_game_ids,
+    resolve_governed_team_game_ids,
 )
 
 from app.models.collection_control import (
@@ -281,7 +281,7 @@ def _reject_duplicate_json_keys(pairs):
 
 
 def _validate_activation_candidate_payload(
-    stream_key: str, payload: str, *, season: str, expected_l15_game_ids=None
+    stream_key: str, payload: str, *, season: str, expected_game_ids_by_team=None
 ) -> None:
     """Validate the immutable fact envelope before binding its pointer.
 
@@ -333,7 +333,7 @@ def _validate_activation_candidate_payload(
             )
         else:
             rows = decode_team_window(document, stream_key=decoder_streams[stream_key])
-            if expected_l15_game_ids is not None:
+            if expected_game_ids_by_team is not None:
                 from app.services.team_matchup_publications import (
                     publication_base_for_stream,
                     validate_publication_rows,
@@ -341,16 +341,16 @@ def _validate_activation_candidate_payload(
                 validate_publication_rows(
                     publication_base_for_stream(decoder_streams[stream_key]),
                     rows,
-                    expected_l15_game_ids=expected_l15_game_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team,
+                    window=("l15" if stream_key.endswith("_l15") else "season"),
                 )
     except Exception as error:
         raise ControlPlaneError("publication_candidate_invalid") from error
 
 
-def _requires_l15_expectation(stream_key: str) -> bool:
+def _requires_team_window_expectation(stream_key: str) -> bool:
     return (
         stream_key in NBA_PUBLICATION_STREAM_KEYS
-        and stream_key.endswith("_l15")
         and publication_base_for_stream(stream_key) is not None
     )
 
@@ -2406,6 +2406,7 @@ class PublicationService(_SessionService):
     def activate_stream(self, stream_key: str, *, reason: str,
                         season: str | None = None, cutoff: datetime | None = None,
                         expected_l15_game_ids=None,
+                        expected_game_ids_by_team=None,
                         parity_artifact_id: str | None = None,
                         candidate_publication_id: str | None = None,
                         actor: str = "operator",
@@ -2435,28 +2436,33 @@ class PublicationService(_SessionService):
             } else None
             if require_candidate and not candidate_publication_id:
                 raise ControlPlaneError("publication_candidate_required")
+            expected_game_ids_by_team = (
+                expected_game_ids_by_team or expected_l15_game_ids
+            )
             if (
                 candidate_publication_id is not None
-                and _requires_l15_expectation(stream_key)
+                and _requires_team_window_expectation(stream_key)
             ):
                 if season is None or cutoff is None:
                     raise ControlPlaneError("publication_governance_unavailable")
+                window = "l15" if stream_key.endswith("_l15") else "season"
                 if self.l15_expectation_resolver is not None:
                     try:
                         # The lower publication seam rechecks the same
                         # season/cutoff authority when production wiring is
                         # present; a caller-supplied map is never trusted in
                         # place of that dependency.
-                        expected_l15_game_ids = resolve_governed_l15_game_ids(
+                        expected_game_ids_by_team = resolve_governed_team_game_ids(
                             self.l15_expectation_resolver,
                             season,
                             cutoff,
+                            window=window,
                         )
                     except Exception as error:
                         raise ControlPlaneError(
                             "publication_governance_unavailable"
                         ) from error
-                elif expected_l15_game_ids is None:
+                elif expected_game_ids_by_team is None:
                     raise ControlPlaneError("publication_governance_unavailable")
             candidate = None
             if candidate_publication_id is not None:
@@ -2526,7 +2532,7 @@ class PublicationService(_SessionService):
                     stream_key,
                     candidate.payload,
                     season=candidate.season,
-                    expected_l15_game_ids=expected_l15_game_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team,
                 )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
@@ -2661,14 +2667,17 @@ class PublicationService(_SessionService):
                 session, stream, season=season, cutoff=_aware(cutoff),
                 manifest_id=manifest_id,
             )
-            expected_l15_game_ids = None
+            expected_game_ids_by_team = None
             if stream_key in NBA_PUBLICATION_STREAM_KEYS:
-                if _requires_l15_expectation(stream_key):
+                if _requires_team_window_expectation(stream_key):
                     try:
-                        expected_l15_game_ids = resolve_governed_l15_game_ids(
+                        expected_game_ids_by_team = resolve_governed_team_game_ids(
                             self.l15_expectation_resolver,
                             season,
                             _aware(cutoff),
+                            window=(
+                                "l15" if stream_key.endswith("_l15") else "season"
+                            ),
                         )
                     except Exception as error:
                         raise ControlPlaneError(
@@ -2678,7 +2687,7 @@ class PublicationService(_SessionService):
                     stream_key,
                     encoded,
                     season=season,
-                    expected_l15_game_ids=expected_l15_game_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team,
                 )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
@@ -3112,15 +3121,19 @@ class CollectionOperationsService(_SessionService):
     ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
-        expected_l15_game_ids = None
-        if _requires_l15_expectation(stream_key) and candidate_publication_id is not None:
+        expected_game_ids_by_team = None
+        if (
+            _requires_team_window_expectation(stream_key)
+            and candidate_publication_id is not None
+        ):
             if season is None or cutoff is None:
                 raise ControlPlaneError("publication_governance_unavailable")
             try:
-                expected_l15_game_ids = resolve_governed_l15_game_ids(
+                expected_game_ids_by_team = resolve_governed_team_game_ids(
                     self.l15_expectation_resolver,
                     season,
                     cutoff,
+                    window=("l15" if stream_key.endswith("_l15") else "season"),
                 )
             except Exception as error:
                 raise ControlPlaneError(
@@ -3133,7 +3146,7 @@ class CollectionOperationsService(_SessionService):
                 reason=reason,
                 season=season,
                 cutoff=cutoff,
-                expected_l15_game_ids=expected_l15_game_ids,
+                expected_game_ids_by_team=expected_game_ids_by_team,
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
                 actor=actor,

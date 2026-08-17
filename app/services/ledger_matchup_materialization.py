@@ -50,7 +50,7 @@ from app.services.team_matchup_publications import (
     publication_lineage,
     publication_metric_identity,
     publication_stream,
-    resolve_governed_l15_game_ids,
+    resolve_governed_team_game_ids,
     validate_publication_rows,
 )
 from app.services.team_matchup_repository import (
@@ -210,6 +210,14 @@ class LedgerMatchupMaterializationService:
             roster_incomplete=roster_incomplete,
         )
         if self.publication_reader is not None:
+            season_game_ids_by_team = {
+                team_id: frozenset(
+                    game.game_id
+                    for game in games
+                    if team_id in {game.home_team_id, game.away_team_id}
+                )
+                for team_id in team_ids
+            }
             publication_reads = self._publication_reads(
                 tuple(
                     publication_stream(base, window)
@@ -224,7 +232,7 @@ class LedgerMatchupMaterializationService:
                     as_of=as_of,
                     window="season",
                     reads=publication_reads,
-                    expected_l15_game_ids=None,
+                    expected_game_ids_by_team=season_game_ids_by_team,
                     expected_team_ids=set(team_ids),
                 )
             )
@@ -234,7 +242,7 @@ class LedgerMatchupMaterializationService:
                     as_of=as_of,
                     window="l15",
                     reads=publication_reads,
-                    expected_l15_game_ids=expected_l15_game_ids,
+                    expected_game_ids_by_team=expected_l15_game_ids,
                     expected_team_ids=set(team_ids),
                 )
             )
@@ -282,7 +290,7 @@ class LedgerMatchupMaterializationService:
         as_of: date,
         window: str,
         reads: Mapping[str, object],
-        expected_l15_game_ids: Mapping[int, frozenset[str]] | None,
+        expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
         expected_team_ids: set[int],
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Project governed NBA team-window publications into raw facts.
@@ -321,7 +329,7 @@ class LedgerMatchupMaterializationService:
                 read,
                 season=season,
                 as_of=as_of,
-                expected_l15_game_ids=expected_l15_game_ids,
+                expected_game_ids_by_team=expected_game_ids_by_team,
                 expected_team_ids=expected_team_ids,
             )
             facts.extend(surface_facts)
@@ -361,7 +369,7 @@ class LedgerMatchupMaterializationService:
         *,
         season: str,
         as_of: date,
-        expected_l15_game_ids: Mapping[int, frozenset[str]] | None,
+        expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
         expected_team_ids: set[int] | None,
     ) -> tuple[tuple[TeamMatchupFact, ...], TeamMatchupObservation]:
         """Decode one NBA publication without borrowing another surface."""
@@ -388,7 +396,7 @@ class LedgerMatchupMaterializationService:
                 unavailable_reason=cutoff_reason,
                 publication=lineage,
             )
-        if expected_l15_game_ids is not None:
+        if expected_game_ids_by_team is not None:
             try:
                 publication_cutoff = (
                     assume_utc(read.cutoff)
@@ -398,10 +406,12 @@ class LedgerMatchupMaterializationService:
                 if read.season != season:
                     raise ValueError("publication_governance_unavailable")
                 if self.l15_expectation_resolver is not None:
-                    expected_l15_game_ids = resolve_governed_l15_game_ids(
+                    window = "l15" if stream_key.endswith("_l15") else "season"
+                    expected_game_ids_by_team = resolve_governed_team_game_ids(
                         self.l15_expectation_resolver,
                         read.season,
                         publication_cutoff,
+                        window=window,
                     )
             except Exception:
                 return (), TeamMatchupObservation(
@@ -431,7 +441,10 @@ class LedgerMatchupMaterializationService:
             )
         try:
             metric_keys = validate_publication_rows(
-                base, rows, expected_l15_game_ids=expected_l15_game_ids,
+                base,
+                rows,
+                expected_game_ids_by_team=expected_game_ids_by_team,
+                window=("l15" if stream_key.endswith("_l15") else "season"),
                 expected_team_ids=expected_team_ids,
             )
         except ValueError as exc:

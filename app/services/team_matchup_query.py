@@ -31,7 +31,7 @@ from app.services.team_matchup_publications import (
     publication_metric_identity,
     publication_metric_keys,
     validate_publication_rows,
-    resolve_governed_l15_game_ids,
+    resolve_governed_team_game_ids,
 )
 
 
@@ -248,12 +248,14 @@ class TeamMatchupQueryService:
             if not read.available:
                 base_windows[base] = None
                 continue
-            publication_l15_game_ids = None
-            if window_games is not None and base in NBA_PUBLICATION_BASES:
-                publication_l15_game_ids = self._publication_l15_ids(
-                    read, requested_season=season
+            publication_game_ids = None
+            if base in NBA_PUBLICATION_BASES:
+                publication_game_ids = self._publication_game_ids(
+                    read,
+                    requested_season=season,
+                    window=window,
                 )
-                if publication_l15_game_ids is None:
+                if publication_game_ids is None:
                     base_windows[base] = None
                     validation_failures[base] = "publication_governance_unavailable"
                     continue
@@ -271,15 +273,12 @@ class TeamMatchupQueryService:
                         base,
                         rows,
                         expected_team_ids=(
-                            set(publication_l15_game_ids)
-                            if publication_l15_game_ids is not None
+                            set(publication_game_ids)
+                            if publication_game_ids is not None
                             else None
                         ),
-                        expected_l15_game_ids=(
-                            publication_l15_game_ids
-                            if window_games is not None
-                            else None
-                        ),
+                        expected_game_ids_by_team=publication_game_ids,
+                        window=window,
                     )
             except PublicationPayloadError as error:
                 base_windows[base] = None
@@ -487,7 +486,9 @@ class TeamMatchupQueryService:
             observations=(observation,),
         )
 
-    def _publication_l15_ids(self, read, *, requested_season: str):
+    def _publication_game_ids(
+        self, read, *, requested_season: str, window: str
+    ):
         """Resolve governance at this immutable publication's own boundary."""
 
         if read.season != requested_season or read.cutoff is None:
@@ -501,12 +502,17 @@ class TeamMatchupQueryService:
             source = (
                 self._l15_expectation_resolver
                 if self._l15_expectation_resolver is not None
-                else self._expected_l15_game_ids_source
+                else (
+                    self._expected_l15_game_ids_source
+                    if self._expected_l15_game_ids_source is not None
+                    else self._publication_reader
+                )
             )
-            return resolve_governed_l15_game_ids(
+            return resolve_governed_team_game_ids(
                 source,
                 read.season,
                 cutoff,
+                window=window,
             )
         except Exception:
             return None

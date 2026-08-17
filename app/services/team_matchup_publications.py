@@ -41,6 +41,8 @@ def validate_publication_rows(
     base: str,
     rows,
     *,
+    expected_game_ids_by_team=None,
+    window: str | None = None,
     expected_l15_game_ids=None,
     expected_team_ids=None,
 ) -> tuple[str, ...]:
@@ -73,11 +75,16 @@ def validate_publication_rows(
             raw_keys = tuple(values)
             if len(raw_keys) != len(set(raw_keys)) or set(raw_keys) != expected:
                 raise PublicationValidationError("publication_metric_taxonomy_mismatch")
-    if expected_l15_game_ids is not None:
-        if {row.team_id for row in rows} != set(expected_l15_game_ids) or any(
-            len(row.game_ids) != 15
-            or len(set(row.game_ids)) != 15
-            or set(row.game_ids) != set(expected_l15_game_ids[row.team_id])
+    if expected_game_ids_by_team is None and expected_l15_game_ids is not None:
+        expected_game_ids_by_team = expected_l15_game_ids
+        window = "l15"
+    if expected_game_ids_by_team is not None:
+        if window not in NBA_PUBLICATION_WINDOWS:
+            raise PublicationValidationError("publication_game_set_mismatch")
+        if {row.team_id for row in rows} != set(expected_game_ids_by_team) or any(
+            len(row.game_ids) != len(set(row.game_ids))
+            or (window == "l15" and len(row.game_ids) != 15)
+            or set(row.game_ids) != set(expected_game_ids_by_team[row.team_id])
             for row in rows
         ):
             raise PublicationValidationError("publication_game_set_mismatch")
@@ -97,20 +104,47 @@ def resolve_governed_l15_game_ids(
     missing or malformed resolver result to become an implicit empty window.
     """
 
-    if resolver is None:
+    return resolve_governed_team_game_ids(resolver, season, cutoff, window="l15")
+
+
+def resolve_governed_team_game_ids(
+    resolver,
+    season: str,
+    cutoff,
+    *,
+    window: str,
+) -> Mapping[int, frozenset[str]]:
+    """Resolve exact governed per-team IDs for one immutable window."""
+
+    if window not in NBA_PUBLICATION_WINDOWS or resolver is None:
         raise ValueError("publication_governance_unavailable")
     result = None
-    for name in ("resolve_l15_game_ids", "resolve", "read_for_composition"):
+    method_names = (
+        "resolve_team_game_ids",
+        "resolve_l15_game_ids" if window == "l15" else "resolve_season_game_ids",
+        "resolve",
+        "read_for_composition",
+    )
+    for name in method_names:
         operation = getattr(resolver, name, None)
         if callable(operation):
-            result = operation(season, cutoff)
+            result = (
+                operation(season, cutoff, window=window)
+                if name == "resolve_team_game_ids"
+                else operation(season, cutoff)
+            )
             break
     else:
         if callable(resolver):
             result = resolver(season, cutoff)
         else:
             raise ValueError("publication_governance_unavailable")
-    result = getattr(result, "expected_l15_game_ids", result)
+    attribute = (
+        "expected_l15_game_ids"
+        if window == "l15"
+        else "expected_season_game_ids"
+    )
+    result = getattr(result, attribute, result)
     if not isinstance(result, Mapping):
         raise ValueError("publication_governance_unavailable")
     normalized: dict[int, frozenset[str]] = {}
@@ -217,5 +251,6 @@ __all__ = [
     "publication_metric_keys",
     "publication_stream",
     "resolve_governed_l15_game_ids",
+    "resolve_governed_team_game_ids",
     "validate_publication_rows",
 ]

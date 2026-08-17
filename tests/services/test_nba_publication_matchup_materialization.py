@@ -115,12 +115,25 @@ def _canonical_league_games():
     return tuple(canonical)
 
 
+def _season_game_ids_by_team():
+    games = _canonical_league_games()
+    return {
+        team_id: tuple(
+            game.game_id
+            for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in CANONICAL_TEAM_IDS
+    }
+
+
 def _engine(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'nba-publications.sqlite3'}")
     run_migrations(engine)
     cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
     with engine.begin() as connection:
         _, governed_l15, _ = _governance(_canonical_league_games())
+        governed_season = _season_game_ids_by_team()
         for base, template in NBA_PUBLICATION_STREAMS.items():
             for window in ("season", "l15"):
                 stream_key = template.format(window=window)
@@ -133,12 +146,12 @@ def _engine(tmp_path):
                             "game_ids": list(
                                 governed_l15[team_id]
                                 if window == "l15"
-                                else (f"game-{team_id}",)
+                                else governed_season[team_id]
                             ),
                             "game_count": (
                                 len(governed_l15[team_id])
                                 if window == "l15"
-                                else 1
+                                else len(governed_season[team_id])
                             ),
                             "per48": {key: float(team_id) for key in metric_keys},
                             "league_average": {
@@ -211,7 +224,23 @@ def _candidate_payload(expected_l15, *, mode="valid"):
         rows[0]["per48"].pop(next(iter(rows[0]["per48"])))
     elif mode == "wrong_game_set":
         rows[0]["game_ids"] = [f"wrong-{index}" for index in range(15)]
+    elif mode == "duplicate_game_ids":
+        rows[0]["game_ids"][-1] = rows[0]["game_ids"][0]
+    elif mode == "missing_game_id":
+        rows[0]["game_ids"].pop()
+        rows[0]["game_count"] -= 1
+    elif mode == "extra_game_id":
+        rows[0]["game_ids"].append("extra-game")
+        rows[0]["game_count"] += 1
     return {"rows": rows}
+
+
+class _WindowGovernanceResolver:
+    def __init__(self, *, season, l15):
+        self.expected = {"season": season, "l15": l15}
+
+    def resolve_team_game_ids(self, season, cutoff, *, window):
+        return self.expected[window]
 
 
 def test_collection_registry_and_publication_contract_share_canonical_taxonomy():
@@ -315,6 +344,78 @@ def test_operator_l15_activation_accepts_exact_governed_unique_ids(tmp_path):
     assert active_id is not None
 
 
+@pytest.mark.parametrize(
+    "mode",
+    ("duplicate_game_ids", "missing_game_id", "extra_game_id", "wrong_game_set"),
+)
+def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
+    tmp_path, mode
+):
+    engine = _engine(tmp_path)
+    season_ids = {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in _season_game_ids_by_team().items()
+    }
+    _, l15_ids, _ = _governance(_canonical_league_games())
+    publications = PublicationService(
+        engine,
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=season_ids, l15=l15_ids
+        ),
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=False,
+    )
+    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    payload = _candidate_payload(season_ids, mode=mode)
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    candidate_id = f"season-candidate-{mode}"
+    with engine.begin() as connection:
+        before = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=candidate_id,
+            stream_key=stream_key,
+            season="2025-26",
+            cutoff=cutoff,
+            version=3,
+            status="candidate",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            created_at=cutoff,
+            fence=0,
+        ))
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.activate_stream(
+            stream_key,
+            actor="operator",
+            reason="reject invalid season identity",
+            season="2025-26",
+            cutoff=cutoff,
+            candidate_publication_id=candidate_id,
+        )
+
+    with engine.connect() as connection:
+        after = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+    assert after["active_publication_id"] == before["active_publication_id"]
+    assert after["fence"] == before["fence"]
+
+
 def _rows(
     metric_key: str | tuple[str, ...],
     game_ids_by_team: dict[int, tuple[str, ...]] | None = None,
@@ -347,7 +448,9 @@ def _reader(
     game_ids_by_stream: dict[str, dict[int, tuple[str, ...]]] | None = None,
     contradict_statistics: bool = False,
     unavailable_lineage_by_stream: dict[str, tuple[str, str, str]] | None = None,
+    governance_available: bool = True,
 ):
+    governed_season = _season_game_ids_by_team()
     stream_bases = {
         template.format(window=window): base
         for base, template in NBA_PUBLICATION_STREAMS.items()
@@ -385,7 +488,10 @@ def _reader(
             (metric_keys_by_stream or {}).get(
                 stream_key, tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
             ),
-            (game_ids_by_stream or {}).get(stream_key),
+            (game_ids_by_stream or {}).get(
+                stream_key,
+                governed_season if stream_key.endswith("_season") else None,
+            ),
         )
         if contradict_statistics:
             decoded = tuple(
@@ -432,6 +538,23 @@ def _reader(
         )
 
     class Reader:
+        def resolve_team_game_ids(self, season, cutoff, *, window):
+            if not governance_available:
+                raise ValueError("publication_governance_unavailable")
+            cutoff_text = cutoff.isoformat()
+            for stream_key, read in reads.items():
+                if (
+                    stream_key.endswith(f"_{window}")
+                    and read.season == season
+                    and read.cutoff == cutoff_text
+                    and read.decoded
+                ):
+                    return {
+                        row.team_id: frozenset(row.game_ids)
+                        for row in read.decoded
+                    }
+            raise ValueError("publication_governance_unavailable")
+
         def snapshot(self, stream_keys, *, season=None, require_active=True):
             selected = {key: reads[key] for key in stream_keys}
             return PublicationReadSnapshot(
@@ -503,7 +626,7 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
     assert fact.publication.publication_id == "publication-exact_shot_zones_opponent_season"
     assert fact.publication.cutoff == "2025-10-15T00:00:00+00:00"
     assert fact.publication.freshness == "stale"
-    assert fact.game_ids == (f"game-{CANONICAL_TEAM_IDS[0]}",)
+    assert fact.game_ids == _season_game_ids_by_team()[CANONICAL_TEAM_IDS[0]]
     shot_type = next(item for item in snapshot.facts if item.base == "shot_types")
     assert (shot_type.slice_key, shot_type.stat_key) == (
         "catch_and_shoot",
@@ -883,6 +1006,58 @@ def test_future_cutoff_nba_surface_degrades_without_rolling_back_other_facts(
     assert observations["shot_types"].status == "available"
     assert any(fact.base == "traditional" for fact in snapshot.facts)
     assert any(fact.base == "shot_types" for fact in snapshot.facts)
+
+
+def test_materialization_rejects_fabricated_season_game_set_independently(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    games = _canonical_league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    season_ids = {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in _season_game_ids_by_team().items()
+    }
+    expected_game_ids, l15_ids, team_ids = _governance(games)
+    wrong = dict(_season_game_ids_by_team())
+    wrong[CANONICAL_TEAM_IDS[0]] = tuple(
+        f"fabricated-{index}" for index in range(15)
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+
+    LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=_reader(
+            game_ids_by_stream={stream_key: wrong},
+        ),
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=season_ids, l15=l15_ids
+        ),
+        clock=lambda: RETRIEVED_AT,
+    ).materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=l15_ids,
+        team_ids=team_ids,
+    )
+
+    snapshot = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF)
+    )
+    observations = {item.surface: item for item in snapshot.observations}
+    assert observations["shot_zones"].status == "unavailable"
+    assert observations["shot_zones"].unavailable_reason == (
+        "publication_game_set_mismatch"
+    )
+    assert observations["shot_types"].status == "available"
+    assert any(fact.base == "traditional" for fact in snapshot.facts)
+    assert not any(fact.base == "shot_zones" for fact in snapshot.facts)
 
 
 @pytest.mark.parametrize(
@@ -1295,6 +1470,57 @@ def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(
     assert after["fence"] == before["fence"]
 
 
+def test_compose_rejects_fabricated_season_game_ids_without_advancing_pointer(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    season_ids = {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in _season_game_ids_by_team().items()
+    }
+    _, l15_ids, _ = _governance(_canonical_league_games())
+    publications = PublicationService(
+        engine,
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=season_ids, l15=l15_ids
+        ),
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=True,
+    )
+    with engine.connect() as connection:
+        before = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose(
+            stream_key,
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            payload=_candidate_payload(season_ids, mode="wrong_game_set"),
+            expected_fence=before["fence"],
+        )
+
+    with engine.connect() as connection:
+        after = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+    assert after["active_publication_id"] == before["active_publication_id"]
+    assert after["fence"] == before["fence"]
+
+
 def test_invalid_active_publication_retains_computed_age(tmp_path):
     engine = _engine(tmp_path)
     publications = PublicationService(engine)
@@ -1386,6 +1612,40 @@ def test_direct_publication_query_preserves_future_cutoff_failure_provenance(
     )
 
 
+def test_direct_query_rejects_fabricated_season_game_set_with_lineage(tmp_path):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(engine)
+    season_ids = {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in _season_game_ids_by_team().items()
+    }
+    _, l15_ids, _ = _governance(_canonical_league_games())
+    wrong = dict(_season_game_ids_by_team())
+    wrong[CANONICAL_TEAM_IDS[0]] = tuple(
+        f"fabricated-{index}" for index in range(15)
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+    window = TeamMatchupQueryService(
+        repository,
+        publication_reader=_reader(
+            game_ids_by_stream={stream_key: wrong},
+        ),
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=season_ids, l15=l15_ids
+        ),
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+
+    observation = next(
+        item for item in window.observations if item.surface == "shot_zones"
+    )
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_game_set_mismatch"
+    assert observation.publication.publication_id == f"publication-{stream_key}"
+    assert not any(
+        metric.base == "shot_zones" for metric in window.league_metrics
+    )
+
+
 def test_l15_query_without_governance_fails_closed(tmp_path):
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(
@@ -1393,7 +1653,7 @@ def test_l15_query_without_governance_fails_closed(tmp_path):
     )
     window = TeamMatchupQueryService(
         repository,
-        publication_reader=_reader(),
+        publication_reader=_reader(governance_available=False),
     ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
 
     assert not any(metric.base in {"play_types", "shot_types", "shot_zones"}
