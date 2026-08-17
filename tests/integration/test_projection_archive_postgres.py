@@ -1354,19 +1354,15 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
         latest_selected.set()
         assert writer_committed.wait(timeout=10)
 
-    def replace_latest():
+    def record_failure():
         assert latest_selected.wait(timeout=10)
-        newer = _two_market_snapshot(
-            catalog,
-            OBSERVED_AT + timedelta(minutes=1),
-            player_ids=(9, 10),
-            thresholds=("21.5", "11.5"),
-        )
         try:
-            ProjectionArchive(writer_engine, catalog).ingest_snapshot(
-                newer,
+            ProjectionArchive(writer_engine, catalog).record_failed_poll(
+                provider="dabble",
                 query=query,
-                accepted_at=OBSERVED_AT + timedelta(minutes=1),
+                poll_started_at=OBSERVED_AT + timedelta(minutes=1),
+                completed_at=OBSERVED_AT + timedelta(minutes=2),
+                failure_reason="access_denied",
             )
         finally:
             writer_committed.set()
@@ -1376,29 +1372,36 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: OBSERVED_AT + timedelta(minutes=2),
     )
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        writer = executor.submit(replace_latest)
-        concurrent_pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
-        writer.result(timeout=10)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writer = executor.submit(record_failure)
+            concurrent_pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+            writer.result(timeout=10)
 
-    assert [player.canonical_player_id for player in concurrent_pool.players] == [7, 8]
-    after = LatestProjectionPlayerPoolReader(
-        reader_engine,
-        ProjectionArchiveReadScope(provider="dabble", query=query),
-        clock=lambda: OBSERVED_AT + timedelta(minutes=2),
-    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
-    assert [player.canonical_player_id for player in after.players] == [9, 10]
-    with reader_engine.connect() as connection:
-        latest = connection.execute(
-            select(
-                LatestPlayerProjection.generation_id,
-                LatestPlayerProjection.canonical_player_id,
-                LatestPlayerProjection.market_reference,
-            ).order_by(LatestPlayerProjection.canonical_player_id)
-        ).all()
-    assert len({row.generation_id for row in latest}) == 1
-    assert [row.canonical_player_id for row in latest] == [9, 10]
-    assert len({row.market_reference for row in latest}) == 2
-    event.remove(reader_engine, "after_cursor_execute", pause_after_latest)
-    reader_engine.dispose()
-    writer_engine.dispose()
+        assert [
+            player.canonical_player_id for player in concurrent_pool.players
+        ] == [7, 8]
+        assert concurrent_pool.freshness["status"] == "fresh"
+
+        after = LatestProjectionPlayerPoolReader(
+            reader_engine,
+            ProjectionArchiveReadScope(provider="dabble", query=query),
+            clock=lambda: OBSERVED_AT + timedelta(minutes=2),
+        ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+        assert [player.canonical_player_id for player in after.players] == [7, 8]
+        assert after.freshness["status"] == "stale-served"
+        with reader_engine.connect() as connection:
+            latest = connection.execute(
+                select(
+                    LatestPlayerProjection.generation_id,
+                    LatestPlayerProjection.canonical_player_id,
+                    LatestPlayerProjection.market_reference,
+                ).order_by(LatestPlayerProjection.canonical_player_id)
+            ).all()
+        assert len({row.generation_id for row in latest}) == 1
+        assert [row.canonical_player_id for row in latest] == [7, 8]
+        assert len({row.market_reference for row in latest}) == 2
+    finally:
+        event.remove(reader_engine, "after_cursor_execute", pause_after_latest)
+        reader_engine.dispose()
+        writer_engine.dispose()
