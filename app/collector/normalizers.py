@@ -450,6 +450,7 @@ def _stat_rows(
             (("fg3a", "FG3A"), "FG3A"),
             (("poss", "POSS"), "POSS"),
             (("pts", "PTS"), "PTS"),
+            (("min", "MIN", "minutes"), "minutes"),
         ):
             aliases = source if isinstance(source, tuple) else (source,)
             raw = _value(row, *aliases)
@@ -529,12 +530,16 @@ def normalize_opponent_synergy_response(
         raise ProviderContractError("provider_window_unsupported")
     requested = scope.get("play_type")
     required = (str(requested),) if requested is not None else None
-    return _stat_rows(
+    observation = _stat_rows(
         response, categories=PLAY_TYPES, category_names=("category", "play_type", "PLAY_TYPE"),
         observation_type="synergy_opponent", scope=scope, season=season,
         cutoff=cutoff, endpoint="synergy_opponent", required_identity=("team_id",),
         required_categories=required,
     )
+    _require_opponent_contract(
+        observation, require_games_played=True, require_minutes=True,
+    )
+    return observation
 
 
 def normalize_grouped_shot_response(
@@ -558,19 +563,29 @@ def normalize_grouped_shot_response(
 def normalize_opponent_grouped_shot_response(
     response: Any, *, season: str, cutoff: datetime | str,
     team_id: int, window: str = "season", category: str | None = None,
+    value_mode: str = "per48",
+    endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
-    scope = {"window": window, "subject": "opponent", "team_id": team_id, "phase": "Regular Season"}
+    scope = {
+        "window": window, "subject": "opponent", "team_id": team_id,
+        "phase": "Regular Season", "value_mode": value_mode,
+        "endpoint_window": dict(endpoint_window or {}),
+    }
     if category is not None:
         scope["category"] = category
     required = (str(category),) if category is not None else None
-    return _stat_rows(
+    observation = _stat_rows(
         response, categories=SHOT_TYPES, category_names=("category", "shot_type", "SHOT_TYPE", "general_range"),
         observation_type="shot_types_opponent", scope=scope, season=season,
         cutoff=cutoff, endpoint="opponent_shot_types", required_identity=("team_id",),
         category_default=str(category or "Catch and Shoot"),
         required_categories=required,
     )
+    _require_opponent_contract(
+        observation, scoped_team_id=team_id, require_games_played=True,
+    )
+    return observation
 
 
 def _zone_response(
@@ -617,6 +632,11 @@ def _zone_response(
         # one registry row per zone so category coverage is inspectable.
         for zone in SHOT_ZONES:
             zone_record = dict(identity_values)
+            games_played = _value(row, "games_played", "GP")
+            if games_played is not None:
+                zone_record["games_played"] = _number(
+                    games_played, integer=True
+                )
             zone_record.update({
                 "base": "shot_zones",
                 "category": zone,
@@ -650,15 +670,51 @@ def normalize_zone_response(
 
 def normalize_opponent_zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
-    team_id: int, window: str = "season",
+    team_id: int, window: str = "season", value_mode: str = "per48",
+    endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
-    scope = {"window": window, "subject": "opponent", "team_id": team_id, "phase": "Regular Season"}
-    return _zone_response(
+    scope = {
+        "window": window, "subject": "opponent", "team_id": team_id,
+        "phase": "Regular Season", "value_mode": value_mode,
+        "endpoint_window": dict(endpoint_window or {}),
+    }
+    observation = _zone_response(
         response, season=season, cutoff=cutoff, scope=scope,
         endpoint="opponent_zones", identity=("team_id",),
         observation_type="shot_zones_opponent",
     )
+    _require_opponent_contract(
+        observation, scoped_team_id=team_id, require_games_played=True
+    )
+    return observation
+
+
+def _require_opponent_contract(
+    observation: NormalizedObservation, *, scoped_team_id: int | None = None,
+    require_games_played: bool = False, require_minutes: bool = False,
+) -> None:
+    """Require real endpoint identity/count facts before envelope creation."""
+
+    records = observation.payload.get("records")
+    if not isinstance(records, list) or not records:
+        raise ProviderContractError("provider_schema_changed")
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ProviderContractError("provider_schema_changed")
+        if scoped_team_id is not None and record.get("team_id") != scoped_team_id:
+            raise ProviderContractError("manifest_scope_mismatch")
+        games_played = record.get("games_played")
+        if games_played is None:
+            if require_games_played:
+                raise ProviderContractError("provider_window_unverified")
+            continue
+        if _number(games_played, integer=True) <= 0:
+            raise ProviderContractError("value_invariant_failed")
+        if require_minutes:
+            minutes = record.get("minutes")
+            if minutes is None or _number(minutes) <= 0:
+                raise ProviderContractError("provider_window_unverified")
 
 
 # Friendly aliases used by compatibility probes and release tests.

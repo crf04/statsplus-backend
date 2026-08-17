@@ -59,6 +59,7 @@ class SanitizedFixtureProvider:
         self._record("opponent_shot_type", general_range=general_range, date_from=date_from, **parameters)
         return [{
             "team_id": parameters["team_id"], "category": general_range,
+            "GP": 15 if parameters.get("last_n_games") == 15 else 82,
             "FG2M": 1, "FG2A": 1, "FG3M": 1, "FG3A": 1,
         }]
 
@@ -66,6 +67,7 @@ class SanitizedFixtureProvider:
         self._record("opponent_zone", date_from=date_from, **parameters)
         return [{
             "team_id": parameters["team_id"],
+            "GP": 15 if parameters.get("last_n_games") == 15 else 82,
             **{
                 f"{zone}_{stat}": 1
                 for zone in SHOT_ZONES

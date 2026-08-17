@@ -283,6 +283,65 @@ class LedgerMatchupMaterializationService:
             l15_selection=self._selection(l15_window, l15_scope, checksums),
         )
 
+    def refresh_publication_surfaces(
+        self,
+        season: str,
+        *,
+        as_of: date,
+        expected_game_ids_by_team: Mapping[int, frozenset[str]],
+        expected_l15_game_ids: Mapping[int, frozenset[str]],
+        team_ids: frozenset[int],
+    ) -> None:
+        """Persist newly composed NBA surfaces without rebuilding ledger facts.
+
+        NBA composition jobs can arrive after the ledger-owned slice has
+        already succeeded.  Replacing only the NBA observations/facts keeps
+        that existing ledger snapshot intact and avoids revalidating the
+        immutable ledger merely because a provider publication completed.
+        """
+
+        if self.publication_reader is None:
+            raise ValueError("publication reader is required")
+        canonical_season = validate_canonical_season(season)
+        expected_teams = set(team_ids)
+        if (
+            set(expected_game_ids_by_team) != expected_teams
+            or set(expected_l15_game_ids) != expected_teams
+        ):
+            raise ValueError("publication governance team set mismatch")
+        reads = self._publication_reads(
+            tuple(
+                publication_stream(base, window)
+                for window in NBA_PUBLICATION_WINDOWS
+                for base in NBA_PUBLICATION_STREAMS
+            ),
+            canonical_season,
+        )
+        snapshots = []
+        for window, game_ids_by_team in (
+            ("season", expected_game_ids_by_team),
+            ("l15", expected_l15_game_ids),
+        ):
+            facts, observations = self._publication_read_model(
+                canonical_season,
+                as_of=as_of,
+                window=window,
+                reads=reads,
+                expected_game_ids_by_team=game_ids_by_team,
+                expected_team_ids=expected_teams,
+            )
+            snapshots.append((
+                TeamMatchupSnapshotScope(
+                    canonical_season, as_of, 15 if window == "l15" else None
+                ),
+                facts,
+                observations,
+            ))
+        self.matchup_repository.replace_governed_publication_snapshots(
+            snapshots,
+            retrieved_at=assume_utc(self._clock()),
+        )
+
     def _publication_read_model(
         self,
         season: str,

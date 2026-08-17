@@ -475,6 +475,7 @@ class LedgerRuntime:
                     self.repository.engine,
                     l15_expectation_resolver=self.governance,
                 )
+            nba_succeeded = False
             for job in nba_jobs:
                 try:
                     if not manifest_id:
@@ -487,6 +488,7 @@ class LedgerRuntime:
                     status, last_error = "failed", str(error)[:255]
                 else:
                     status, last_error = "succeeded", None
+                    nba_succeeded = True
                     completed += 1
                 with self.repository.engine.begin() as connection:
                     connection.execute(update(table).where(
@@ -500,6 +502,19 @@ class LedgerRuntime:
                 if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
             ]
             if not ledger_jobs:
+                if nba_succeeded and self.matchup_materialization is not None:
+                    governance = self.governance.read_for_composition(
+                        season, cutoff, manifest_id,
+                    )
+                    self.matchup_materialization.refresh_publication_surfaces(
+                        season,
+                        as_of=slate_date_for_instant(cutoff),
+                        expected_game_ids_by_team=(
+                            governance.expected_season_game_ids
+                        ),
+                        expected_l15_game_ids=governance.expected_l15_game_ids,
+                        team_ids=governance.team_ids,
+                    )
                 continue
             governance = self.governance.read_for_composition(
                 season,

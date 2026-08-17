@@ -153,6 +153,7 @@ class ResidentialScopeExecutor:
                     "window": "season", "phase": "Regular Season",
                     "play_type": category,
                     "subject": "opponent" if scope == "synergy_opponent" else "player",
+                    "value_mode": str(parameters.get("value_mode", "totals")),
                 }
                 normalizer = (
                     normalize_opponent_synergy_response
@@ -179,10 +180,17 @@ class ResidentialScopeExecutor:
                         parameters.get("date_from"), date_to=parameters.get("date_to"),
                         season=work.season, season_type="Regular Season",
                         team_id=int(team_id), last_n_games=15 if window == "l15" else None,
+                        per_mode_simple=str(parameters.get("per_mode", "Per48")),
                     )
                     yield normalize_opponent_grouped_shot_response(
                         raw, season=work.season, cutoff=work.cutoff,
                         team_id=int(team_id), window=window, category=category,
+                        value_mode=str(parameters.get("value_mode", "per48")),
+                        endpoint_window={
+                            "last_n_games": 15 if window == "l15" else 0,
+                            "date_from": parameters.get("date_from"),
+                            "date_to": parameters.get("date_to"),
+                        },
                     )
                 return
             for category in categories:
@@ -208,10 +216,17 @@ class ResidentialScopeExecutor:
                     parameters.get("date_from"), date_to=parameters.get("date_to"),
                     season=work.season, season_type="Regular Season",
                     team_id=int(team_id), last_n_games=15 if window == "l15" else None,
+                    per_mode_detailed=str(parameters.get("per_mode", "Per48")),
                 )
                 yield normalize_opponent_zone_response(
                     raw, season=work.season, cutoff=work.cutoff,
                     team_id=int(team_id), window=window,
+                    value_mode=str(parameters.get("value_mode", "per48")),
+                    endpoint_window={
+                        "last_n_games": 15 if window == "l15" else 0,
+                        "date_from": parameters.get("date_from"),
+                        "date_to": parameters.get("date_to"),
+                    },
                 )
                 return
             raw = _call(
@@ -260,6 +275,40 @@ class _StandaloneNBAProvider:
                 raise ProviderTransientError("provider_unavailable") from error
             raise ProviderContractError("provider_schema_changed") from error
 
+    @staticmethod
+    def _bind_window_gp(frame: Any, evidence: Any, *, team_id: int) -> Any:
+        try:
+            rows = evidence.loc[evidence["TEAM_ID"] == team_id, ["TEAM_ID", "GP"]]
+            if len(rows.index) != 1:
+                raise ProviderContractError("provider_window_unverified")
+            expected_gp = int(rows.iloc[0]["GP"])
+            merged = frame.copy()
+            if "TEAM_ID" not in merged or not (merged["TEAM_ID"] == team_id).all():
+                raise ProviderContractError("provider_window_unverified")
+            if "GP" in merged and not (merged["GP"] == expected_gp).all():
+                raise ProviderContractError("provider_window_unverified")
+            merged["GP"] = expected_gp
+            return merged
+        except (KeyError, TypeError, AttributeError, ValueError) as error:
+            raise ProviderContractError("provider_window_unverified") from error
+
+    def _team_window_evidence(
+        self, *, season: str, season_type: str, team_id: int,
+        last_n_games: int | None, date_from: str | None, date_to: str | None,
+    ) -> Any:
+        from nba_api.stats import endpoints
+        return self._request(lambda: endpoints.LeagueDashTeamStats(
+            season=season,
+            season_type_all_star=season_type,
+            team_id_nullable=team_id,
+            last_n_games=str(last_n_games or 0),
+            date_from_nullable=date_from or "",
+            date_to_nullable=date_to or "",
+            per_mode_detailed="Totals",
+            league_id_nullable="00",
+            timeout=self.timeout,
+        ))
+
     def fetch_whole_season_schedule(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
         return self._request(lambda: endpoints.ScheduleLeagueV2(season=season, timeout=self.timeout))
@@ -276,7 +325,7 @@ class _StandaloneNBAProvider:
         per_mode_simple: str = "Totals",
     ) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.SynergyPlayTypes(
+        frame = self._request(lambda: endpoints.SynergyPlayTypes(
             play_type_nullable=play_type,
             player_or_team_abbreviation=player_or_team_abbreviation,
             type_grouping_nullable=type_grouping,
@@ -286,6 +335,28 @@ class _StandaloneNBAProvider:
             league_id="00",
             timeout=self.timeout,
         ))
+        if player_or_team_abbreviation != "T":
+            return frame
+        minutes = self._request(lambda: endpoints.LeagueDashTeamStats(
+            season=season,
+            season_type_all_star=season_type,
+            per_mode_detailed="Totals",
+            league_id_nullable="00",
+            timeout=self.timeout,
+        ))
+        try:
+            minute_rows = minutes[["TEAM_ID", "MIN", "GP"]].rename(
+                columns={"GP": "WINDOW_GP"}
+            )
+            merged = frame.merge(minute_rows, on="TEAM_ID", how="left")
+            if merged[["MIN", "WINDOW_GP"]].isna().any().any():
+                raise ProviderContractError("provider_window_unverified")
+            if "GP" in merged and not (merged["GP"] == merged["WINDOW_GP"]).all():
+                raise ProviderContractError("provider_window_unverified")
+            merged["GP"] = merged["WINDOW_GP"]
+            return merged.drop(columns=["WINDOW_GP"])
+        except (KeyError, TypeError, AttributeError) as error:
+            raise ProviderContractError("provider_window_unverified") from error
 
     def fetch_player_shot_type(self, general_range: str, *, season: str, season_type: str) -> Any:
         from nba_api.stats import endpoints
@@ -315,9 +386,10 @@ class _StandaloneNBAProvider:
     def fetch_opponent_shot_chart(
         self, general_range: str, date_from: str | None, *, date_to: str | None = None,
         season: str, season_type: str, team_id: int, last_n_games: int | None,
+        per_mode_simple: str = "Per48",
     ) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.LeagueDashOppPtShot(
+        frame = self._request(lambda: endpoints.LeagueDashOppPtShot(
             general_range_nullable=general_range,
             date_from_nullable=date_from,
             date_to_nullable=date_to,
@@ -325,20 +397,26 @@ class _StandaloneNBAProvider:
             season_type_all_star=season_type,
             team_id_nullable=team_id,
             last_n_games_nullable=last_n_games,
-            per_mode_simple="Totals",
+            per_mode_simple=per_mode_simple,
             league_id="00",
             timeout=self.timeout,
         ))
+        evidence = self._team_window_evidence(
+            season=season, season_type=season_type, team_id=team_id,
+            last_n_games=last_n_games, date_from=date_from, date_to=date_to,
+        )
+        return self._bind_window_gp(frame, evidence, team_id=team_id)
 
     def fetch_opponent_shooting_zone(
         self, date_from: str | None, *, date_to: str | None = None,
         season: str, season_type: str, team_id: int, last_n_games: int | None,
+        per_mode_detailed: str = "Per48",
     ) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.LeagueDashTeamShotLocations(
+        frame = self._request(lambda: endpoints.LeagueDashTeamShotLocations(
             distance_range="By Zone",
             measure_type_simple="Opponent",
-            per_mode_detailed="Totals",
+            per_mode_detailed=per_mode_detailed,
             date_from_nullable=date_from,
             date_to_nullable=date_to,
             season=season,
@@ -348,6 +426,11 @@ class _StandaloneNBAProvider:
             league_id_nullable="00",
             timeout=self.timeout,
         ))
+        evidence = self._team_window_evidence(
+            season=season, season_type=season_type, team_id=team_id,
+            last_n_games=last_n_games, date_from=date_from, date_to=date_to,
+        )
+        return self._bind_window_gp(frame, evidence, team_id=team_id)
 
 
 class NBAStatsProviderAdapter:

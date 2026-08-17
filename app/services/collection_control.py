@@ -268,13 +268,14 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
         descriptors.extend({"scope": opponent_synergy, "parameters": {
             "window": "season", "subject": "opponent", "play_type": category,
             "subject_code": "T", "type_grouping": "Defensive",
-            "per_mode": "Totals",
+            "per_mode": "Totals", "value_mode": "totals_with_minutes",
         }} for category in PLAY_TYPES)
     date_to = slate_date_for_instant(_aware(cutoff)).isoformat()
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
             governed = {"window": window, "subject": "opponent", "team_id": team_id,
-                        "date_from": None, "date_to": date_to}
+                        "date_from": None, "date_to": date_to,
+                        "per_mode": "Per48", "value_mode": "per48"}
             if opponent_shots and window in shot_stream_windows:
                 descriptors.extend({"scope": opponent_shots, "parameters": {
                     **governed, "general_range": category,
@@ -438,6 +439,7 @@ def _compose_nba_observation_payload(
     values: dict[int, dict[str, float]] = {
         team_id: {} for team_id in expected_teams
     }
+    minutes_by_team: dict[int, float] = {}
     sources: list[dict[str, str]] = []
     stat_keys = {
         "play_types": ("PTS", "POSS"),
@@ -468,9 +470,29 @@ def _compose_nba_observation_payload(
             )
         ):
             raise ValueError("publication observation integrity mismatch")
+        expected_value_mode = (
+            "totals_with_minutes" if base == "play_types" else "per48"
+        )
+        if scope.get("value_mode") != expected_value_mode:
+            raise ValueError("publication value mode unverified")
+        if base != "play_types":
+            endpoint_window = scope.get("endpoint_window")
+            if (
+                not isinstance(endpoint_window, Mapping)
+                or int(endpoint_window.get("last_n_games", -1))
+                != (15 if window == "l15" else 0)
+                or not endpoint_window.get("date_to")
+            ):
+                raise ValueError("provider_window_unverified")
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
+        scoped_team_id = scope.get("team_id")
+        if scoped_team_id is not None:
+            try:
+                scoped_team_id = int(scoped_team_id)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError("publication scope team invalid") from error
         sources.append({
             "observation_id": observation.observation_id,
             "checksum": observation.checksum,
@@ -484,6 +506,32 @@ def _compose_nba_observation_payload(
                 raise ValueError("publication team identity missing") from error
             if team_id not in expected_teams:
                 raise ValueError("publication team identity invalid")
+            if scoped_team_id is not None and team_id != scoped_team_id:
+                raise ValueError("publication scope team mismatch")
+            games_played = record.get("games_played")
+            if games_played is None:
+                raise ValueError("provider_window_unverified")
+            if games_played is not None:
+                if (
+                    isinstance(games_played, bool)
+                    or not isinstance(games_played, (int, float))
+                    or not float(games_played).is_integer()
+                    or int(games_played) != len(expected_game_ids_by_team[team_id])
+                ):
+                    raise ValueError("publication games played mismatch")
+            if base == "play_types":
+                minutes = record.get("minutes")
+                if isinstance(minutes, bool):
+                    raise ValueError("publication minutes invalid")
+                try:
+                    minutes = float(minutes)
+                except (TypeError, ValueError, OverflowError) as error:
+                    raise ValueError("publication minutes invalid") from error
+                if not math.isfinite(minutes) or minutes <= 0:
+                    raise ValueError("publication minutes invalid")
+                prior_minutes = minutes_by_team.setdefault(team_id, minutes)
+                if prior_minutes != minutes:
+                    raise ValueError("publication minutes mismatch")
             category = str(
                 record.get("slice_key", record.get("category", ""))
             ).strip()
@@ -515,7 +563,11 @@ def _compose_nba_observation_payload(
             "game_ids": game_ids,
             "game_count": len(game_ids),
             "per48": {
-                metric: values[team_id][metric] / len(game_ids)
+                metric: (
+                    values[team_id][metric] * 48.0 / minutes_by_team[team_id]
+                    if base == "play_types"
+                    else values[team_id][metric]
+                )
                 for metric in sorted(expected_metrics)
             },
         })
@@ -2254,6 +2306,11 @@ class ObservationIngestionService(_SessionService):
                 min_event_catalog_games=self.min_event_catalog_games,
                 min_event_catalog_teams=self.min_event_catalog_teams,
                 min_athlete_catalog_identities=self.min_athlete_catalog_identities,
+            )
+            _validate_observation_scope_identity(
+                value,
+                observation_type=str(envelope.get("observation_type", "")),
+                scope=envelope.get("scope"),
             )
         except UnresolvedIdentityError as error:
             if self.collection_control is not None and envelope.get("season"):
@@ -4360,6 +4417,30 @@ def _validate_catalog_payload(value: Any, catalog_type: str, *,
             raise ValueError("athlete season coverage required")
     if len(identities) < max(1, int(min_athlete_identities)):
         raise ValueError("catalog_incomplete: athlete volume below bound")
+
+
+def _validate_observation_scope_identity(
+    value: Any, *, observation_type: str, scope: Any,
+) -> None:
+    """Reject team-scoped opponent envelopes whose rows name another team."""
+
+    if observation_type not in {"shot_types_opponent", "shot_zones_opponent"}:
+        return
+    if not isinstance(scope, Mapping) or "team_id" not in scope:
+        raise ValueError("opponent team scope required")
+    try:
+        scoped_team_id = int(scope["team_id"])
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("opponent team scope invalid") from error
+    if not isinstance(value, Mapping) or not isinstance(value.get("records"), list):
+        raise ValueError("opponent observation rows required")
+    for record in value["records"]:
+        try:
+            team_id = int(record["team_id"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("opponent observation team invalid") from error
+        if team_id != scoped_team_id:
+            raise ValueError("opponent observation team mismatch")
 
 
 def _validate_observation_payload(value: Any, *, observation_type: str,

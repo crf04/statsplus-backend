@@ -51,6 +51,16 @@ from app.services.collection_control import (
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.ledger_runtime import LedgerRuntime
 from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+from app.services.ledger_matchup_materialization import (
+    LedgerMatchupMaterializationService,
+)
+from app.services.team_matchup_repository import (
+    TeamMatchupFact,
+    TeamMatchupObservation,
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
+)
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=UTC)
@@ -166,6 +176,7 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
         pd.DataFrame([{
             "TEAM_ID": 1610612737,
             "GENERAL_RANGE": "Catch and Shoot",
+            "GP": 15,
             "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
         }]),
         season="2025-26", cutoff=NOW, team_id=1610612737,
@@ -176,9 +187,20 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
         key: shot.payload["records"][0][key]
         for key in ("FG2M", "FG2A", "FG3M", "FG3A")
     } == {"FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6}
+    with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
+        normalize_opponent_grouped_shot_response(
+            pd.DataFrame([{
+                "TEAM_ID": 1610612738, "GP": 15,
+                "GENERAL_RANGE": "Catch and Shoot",
+                "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
+            }]),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+            category="Catch and Shoot",
+        )
 
     columns = [("", "TEAM_ID")]
-    values = [1610612737]
+    columns.append(("", "GP"))
+    values = [1610612737, 15]
     for zone in (
         "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
         "Corner 3", "Above the Break 3",
@@ -201,6 +223,23 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
             "Corner 3", "Above the Break 3",
         )
     }
+    wrong_team_values = list(values)
+    wrong_team_values[0] = 1610612738
+    with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
+        normalize_opponent_zone_response(
+            pd.DataFrame(
+                [wrong_team_values], columns=pd.MultiIndex.from_tuples(columns)
+            ),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+        normalize_opponent_zone_response(
+            pd.DataFrame(
+                [values[:1] + values[2:]],
+                columns=pd.MultiIndex.from_tuples(columns[:1] + columns[2:]),
+            ),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
 
 
 def test_schedule_normalizer_canonicalizes_terminal_alias_and_postponement():
@@ -313,6 +352,8 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     assert {item["parameters"]["window"] for item in team_scoped} == {"season", "l15"}
     assert {item["parameters"]["date_to"] for item in team_scoped} == {NOW.date().isoformat()}
     assert all(item["parameters"]["date_from"] is None for item in team_scoped)
+    assert {item["parameters"]["per_mode"] for item in team_scoped} == {"Per48"}
+    assert {item["parameters"]["value_mode"] for item in team_scoped} == {"per48"}
     synergy = [item for item in opponent if item["scope"] == "synergy_opponent"]
     assert len(synergy) == 11
     assert {item["parameters"]["window"] for item in synergy} == {"season"}
@@ -340,7 +381,10 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
 
 @pytest.mark.parametrize(
     ("evidence_mode", "expected_composed"),
-    (("complete", 5), ("partial", 4), ("tampered", 4)),
+    (
+        ("complete", 5), ("partial", 4), ("tampered", 4), ("gp14", 4),
+        ("permuted", 1),
+    ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
     tmp_path: Path, evidence_mode: str, expected_composed: int,
@@ -409,19 +453,23 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             assert kwargs["per_mode_simple"] == "Totals"
             rows = [{
                 "team_id": int(team_id), "category": category,
-                "POSS": 10, "PTS": 12,
+                "GP": 15, "MIN": 750, "POSS": 10, "PTS": 12,
             } for team_id in team_ids]
             return rows[:1] if evidence_mode == "partial" and category == "Transition" else rows
 
         def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
+            assert kwargs["per_mode_simple"] == "Per48"
             return [{
                 "team_id": kwargs["team_id"], "category": category,
+                "GP": 14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15,
                 "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
             }]
 
         def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
+            assert kwargs["per_mode_detailed"] == "Per48"
             return [{
                 "team_id": kwargs["team_id"],
+                "GP": 15,
                 **{
                     f"{zone}_{stat}": value
                     for zone in (
@@ -482,6 +530,28 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     ingestion = ObservationIngestionService(
         control_db, publication_service=publications, clock=lambda: NOW
     )
+    for observation_type in ("shot_types_opponent", "shot_zones_opponent"):
+        mismatched = json.loads(json.dumps(next(
+            document
+            for document in uploaded
+            if document["observation_type"] == observation_type
+        )))
+        mismatched["client_observation_id"] += "-scope-mismatch"
+        scoped_team_id = int(mismatched["scope"]["team_id"])
+        mismatched["scope"]["team_id"] = next(
+            int(team_id) for team_id in team_ids if int(team_id) != scoped_team_id
+        )
+        assert {
+            int(record["team_id"])
+            for record in mismatched["payload"]["records"]
+        } == {scoped_team_id}
+        assert mismatched["observation_type"] == observation_type
+        assert int(mismatched["scope"]["team_id"]) != scoped_team_id
+        mismatched_payload = json.dumps(
+            mismatched.pop("payload"), sort_keys=True, separators=(",", ":")
+        ).encode()
+        with pytest.raises(ControlPlaneError, match="malformed_payload"):
+            ingestion.ingest(claims, mismatched, mismatched_payload)
     for document in uploaded:
         payload = json.dumps(
             document.pop("payload"), sort_keys=True, separators=(",", ":")
@@ -499,6 +569,24 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             connection.execute(update(CollectionObservation).where(
                 CollectionObservation.observation_id == target["observation_id"]
             ).values(payload=target["payload"] + " "))
+    if evidence_mode == "permuted":
+        next_team = {
+            int(team_id): int(team_ids[(index + 1) % len(team_ids)])
+            for index, team_id in enumerate(team_ids)
+        }
+        with control_db.begin() as connection:
+            observations = connection.execute(select(CollectionObservation).where(
+                CollectionObservation.observation_type.in_((
+                    "shot_types_opponent", "shot_zones_opponent",
+                ))
+            )).mappings().all()
+            for observation in observations:
+                scope = json.loads(observation["scope"])
+                scope["team_id"] = next_team[int(scope["team_id"])]
+                connection.execute(update(CollectionObservation).where(
+                    CollectionObservation.observation_id
+                    == observation["observation_id"]
+                ).values(scope=json.dumps(scope, sort_keys=True)))
     with control_db.connect() as connection:
         assert {
             row.stream_key
@@ -511,11 +599,43 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             cutoff=cutoff, payload={"rows": []},
             manifest_id=manifest.manifest_id,
         )
+    matchup_repository = TeamMatchupRepository(
+        control_db,
+        publication_write_capability=(
+            publications.governed_publication_write_capability()
+        ),
+    )
+    preserved_scope = TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    matchup_repository.replace_snapshots(
+        [(
+            preserved_scope,
+            [
+                TeamMatchupFact(
+                    team_id=team_id, base="traditional", slice_key="overall",
+                    stat_key="FGA", raw_value=1, denominator_value=1,
+                    denominator_unit="minutes", provider="ledger",
+                )
+                for team_id in team_ids
+            ],
+            [TeamMatchupObservation(surface="traditional", status="available")],
+        )],
+        retrieved_at=cutoff,
+    )
+    matchup_materialization = LedgerMatchupMaterializationService(
+        CanonicalGameLedgerRepository(control_db),
+        matchup_repository,
+        publication_reader=DatabaseFirstPublicationReader(
+            control_db, clock=lambda: NOW
+        ),
+        l15_expectation_resolver=governance,
+        clock=lambda: NOW,
+    )
     runtime = LedgerRuntime(
         backfill=None,
         repository=SimpleNamespace(engine=control_db),
         materialization=None,
         governance=governance,
+        matchup_materialization=matchup_materialization,
         publication_service=publications,
         clock=lambda: NOW,
     )
@@ -534,6 +654,12 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             ) or (
                 evidence_mode == "tampered"
                 and stream_key == "grouped_shot_types_opponent_season"
+            ) or (
+                evidence_mode == "gp14"
+                and stream_key == "grouped_shot_types_opponent_l15"
+            ) or (
+                evidence_mode == "permuted"
+                and stream_key != "synergy_play_types_opponent_season"
             )
             else "succeeded"
         )
@@ -541,11 +667,11 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     }
     reader = DatabaseFirstPublicationReader(control_db, clock=lambda: NOW)
     expected_values = {
-        "synergy_play_types_opponent_season": ("Transition_PTS", 12 / 15),
-        "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 4 / 15),
-        "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 4 / 15),
-        "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4 / 15),
-        "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4 / 15),
+        "synergy_play_types_opponent_season": ("Transition_PTS", 12 * 48 / 750),
+        "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 4),
+        "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 4),
+        "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4),
+        "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4),
     }
     if evidence_mode == "partial":
         expected_values.pop("synergy_play_types_opponent_season")
@@ -557,11 +683,44 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         assert not reader.read(
             "grouped_shot_types_opponent_season", season="2025-26"
         ).available
+    if evidence_mode == "gp14":
+        expected_values.pop("grouped_shot_types_opponent_l15")
+        assert not reader.read(
+            "grouped_shot_types_opponent_l15", season="2025-26"
+        ).available
+    if evidence_mode == "permuted":
+        expected_values = {
+            "synergy_play_types_opponent_season": (
+                "Transition_PTS", 12 * 48 / 750,
+            )
+        }
     for stream_key, (metric, expected) in expected_values.items():
         read = reader.read(stream_key, season="2025-26")
         assert read.available and len(read.decoded or ()) == 30
         assert (read.decoded or ())[0].per48[metric] == pytest.approx(expected)
         assert read.payload["source_observations"]
+    if evidence_mode == "complete":
+        season_snapshot = matchup_repository.get_snapshot(
+            TeamMatchupSnapshotScope("2025-26", cutoff.date())
+        )
+        l15_snapshot = matchup_repository.get_snapshot(
+            TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+        )
+        assert {fact.base for fact in season_snapshot.facts} >= {
+            "play_types", "shot_types", "shot_zones",
+        }
+        assert {fact.base for fact in l15_snapshot.facts} >= {
+            "shot_types", "shot_zones",
+        }
+        assert all(
+            fact.publication is not None
+            for fact in (*season_snapshot.facts, *l15_snapshot.facts)
+            if fact.base in {"play_types", "shot_types", "shot_zones"}
+        )
+        assert any(
+            fact.base == "traditional" and fact.raw_value == 1
+            for fact in season_snapshot.facts
+        )
     with control_db.connect() as connection:
         assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)
     outbox.close()
