@@ -316,33 +316,161 @@ class _RecordedLegacyCatalog:
         return list(self.events)
 
 
-def _recorded_provider_membership(team_ids):
-    """Return the independent game-log/detail response fixture.
+# Immutable provider captures.  These literals are independently authored
+# response evidence: they are not derived from the Event Catalog, ledger
+# CanonicalGame rows, or the route's expected-value fixture.
+_RECORDED_NBA_MEMBERSHIP = {
+    1610612737: ("game-00-00", "game-01-00", "game-02-00", "game-03-00", "game-04-00", "game-05-00", "game-06-00", "game-07-00", "game-08-00", "game-09-00", "game-10-00", "game-11-00", "game-12-00", "game-13-00", "game-14-00"),
+    1610612738: ("game-00-01", "game-01-02", "game-02-03", "game-03-04", "game-04-05", "game-05-06", "game-06-07", "game-07-08", "game-08-09", "game-09-10", "game-10-11", "game-11-12", "game-12-13", "game-13-14", "game-14-14"),
+    1610612739: ("game-00-02", "game-01-03", "game-02-04", "game-03-05", "game-04-06", "game-05-07", "game-06-08", "game-07-09", "game-08-10", "game-09-11", "game-10-12", "game-11-13", "game-12-14", "game-13-14", "game-14-13"),
+    1610612740: ("game-00-03", "game-01-04", "game-02-05", "game-03-06", "game-04-07", "game-05-08", "game-06-09", "game-07-10", "game-08-11", "game-09-12", "game-10-13", "game-11-14", "game-12-14", "game-13-13", "game-14-12"),
+    1610612741: ("game-00-04", "game-01-05", "game-02-06", "game-03-07", "game-04-08", "game-05-09", "game-06-10", "game-07-11", "game-08-12", "game-09-13", "game-10-14", "game-11-14", "game-12-13", "game-13-12", "game-14-11"),
+    1610612742: ("game-00-05", "game-01-06", "game-02-07", "game-03-08", "game-04-09", "game-05-10", "game-06-11", "game-07-12", "game-08-13", "game-09-14", "game-10-14", "game-11-13", "game-12-12", "game-13-11", "game-14-10"),
+    1610612743: ("game-00-06", "game-01-07", "game-02-08", "game-03-09", "game-04-10", "game-05-11", "game-06-12", "game-07-13", "game-08-14", "game-09-14", "game-10-13", "game-11-12", "game-12-11", "game-13-10", "game-14-09"),
+    1610612744: ("game-00-07", "game-01-08", "game-02-09", "game-03-10", "game-04-11", "game-05-12", "game-06-13", "game-07-14", "game-08-14", "game-09-13", "game-10-12", "game-11-11", "game-12-10", "game-13-09", "game-14-08"),
+    1610612745: ("game-00-08", "game-01-09", "game-02-10", "game-03-11", "game-04-12", "game-05-13", "game-06-14", "game-07-14", "game-08-13", "game-09-12", "game-10-11", "game-11-10", "game-12-09", "game-13-08", "game-14-07"),
+    1610612746: ("game-00-09", "game-01-10", "game-02-11", "game-03-12", "game-04-13", "game-05-14", "game-06-14", "game-07-13", "game-08-12", "game-09-11", "game-10-10", "game-11-09", "game-12-08", "game-13-07", "game-14-06"),
+    1610612747: ("game-00-10", "game-01-11", "game-02-12", "game-03-13", "game-04-14", "game-05-14", "game-06-13", "game-07-12", "game-08-11", "game-09-10", "game-10-09", "game-11-08", "game-12-07", "game-13-06", "game-14-05"),
+    1610612748: ("game-00-11", "game-01-12", "game-02-13", "game-03-14", "game-04-14", "game-05-13", "game-06-12", "game-07-11", "game-08-10", "game-09-09", "game-10-08", "game-11-07", "game-12-06", "game-13-05", "game-14-04"),
+    1610612749: ("game-00-12", "game-01-13", "game-02-14", "game-03-14", "game-04-13", "game-05-12", "game-06-11", "game-07-10", "game-08-09", "game-09-08", "game-10-07", "game-11-06", "game-12-05", "game-13-04", "game-14-03"),
+    1610612750: ("game-00-13", "game-01-14", "game-02-14", "game-03-13", "game-04-12", "game-05-11", "game-06-10", "game-07-09", "game-08-08", "game-09-07", "game-10-06", "game-11-05", "game-12-04", "game-13-03", "game-14-02"),
+    1610612751: ("game-00-14", "game-01-14", "game-02-13", "game-03-12", "game-04-11", "game-05-10", "game-06-09", "game-07-08", "game-08-07", "game-09-06", "game-10-05", "game-11-04", "game-12-03", "game-13-02", "game-14-01"),
+    1610612752: ("game-00-14", "game-01-13", "game-02-12", "game-03-11", "game-04-10", "game-05-09", "game-06-08", "game-07-07", "game-08-06", "game-09-05", "game-10-04", "game-11-03", "game-12-02", "game-13-01", "game-14-00"),
+    1610612753: ("game-00-13", "game-01-12", "game-02-11", "game-03-10", "game-04-09", "game-05-08", "game-06-07", "game-07-06", "game-08-05", "game-09-04", "game-10-03", "game-11-02", "game-12-01", "game-13-00", "game-14-01"),
+    1610612754: ("game-00-12", "game-01-11", "game-02-10", "game-03-09", "game-04-08", "game-05-07", "game-06-06", "game-07-05", "game-08-04", "game-09-03", "game-10-02", "game-11-01", "game-12-00", "game-13-01", "game-14-02"),
+    1610612755: ("game-00-11", "game-01-10", "game-02-09", "game-03-08", "game-04-07", "game-05-06", "game-06-05", "game-07-04", "game-08-03", "game-09-02", "game-10-01", "game-11-00", "game-12-01", "game-13-02", "game-14-03"),
+    1610612756: ("game-00-10", "game-01-09", "game-02-08", "game-03-07", "game-04-06", "game-05-05", "game-06-04", "game-07-03", "game-08-02", "game-09-01", "game-10-00", "game-11-01", "game-12-02", "game-13-03", "game-14-04"),
+    1610612757: ("game-00-09", "game-01-08", "game-02-07", "game-03-06", "game-04-05", "game-05-04", "game-06-03", "game-07-02", "game-08-01", "game-09-00", "game-10-01", "game-11-02", "game-12-03", "game-13-04", "game-14-05"),
+    1610612758: ("game-00-08", "game-01-07", "game-02-06", "game-03-05", "game-04-04", "game-05-03", "game-06-02", "game-07-01", "game-08-00", "game-09-01", "game-10-02", "game-11-03", "game-12-04", "game-13-05", "game-14-06"),
+    1610612759: ("game-00-07", "game-01-06", "game-02-05", "game-03-04", "game-04-03", "game-05-02", "game-06-01", "game-07-00", "game-08-01", "game-09-02", "game-10-03", "game-11-04", "game-12-05", "game-13-06", "game-14-07"),
+    1610612760: ("game-00-06", "game-01-05", "game-02-04", "game-03-03", "game-04-02", "game-05-01", "game-06-00", "game-07-01", "game-08-02", "game-09-03", "game-10-04", "game-11-05", "game-12-06", "game-13-07", "game-14-08"),
+    1610612761: ("game-00-05", "game-01-04", "game-02-03", "game-03-02", "game-04-01", "game-05-00", "game-06-01", "game-07-02", "game-08-03", "game-09-04", "game-10-05", "game-11-06", "game-12-07", "game-13-08", "game-14-09"),
+    1610612762: ("game-00-04", "game-01-03", "game-02-02", "game-03-01", "game-04-00", "game-05-01", "game-06-02", "game-07-03", "game-08-04", "game-09-05", "game-10-06", "game-11-07", "game-12-08", "game-13-09", "game-14-10"),
+    1610612763: ("game-00-03", "game-01-02", "game-02-01", "game-03-00", "game-04-01", "game-05-02", "game-06-03", "game-07-04", "game-08-05", "game-09-06", "game-10-07", "game-11-08", "game-12-09", "game-13-10", "game-14-11"),
+    1610612764: ("game-00-02", "game-01-01", "game-02-00", "game-03-01", "game-04-02", "game-05-03", "game-06-04", "game-07-05", "game-08-06", "game-09-07", "game-10-08", "game-11-09", "game-12-10", "game-13-11", "game-14-12"),
+    1610612765: ("game-00-01", "game-01-00", "game-02-01", "game-03-02", "game-04-03", "game-05-04", "game-06-05", "game-07-06", "game-08-07", "game-09-08", "game-10-09", "game-11-10", "game-12-11", "game-13-12", "game-14-13"),
+    1610612766: ("game-00-00", "game-01-01", "game-02-02", "game-03-03", "game-04-04", "game-05-05", "game-06-06", "game-07-07", "game-08-08", "game-09-09", "game-10-10", "game-11-11", "game-12-12", "game-13-13", "game-14-14"),
+}
 
-    These are provider-returned IDs recorded from the fixture provider, not
-    IDs read from the governed Event Catalog.  The deterministic schedule is
-    kept here so a catalog mutation cannot silently rewrite the provider
-    response that the refresh writer validates.
-    """
+_RECORDED_PBP_MEMBERSHIP = {
+    1610612737: ("game-00-00", "game-01-00", "game-02-00", "game-03-00", "game-04-00", "game-05-00", "game-06-00", "game-07-00", "game-08-00", "game-09-00", "game-10-00", "game-11-00", "game-12-00", "game-13-00", "game-14-00"),
+    1610612738: ("game-00-01", "game-01-02", "game-02-03", "game-03-04", "game-04-05", "game-05-06", "game-06-07", "game-07-08", "game-08-09", "game-09-10", "game-10-11", "game-11-12", "game-12-13", "game-13-14", "game-14-14"),
+    1610612739: ("game-00-02", "game-01-03", "game-02-04", "game-03-05", "game-04-06", "game-05-07", "game-06-08", "game-07-09", "game-08-10", "game-09-11", "game-10-12", "game-11-13", "game-12-14", "game-13-14", "game-14-13"),
+    1610612740: ("game-00-03", "game-01-04", "game-02-05", "game-03-06", "game-04-07", "game-05-08", "game-06-09", "game-07-10", "game-08-11", "game-09-12", "game-10-13", "game-11-14", "game-12-14", "game-13-13", "game-14-12"),
+    1610612741: ("game-00-04", "game-01-05", "game-02-06", "game-03-07", "game-04-08", "game-05-09", "game-06-10", "game-07-11", "game-08-12", "game-09-13", "game-10-14", "game-11-14", "game-12-13", "game-13-12", "game-14-11"),
+    1610612742: ("game-00-05", "game-01-06", "game-02-07", "game-03-08", "game-04-09", "game-05-10", "game-06-11", "game-07-12", "game-08-13", "game-09-14", "game-10-14", "game-11-13", "game-12-12", "game-13-11", "game-14-10"),
+    1610612743: ("game-00-06", "game-01-07", "game-02-08", "game-03-09", "game-04-10", "game-05-11", "game-06-12", "game-07-13", "game-08-14", "game-09-14", "game-10-13", "game-11-12", "game-12-11", "game-13-10", "game-14-09"),
+    1610612744: ("game-00-07", "game-01-08", "game-02-09", "game-03-10", "game-04-11", "game-05-12", "game-06-13", "game-07-14", "game-08-14", "game-09-13", "game-10-12", "game-11-11", "game-12-10", "game-13-09", "game-14-08"),
+    1610612745: ("game-00-08", "game-01-09", "game-02-10", "game-03-11", "game-04-12", "game-05-13", "game-06-14", "game-07-14", "game-08-13", "game-09-12", "game-10-11", "game-11-10", "game-12-09", "game-13-08", "game-14-07"),
+    1610612746: ("game-00-09", "game-01-10", "game-02-11", "game-03-12", "game-04-13", "game-05-14", "game-06-14", "game-07-13", "game-08-12", "game-09-11", "game-10-10", "game-11-09", "game-12-08", "game-13-07", "game-14-06"),
+    1610612747: ("game-00-10", "game-01-11", "game-02-12", "game-03-13", "game-04-14", "game-05-14", "game-06-13", "game-07-12", "game-08-11", "game-09-10", "game-10-09", "game-11-08", "game-12-07", "game-13-06", "game-14-05"),
+    1610612748: ("game-00-11", "game-01-12", "game-02-13", "game-03-14", "game-04-14", "game-05-13", "game-06-12", "game-07-11", "game-08-10", "game-09-09", "game-10-08", "game-11-07", "game-12-06", "game-13-05", "game-14-04"),
+    1610612749: ("game-00-12", "game-01-13", "game-02-14", "game-03-14", "game-04-13", "game-05-12", "game-06-11", "game-07-10", "game-08-09", "game-09-08", "game-10-07", "game-11-06", "game-12-05", "game-13-04", "game-14-03"),
+    1610612750: ("game-00-13", "game-01-14", "game-02-14", "game-03-13", "game-04-12", "game-05-11", "game-06-10", "game-07-09", "game-08-08", "game-09-07", "game-10-06", "game-11-05", "game-12-04", "game-13-03", "game-14-02"),
+    1610612751: ("game-00-14", "game-01-14", "game-02-13", "game-03-12", "game-04-11", "game-05-10", "game-06-09", "game-07-08", "game-08-07", "game-09-06", "game-10-05", "game-11-04", "game-12-03", "game-13-02", "game-14-01"),
+    1610612752: ("game-00-14", "game-01-13", "game-02-12", "game-03-11", "game-04-10", "game-05-09", "game-06-08", "game-07-07", "game-08-06", "game-09-05", "game-10-04", "game-11-03", "game-12-02", "game-13-01", "game-14-00"),
+    1610612753: ("game-00-13", "game-01-12", "game-02-11", "game-03-10", "game-04-09", "game-05-08", "game-06-07", "game-07-06", "game-08-05", "game-09-04", "game-10-03", "game-11-02", "game-12-01", "game-13-00", "game-14-01"),
+    1610612754: ("game-00-12", "game-01-11", "game-02-10", "game-03-09", "game-04-08", "game-05-07", "game-06-06", "game-07-05", "game-08-04", "game-09-03", "game-10-02", "game-11-01", "game-12-00", "game-13-01", "game-14-02"),
+    1610612755: ("game-00-11", "game-01-10", "game-02-09", "game-03-08", "game-04-07", "game-05-06", "game-06-05", "game-07-04", "game-08-03", "game-09-02", "game-10-01", "game-11-00", "game-12-01", "game-13-02", "game-14-03"),
+    1610612756: ("game-00-10", "game-01-09", "game-02-08", "game-03-07", "game-04-06", "game-05-05", "game-06-04", "game-07-03", "game-08-02", "game-09-01", "game-10-00", "game-11-01", "game-12-02", "game-13-03", "game-14-04"),
+    1610612757: ("game-00-09", "game-01-08", "game-02-07", "game-03-06", "game-04-05", "game-05-04", "game-06-03", "game-07-02", "game-08-01", "game-09-00", "game-10-01", "game-11-02", "game-12-03", "game-13-04", "game-14-05"),
+    1610612758: ("game-00-08", "game-01-07", "game-02-06", "game-03-05", "game-04-04", "game-05-03", "game-06-02", "game-07-01", "game-08-00", "game-09-01", "game-10-02", "game-11-03", "game-12-04", "game-13-05", "game-14-06"),
+    1610612759: ("game-00-07", "game-01-06", "game-02-05", "game-03-04", "game-04-03", "game-05-02", "game-06-01", "game-07-00", "game-08-01", "game-09-02", "game-10-03", "game-11-04", "game-12-05", "game-13-06", "game-14-07"),
+    1610612760: ("game-00-06", "game-01-05", "game-02-04", "game-03-03", "game-04-02", "game-05-01", "game-06-00", "game-07-01", "game-08-02", "game-09-03", "game-10-04", "game-11-05", "game-12-06", "game-13-07", "game-14-08"),
+    1610612761: ("game-00-05", "game-01-04", "game-02-03", "game-03-02", "game-04-01", "game-05-00", "game-06-01", "game-07-02", "game-08-03", "game-09-04", "game-10-05", "game-11-06", "game-12-07", "game-13-08", "game-14-09"),
+    1610612762: ("game-00-04", "game-01-03", "game-02-02", "game-03-01", "game-04-00", "game-05-01", "game-06-02", "game-07-03", "game-08-04", "game-09-05", "game-10-06", "game-11-07", "game-12-08", "game-13-09", "game-14-10"),
+    1610612763: ("game-00-03", "game-01-02", "game-02-01", "game-03-00", "game-04-01", "game-05-02", "game-06-03", "game-07-04", "game-08-05", "game-09-06", "game-10-07", "game-11-08", "game-12-09", "game-13-10", "game-14-11"),
+    1610612764: ("game-00-02", "game-01-01", "game-02-00", "game-03-01", "game-04-02", "game-05-03", "game-06-04", "game-07-05", "game-08-06", "game-09-07", "game-10-08", "game-11-09", "game-12-10", "game-13-11", "game-14-12"),
+    1610612765: ("game-00-01", "game-01-00", "game-02-01", "game-03-02", "game-04-03", "game-05-04", "game-06-05", "game-07-06", "game-08-07", "game-09-08", "game-10-09", "game-11-10", "game-12-11", "game-13-12", "game-14-13"),
+    1610612766: ("game-00-00", "game-01-01", "game-02-02", "game-03-03", "game-04-04", "game-05-05", "game-06-06", "game-07-07", "game-08-08", "game-09-09", "game-10-10", "game-11-11", "game-12-12", "game-13-13", "game-14-14"),
+}
 
-    provider_order = list(sorted(team_ids))
-    membership = {team_id: [] for team_id in provider_order}
-    for round_index in range(15):
-        for pair_index in range(15):
-            home = provider_order[pair_index]
-            away = provider_order[-1 - pair_index]
-            game_id = f"game-{round_index:02d}-{pair_index:02d}"
-            membership[home].append(game_id)
-            membership[away].append(game_id)
-        provider_order = [provider_order[0], provider_order[-1], *provider_order[1:-1]]
-    return {team_id: tuple(sorted(game_ids)) for team_id, game_ids in membership.items()}
+_RECORDED_NBA_AGGREGATES = {
+    1610612737: {"TEAM_ID": 1610612737, "TEAM_NAME": "Team 1610612737", "GP": 15, "MIN": 720, "OPP_REB": 15, "OPP_TOV": 15, "OPP_STL": 15, "OPP_BLK": 15},
+    1610612738: {"TEAM_ID": 1610612738, "TEAM_NAME": "Team 1610612738", "GP": 15, "MIN": 720, "OPP_REB": 30, "OPP_TOV": 30, "OPP_STL": 30, "OPP_BLK": 30},
+    1610612739: {"TEAM_ID": 1610612739, "TEAM_NAME": "Team 1610612739", "GP": 15, "MIN": 720, "OPP_REB": 45, "OPP_TOV": 45, "OPP_STL": 45, "OPP_BLK": 45},
+    1610612740: {"TEAM_ID": 1610612740, "TEAM_NAME": "Team 1610612740", "GP": 15, "MIN": 720, "OPP_REB": 60, "OPP_TOV": 60, "OPP_STL": 60, "OPP_BLK": 60},
+    1610612741: {"TEAM_ID": 1610612741, "TEAM_NAME": "Team 1610612741", "GP": 15, "MIN": 720, "OPP_REB": 75, "OPP_TOV": 75, "OPP_STL": 75, "OPP_BLK": 75},
+    1610612742: {"TEAM_ID": 1610612742, "TEAM_NAME": "Team 1610612742", "GP": 15, "MIN": 720, "OPP_REB": 90, "OPP_TOV": 90, "OPP_STL": 90, "OPP_BLK": 90},
+    1610612743: {"TEAM_ID": 1610612743, "TEAM_NAME": "Team 1610612743", "GP": 15, "MIN": 720, "OPP_REB": 105, "OPP_TOV": 105, "OPP_STL": 105, "OPP_BLK": 105},
+    1610612744: {"TEAM_ID": 1610612744, "TEAM_NAME": "Team 1610612744", "GP": 15, "MIN": 720, "OPP_REB": 120, "OPP_TOV": 120, "OPP_STL": 120, "OPP_BLK": 120},
+    1610612745: {"TEAM_ID": 1610612745, "TEAM_NAME": "Team 1610612745", "GP": 15, "MIN": 720, "OPP_REB": 135, "OPP_TOV": 135, "OPP_STL": 135, "OPP_BLK": 135},
+    1610612746: {"TEAM_ID": 1610612746, "TEAM_NAME": "Team 1610612746", "GP": 15, "MIN": 720, "OPP_REB": 150, "OPP_TOV": 150, "OPP_STL": 150, "OPP_BLK": 150},
+    1610612747: {"TEAM_ID": 1610612747, "TEAM_NAME": "Team 1610612747", "GP": 15, "MIN": 720, "OPP_REB": 165, "OPP_TOV": 165, "OPP_STL": 165, "OPP_BLK": 165},
+    1610612748: {"TEAM_ID": 1610612748, "TEAM_NAME": "Team 1610612748", "GP": 15, "MIN": 720, "OPP_REB": 180, "OPP_TOV": 180, "OPP_STL": 180, "OPP_BLK": 180},
+    1610612749: {"TEAM_ID": 1610612749, "TEAM_NAME": "Team 1610612749", "GP": 15, "MIN": 720, "OPP_REB": 195, "OPP_TOV": 195, "OPP_STL": 195, "OPP_BLK": 195},
+    1610612750: {"TEAM_ID": 1610612750, "TEAM_NAME": "Team 1610612750", "GP": 15, "MIN": 720, "OPP_REB": 210, "OPP_TOV": 210, "OPP_STL": 210, "OPP_BLK": 210},
+    1610612751: {"TEAM_ID": 1610612751, "TEAM_NAME": "Team 1610612751", "GP": 15, "MIN": 720, "OPP_REB": 225, "OPP_TOV": 225, "OPP_STL": 225, "OPP_BLK": 225},
+    1610612752: {"TEAM_ID": 1610612752, "TEAM_NAME": "Team 1610612752", "GP": 15, "MIN": 720, "OPP_REB": 240, "OPP_TOV": 240, "OPP_STL": 240, "OPP_BLK": 240},
+    1610612753: {"TEAM_ID": 1610612753, "TEAM_NAME": "Team 1610612753", "GP": 15, "MIN": 720, "OPP_REB": 255, "OPP_TOV": 255, "OPP_STL": 255, "OPP_BLK": 255},
+    1610612754: {"TEAM_ID": 1610612754, "TEAM_NAME": "Team 1610612754", "GP": 15, "MIN": 720, "OPP_REB": 270, "OPP_TOV": 270, "OPP_STL": 270, "OPP_BLK": 270},
+    1610612755: {"TEAM_ID": 1610612755, "TEAM_NAME": "Team 1610612755", "GP": 15, "MIN": 720, "OPP_REB": 285, "OPP_TOV": 285, "OPP_STL": 285, "OPP_BLK": 285},
+    1610612756: {"TEAM_ID": 1610612756, "TEAM_NAME": "Team 1610612756", "GP": 15, "MIN": 720, "OPP_REB": 300, "OPP_TOV": 300, "OPP_STL": 300, "OPP_BLK": 300},
+    1610612757: {"TEAM_ID": 1610612757, "TEAM_NAME": "Team 1610612757", "GP": 15, "MIN": 720, "OPP_REB": 315, "OPP_TOV": 315, "OPP_STL": 315, "OPP_BLK": 315},
+    1610612758: {"TEAM_ID": 1610612758, "TEAM_NAME": "Team 1610612758", "GP": 15, "MIN": 720, "OPP_REB": 330, "OPP_TOV": 330, "OPP_STL": 330, "OPP_BLK": 330},
+    1610612759: {"TEAM_ID": 1610612759, "TEAM_NAME": "Team 1610612759", "GP": 15, "MIN": 720, "OPP_REB": 345, "OPP_TOV": 345, "OPP_STL": 345, "OPP_BLK": 345},
+    1610612760: {"TEAM_ID": 1610612760, "TEAM_NAME": "Team 1610612760", "GP": 15, "MIN": 720, "OPP_REB": 360, "OPP_TOV": 360, "OPP_STL": 360, "OPP_BLK": 360},
+    1610612761: {"TEAM_ID": 1610612761, "TEAM_NAME": "Team 1610612761", "GP": 15, "MIN": 720, "OPP_REB": 375, "OPP_TOV": 375, "OPP_STL": 375, "OPP_BLK": 375},
+    1610612762: {"TEAM_ID": 1610612762, "TEAM_NAME": "Team 1610612762", "GP": 15, "MIN": 720, "OPP_REB": 390, "OPP_TOV": 390, "OPP_STL": 390, "OPP_BLK": 390},
+    1610612763: {"TEAM_ID": 1610612763, "TEAM_NAME": "Team 1610612763", "GP": 15, "MIN": 720, "OPP_REB": 405, "OPP_TOV": 405, "OPP_STL": 405, "OPP_BLK": 405},
+    1610612764: {"TEAM_ID": 1610612764, "TEAM_NAME": "Team 1610612764", "GP": 15, "MIN": 720, "OPP_REB": 420, "OPP_TOV": 420, "OPP_STL": 420, "OPP_BLK": 420},
+    1610612765: {"TEAM_ID": 1610612765, "TEAM_NAME": "Team 1610612765", "GP": 15, "MIN": 720, "OPP_REB": 435, "OPP_TOV": 435, "OPP_STL": 435, "OPP_BLK": 435},
+    1610612766: {"TEAM_ID": 1610612766, "TEAM_NAME": "Team 1610612766", "GP": 15, "MIN": 720, "OPP_REB": 450, "OPP_TOV": 450, "OPP_STL": 450, "OPP_BLK": 450},
+}
+
+_RECORDED_PBP_AGGREGATES = {
+    1610612737: {"TeamId": 1610612737, "Name": "Team 1610612737", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 75, "Arc3Assists": 15, "Corner3Assists": 15, "AtRimAssists": 15, "ShortMidRangeAssists": 15, "LongMidRangeAssists": 15},
+    1610612738: {"TeamId": 1610612738, "Name": "Team 1610612738", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 150, "Arc3Assists": 30, "Corner3Assists": 30, "AtRimAssists": 30, "ShortMidRangeAssists": 30, "LongMidRangeAssists": 30},
+    1610612739: {"TeamId": 1610612739, "Name": "Team 1610612739", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 225, "Arc3Assists": 45, "Corner3Assists": 45, "AtRimAssists": 45, "ShortMidRangeAssists": 45, "LongMidRangeAssists": 45},
+    1610612740: {"TeamId": 1610612740, "Name": "Team 1610612740", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 300, "Arc3Assists": 60, "Corner3Assists": 60, "AtRimAssists": 60, "ShortMidRangeAssists": 60, "LongMidRangeAssists": 60},
+    1610612741: {"TeamId": 1610612741, "Name": "Team 1610612741", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 375, "Arc3Assists": 75, "Corner3Assists": 75, "AtRimAssists": 75, "ShortMidRangeAssists": 75, "LongMidRangeAssists": 75},
+    1610612742: {"TeamId": 1610612742, "Name": "Team 1610612742", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 450, "Arc3Assists": 90, "Corner3Assists": 90, "AtRimAssists": 90, "ShortMidRangeAssists": 90, "LongMidRangeAssists": 90},
+    1610612743: {"TeamId": 1610612743, "Name": "Team 1610612743", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 525, "Arc3Assists": 105, "Corner3Assists": 105, "AtRimAssists": 105, "ShortMidRangeAssists": 105, "LongMidRangeAssists": 105},
+    1610612744: {"TeamId": 1610612744, "Name": "Team 1610612744", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 600, "Arc3Assists": 120, "Corner3Assists": 120, "AtRimAssists": 120, "ShortMidRangeAssists": 120, "LongMidRangeAssists": 120},
+    1610612745: {"TeamId": 1610612745, "Name": "Team 1610612745", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 675, "Arc3Assists": 135, "Corner3Assists": 135, "AtRimAssists": 135, "ShortMidRangeAssists": 135, "LongMidRangeAssists": 135},
+    1610612746: {"TeamId": 1610612746, "Name": "Team 1610612746", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 750, "Arc3Assists": 150, "Corner3Assists": 150, "AtRimAssists": 150, "ShortMidRangeAssists": 150, "LongMidRangeAssists": 150},
+    1610612747: {"TeamId": 1610612747, "Name": "Team 1610612747", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 825, "Arc3Assists": 165, "Corner3Assists": 165, "AtRimAssists": 165, "ShortMidRangeAssists": 165, "LongMidRangeAssists": 165},
+    1610612748: {"TeamId": 1610612748, "Name": "Team 1610612748", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 900, "Arc3Assists": 180, "Corner3Assists": 180, "AtRimAssists": 180, "ShortMidRangeAssists": 180, "LongMidRangeAssists": 180},
+    1610612749: {"TeamId": 1610612749, "Name": "Team 1610612749", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 975, "Arc3Assists": 195, "Corner3Assists": 195, "AtRimAssists": 195, "ShortMidRangeAssists": 195, "LongMidRangeAssists": 195},
+    1610612750: {"TeamId": 1610612750, "Name": "Team 1610612750", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1050, "Arc3Assists": 210, "Corner3Assists": 210, "AtRimAssists": 210, "ShortMidRangeAssists": 210, "LongMidRangeAssists": 210},
+    1610612751: {"TeamId": 1610612751, "Name": "Team 1610612751", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1125, "Arc3Assists": 225, "Corner3Assists": 225, "AtRimAssists": 225, "ShortMidRangeAssists": 225, "LongMidRangeAssists": 225},
+    1610612752: {"TeamId": 1610612752, "Name": "Team 1610612752", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1200, "Arc3Assists": 240, "Corner3Assists": 240, "AtRimAssists": 240, "ShortMidRangeAssists": 240, "LongMidRangeAssists": 240},
+    1610612753: {"TeamId": 1610612753, "Name": "Team 1610612753", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1275, "Arc3Assists": 255, "Corner3Assists": 255, "AtRimAssists": 255, "ShortMidRangeAssists": 255, "LongMidRangeAssists": 255},
+    1610612754: {"TeamId": 1610612754, "Name": "Team 1610612754", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1350, "Arc3Assists": 270, "Corner3Assists": 270, "AtRimAssists": 270, "ShortMidRangeAssists": 270, "LongMidRangeAssists": 270},
+    1610612755: {"TeamId": 1610612755, "Name": "Team 1610612755", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1425, "Arc3Assists": 285, "Corner3Assists": 285, "AtRimAssists": 285, "ShortMidRangeAssists": 285, "LongMidRangeAssists": 285},
+    1610612756: {"TeamId": 1610612756, "Name": "Team 1610612756", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1500, "Arc3Assists": 300, "Corner3Assists": 300, "AtRimAssists": 300, "ShortMidRangeAssists": 300, "LongMidRangeAssists": 300},
+    1610612757: {"TeamId": 1610612757, "Name": "Team 1610612757", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1575, "Arc3Assists": 315, "Corner3Assists": 315, "AtRimAssists": 315, "ShortMidRangeAssists": 315, "LongMidRangeAssists": 315},
+    1610612758: {"TeamId": 1610612758, "Name": "Team 1610612758", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1650, "Arc3Assists": 330, "Corner3Assists": 330, "AtRimAssists": 330, "ShortMidRangeAssists": 330, "LongMidRangeAssists": 330},
+    1610612759: {"TeamId": 1610612759, "Name": "Team 1610612759", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1725, "Arc3Assists": 345, "Corner3Assists": 345, "AtRimAssists": 345, "ShortMidRangeAssists": 345, "LongMidRangeAssists": 345},
+    1610612760: {"TeamId": 1610612760, "Name": "Team 1610612760", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1800, "Arc3Assists": 360, "Corner3Assists": 360, "AtRimAssists": 360, "ShortMidRangeAssists": 360, "LongMidRangeAssists": 360},
+    1610612761: {"TeamId": 1610612761, "Name": "Team 1610612761", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1875, "Arc3Assists": 375, "Corner3Assists": 375, "AtRimAssists": 375, "ShortMidRangeAssists": 375, "LongMidRangeAssists": 375},
+    1610612762: {"TeamId": 1610612762, "Name": "Team 1610612762", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 1950, "Arc3Assists": 390, "Corner3Assists": 390, "AtRimAssists": 390, "ShortMidRangeAssists": 390, "LongMidRangeAssists": 390},
+    1610612763: {"TeamId": 1610612763, "Name": "Team 1610612763", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2025, "Arc3Assists": 405, "Corner3Assists": 405, "AtRimAssists": 405, "ShortMidRangeAssists": 405, "LongMidRangeAssists": 405},
+    1610612764: {"TeamId": 1610612764, "Name": "Team 1610612764", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2100, "Arc3Assists": 420, "Corner3Assists": 420, "AtRimAssists": 420, "ShortMidRangeAssists": 420, "LongMidRangeAssists": 420},
+    1610612765: {"TeamId": 1610612765, "Name": "Team 1610612765", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2175, "Arc3Assists": 435, "Corner3Assists": 435, "AtRimAssists": 435, "ShortMidRangeAssists": 435, "LongMidRangeAssists": 435},
+    1610612766: {"TeamId": 1610612766, "Name": "Team 1610612766", "GamesPlayed": 15, "SecondsPlayed": 43200, "Assists": 2250, "Arc3Assists": 450, "Corner3Assists": 450, "AtRimAssists": 450, "ShortMidRangeAssists": 450, "LongMidRangeAssists": 450},
+}
+
+_RECORDED_NBA_SHOT_CHART = {
+    team_id: {
+        "TEAM_ID": team_id, "TEAM_NAME": f"Team {team_id}", "GP": 15,
+        "FG2M": 1, "FG2A": 1, "FG3M": 1, "FG3A": 1,
+    }
+    for team_id in _RECORDED_NBA_MEMBERSHIP
+}
+_RECORDED_NBA_SHOT_ZONES = {
+    team_id: {
+        "TEAM_ID": team_id, "TEAM_NAME": f"Team {team_id}",
+        "Restricted Area_OPP_FGM": 1, "Restricted Area_OPP_FGA": 1,
+    }
+    for team_id in _RECORDED_NBA_MEMBERSHIP
+}
 
 
 class _RecordedLegacyNBA:
-    def __init__(self, team_ids, membership, values):
-        self.team_ids = tuple(team_ids)
-        self.membership = membership
-        self.values = values
+    def __init__(self):
+        self.team_ids = tuple(_RECORDED_NBA_MEMBERSHIP)
+        self.membership = _RECORDED_NBA_MEMBERSHIP
         self.aggregate_calls = []
         self.detail_calls = []
 
@@ -353,56 +481,24 @@ class _RecordedLegacyNBA:
     def fetch_opponent_team_stats(self, date_from, **kwargs):
         self.aggregate_calls.append(("traditional", date_from, dict(kwargs)))
         team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
-        return pd.DataFrame([
-            {
-                "TEAM_ID": team_id,
-                "TEAM_NAME": f"Team {team_id}",
-                "GP": len(self.membership[team_id]),
-                "MIN": len(self.membership[team_id]) * 48,
-                "OPP_REB": self.values[team_id] * len(self.membership[team_id]),
-                "OPP_TOV": self.values[team_id] * len(self.membership[team_id]),
-                "OPP_STL": self.values[team_id] * len(self.membership[team_id]),
-                "OPP_BLK": self.values[team_id] * len(self.membership[team_id]),
-            }
-            for team_id in team_ids
-        ])
+        return pd.DataFrame([_RECORDED_NBA_AGGREGATES[team_id] for team_id in team_ids])
 
     def fetch_opponent_shot_chart(self, general_range, date_from, **kwargs):
         team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
-        return pd.DataFrame([
-            {
-                "TEAM_ID": team_id,
-                "TEAM_NAME": f"Team {team_id}",
-                "GP": len(self.membership[team_id]),
-                "FG2M": 1,
-                "FG2A": 1,
-                "FG3M": 1,
-                "FG3A": 1,
-            }
-            for team_id in team_ids
-        ])
+        return pd.DataFrame([_RECORDED_NBA_SHOT_CHART[team_id] for team_id in team_ids])
 
     def fetch_opponent_shooting_zone(self, date_from, **kwargs):
         team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
-        return pd.DataFrame([
-            {
-                "TEAM_ID": team_id,
-                "TEAM_NAME": f"Team {team_id}",
-                "Restricted Area_OPP_FGM": 1,
-                "Restricted Area_OPP_FGA": 1,
-            }
-            for team_id in team_ids
-        ])
+        return pd.DataFrame([_RECORDED_NBA_SHOT_ZONES[team_id] for team_id in team_ids])
 
     def fetch_synergy_play_types(self, play_type, **kwargs):
         return pd.DataFrame()
 
 
 class _RecordedLegacyPBP:
-    def __init__(self, team_ids, membership, values):
-        self.team_ids = tuple(team_ids)
-        self.membership = membership
-        self.values = values
+    def __init__(self):
+        self.team_ids = tuple(_RECORDED_PBP_MEMBERSHIP)
+        self.membership = _RECORDED_PBP_MEMBERSHIP
         self.aggregate_calls = []
         self.detail_calls = []
 
@@ -414,37 +510,19 @@ class _RecordedLegacyPBP:
         assert data_type == "opponent"
         self.aggregate_calls.append(dict(kwargs))
         team_ids = self.team_ids if kwargs["team_id"] is None else (kwargs["team_id"],)
-        return pd.DataFrame([
-            {
-                "TeamId": team_id,
-                "Name": f"Team {team_id}",
-                "GamesPlayed": len(self.membership[team_id]),
-                "SecondsPlayed": len(self.membership[team_id]) * 48 * 60,
-                "Assists": self.values[team_id] * 5 * len(self.membership[team_id]),
-                "Arc3Assists": self.values[team_id] * len(self.membership[team_id]),
-                "Corner3Assists": self.values[team_id] * len(self.membership[team_id]),
-                "AtRimAssists": self.values[team_id] * len(self.membership[team_id]),
-                "ShortMidRangeAssists": self.values[team_id] * len(self.membership[team_id]),
-                "LongMidRangeAssists": self.values[team_id] * len(self.membership[team_id]),
-            }
-            for team_id in team_ids
-        ])
+        return pd.DataFrame([_RECORDED_PBP_AGGREGATES[team_id] for team_id in team_ids])
 
 
 def _refresh_isolated_legacy_output(legacy_engine, source_engine, governance):
     """Run the production legacy writer against recorded provider responses."""
 
     team_ids = tuple(sorted(governance.team_ids))
-    values = {
-        int(row["team_id"]): int(row["allowed"])
-        for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
-    }
-    nba = _RecordedLegacyNBA(
-        team_ids, _recorded_provider_membership(team_ids), values
-    )
-    pbp = _RecordedLegacyPBP(
-        team_ids, _recorded_provider_membership(team_ids), values
-    )
+    nba = _RecordedLegacyNBA()
+    pbp = _RecordedLegacyPBP()
+    assert nba.team_ids == team_ids
+    assert pbp.team_ids == team_ids
+    assert nba.membership is not pbp.membership
+    assert nba.membership == pbp.membership
     with source_engine.connect() as connection:
         manifest = connection.execute(
             select(CollectionManifest.__table__).where(
@@ -1593,12 +1671,38 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert len(legacy_pbp.aggregate_calls) == len(matchup_governance.team_ids) + 1
     assert len(legacy_nba.detail_calls) == len(matchup_governance.team_ids) * 2
     assert len(legacy_pbp.detail_calls) == len(matchup_governance.team_ids) * 2
+    legacy_retrieved_at = matchup_governance.cutoff - timedelta(minutes=1)
+    for snapshot in legacy_snapshots:
+        assert {
+            surface: {
+                fact.retrieved_at
+                for fact in snapshot.facts
+                if fact.base == surface
+            }
+            for surface in ("traditional", "assist_locations")
+        } == {
+            "traditional": {legacy_retrieved_at},
+            "assist_locations": {legacy_retrieved_at},
+        }
+        assert {
+            surface: {
+                observation.retrieved_at
+                for observation in snapshot.observations
+                if observation.surface == surface
+            }
+            for surface in ("traditional", "assist_locations")
+        } == {
+            "traditional": {legacy_retrieved_at},
+            "assist_locations": {legacy_retrieved_at},
+        }
     TeamMatchupRepository(engine).replace_snapshots(
         tuple(
             (snapshot.scope, snapshot.facts, snapshot.observations)
             for snapshot in legacy_snapshots
         ),
-        retrieved_at=matchup_governance.cutoff,
+        # Preserve the completed isolated writer's exact observation time;
+        # copying must not relabel the legacy snapshot as a later read.
+        retrieved_at=legacy_retrieved_at,
     )
     team_matchups = TeamMatchupQueryService(
         TeamMatchupRepository(engine), clock=lambda: NOW
@@ -1863,15 +1967,19 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert pre_matchup_response.status_code == 200
     assert pre_player_game_log_response.status_code == 200
     pre_matchup = pre_matchup_response.get_json()
-    def assert_matchup_freshness_envelope(payload, *, source):
+    def assert_matchup_freshness_envelope(payload, *, source, expected_retrieved_at):
         for window in ("season", "last_15"):
             for surface in ("traditional", "assist_locations"):
                 envelope = payload["freshness"]["team_matchups"][window]["surfaces"][surface]
                 assert envelope["status"] == "available"
                 assert envelope["unavailable_reason"] is None
-                assert envelope["retrieved_at"] is not None, source
+                assert envelope["retrieved_at"] == expected_retrieved_at, source
 
-    assert_matchup_freshness_envelope(pre_matchup, source="legacy")
+    assert_matchup_freshness_envelope(
+        pre_matchup,
+        source="legacy",
+        expected_retrieved_at=legacy_retrieved_at.isoformat(),
+    )
     for stream_key in (
         *matchup_publications["season"].keys(),
         *matchup_publications["l15"].keys(),
@@ -1918,6 +2026,20 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         for publications in matchup_publications.values()
         for stream_key in publications
     )
+    with engine.connect() as connection:
+        for publications in matchup_publications.values():
+            for stream_key, publication_id in publications.items():
+                created_at = connection.execute(
+                    select(PublicationVersion.created_at).where(
+                        PublicationVersion.publication_id == publication_id,
+                        PublicationVersion.stream_key == stream_key,
+                    )
+                ).scalar_one()
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                else:
+                    created_at = created_at.astimezone(timezone.utc)
+                assert created_at == NOW
 
     slate_response = client.get("/api/games/slate?date=2026-01-15", headers=auth_headers)
     matchup_response = client.get(
@@ -1964,7 +2086,11 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert repeated_player_game_log_response.status_code == 200
     assert repeated_player_game_log_response.data == player_game_log_response.data
     matchup = matchup_response.get_json()
-    assert_matchup_freshness_envelope(matchup, source="ledger")
+    assert_matchup_freshness_envelope(
+        matchup,
+        source="ledger",
+        expected_retrieved_at=NOW.isoformat(),
+    )
     for stream_key in (
         *matchup_publications["season"].keys(),
         *matchup_publications["l15"].keys(),
@@ -1983,7 +2109,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         assert provenance["event_catalog_checksum"] == (
             matchup_governance.event_catalog_checksum
         )
-        assert provenance["retrieved_at"] is not None
+        assert provenance["retrieved_at"] == NOW.isoformat()
     assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
     assert matchup["provenance"]["player_game_logs"]["publication_id"] == rollback.resource.publication_id
     assert matchup["provenance"]["synergy_play_types"]["publication_id"] == diet_candidate
