@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine, select
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
+    ActiveSeason,
     CollectionManifest,
     CollectionObservation,
     CompositionJob,
@@ -18,6 +21,7 @@ from app.models.collection_control import (
     PublicationVersion,
     ReconciliationItem,
 )
+from app.models.event_catalog import EventCatalogEntry
 from app.services.collection_control import PublicationService
 from app.services.collection_control import LedgerPublicationComposition
 from app.services.canonical_game_ledger import (
@@ -30,8 +34,10 @@ from app.services.ledger_materialization import (
     LedgerMaterializationUnavailable,
 )
 from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
-from app.services.ledger_parity import LedgerParityArtifactRepository
+from app.services.ledger_parity import LedgerParityArtifactRepository, LegacyParityDiagnosticReader
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader, LedgerRuntime
 from app.services.team_matchup_repository import TeamMatchupRepository, TeamMatchupSnapshotScope
+from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
 
 
@@ -202,30 +208,270 @@ def test_targeted_recomposition_retains_unaffected_team_facts(tmp_path):
 
 
 def test_correction_changes_published_counts_and_rank(tmp_path):
-    """Acceptance correction changes the persisted derived metric payload."""
+    """A governed correction changes the active publication and public read."""
     engine = _engine(tmp_path, "counts.sqlite3")
+    cutoff = AS_OF
+    runtime_now = AS_OF + timedelta(hours=18)
     games = _league_games()
-    ledger = CanonicalGameLedgerRepository(engine)
-    ledger.replace_games_atomic(games)
+
+    def raw_document(game):
+        facts_by_team = {fact.team_id: fact for fact in game.team_facts}
+
+        def diagnostic(team_id):
+            fact = facts_by_team[team_id]
+            return {
+                "TeamId": team_id,
+                "Points": fact.points,
+                "FG2M": fact.two_pointers_made,
+                "FG2A": fact.two_pointers_attempted,
+                "FG3M": fact.three_pointers_made,
+                "FG3A": fact.three_pointers_attempted,
+                "FtPoints": fact.free_throws_made,
+                "FTA": fact.free_throws_attempted,
+                "OffRebounds": fact.offensive_rebounds,
+                "DefRebounds": fact.defensive_rebounds,
+                "Rebounds": fact.rebounds,
+                "Assists": fact.assists,
+                "Turnovers": fact.turnovers,
+                "Steals": fact.steals,
+                "Blocks": fact.blocks,
+                "Fouls": fact.personal_fouls,
+            }
+
+        return {
+            "stats": {
+                side: {
+                    "FullGame": [
+                        dict(row.payload)
+                        for row in game.raw_rows
+                        if row.side == side
+                    ],
+                }
+                for side in ("Home", "Away")
+            },
+            "team_results": {
+                "Home": {"FullGame": diagnostic(game.home_team_id)},
+                "Away": {"FullGame": diagnostic(game.away_team_id)},
+            },
+            "home_team_abbreviation": game.home_team_tricode,
+            "away_team_abbreviation": game.away_team_tricode,
+            "date": game.game_date.isoformat(),
+            "participant_ids_by_team": {
+                str(team_id): [player.player_id for player in game.player_facts
+                               if player.team_id == team_id]
+                for team_id in (game.home_team_id, game.away_team_id)
+            },
+        }
+
+    def accepted_observation(game):
+        payload = json.dumps(
+            raw_document(game), sort_keys=True, separators=(",", ":")
+        )
+        return {
+            "observation_id": game.source_observation_id,
+            "client_observation_id": game.source_observation_id,
+            "collector_id": "railway-ledger",
+            "manifest_id": "ledger-manifest",
+            "environment": "server",
+            "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": json.dumps(
+                {"game_id": game.game_id, "surface": "canonical_game_ledger"},
+                sort_keys=True,
+            ),
+            "season": game.season,
+            "cutoff": cutoff,
+            "schema_version": 1,
+            "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+            "payload": payload,
+            "payload_bytes": len(payload.encode()),
+            "retrieved_at": game.retrieved_at,
+            "accepted_at": game.retrieved_at,
+        }
+
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=30), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), [{
+            "nba_game_id": game.game_id,
+            "season": game.season,
+            "home_team_id": game.home_team_id,
+            "home_team_name": f"Team {game.home_team_id}",
+            "home_team_tricode": game.home_team_tricode,
+            "away_team_id": game.away_team_id,
+            "away_team_name": f"Team {game.away_team_id}",
+            "away_team_tricode": game.away_team_tricode,
+            "scheduled_at": datetime.combine(game.game_date, datetime.min.time(), UTC),
+            "status_text": "Final",
+            "status_code": 3,
+            "classification": "Regular Season",
+            "first_seen_at": cutoff,
+            "last_seen_at": cutoff,
+        } for game in games])
+
+    publications = PublicationService(engine, clock=lambda: runtime_now)
+    publications.register_default_streams()
+    for stream_key, windows in (
+        ("traditional_opponent_season", ("season",)),
+        ("traditional_opponent_l15", ("l15",)),
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            supported_windows=windows,
+            enabled=True,
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+        )
+
+    queue = LedgerCorrectionQueue(
+        clock=lambda: runtime_now,
+        require_governance=True,
+    )
+    ledger = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    accepted = {
+        game.source_observation_id: accepted_observation(game)
+        for game in games
+    }
+    ledger.replace_games_atomic(games, accepted_observations=accepted)
+
     matchup = TeamMatchupRepository(engine)
-    service = LedgerMatchupMaterializationService(ledger, matchup, clock=lambda: AS_OF + timedelta(hours=18))
-    expected = frozenset(game.game_id for game in games)
-    expected_l15 = {team_id: frozenset(game.game_id for game in games
-                                      if team_id in {game.home_team_id, game.away_team_id})
-                    for team_id in range(1, 31)}
-    service.materialize("2025-26", as_of=AS_OF.date(), expected_game_ids=expected,
-                        expected_l15_game_ids=expected_l15,
-                        cutoff=AS_OF + timedelta(hours=18), team_ids=frozenset(range(1, 31)))
-    before = matchup.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF.date()))
-    corrected = replace(games[0], team_facts=(replace(games[0].team_facts[0], points=99), games[0].team_facts[1]))
-    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
-    ledger.replace_game(corrected)
-    service.materialize("2025-26", as_of=AS_OF.date(), cutoff=AS_OF + timedelta(hours=18), recomposition_reason="correction",
-                        expected_game_ids=expected, expected_l15_game_ids=expected_l15,
-                        team_ids=frozenset(range(1, 31)))
-    after = matchup.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF.date()))
-    assert before.facts != after.facts
-    assert any(fact.recomposition_reason == "correction" for fact in after.facts)
+    matchup_materialization = LedgerMatchupMaterializationService(
+        ledger, matchup, clock=lambda: runtime_now
+    )
+
+    materialization = LedgerMaterializationService(
+        ledger,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=LegacyParityDiagnosticReader(engine),
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=ledger,
+        materialization=materialization,
+        governance=ActiveManifestLedgerGovernanceReader(
+            engine, clock=lambda: runtime_now
+        ),
+        matchup_materialization=matchup_materialization,
+        publication_service=publications,
+        clock=lambda: runtime_now,
+    )
+
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+    query = TeamMatchupQueryService(matchup, clock=lambda: runtime_now)
+    scope = TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    before_window = query.get_window(scope)
+    before_metric = next(
+        metric
+        for metric in before_window.team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    before_snapshot = matchup.get_snapshot(scope)
+    before_fact = next(
+        fact
+        for fact in before_snapshot.facts
+        if fact.team_id == 1 and fact.base == "traditional" and fact.stat_key == "OPP_REB"
+    )
+    before_publication = publications.current("traditional_opponent_season")
+    assert before_publication is not None
+    assert before_fact.raw_value == 75
+    assert before_metric.allowed_per_48 == 5.0
+    assert before_metric.rank == 1
+
+    original = games[0]
+    corrected_team_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original.away_team_id
+        else fact
+        for fact in original.team_facts
+    )
+    corrected = replace(
+        original,
+        team_facts=corrected_team_facts,
+        source_observation_id=f"obs:correction:{original.game_id}",
+        retrieved_at=cutoff + timedelta(hours=1),
+    )
+    corrected = replace(
+        corrected, raw_rows=raw_rows_from_facts(corrected)
+    ).with_checksum()
+    result = ledger.replace_games_atomic(
+        (corrected,),
+        accepted_observations={
+            corrected.source_observation_id: accepted_observation(corrected),
+        },
+    )
+    assert result[0].replaced
+    assert result[0].checksum == corrected.checksum
+
+    assert runtime.compose_queued("2025-26") == len(LedgerCorrectionQueue.STREAMS)
+    after_window = query.get_window(scope)
+    after_metric = next(
+        metric
+        for metric in after_window.team_metrics[1]
+        if metric.base == "traditional" and metric.stat_key == "OPP_REB"
+    )
+    after_snapshot = matchup.get_snapshot(scope)
+    after_fact = next(
+        fact
+        for fact in after_snapshot.facts
+        if fact.team_id == 1 and fact.base == "traditional" and fact.stat_key == "OPP_REB"
+    )
+    after_publication = publications.current("traditional_opponent_season")
+    stored = ledger.get_game(original.game_id)
+    assert after_publication is not None
+    assert after_publication.publication_id != before_publication.publication_id
+    assert after_publication.status == "active"
+    assert after_publication.reason == "correction"
+    assert stored is not None
+    assert stored.source_observation_id == corrected.source_observation_id
+    assert stored.checksum == corrected.checksum
+    assert stored.raw_checksum == corrected.raw_checksum
+    assert after_fact.raw_value == 85
+    assert after_fact.ledger_checksum != before_fact.ledger_checksum
+    assert corrected.source_observation_id in after_fact.source_observation_ids
+    assert after_metric.allowed_per_48 == pytest.approx(17 / 3)
+    assert after_metric.rank == 30
+    assert after_metric.allowed_per_48 != before_metric.allowed_per_48
+    assert after_metric.rank != before_metric.rank
+    assert all(
+        observation.recomposition_reason == "correction"
+        and corrected.source_observation_id in observation.source_observation_ids
+        and observation.ledger_checksum == after_fact.ledger_checksum
+        for observation in after_snapshot.observations
+    )
+    with engine.connect() as connection:
+        correction_observation = connection.execute(
+            select(CollectionObservation).where(
+                CollectionObservation.observation_id == corrected.source_observation_id,
+            )
+        ).mappings().one()
+        jobs = connection.execute(select(CompositionJob)).mappings().all()
+    assert correction_observation["checksum"] == hashlib.sha256(
+        correction_observation["payload"].encode()
+    ).hexdigest()
+    assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
+    assert all(job["status"] == "succeeded" for job in jobs)
+    assert all(
+        corrected.source_observation_id in json.loads(job["source_observation_ids"])
+        for job in jobs
+    )
 
 
 def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_path, monkeypatch):
