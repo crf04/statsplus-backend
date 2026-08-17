@@ -26,6 +26,7 @@ from app.services.canonical_game_ledger import (
 from app.services.ledger_materialization import (
     LedgerCorrectionQueue,
     LedgerMaterializationService,
+    LedgerMaterializationUnavailable,
 )
 from app.services.ledger_matchup_materialization import LedgerMatchupMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
@@ -69,13 +70,33 @@ def test_correction_jobs_record_target_lineage_and_replay_is_idempotent(tmp_path
     assert {row["recomposition_reason"] for row in first_jobs} == {"correction"}
     assert {row["ledger_checksum"] for row in first_jobs} == {corrected.checksum}
     assert all(json.loads(row["source_observation_ids"]) == [corrected.source_observation_id] for row in first_jobs)
-
     repository.replace_game(corrected)
     with engine.connect() as connection:
         replay_jobs = connection.execute(select(CompositionJob.__table__)).mappings().all()
     assert len(replay_jobs) == len(first_jobs)
     assert {row["job_id"] for row in replay_jobs} == {row["job_id"] for row in first_jobs}
 
+
+def test_coalesced_correction_union_keeps_all_trigger_and_source_lineage(tmp_path):
+    engine = _engine(tmp_path, "coalesced.sqlite3")
+    queue = LedgerCorrectionQueue(clock=lambda: AS_OF)
+    repository = CanonicalGameLedgerRepository(engine, correction_sink=queue)
+    first, second = _league_games()[:2]
+    repository.replace_game(first)
+    repository.replace_game(second)
+    corrected = replace(first, team_facts=tuple(
+        replace(fact, points=fact.points + 1) for fact in first.team_facts
+    ))
+    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
+    repository.replace_game(corrected)
+    with engine.connect() as connection:
+        row = connection.execute(select(CompositionJob.__table__)).mappings().first()
+    assert set(json.loads(row["trigger_game_id"])) == {first.game_id, second.game_id}
+    assert set(json.loads(row["source_observation_ids"])) == {
+        first.source_observation_id, second.source_observation_id,
+    }
+    assert row["recomposition_reason"] == "correction"
+    assert row["game_set_checksum"]
 
 def test_matchup_lineage_persists_cutoff_reason_and_exact_game_set(tmp_path):
     engine = _engine(tmp_path, "matchup.sqlite3")
@@ -191,7 +212,7 @@ def test_recomposition_failure_records_retryable_state_without_reconciliation_lo
 
     class Governance:
         def read_for_composition(self, season, cutoff, manifest_id=None):
-            raise RuntimeError("provider boundary must not be called")
+            raise LedgerMaterializationUnavailable("provider boundary unavailable")
 
     class Materialization:
         publication_service = None

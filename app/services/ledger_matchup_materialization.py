@@ -15,8 +15,6 @@ can fail without preventing ledger-owned surfaces from materializing.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -41,6 +39,7 @@ from app.services.ledger_derivations import (
     materialize_team_window,
     window_ledger_checksum,
 )
+from app.services.ledger_lineage import LedgerLineage
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -617,9 +616,7 @@ def _source_observation_ids(
 def _game_set_checksum(game_ids: tuple[str, ...]) -> str:
     """Hash only the exact selected IDs, independently of their facts."""
 
-    return hashlib.sha256(
-        json.dumps(sorted(set(game_ids)), separators=(",", ":")).encode()
-    ).hexdigest()
+    return LedgerLineage.for_game_ids(game_ids)
 
 
 __all__ = [

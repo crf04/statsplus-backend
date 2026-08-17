@@ -39,6 +39,7 @@ from app.services.ledger_parity import (
     SemanticDifference,
     compare_ledger_to_legacy,
 )
+from app.services.ledger_lineage import LedgerLineage
 
 
 class LedgerMaterializationUnavailable(ValueError):
@@ -384,8 +385,6 @@ class LedgerCorrectionQueue:
             connection.info.get("canonical_game_ledger_replacement", False)
         )
         affected_team_ids = sorted({fact.team_id for fact in game.team_facts})
-        source_observation_ids = [str(game.source_observation_id)]
-        game_set_checksum = _game_set_checksum((game.game_id,))
         recomposition_reason = "correction" if is_correction else "initial_acceptance"
         manifest = connection.execute(select(CollectionManifest).where(
             CollectionManifest.season == game.season,
@@ -407,27 +406,36 @@ class LedgerCorrectionQueue:
                 table.c.job_id,
                 table.c.affected_team_ids,
                 table.c.source_observation_ids,
+                table.c.trigger_game_id,
+                table.c.ledger_checksum,
+                table.c.recomposition_reason,
             ).where(
                 table.c.stream_key == stream_key,
                 table.c.season == game.season,
                 table.c.cutoff == cutoff,
             )).mappings().one_or_none()
             if existing is not None:
+                previous_lineage = LedgerLineage(
+                    tuple(_json_values(existing["source_observation_ids"])),
+                    tuple(_json_values(existing["trigger_game_id"])),
+                    (str(existing["ledger_checksum"]),), cutoff,
+                    str(existing["recomposition_reason"] or "initial_acceptance"),
+                )
+                lineage = previous_lineage.merge(LedgerLineage.single(
+                    game_id=game.game_id,
+                    source_observation_id=str(game.source_observation_id),
+                    ledger_checksum=game.checksum,
+                    cutoff=cutoff,
+                    reason=recomposition_reason,
+                ))
                 previous_team_ids = {
                     int(team_id)
                     for team_id in _json_values(existing["affected_team_ids"])
                     if str(team_id).isdigit()
                 }
-                previous_observation_ids = _json_values(
-                    existing["source_observation_ids"]
-                )
                 merged_team_ids = sorted({
                     *previous_team_ids,
                     *affected_team_ids,
-                })
-                merged_observation_ids = sorted({
-                    *previous_observation_ids,
-                    *source_observation_ids,
                 })
                 connection.execute(
                     update(table).where(table.c.job_id == existing["job_id"]).values(
@@ -436,14 +444,12 @@ class LedgerCorrectionQueue:
                         manifest_id=manifest["manifest_id"] if manifest is not None else None,
                         updated_at=now,
                         last_error=None,
-                        trigger_game_id=game.game_id,
+                        trigger_game_id=lineage.encoded_game_ids(),
                         affected_team_ids=json.dumps(merged_team_ids, separators=(",", ":")),
-                        source_observation_ids=json.dumps(
-                            merged_observation_ids, separators=(",", ":")
-                        ),
-                        recomposition_reason=recomposition_reason,
-                        ledger_checksum=game.checksum,
-                        game_set_checksum=game_set_checksum,
+                        source_observation_ids=json.dumps(lineage.source_observation_ids, separators=(",", ":")),
+                        recomposition_reason=lineage.recomposition_reason,
+                        ledger_checksum=lineage.ledger_checksum,
+                        game_set_checksum=lineage.game_set_checksum,
                     )
                 )
             else:
@@ -458,14 +464,18 @@ class LedgerCorrectionQueue:
                     created_at=now,
                     updated_at=now,
                     last_error=None,
-                    trigger_game_id=game.game_id,
+                    trigger_game_id=json.dumps([game.game_id], separators=(",", ":")),
                     affected_team_ids=json.dumps(affected_team_ids, separators=(",", ":")),
-                    source_observation_ids=json.dumps(
-                        source_observation_ids, separators=(",", ":")
-                    ),
+                    source_observation_ids=json.dumps([str(game.source_observation_id)], separators=(",", ":")),
                     recomposition_reason=recomposition_reason,
                     ledger_checksum=game.checksum,
-                    game_set_checksum=game_set_checksum,
+                    game_set_checksum=LedgerLineage.single(
+                        game_id=game.game_id,
+                        source_observation_id=str(game.source_observation_id),
+                        ledger_checksum=game.checksum,
+                        cutoff=cutoff,
+                        reason=recomposition_reason,
+                    ).game_set_checksum,
                 ))
 
 

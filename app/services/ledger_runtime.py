@@ -296,14 +296,18 @@ class LedgerRuntime:
                 for team_id in _json_list(row.get("affected_team_ids"))
                 if str(team_id).isdigit()
             )
-            trigger_game_id = next(
-                (
+            trigger_game_ids = frozenset(
+                str(game_id)
+                for row in slice_jobs
+                for game_id in _json_list(row.get("trigger_game_id"))
+            )
+            if not trigger_game_ids:
+                trigger_game_ids = frozenset(
                     str(row["trigger_game_id"])
                     for row in slice_jobs
                     if row.get("trigger_game_id")
-                ),
-                None,
-            )
+                )
+            trigger_game_id = next(iter(sorted(trigger_game_ids)), None)
             try:
                 governance = self.governance.read_for_composition(
                     season,
@@ -359,7 +363,7 @@ class LedgerRuntime:
                     activate=self.publication_service is not None,
                     recomposition_reason=reason,
                 )
-            except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable, ValueError, RuntimeError):
+            except (ControlPlaneError, LedgerMaterializationUnavailable, LedgerDerivationUnavailable):
                 self._mark_slice_failed(
                     season=season,
                     cutoff=stored_cutoff,
