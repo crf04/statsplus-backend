@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from app.dfs_catalog import DFS_PROVIDER_NAME_SET
+from app.dfs_catalog import DFS_DABBLE, DFS_PROVIDER_NAME_SET
 from app.domain.freshness import cache_window_policy, time_window_seconds
 from app.domain.market_content import NumericDomainError
 
@@ -153,6 +153,17 @@ class FeatureSettings(BaseModel):
     dfs_board_enabled: bool = False
     injury_report_enabled: bool = False
     projection_archive_read_enabled: bool = False
+    projection_archive_read_provider: str = DFS_DABBLE
+
+    @field_validator("projection_archive_read_provider", mode="before")
+    @classmethod
+    def validate_projection_archive_read_provider(cls, value: Any) -> str:
+        provider = str(value).strip().casefold()
+        if provider not in DFS_PROVIDER_NAME_SET:
+            raise ValueError(
+                "PROJECTION_ARCHIVE_READ_PROVIDER must name a supported DFS provider"
+            )
+        return provider
 
 
 class ProviderSettings(BaseModel):
@@ -667,6 +678,9 @@ def _build_settings(
         injury_report_enabled=reader.boolean("INJURY_REPORT_ENABLED", False),
         projection_archive_read_enabled=reader.boolean(
             "PROJECTION_ARCHIVE_READ_ENABLED", False
+        ),
+        projection_archive_read_provider=reader.text(
+            "PROJECTION_ARCHIVE_READ_PROVIDER", DFS_DABBLE
         ),
     )
     providers = _validated_model(

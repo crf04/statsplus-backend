@@ -199,6 +199,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
+        ProjectionRecordingService,
         ProjectionSelectionPlayerPoolReader,
     )
 
@@ -219,6 +220,9 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert isinstance(reader, LatestProjectionPlayerPoolReader)
     assert isinstance(dependencies.projection_archive, ProjectionArchive)
     assert dependencies.projection_archive.engine is dependencies.engine
+    assert isinstance(dependencies.projection_recorder, ProjectionRecordingService)
+    assert dependencies.projection_recorder.archive is dependencies.projection_archive
+    assert reader.scope.provider == "dabble"
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
     selection_reader = dependencies.matchup_selection_service.player_pool
@@ -250,6 +254,26 @@ def test_projection_archive_gate_refuses_the_read_only_demo_database(monkeypatch
         ConfigurationError,
         match="PROJECTION_ARCHIVE_READ_ENABLED.*demo database",
     ):
+        build_dependencies(settings)
+
+
+def test_projection_archive_gate_refuses_an_unmigrated_application_database(
+    monkeypatch,
+):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": "sqlite:///:memory:"},
+        features=FeatureSettings(projection_archive_read_enabled=True),
+    )
+
+    with pytest.raises(ConfigurationError, match="requires migrated archive tables"):
         build_dependencies(settings)
 
 

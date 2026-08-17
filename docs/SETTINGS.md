@@ -68,14 +68,18 @@ so even a locally forced pair of gates makes no request and reports the only
 applicable closed reason, `unavailable/fetch_failed`.
 
 The projection archive reader also requires an application database whose
-migrations include the archive schema. Setting
+migrations include its scope-lock, source-snapshot, poll, observation,
+materialization-generation, and Latest tables. Dependency assembly verifies
+those authoritative tables at startup. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
-`false`; when enabled on an application database, one database-only reader is
+`false`; `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` and selects
+exactly one provider plus the configured current-season canonical query. When
+enabled on an application database, one database-only reader is
 used by Slate, Matchup, and Matchup Selection. Dependency assembly also exposes
-the archive writer on application databases so an operator-owned collection
-boundary can submit a Complete normalized snapshot without adding a scheduler
-to this slice.
+the named projection recording service on application databases so an
+operator-owned collector can submit an already retrieved Complete normalized
+snapshot. Provider polling and scheduling belong to later slices.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and

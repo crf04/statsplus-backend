@@ -53,6 +53,26 @@ class ProjectionArchiveResult:
     materialization_outcome: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectionArchiveReadScope:
+    """One explicit provider/query identity selected for request-time reads."""
+
+    provider: str
+    query: NBAMarketQuery
+
+    def __post_init__(self) -> None:
+        provider = self.provider.strip().casefold()
+        if not provider:
+            raise ValueError("projection archive read provider is required")
+        if not isinstance(self.query, NBAMarketQuery) or self.query.season is None:
+            raise ValueError("projection archive read scope requires a season query")
+        object.__setattr__(self, "provider", provider)
+
+    @property
+    def query_key(self) -> str:
+        return _query_key(self.query)
+
+
 def _digest(prefix: str, *values: object) -> str:
     payload = "\x1f".join(str(value) for value in values).encode("utf-8")
     return f"{prefix}_{sha256(payload).hexdigest()}"
@@ -133,6 +153,7 @@ class ProjectionArchive:
             raise ValueError("projection poll cannot start after it completes")
         source = _source_snapshot(snapshot)
         query_key = _query_key(query)
+        observation_count = len(snapshot.markets)
         document = serialize_provider_snapshot(source, query)
         checksum = _snapshot_checksum(query_key, document)
         content_checksum = _snapshot_content_checksum(query_key, document)
@@ -173,13 +194,13 @@ class ProjectionArchive:
                     completed_at=accepted,
                     outcome="unchanged",
                     snapshot_id=str(current["snapshot_id"]),
-                    observation_count=len(snapshot.markets),
+                    observation_count=observation_count,
                 )
                 return ProjectionArchiveResult(
                     snapshot_id=str(current["snapshot_id"]),
                     generation_id=str(current["generation_id"]),
                     changed=False,
-                    observation_count=len(snapshot.markets),
+                    observation_count=observation_count,
                     materialization_outcome="unchanged",
                 )
 
@@ -199,13 +220,13 @@ class ProjectionArchive:
                     completed_at=accepted,
                     outcome="unchanged",
                     snapshot_id=str(existing),
-                    observation_count=len(snapshot.markets),
+                    observation_count=observation_count,
                 )
                 return ProjectionArchiveResult(
                     snapshot_id=str(existing),
                     generation_id=generation_id,
                     changed=False,
-                    observation_count=len(snapshot.markets),
+                    observation_count=observation_count,
                     materialization_outcome="unchanged",
                 )
 
@@ -264,14 +285,14 @@ class ProjectionArchive:
                 completed_at=accepted,
                 outcome="changed",
                 snapshot_id=snapshot_id,
-                observation_count=len(observation_rows),
+                observation_count=observation_count,
             )
 
         return ProjectionArchiveResult(
             snapshot_id=snapshot_id,
             generation_id=generation_id,
             changed=True,
-            observation_count=len(observation_rows),
+            observation_count=observation_count,
             materialization_outcome=materialization_outcome,
         )
 
@@ -286,6 +307,22 @@ class ProjectionArchive:
         with self._scope_locks_guard:
             lock = self._scope_locks.setdefault(key, threading.RLock())
         table = ProjectionArchiveScopeLock.__table__
+        if self.engine.dialect.name == "sqlite":
+            with lock, self.engine.connect() as connection:
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        insert(table)
+                        .values(provider=provider, season=season, query_key=query_key)
+                        .prefix_with("OR IGNORE")
+                    )
+                    yield connection
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            return
         with lock, self.engine.begin() as connection:
             try:
                 with connection.begin_nested():
@@ -578,13 +615,16 @@ class ProjectionArchive:
 class LatestProjectionPlayerPoolReader:
     """Read the current Latest Player Projections; never call a provider."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, scope: ProjectionArchiveReadScope) -> None:
         self.engine = engine
+        self.scope = scope
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
         return self.get_pool(season=season, game_ids=(game_id,))
 
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
+        if season != self.scope.query.season:
+            raise ValueError("projection archive read season is outside its scope")
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested_games:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
@@ -594,6 +634,8 @@ class LatestProjectionPlayerPoolReader:
                 connection.execute(
                     select(table).where(
                         table.c.season == season,
+                        table.c.provider == self.scope.provider,
+                        table.c.query_key == self.scope.query_key,
                         table.c.canonical_game_id.in_(requested_games),
                     )
                 )
@@ -709,9 +751,33 @@ class ProjectionSelectionPlayerPoolReader:
         return pool
 
 
+class ProjectionRecordingService:
+    """Application boundary for recording an already retrieved Complete snapshot."""
+
+    def __init__(self, archive: ProjectionArchive) -> None:
+        self.archive = archive
+
+    def record_complete_snapshot(
+        self,
+        snapshot: ProviderSnapshot,
+        *,
+        query: NBAMarketQuery,
+        accepted_at: datetime | None = None,
+        poll_started_at: datetime | None = None,
+    ) -> ProjectionArchiveResult:
+        return self.archive.ingest_complete_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=accepted_at,
+            poll_started_at=poll_started_at,
+        )
+
+
 __all__ = [
     "LatestProjectionPlayerPoolReader",
     "ProjectionArchive",
+    "ProjectionArchiveReadScope",
     "ProjectionArchiveResult",
+    "ProjectionRecordingService",
     "ProjectionSelectionPlayerPoolReader",
 ]

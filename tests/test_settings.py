@@ -879,12 +879,16 @@ def test_dfs_board_feature_flag_is_off_by_default(monkeypatch):
 def test_projection_archive_reader_is_activation_gated(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.delenv("PROJECTION_ARCHIVE_READ_ENABLED", raising=False)
+    monkeypatch.delenv("PROJECTION_ARCHIVE_READ_PROVIDER", raising=False)
 
     assert load_settings().features.projection_archive_read_enabled is False
+    assert load_settings().features.projection_archive_read_provider == "dabble"
 
     monkeypatch.setenv("PROJECTION_ARCHIVE_READ_ENABLED", "true")
+    monkeypatch.setenv("PROJECTION_ARCHIVE_READ_PROVIDER", "PrizePicks")
 
     assert load_settings().features.projection_archive_read_enabled is True
+    assert load_settings().features.projection_archive_read_provider == "prizepicks"
 
 
 def test_dfs_board_feature_flag_opts_in_explicitly(monkeypatch):

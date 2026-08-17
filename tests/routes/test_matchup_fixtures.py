@@ -1330,7 +1330,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert missing_selection.status_code == 503
     assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
 
-    assembled.projection_archive.ingest_complete_snapshot(
+    assembled.projection_recorder.record_complete_snapshot(
         _recorded_projection_snapshot(catalog),
         query=NBAMarketQuery(season=SEASON),
         accepted_at=NOW,

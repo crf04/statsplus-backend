@@ -331,8 +331,9 @@ snapshot.
 #### Projection archive expansion path
 
 Migration 037 adds the durable projection evidence path without replacing the
-legacy Player Pool reader. `ProjectionArchive.ingest_complete_snapshot()` is
-the single write interface for this first vertical slice. It accepts one
+legacy Player Pool reader. `ProjectionRecordingService.record_complete_snapshot()`
+is the application recording boundary for this first vertical slice and
+delegates durable work to `ProjectionArchive`. It accepts one already retrieved
 Complete normalized `ProviderSnapshot` and its canonical season query and
 writes one Provider Poll for every accepted attempt. A changed attempt writes
 one checksummed source-evidence document, immutable market observations, and
@@ -350,7 +351,10 @@ completion time: replaying that recorded attempt returns its persisted result
 without adding a poll, while a different start, retrieval, or completion time
 is a distinct accepted poll. Query status filters are sorted exactly as the
 Provider Snapshot codec sorts them, so caller order cannot split one archive
-scope.
+scope. `observation_count` always means the number of normalized observations
+present in that accepted snapshot, including unchanged attempts; it is not the
+number of newly inserted rows. Provider polling and scheduling remain outside
+this slice.
 Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An
@@ -360,9 +364,14 @@ document at the same provider/query observation time is archived with a
 `same_time_not_promoted` materialization outcome and cannot replace the current
 Latest set; `older_not_promoted` records the corresponding older-snapshot
 decision.
-Every write first enters a provider/season/query scope transaction. An
-in-process lock covers SQLite writers before a durable scope-lock row exists;
-that stable row is then selected `FOR UPDATE` on production databases. The
+Every write first enters a provider/season/query scope transaction. PostgreSQL
+serializes both the initial unique scope-lock row insertion race and subsequent
+decisions with the durable row selected `FOR UPDATE`. SQLite ignores that
+clause, so the archive explicitly begins an `IMMEDIATE` write transaction
+before inserting or reading the lock row; this makes
+separate engine instances still serialize writers; SQLite therefore has
+database-wide rather than per-scope writer concurrency. The in-process lock is
+an additional same-engine optimization, not the durable guarantee. The
 change decision, evidence inserts, full Latest replacement, and poll commit
 therefore serialize as one transaction, and Latest can contain rows from only
 one generation for the scope.
@@ -379,9 +388,12 @@ ID-less markets nevertheless produce the same content-derived reference, every
 occurrence stays in immutable observations and the first targetable occurrence
 by source ordinal is the sole Latest pointer for that reference.
 
-`LatestProjectionPlayerPoolReader` is the database-only read interface. It
-unions current Latest Player Projections by canonical player, category, and
-provider without holding a DFS Board or provider registry. Latest remains
+`LatestProjectionPlayerPoolReader` is the database-only read interface. Its
+constructor requires one explicit canonical provider/query scope, and every
+read filters by that scope; unrelated providers or query generations can never
+be unioned into one request. Within that scope it groups current Latest Player
+Projections by canonical player, category, and provider without holding a DFS
+Board or provider registry. Latest remains
 current until a newer Complete snapshot replaces its provider/query set; this
 slice does not invent a separate wall-clock expiry policy. A targetable row
 requires the canonical athlete's name as well as its governed IDs; an ID is

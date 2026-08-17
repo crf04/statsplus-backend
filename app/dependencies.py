@@ -15,6 +15,16 @@ from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
 
 
+PROJECTION_ARCHIVE_REQUIRED_TABLES = (
+    "projection_archive_scope_locks",
+    "projection_provider_snapshots",
+    "projection_provider_polls",
+    "projection_observations",
+    "projection_materialization_generations",
+    "latest_player_projections",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationDependencies:
     """Runtime objects constructed once for one Flask application."""
@@ -61,6 +71,7 @@ class ApplicationDependencies:
     ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
     projection_archive: Any | None = None
+    projection_recorder: Any | None = None
     projection_player_pool_reader: Any | None = None
 
 
@@ -79,6 +90,7 @@ def build_dependencies(
     from app.providers.prizepicks import PrizePicksAdapter
     from app.providers.underdog import UnderdogAdapter
     from app.providers.rotowire import RotoWireInjuryProvider
+    from app.providers.dfs import NBAMarketQuery
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
@@ -98,6 +110,8 @@ def build_dependencies(
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
+        ProjectionArchiveReadScope,
+        ProjectionRecordingService,
         ProjectionSelectionPlayerPoolReader,
     )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
@@ -145,6 +159,17 @@ def build_dependencies(
         raise ConfigurationError(
             "PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database"
         )
+    if settings.features.projection_archive_read_enabled:
+        missing_archive_tables = tuple(
+            table_name
+            for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
+            if not inspect(engine).has_table(table_name)
+        )
+        if missing_archive_tables:
+            raise ConfigurationError(
+                "PROJECTION_ARCHIVE_READ_ENABLED requires migrated archive tables: "
+                + ", ".join(missing_archive_tables)
+            )
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     publication_reader = None
     write_fence = None
@@ -426,8 +451,17 @@ def build_dependencies(
     projection_archive = (
         None if demo_database else ProjectionArchive(engine, statistic_catalog)
     )
+    projection_recorder = (
+        None
+        if projection_archive is None
+        else ProjectionRecordingService(projection_archive)
+    )
+    projection_read_scope = ProjectionArchiveReadScope(
+        provider=settings.features.projection_archive_read_provider,
+        query=NBAMarketQuery(season=settings.nba.current_season),
+    )
     projection_player_pool_reader = (
-        LatestProjectionPlayerPoolReader(engine)
+        LatestProjectionPlayerPoolReader(engine, projection_read_scope)
         if settings.features.projection_archive_read_enabled
         else None
     )
@@ -556,6 +590,7 @@ def build_dependencies(
         ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
         projection_archive=projection_archive,
+        projection_recorder=projection_recorder,
         projection_player_pool_reader=projection_player_pool_reader,
     )
 
