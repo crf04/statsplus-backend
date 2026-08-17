@@ -39,6 +39,11 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
 )
+from app.domain.publication_integrity import (
+    canonical_publication_json,
+    publication_payload_checksum,
+    publication_payload_matches_checksum,
+)
 from app.models.catalogs import SHOOTING_TYPES
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
@@ -426,7 +431,7 @@ def _bootstrap_dict(row: BootstrapRequest) -> dict[str, Any]:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return canonical_publication_json(value)
 
 
 def _write_publication_projection(
@@ -1733,7 +1738,9 @@ class CollectionControlService(_SessionService):
         ):
             raise ControlPlaneError("invalid_manifest")
         material = {"season": season, "cutoff": cutoff.isoformat(), "collect_before": collect_before.isoformat(),
-                    "accepted_versions": versions, "scopes": scope_list}
+                    "accepted_versions": versions, "scopes": scope_list,
+                    "event_catalog_publication_id": event.publication_id,
+                    "event_catalog_checksum": event.checksum}
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
             active = session.get(ActiveSeason, season)
@@ -1748,8 +1755,24 @@ class CollectionControlService(_SessionService):
             prior = session.scalars(select(CollectionManifest).where(CollectionManifest.season == season, CollectionManifest.status == "active")).all()
             session.query(CollectionManifest).filter(CollectionManifest.season == season, CollectionManifest.status == "active").update(
                 {"status": "superseded", "superseded_at": now})
+            bound_event = session.get(CatalogPublication, event.publication_id)
+            if (
+                bound_event is None
+                or bound_event.catalog_type != "event"
+                or bound_event.season != season
+                or _aware(bound_event.cutoff) != cutoff
+                or not bound_event.complete
+                or bound_event.checksum != event.checksum
+                or not publication_payload_matches_checksum(
+                    bound_event.payload, bound_event.checksum
+                )
+            ):
+                raise ControlPlaneError("event_catalog_required")
             row = CollectionManifest(manifest_id=_uuid(), season=season, cutoff=cutoff, collect_before=collect_before,
-                accepted_versions=_json(versions), scopes=_json(scope_list), checksum=digest, status="active", created_at=now)
+                accepted_versions=_json(versions), scopes=_json(scope_list), checksum=digest,
+                event_catalog_publication_id=bound_event.publication_id,
+                event_catalog_checksum=bound_event.checksum,
+                status="active", created_at=now)
             session.add(row)
             for old in prior:
                 old.superseded_by = row.manifest_id
@@ -1790,14 +1813,29 @@ class CollectionControlService(_SessionService):
             active = session.get(ActiveSeason, manifest.season)
             if active is None or active.status != "active":
                 raise ControlPlaneError("season_not_active")
-            event = session.scalar(select(CatalogPublication).where(
-                CatalogPublication.season == manifest.season,
-                CatalogPublication.catalog_type == "event",
-                CatalogPublication.cutoff == manifest.cutoff,
-                (CatalogPublication.expires_at.is_(None)
-                 | (CatalogPublication.expires_at > _aware(now))),
-            ).order_by(CatalogPublication.published_at.desc()))
-            if event is None or not event.complete:
+            event = (
+                session.get(
+                    CatalogPublication,
+                    manifest.event_catalog_publication_id,
+                )
+                if manifest.event_catalog_publication_id
+                else None
+            )
+            if (
+                event is None
+                or not event.complete
+                or event.catalog_type != "event"
+                or event.season != manifest.season
+                or _aware(event.cutoff) != _aware(manifest.cutoff)
+                or event.checksum != manifest.event_catalog_checksum
+                or (
+                    event.expires_at is not None
+                    and _aware(event.expires_at) <= _aware(now)
+                )
+                or not publication_payload_matches_checksum(
+                    event.payload, event.checksum
+                )
+            ):
                 raise ControlPlaneError("event_catalog_required")
             try:
                 event_document = json.loads(event.payload)
@@ -2482,6 +2520,11 @@ class PublicationService(_SessionService):
                 ).order_by(PublicationVersion.version.desc()).limit(1))
                 if candidate is None:
                     raise ControlPlaneError("publication_candidate_invalid")
+                if not publication_payload_matches_checksum(
+                    candidate.payload,
+                    candidate.checksum,
+                ):
+                    raise ControlPlaneError("publication_checksum_mismatch")
                 if season is not None and candidate.season != season:
                     raise ControlPlaneError("publication_candidate_invalid")
                 if cutoff is not None and (
@@ -2710,7 +2753,7 @@ class PublicationService(_SessionService):
                 PublicationVersion.season == season).order_by(PublicationVersion.version.desc()).limit(1)) or 0
             pointer.fence += 1
             publication = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=season,
-                cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=_checksum(encoded), payload=encoded,
+                cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=publication_payload_checksum(encoded), payload=encoded,
                 created_at=now, reason=reason, fence=pointer.fence)
             session.add(publication)
             session.flush()
@@ -2802,7 +2845,7 @@ class PublicationService(_SessionService):
                 cutoff=_aware(cutoff),
                 version=int(next_version) + 1,
                 status="candidate",
-                checksum=_checksum(encoded),
+                checksum=publication_payload_checksum(encoded),
                 payload=encoded,
                 created_at=now,
                 reason=reason,
@@ -2975,6 +3018,8 @@ class PublicationService(_SessionService):
             current = session.get(PublicationVersion, pointer.active_publication_id)
             if prior is None or current is None:
                 raise ControlPlaneError("rollback_unavailable")
+            if not publication_payload_matches_checksum(prior.payload, prior.checksum):
+                raise ControlPlaneError("publication_checksum_mismatch")
             pointer.fence += 1
             version = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=prior.season,
                 cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-import hashlib
 import json
 from typing import Mapping, Protocol
 
 from sqlalchemy import select, update
 
+from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -211,18 +211,19 @@ class ActiveManifestLedgerGovernanceReader:
         )
 
     def _immutable_catalog_events(self, manifest) -> tuple[Mapping[str, object], ...]:
-        """Read the exact Event Catalog snapshot that preceded this manifest."""
+        """Read the exact Event Catalog snapshot bound to this manifest."""
 
         with self.engine.connect() as connection:
-            catalog = connection.execute(
-                select(CatalogPublication.__table__).where(
-                    CatalogPublication.season == manifest["season"],
-                    CatalogPublication.catalog_type == "event",
-                    CatalogPublication.cutoff == manifest["cutoff"],
-                    CatalogPublication.complete.is_(True),
-                    CatalogPublication.published_at <= manifest["created_at"],
-                ).order_by(CatalogPublication.published_at.desc()).limit(1)
-            ).mappings().one_or_none()
+            publication_id = manifest.get("event_catalog_publication_id")
+            catalog = (
+                connection.execute(
+                    select(CatalogPublication.__table__).where(
+                        CatalogPublication.publication_id == publication_id,
+                    )
+                ).mappings().one_or_none()
+                if publication_id
+                else None
+            )
         if catalog is None:
             raise ValueError(
                 "active manifest and immutable Event Catalog governance are required"
@@ -230,7 +231,14 @@ class ActiveManifestLedgerGovernanceReader:
         payload = catalog["payload"]
         if (
             not isinstance(payload, str)
-            or hashlib.sha256(payload.encode()).hexdigest() != catalog["checksum"]
+            or catalog["publication_id"]
+            != manifest["event_catalog_publication_id"]
+            or catalog["checksum"] != manifest.get("event_catalog_checksum")
+            or catalog["season"] != manifest["season"]
+            or catalog["catalog_type"] != "event"
+            or catalog["cutoff"] != manifest["cutoff"]
+            or not catalog["complete"]
+            or not publication_payload_matches_checksum(payload, catalog["checksum"])
         ):
             raise ValueError("immutable Event Catalog governance is inconsistent")
         try:

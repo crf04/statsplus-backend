@@ -19,13 +19,14 @@ from typing import Any, Callable, Protocol
 from sqlalchemy import exists, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import defer, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
     SHOT_ZONE_SLICES,
 )
+from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.models.collection_control import (
     PublicationPointer,
     PublicationStream,
@@ -405,6 +406,7 @@ class PublicationTeamWindowRow:
 def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTeamWindowRow, ...]:
     """Decode a complete, immutable team-window publication."""
 
+    publication_base = publication_base_for_stream(stream_key)
     supported = {
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
@@ -416,21 +418,38 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
     for row in rows:
         for field in (
             "team_id", "team_tricode", "game_ids", "game_count", "per48",
-            "league_average", "population_sigma", "competition_rank",
         ):
             _required(row, field, stream_key=stream_key)
+        if publication_base is None:
+            for field in (
+                "league_average", "population_sigma", "competition_rank",
+            ):
+                _required(row, field, stream_key=stream_key)
         game_ids = row["game_ids"]
         if not isinstance(game_ids, (list, tuple)) or any(
             not isinstance(value, str) or not value.strip() for value in game_ids
         ):
             raise PublicationPayloadError(f"{stream_key} publication game_ids are invalid")
         per48 = _strict_mapping(row["per48"], field="per48", stream_key=stream_key)
-        average = _strict_mapping(row["league_average"], field="league_average", stream_key=stream_key)
-        sigma = _strict_mapping(row["population_sigma"], field="population_sigma", stream_key=stream_key)
-        ranks = _strict_mapping(row["competition_rank"], field="competition_rank", stream_key=stream_key)
-        keys = set(per48)
-        if keys != set(average) or keys != set(sigma) or keys != set(ranks):
-            raise PublicationPayloadError(f"{stream_key} publication metric keys are inconsistent")
+        # NBA publication rows authoritatively carry per-48 values only.  The
+        # three derived mappings remain accepted for compatibility, but are
+        # never trusted by matchup assembly; it recomputes them from the exact
+        # 30-team value set.
+        average = _strict_mapping(
+            row["league_average"],
+            field="league_average",
+            stream_key=stream_key,
+        ) if "league_average" in row else {}
+        sigma = _strict_mapping(
+            row["population_sigma"],
+            field="population_sigma",
+            stream_key=stream_key,
+        ) if "population_sigma" in row else {}
+        ranks = _strict_mapping(
+            row["competition_rank"],
+            field="competition_rank",
+            stream_key=stream_key,
+        ) if "competition_rank" in row else {}
         numeric = {
             key: _strict_float(value, field=f"per48.{key}", stream_key=stream_key, minimum=0)
             for key, value in per48.items()
@@ -463,10 +482,9 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
         raise PublicationPayloadError(f"{stream_key} publication repeats a team")
     if any(row.game_count != len(row.game_ids) for row in decoded):
         raise PublicationPayloadError(f"{stream_key} publication game count is inconsistent")
-    base = publication_base_for_stream(stream_key)
-    if base is not None:
+    if publication_base is not None:
         try:
-            validate_publication_rows(base, tuple(decoded))
+            validate_publication_rows(publication_base, tuple(decoded))
         except ValueError as exc:
             raise PublicationPayloadError(str(exc)) from exc
     return tuple(decoded)
@@ -761,7 +779,7 @@ class DatabaseFirstPublicationReader:
                             == PublicationVersion.publication_id
                         )
                     ).label("projection_ready")
-                ).options(defer(PublicationVersion.payload, raiseload=True))
+                )
                 snapshot = {
                     stream.stream_key: (
                         stream,
@@ -890,6 +908,24 @@ class DatabaseFirstPublicationReader:
             )
         threshold = self.freshness_seconds.get(str(stream.freshness_rule))
         freshness = "fresh" if threshold is not None and age <= threshold else "stale"
+        if not publication_payload_matches_checksum(
+            publication.payload,
+            publication.checksum,
+        ):
+            return self._missing(
+                stream_key,
+                "unavailable",
+                reason="publication_checksum_mismatch",
+                fence=pointer.fence,
+                publication_id=publication.publication_id,
+                season=publication.season,
+                cutoff=_utc(publication.cutoff).isoformat(),
+                version=int(publication.version),
+                retrieved_at=retrieved_at,
+                checksum=publication.checksum,
+                freshness=freshness,
+                age_seconds=age,
+            )
         if not hydrate_payload:
             if not projection_ready:
                 return self._missing(

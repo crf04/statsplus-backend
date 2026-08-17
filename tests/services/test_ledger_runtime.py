@@ -6,9 +6,9 @@ import hashlib
 import json
 
 import pytest
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, inspect, select, update
 
-from app.migrations import run_migrations
+from app.migrations import MIGRATIONS, run_migrations
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -84,6 +84,14 @@ def _immutable_event_catalog(events, cutoff, *, published_at=None):
     }
 
 
+def _manifest_catalog_binding(events, cutoff):
+    catalog = _immutable_event_catalog(events, cutoff)
+    return {
+        "event_catalog_publication_id": catalog["publication_id"],
+        "event_catalog_checksum": catalog["checksum"],
+    }
+
+
 def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'missing.sqlite3'}")
     run_migrations(engine)
@@ -94,6 +102,71 @@ def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
         ).read(
             "2025-26", datetime(2025, 11, 1, tzinfo=timezone.utc)
         )
+
+
+def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'binding-migration.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    events = _catalog_events(_league_games()[:1], cutoff)
+    catalog = _immutable_event_catalog(events, cutoff)
+    ambiguous_cutoff = cutoff + timedelta(days=1)
+    ambiguous_catalog = _immutable_event_catalog(
+        events,
+        ambiguous_cutoff,
+        published_at=cutoff + timedelta(microseconds=1),
+    )
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(
+            CatalogPublication.__table__.insert().values(**ambiguous_catalog)
+        )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="legacy-boundable",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="legacy-boundable",
+            status="active",
+            created_at=cutoff,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="legacy-ambiguous",
+            season="2025-26",
+            cutoff=ambiguous_cutoff,
+            collect_before=cutoff + timedelta(days=1, hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="legacy-ambiguous",
+            status="superseded",
+            created_at=cutoff,
+        ))
+        MIGRATIONS[-1].upgrade(connection)
+        rows = {
+            row["manifest_id"]: row
+            for row in connection.execute(
+                CollectionManifest.__table__.select()
+            ).mappings()
+        }
+    assert rows["legacy-boundable"]["event_catalog_publication_id"] == catalog[
+        "publication_id"
+    ]
+    assert rows["legacy-boundable"]["event_catalog_checksum"] == catalog[
+        "checksum"
+    ]
+    assert rows["legacy-ambiguous"]["event_catalog_publication_id"] is None
+    assert any(
+        foreign_key["constrained_columns"] == ["event_catalog_publication_id"]
+        and foreign_key["referred_table"] == "collection_catalog_publications"
+        and foreign_key["options"].get("ondelete") == "RESTRICT"
+        for foreign_key in inspect(engine).get_foreign_keys(
+            "collection_manifests"
+        )
+    )
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
@@ -148,18 +221,19 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
         ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            status="active", created_at=cutoff,
-        ))
-        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(
             CatalogPublication.__table__.insert().values(
                 **_immutable_event_catalog(events, cutoff)
             )
         )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            **_manifest_catalog_binding(events, cutoff),
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
 
     reader = ActiveManifestLedgerGovernanceReader(
         engine, clock=lambda: cutoff - timedelta(hours=1)
@@ -213,6 +287,10 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     with pytest.raises(ValueError, match="immutable Event Catalog"):
         reader.read("2025-26", cutoff)
     with engine.begin() as connection:
+        connection.execute(update(CollectionManifest).values(
+            event_catalog_publication_id=None,
+            event_catalog_checksum=None,
+        ))
         connection.execute(CatalogPublication.__table__.delete())
     with pytest.raises(ValueError, match="immutable Event Catalog"):
         reader.read("2025-26", cutoff)
@@ -393,18 +471,19 @@ def test_compose_queued_persists_incomplete_governed_l15_as_missing(tmp_path):
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
         ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            status="active", created_at=cutoff,
-        ))
-        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(
             CatalogPublication.__table__.insert().values(
                 **_immutable_event_catalog(events, cutoff)
             )
         )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            **_manifest_catalog_binding(events, cutoff),
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(CompositionJob.__table__.insert().values(
             job_id="matchup", stream_key="traditional_opponent_season",
             manifest_id="manifest", season="2025-26", cutoff=cutoff, status="queued",
@@ -479,18 +558,19 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
         ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            status="active", created_at=cutoff,
-        ))
-        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(
             CatalogPublication.__table__.insert().values(
                 **_immutable_event_catalog(events, cutoff)
             )
         )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            **_manifest_catalog_binding(events, cutoff),
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(CompositionJob.__table__.insert(), [{
             "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
             "season": "2025-26", "cutoff": cutoff, "status": "queued",
@@ -567,18 +647,19 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
             season="2025-26", phase="Regular Season", status="active",
             cutoff=cutoff, activated_at=cutoff, activated_by="test",
         ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=cutoff,
-            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
-            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
-            status="active", created_at=cutoff,
-        ))
-        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(
             CatalogPublication.__table__.insert().values(
                 **_immutable_event_catalog(events, cutoff)
             )
         )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+            scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+            **_manifest_catalog_binding(events, cutoff),
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(CompositionJob.__table__.insert(), [{
             "job_id": f"job-{stream}", "stream_key": stream, "manifest_id": "manifest",
             "season": "2025-26", "cutoff": cutoff, "status": "queued",
@@ -681,18 +762,19 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
             season="2025-26", phase="Regular Season", status="active",
             cutoff=now, activated_at=now, activated_by="test",
         ))
-        connection.execute(CollectionManifest.__table__.insert().values(
-            manifest_id="manifest", season="2025-26", cutoff=now,
-            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
-            scopes='["canonical_game_ledger"]', checksum="manifest",
-            status="active", created_at=now,
-        ))
-        connection.execute(EventCatalogEntry.__table__.insert(), events)
         connection.execute(
             CatalogPublication.__table__.insert().values(
                 **_immutable_event_catalog(events, now)
             )
         )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="manifest",
+            **_manifest_catalog_binding(events, now),
+            status="active", created_at=now,
+        ))
+        connection.execute(EventCatalogEntry.__table__.insert(), events)
 
     class Backfill:
         calls = 0

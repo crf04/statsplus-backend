@@ -77,6 +77,15 @@ class CollectionManifest(Base):
     accepted_versions = Column(Text, nullable=False)
     scopes = Column(Text, nullable=False)
     checksum = Column(String(64), nullable=False, unique=True)
+    event_catalog_publication_id = Column(
+        String(36),
+        ForeignKey(
+            "collection_catalog_publications.publication_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    event_catalog_checksum = Column(String(64), nullable=True)
     status = Column(String(16), nullable=False, default="active")
     created_at = Column(DateTime(timezone=True), nullable=False)
     superseded_at = Column(DateTime(timezone=True), nullable=True)

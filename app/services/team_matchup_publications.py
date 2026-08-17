@@ -7,6 +7,8 @@ from datetime import date, datetime
 from collections.abc import Mapping
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.slate_time import publication_cutoff_is_after_slate_day
+from app.domain.utc import parse_utc_iso
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_BASES,
     NBA_PUBLICATION_STREAM_KEYS,
@@ -71,10 +73,19 @@ def validate_publication_rows(
     for row in rows:
         if row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]:
             raise PublicationValidationError("publication_team_identity_mismatch")
-        for values in (row.per48, row.league_average, row.population_sigma, row.competition_rank):
+        for values in (row.per48,):
             raw_keys = tuple(values)
             if len(raw_keys) != len(set(raw_keys)) or set(raw_keys) != expected:
                 raise PublicationValidationError("publication_metric_taxonomy_mismatch")
+        for values in (
+            row.league_average,
+            row.population_sigma,
+            row.competition_rank,
+        ):
+            if values and set(values) != expected:
+                raise PublicationValidationError(
+                    "publication_metric_taxonomy_mismatch"
+                )
     if expected_game_ids_by_team is None and expected_l15_game_ids is not None:
         expected_game_ids_by_team = expected_l15_game_ids
         window = "l15"
@@ -196,16 +207,16 @@ def publication_cutoff_reason(read, cutoff: date) -> str | None:
     if value is None:
         return None
     try:
-        publication_date = (
-            value.date()
-            if isinstance(value, datetime)
-            else datetime.fromisoformat(str(value)).date()
+        publication_instant = (
+            value if isinstance(value, datetime) else parse_utc_iso(str(value))
         )
-    except ValueError:
+        if publication_instant.tzinfo is None or publication_instant.utcoffset() is None:
+            raise ValueError("publication cutoff must be timezone-aware")
+    except (AttributeError, TypeError, ValueError):
         return "publication_cutoff_invalid"
     return (
         "publication_cutoff_after_as_of"
-        if publication_date > cutoff
+        if publication_cutoff_is_after_slate_day(publication_instant, cutoff)
         else None
     )
 

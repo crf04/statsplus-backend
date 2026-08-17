@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -15,6 +14,8 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
 
 from app.domain.utc import assume_utc, parse_utc_iso
+from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.slate_time import publication_cutoff_is_after_slate_day
 from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
@@ -97,7 +98,9 @@ class PublicationWriteCapability:
                     raise ValueError("publication_write_context_invalid") from None
                 if lineage_cutoff != version_cutoff:
                     raise ValueError("publication_write_context_invalid")
-                if version_cutoff.date() > scope.as_of:
+                if publication_cutoff_is_after_slate_day(
+                    version_cutoff, scope.as_of
+                ):
                     raise ValueError("publication_write_context_invalid")
                 pointer = connection.execute(
                     select(PublicationPointer.__table__).where(
@@ -137,9 +140,9 @@ class PublicationWriteCapability:
         )
 
         try:
-            if hashlib.sha256(version["payload"].encode()).hexdigest() != version[
-                "checksum"
-            ]:
+            if not publication_payload_matches_checksum(
+                version["payload"], version["checksum"]
+            ):
                 raise ValueError("publication checksum mismatch")
             document = json.loads(
                 version["payload"],

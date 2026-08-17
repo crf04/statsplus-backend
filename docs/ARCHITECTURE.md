@@ -1055,12 +1055,22 @@ its publication cascade and accepted-observation restrict links.
 Migration `027_bind_ledger_parity_to_publications` binds each new parity
 artifact to the exact inactive PublicationVersion and payload checksum it
 rehearsed; pre-binding artifacts are retired and cannot authorize cutover.
+Migration `038_bind_manifests_to_event_catalog_publications` gives every new
+manifest an exact Event Catalog publication ID and checksum. It backfills only
+legacy rows whose prior timestamp rule identifies one snapshot and leaves the
+rest unbound, so governance fails closed instead of guessing. Season and L15
+game sets both come from that checksummed snapshot; later mutable catalog
+status changes and same-clock catalog republications cannot reinterpret an
+existing cutoff.
 PBP responses
 remain staged until complete-game and identity validation succeeds; acceptance,
 ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime
-expectations come only from the active manifest and completed Regular Season
-Event Catalog entries. Traditional Season/L15 candidates contain complete
-30-team per-48, league-average, population-sigma, and ascending-rank payloads.
+expectations come only from the active manifest and its bound, completed
+Regular Season Event Catalog publication. NBA-owned Season/L15 candidates
+contain complete 30-team per-48 payloads; league mean, population sigma,
+deviation, and ascending rank are always derived in the backend from that
+exact raw value set. Legacy derived fields remain readable but are never
+authoritative.
 Each valid game commits independently, so a later failed target cannot erase
 earlier accepted progress. Governance requires an active, unexpired manifest
 at the shared cutoff with exact `canonical_game_ledger` scope and envelope
@@ -1424,7 +1434,9 @@ hide yesterday's valid values. Each surface reports both the scope and
 the same Slate Date. Consumers can therefore label stale-served metrics
 without overstating their freshness. Future cutoffs are rejected and the default
 cutoff is the injected clock's current ET date, so future-dated rows cannot
-shadow current data.
+shadow current data. Publication instants are compared with the exclusive end
+of that America/New_York Slate Date, including DST transitions; an evening UTC
+date rollover that remains on the requested Eastern day is not future data.
 
 Rolling boundaries come only from completed, governed `event_catalog` games.
 The resolver excludes postponed, preseason, All-Star, non-final, and

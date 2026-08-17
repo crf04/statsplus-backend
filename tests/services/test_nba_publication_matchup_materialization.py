@@ -22,6 +22,7 @@ from app.services.database_first_activation import (
     PublicationTeamWindowRow,
     LegacyWriteFence,
 )
+from app.services.database_first_rehearsal import HistoricalRehearsalRunner
 from app.services.collection_control import PublicationService
 from app.services.collection_control import CollectionOperationsService, ControlPlaneError
 from app.services.collection_control import STREAM_REQUIRED_SLICES
@@ -55,6 +56,7 @@ from app.services.team_matchup_publications import (
     PublicationLineage,
     PublicationValidationError,
     publication_metric_identity,
+    publication_cutoff_reason,
     validate_publication_rows,
 )
 from tests.services.test_ledger_derivations import _league_games
@@ -241,6 +243,15 @@ def _candidate_payload(expected_l15, *, mode="valid"):
         rows[0]["game_ids"].append("extra-game")
         rows[0]["game_count"] += 1
     return {"rows": rows}
+
+
+def _per48_only_payload(expected_game_ids):
+    payload = _candidate_payload(expected_game_ids)
+    for row in payload["rows"]:
+        row.pop("league_average")
+        row.pop("population_sigma")
+        row.pop("competition_rank")
+    return payload
 
 
 class _WindowGovernanceResolver:
@@ -515,6 +526,10 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
             accepted_versions="[1]",
             scopes='["canonical_game_ledger"]',
             checksum="immutable-manifest",
+            event_catalog_publication_id="immutable-event-catalog",
+            event_catalog_checksum=hashlib.sha256(
+                encoded_catalog.encode()
+            ).hexdigest(),
             status="active",
             created_at=cutoff,
         ))
@@ -1147,8 +1162,22 @@ def test_prior_season_unavailable_nba_lineage_does_not_rollback_ledger_facts(
     )
 
 
-def test_future_cutoff_nba_surface_degrades_without_rolling_back_other_facts(
+@pytest.mark.parametrize(
+    ("publication_cutoff", "expected_status", "expected_reason"),
+    (
+        ("2025-10-16T02:00:00+00:00", "available", None),
+        (
+            "2025-10-16T04:00:00+00:00",
+            "unavailable",
+            "publication_cutoff_after_as_of",
+        ),
+    ),
+)
+def test_publication_cutoff_uses_eastern_slate_day_in_materialization_and_fence(
     tmp_path,
+    publication_cutoff,
+    expected_status,
+    expected_reason,
 ):
     engine = _engine(tmp_path)
     games = _canonical_league_games()
@@ -1158,12 +1187,11 @@ def test_future_cutoff_nba_surface_degrades_without_rolling_back_other_facts(
         engine, publication_write_capability=create_publication_write_capability(engine)
     )
     stream_key = "exact_shot_zones_opponent_season"
-    future_cutoff = "2025-10-16T00:00:00+00:00"
     with engine.begin() as connection:
         connection.execute(
             PublicationVersion.__table__.update().where(
                 PublicationVersion.publication_id == f"publication-{stream_key}"
-            ).values(cutoff=datetime.fromisoformat(future_cutoff))
+            ).values(cutoff=datetime.fromisoformat(publication_cutoff))
         )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
 
@@ -1171,7 +1199,7 @@ def test_future_cutoff_nba_surface_degrades_without_rolling_back_other_facts(
         ledger,
         repository,
         publication_reader=_reader(
-            cutoff_by_stream={stream_key: future_cutoff},
+            cutoff_by_stream={stream_key: publication_cutoff},
         ),
         clock=lambda: RETRIEVED_AT,
     ).materialize(
@@ -1186,13 +1214,37 @@ def test_future_cutoff_nba_surface_degrades_without_rolling_back_other_facts(
         TeamMatchupSnapshotScope("2025-26", AS_OF)
     )
     observations = {item.surface: item for item in snapshot.observations}
-    assert observations["shot_zones"].status == "unavailable"
-    assert observations["shot_zones"].unavailable_reason == (
-        "publication_cutoff_after_as_of"
+    assert observations["shot_zones"].status == expected_status
+    assert observations["shot_zones"].unavailable_reason == expected_reason
+    assert any(fact.base == "shot_zones" for fact in snapshot.facts) is (
+        expected_status == "available"
     )
     assert observations["shot_types"].status == "available"
     assert any(fact.base == "traditional" for fact in snapshot.facts)
     assert any(fact.base == "shot_types" for fact in snapshot.facts)
+
+
+def test_publication_cutoff_uses_dst_aware_eastern_midnight_boundary():
+    def read_at(cutoff):
+        return PublicationRead(
+            stream_key="exact_shot_zones_opponent_season",
+            publication_id="publication",
+            season="2025-26",
+            cutoff=cutoff,
+            version=1,
+            status="active",
+            freshness="fresh",
+            age_seconds=0,
+            payload={"rows": []},
+        )
+
+    fall_back_day = date(2025, 11, 2)
+    assert publication_cutoff_reason(
+        read_at("2025-11-03T04:59:59+00:00"), fall_back_day
+    ) is None
+    assert publication_cutoff_reason(
+        read_at("2025-11-03T05:00:00+00:00"), fall_back_day
+    ) == "publication_cutoff_after_as_of"
 
 
 def test_materialization_rejects_fabricated_season_game_set_independently(
@@ -1708,6 +1760,129 @@ def test_compose_rejects_fabricated_season_game_ids_without_advancing_pointer(
     assert after["fence"] == before["fence"]
 
 
+def test_per48_only_publication_composes_activates_reads_and_materializes(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    games = _canonical_league_games()
+    season_ids = {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in _season_game_ids_by_team().items()
+    }
+    expected_game_ids, l15_ids, team_ids = _governance(games)
+    resolver = _WindowGovernanceResolver(season=season_ids, l15=l15_ids)
+    publications = PublicationService(
+        engine,
+        l15_expectation_resolver=resolver,
+    )
+
+    l15_stream = "exact_shot_zones_opponent_l15"
+    publications.register_stream(
+        l15_stream,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("l15",),
+        enabled=True,
+    )
+    with engine.connect() as connection:
+        l15_pointer = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == l15_stream
+            )
+        ).mappings().one()
+    composed = publications.compose(
+        l15_stream,
+        season="2025-26",
+        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        payload=_per48_only_payload(l15_ids),
+        expected_fence=l15_pointer["fence"],
+    )
+    rehearsal_publications = HistoricalRehearsalRunner(
+        engine, environment="unit"
+    )._load_isolated_publications(
+        {l15_stream: composed.publication_id},
+        season="2025-26",
+        cutoff=AS_OF,
+    )
+    assert rehearsal_publications[l15_stream].publication_id == (
+        composed.publication_id
+    )
+
+    season_stream = "exact_shot_zones_opponent_season"
+    publications.register_stream(
+        season_stream,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=False,
+    )
+    season_payload = _per48_only_payload(season_ids)
+    encoded = json.dumps(season_payload, separators=(",", ":"), sort_keys=True)
+    candidate_id = "per48-only-season-candidate"
+    with engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=candidate_id,
+            stream_key=season_stream,
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            version=3,
+            status="candidate",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            created_at=RETRIEVED_AT,
+            fence=0,
+        ))
+    publications.activate_stream(
+        season_stream,
+        reason="activate per48-only contract",
+        season="2025-26",
+        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        candidate_publication_id=candidate_id,
+    )
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
+    read = reader.read(season_stream, season="2025-26")
+    assert read.available
+    assert len(read.decoded) == 30
+    assert all(
+        not row.league_average
+        and not row.population_sigma
+        and not row.competition_rank
+        for row in read.decoded
+    )
+
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine,
+        publication_write_capability=create_publication_write_capability(engine),
+    )
+    LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=reader,
+        l15_expectation_resolver=resolver,
+        clock=lambda: RETRIEVED_AT,
+    ).materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=l15_ids,
+        team_ids=team_ids,
+    )
+    snapshot = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF)
+    )
+    assert any(fact.base == "shot_zones" for fact in snapshot.facts)
+    assert next(
+        item for item in snapshot.observations if item.surface == "shot_zones"
+    ).status == "available"
+
+
 def test_invalid_active_publication_retains_computed_age(tmp_path):
     engine = _engine(tmp_path)
     publications = PublicationService(engine)
@@ -1724,7 +1899,10 @@ def test_invalid_active_publication_retains_computed_age(tmp_path):
         connection.execute(
             PublicationVersion.__table__.update().where(
                 PublicationVersion.publication_id == f"publication-{stream_key}"
-            ).values(payload="{}")
+            ).values(
+                payload="{}",
+                checksum=hashlib.sha256(b"{}").hexdigest(),
+            )
         )
 
     read = DatabaseFirstPublicationReader(
@@ -1734,6 +1912,133 @@ def test_invalid_active_publication_retains_computed_age(tmp_path):
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_payload_invalid"
     assert read.age_seconds == 122400
+
+
+def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehearsal(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    _, l15_ids, _ = _governance(_canonical_league_games())
+    publications = PublicationService(
+        engine,
+        l15_expectation_resolver=lambda season, cutoff: l15_ids,
+    )
+    stream_key = "exact_shot_zones_opponent_l15"
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("l15",),
+        enabled=True,
+    )
+    with engine.connect() as connection:
+        pointer = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+    current = publications.compose(
+        stream_key,
+        season="2025-26",
+        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        payload=_per48_only_payload(l15_ids),
+        expected_fence=pointer["fence"],
+    )
+    with engine.begin() as connection:
+        prior_id = connection.execute(
+            select(PublicationPointer.previous_publication_id).where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).scalar_one()
+        prior_payload = connection.execute(
+            select(PublicationVersion.payload).where(
+                PublicationVersion.publication_id == prior_id
+            )
+        ).scalar_one()
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == prior_id
+            ).values(payload=prior_payload.replace("1.0", "1.25", 1))
+        )
+    with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
+        publications.rollback(stream_key, reason="reject corrupt prior")
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(PublicationPointer.active_publication_id).where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).scalar_one() == current.publication_id
+
+    candidate_payload = json.loads(current.payload)
+    candidate_payload["rows"][0]["per48"][
+        next(iter(candidate_payload["rows"][0]["per48"]))
+    ] = 2.0
+    candidate_encoded = json.dumps(
+        candidate_payload, separators=(",", ":"), sort_keys=True
+    )
+    candidate_id = "checksum-mismatch-candidate"
+    with engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=candidate_id,
+            stream_key=stream_key,
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            version=current.version + 1,
+            status="candidate",
+            checksum=current.checksum,
+            payload=candidate_encoded,
+            created_at=RETRIEVED_AT,
+            fence=0,
+        ))
+    with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
+        publications.activate_stream(
+            stream_key,
+            reason="reject stale checksum",
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            candidate_publication_id=candidate_id,
+        )
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(PublicationPointer.active_publication_id).where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).scalar_one() == current.publication_id
+
+    with pytest.raises(ValueError, match="rehearsal publication checksum mismatch"):
+        HistoricalRehearsalRunner(
+            engine, environment="unit"
+        )._load_isolated_publications(
+            {stream_key: candidate_id},
+            season="2025-26",
+            cutoff=AS_OF,
+        )
+
+    with engine.begin() as connection:
+        current_payload = connection.execute(
+            select(PublicationVersion.payload).where(
+                PublicationVersion.publication_id == current.publication_id
+            )
+        ).scalar_one()
+        mutated = json.loads(current_payload)
+        mutated["rows"][0]["per48"][
+            next(iter(mutated["rows"][0]["per48"]))
+        ] = 3.0
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == current.publication_id
+            ).values(payload=json.dumps(
+                mutated, separators=(",", ":"), sort_keys=True
+            ))
+        )
+    read = DatabaseFirstPublicationReader(
+        engine, clock=lambda: RETRIEVED_AT
+    ).read(stream_key, season="2025-26")
+    assert read.status == "unavailable"
+    assert read.unavailable_reason == "publication_checksum_mismatch"
+    assert read.age_seconds is not None
 
 
 def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
@@ -1774,7 +2079,7 @@ def test_direct_publication_query_preserves_future_cutoff_failure_provenance(
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(engine)
     stream_key = "exact_shot_zones_opponent_season"
-    future_cutoff = "2025-10-16T00:00:00+00:00"
+    future_cutoff = "2025-10-16T04:00:00+00:00"
     window = TeamMatchupQueryService(
         repository,
         publication_reader=_reader(

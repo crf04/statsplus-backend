@@ -40,6 +40,7 @@ from app.services.collection_control import (
     EmailAlertAdapter,
     NBA_TEAM_IDS,
 )
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 
 
 UTC = timezone.utc
@@ -480,6 +481,57 @@ def test_bootstrap_requires_active_season_and_manifest_uses_exact_cutoff(control
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     assert manifest.cutoff == cutoff
     assert json.loads(manifest.accepted_versions) == [1, 2]
+
+
+def test_manifest_binds_fixed_clock_event_catalog_republication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+
+    first_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    first = control.publish_catalog(
+        first_request.request_id,
+        _catalog_payload("event"),
+        version="event-v1",
+    )
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(
+        athlete_request.request_id,
+        _catalog_payload("athlete"),
+        version="athlete-v1",
+    )
+    corrected_payload = _catalog_payload("event")
+    corrected_payload["events"][0]["status"] = "Scheduled"
+    corrected_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    corrected = control.publish_catalog(
+        corrected_request.request_id,
+        corrected_payload,
+        version="event-v2",
+    )
+    assert corrected.published_at > now
+    assert corrected.publication_id != first.publication_id
+
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["canonical_game_ledger"],
+        collect_before=now + timedelta(hours=1),
+    )
+    assert manifest.event_catalog_publication_id == corrected.publication_id
+    assert manifest.event_catalog_checksum == corrected.checksum
+
+    governance = ActiveManifestLedgerGovernanceReader(control_db).read(
+        "2025-26", cutoff
+    )
+    assert "game-0" not in governance.expected_game_ids
+    assert len(governance.expected_game_ids) == 14
 
 
 def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(control_db):

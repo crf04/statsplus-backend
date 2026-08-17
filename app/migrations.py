@@ -992,6 +992,77 @@ def _create_publication_player_game_log_projection(
             continue
 
 
+def _bind_manifests_to_event_catalog_publications(
+    connection: Connection,
+) -> None:
+    """Bind each manifest to the exact immutable Event Catalog it validated."""
+
+    from app.models.collection_control import CatalogPublication, CollectionManifest
+
+    preparer = connection.dialect.identifier_preparer
+    table_name = preparer.quote(CollectionManifest.__tablename__)
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            CollectionManifest.__tablename__
+        )
+    }
+    if "event_catalog_publication_id" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {table_name} ADD COLUMN "
+            "event_catalog_publication_id VARCHAR(36) REFERENCES "
+            "collection_catalog_publications(publication_id) ON DELETE RESTRICT"
+        ))
+    if "event_catalog_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {table_name} ADD COLUMN "
+            "event_catalog_checksum VARCHAR(64)"
+        ))
+
+    manifest_table = CollectionManifest.__table__
+    catalog_table = CatalogPublication.__table__
+    manifests = connection.execute(select(
+        manifest_table.c.manifest_id,
+        manifest_table.c.season,
+        manifest_table.c.cutoff,
+        manifest_table.c.created_at,
+        manifest_table.c.event_catalog_publication_id,
+    )).mappings()
+    for manifest in manifests:
+        if manifest["event_catalog_publication_id"]:
+            continue
+        catalogs = list(connection.execute(
+            select(
+                catalog_table.c.publication_id,
+                catalog_table.c.checksum,
+                catalog_table.c.published_at,
+            ).where(
+                catalog_table.c.season == manifest["season"],
+                catalog_table.c.catalog_type == "event",
+                catalog_table.c.cutoff == manifest["cutoff"],
+                catalog_table.c.complete.is_(True),
+            ).order_by(catalog_table.c.published_at.desc()).limit(1)
+        ).mappings())
+        eligible = [
+            catalog
+            for catalog in catalogs
+            if catalog["published_at"] <= manifest["created_at"]
+        ]
+        if not eligible or len(eligible) != len(catalogs):
+            # Ambiguous legacy rows stay explicitly unbound and therefore
+            # fail closed in governance reads.
+            continue
+        catalog = eligible[0]
+        connection.execute(
+            manifest_table.update().where(
+                manifest_table.c.manifest_id == manifest["manifest_id"]
+            ).values(
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+            )
+        )
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -1048,6 +1119,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         37,
         "037_team_matchup_publication_lineage",
         _add_team_matchup_publication_lineage,
+    ),
+    Migration(
+        38,
+        "038_bind_manifests_to_event_catalog_publications",
+        _bind_manifests_to_event_catalog_publications,
     ),
 )
 
