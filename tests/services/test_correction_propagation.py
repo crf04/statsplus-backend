@@ -19,6 +19,7 @@ from app.models.collection_control import (
     ReconciliationItem,
 )
 from app.services.collection_control import PublicationService
+from app.services.collection_control import LedgerPublicationComposition
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     raw_rows_from_facts,
@@ -225,6 +226,98 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
     after = matchup.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF.date()))
     assert before.facts != after.facts
     assert any(fact.recomposition_reason == "correction" for fact in after.facts)
+
+
+def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_path, monkeypatch):
+    engine = _engine(tmp_path, "atomic-runtime.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    publications.register_default_streams()
+    streams = ("traditional_opponent_season", "player_game_logs")
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="manifest",
+            status="active", created_at=AS_OF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="obs:one", client_observation_id="obs:one", collector_id="test",
+            manifest_id="manifest", environment="testing", provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({"surface": "canonical_game_ledger", "game_id": "game-one"}),
+            season="2025-26", cutoff=AS_OF, schema_version=1, checksum="a" * 64,
+            payload="{}", payload_bytes=2, retrieved_at=AS_OF, accepted_at=AS_OF,
+        ))
+        connection.execute(PublicationStream.__table__.update().where(
+            PublicationStream.stream_key.in_(streams),
+        ).values(enabled=True))
+        connection.execute(CompositionJob.__table__.insert(), [
+            {"job_id": f"job-{index}", "stream_key": stream, "manifest_id": "manifest",
+             "season": "2025-26", "cutoff": AS_OF, "status": "queued", "attempts": 0,
+             "created_at": AS_OF, "updated_at": AS_OF}
+            for index, stream in enumerate(streams)
+        ])
+    provenance = {"obs:one": "game-one"}
+    import app.services.collection_control as collection_control
+    monkeypatch.setattr(collection_control, "_write_publication_projection", lambda *args: None)
+    def payload_for(stream, value):
+        return [{"value": value}]
+    for stream in streams:
+        publications.recompose_ledger(stream, season="2025-26", cutoff=AS_OF,
+                                       payload=payload_for(stream, "last-good"), provenance=provenance)
+    with engine.connect() as connection:
+        before = {
+            row["stream_key"]: row["active_publication_id"]
+            for row in connection.execute(select(PublicationPointer.__table__)).mappings()
+            if row["stream_key"] in streams
+        }
+
+    class Governance:
+        def read_for_composition(self, season, cutoff, manifest_id=None):
+            return type("Governance", (), {
+                "expected_game_ids": frozenset(), "expected_l15_game_ids": {},
+                "team_ids": frozenset(),
+            })()
+
+    class Materialization:
+        publication_service = publications
+
+        def compose(self, games, **kwargs):
+            compositions = [LedgerPublicationComposition(
+                stream_key=stream, season="2025-26", cutoff=AS_OF,
+                payload=payload_for(stream, "new"), provenance=provenance,
+            ) for stream in streams]
+            return publications.recompose_ledger_batch(compositions)
+
+    repository = CanonicalGameLedgerRepository(engine)
+    runtime = __import__("app.services.ledger_runtime", fromlist=["LedgerRuntime"]).LedgerRuntime(
+        backfill=None, repository=repository, materialization=Materialization(),
+        governance=Governance(), clock=lambda: AS_OF,
+    )
+    original = publications._compose_active_in_session
+    calls = {"count": 0}
+
+    def fail_after_first(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise LedgerMaterializationUnavailable("injected staged-stream failure")
+        return original(*args, **kwargs)
+
+    publications._compose_active_in_session = fail_after_first
+    assert runtime.compose_queued("2025-26") == 0
+    assert calls["count"] == 2
+    with engine.connect() as connection:
+        after = {
+            row["stream_key"]: row["active_publication_id"]
+            for row in connection.execute(select(PublicationPointer.__table__)).mappings()
+            if row["stream_key"] in streams
+        }
+        versions = connection.execute(select(PublicationVersion.__table__)).all()
+        jobs = connection.execute(select(CompositionJob.__table__)).mappings().all()
+    assert after == before
+    assert len(versions) == 2
+    assert all(job["status"] == "failed" for job in jobs)
+    assert all(job["last_error"] == "recomposition_failed" for job in jobs)
 
 
 def test_recomposition_failure_records_retryable_state_without_reconciliation_loss(tmp_path):
