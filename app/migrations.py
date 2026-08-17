@@ -300,11 +300,13 @@ def _upgrade_correction_propagation(connection: Connection) -> None:
     additions = {
         "composition_jobs": {
             "trigger_game_id": "VARCHAR(64)",
+            "trigger_game_ids": "TEXT NOT NULL DEFAULT '[]'",
             "affected_team_ids": "TEXT NOT NULL DEFAULT '[]'",
             "source_observation_ids": "TEXT NOT NULL DEFAULT '[]'",
             "recomposition_reason": "VARCHAR(128)",
             "ledger_checksum": "VARCHAR(64)",
             "game_set_checksum": "VARCHAR(64)",
+            "ledger_evidence": "TEXT NOT NULL DEFAULT '{}'",
         },
         "team_matchup_facts": {
             "source_observation_ids": "TEXT",

@@ -91,7 +91,7 @@ def test_coalesced_correction_union_keeps_all_trigger_and_source_lineage(tmp_pat
     repository.replace_game(corrected)
     with engine.connect() as connection:
         row = connection.execute(select(CompositionJob.__table__)).mappings().first()
-    assert set(json.loads(row["trigger_game_id"])) == {first.game_id, second.game_id}
+    assert set(json.loads(row["trigger_game_ids"])) == {first.game_id, second.game_id}
     assert set(json.loads(row["source_observation_ids"])) == {
         first.source_observation_id, second.source_observation_id,
     }

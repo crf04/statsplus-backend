@@ -299,7 +299,7 @@ class LedgerRuntime:
             trigger_game_ids = frozenset(
                 str(game_id)
                 for row in slice_jobs
-                for game_id in _json_list(row.get("trigger_game_id"))
+                for game_id in _json_list(row.get("trigger_game_ids"))
             )
             if not trigger_game_ids:
                 trigger_game_ids = frozenset(

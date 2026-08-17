@@ -56,5 +56,9 @@ class LedgerLineage:
             return self.ledger_checksums[0]
         return hashlib.sha256("\n".join(self.ledger_checksums).encode()).hexdigest()
 
+    @staticmethod
+    def evidence_checksum(evidence: dict[str, str]) -> str:
+        return hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
     def encoded_game_ids(self) -> str:
         return json.dumps(self.game_ids, separators=(",", ":"))
