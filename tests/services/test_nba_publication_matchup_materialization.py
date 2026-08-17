@@ -57,6 +57,7 @@ from app.services.team_matchup_publications import (
     PublicationValidationError,
     publication_metric_identity,
     publication_cutoff_reason,
+    resolve_governed_team_game_ids,
     validate_publication_rows,
 )
 from tests.services.test_ledger_derivations import _league_games
@@ -383,8 +384,47 @@ class _WindowGovernanceResolver:
     def __init__(self, *, season, l15):
         self.expected = {"season": season, "l15": l15}
 
-    def resolve_team_game_ids(self, season, cutoff, *, window):
+    def resolve_team_game_ids(
+        self,
+        season,
+        cutoff,
+        *,
+        window,
+        manifest_id=None,
+        event_catalog_publication_id=None,
+        event_catalog_checksum=None,
+    ):
         return self.expected[window]
+
+
+def test_legacy_resolver_cannot_discard_requested_publication_authority():
+    expected = {
+        team_id: frozenset({f"game-{team_id}"})
+        for team_id in CANONICAL_TEAM_IDS
+    }
+    class LegacyResolver:
+        def resolve_team_game_ids(self, season, cutoff, *, window):
+            return expected
+
+    resolver = LegacyResolver()
+
+    with pytest.raises(ValueError, match="publication_governance_unavailable"):
+        resolve_governed_team_game_ids(
+            resolver,
+            "2025-26",
+            datetime(2025, 10, 15, tzinfo=timezone.utc),
+            window="season",
+            manifest_id="invented-manifest",
+            event_catalog_publication_id="invented-catalog",
+            event_catalog_checksum="invented-checksum",
+        )
+
+    assert resolve_governed_team_game_ids(
+        resolver,
+        "2025-26",
+        datetime(2025, 10, 15, tzinfo=timezone.utc),
+        window="season",
+    ) == expected
 
 
 def test_collection_registry_and_publication_contract_share_canonical_taxonomy():
@@ -417,8 +457,9 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
         for team_id in CANONICAL_TEAM_IDS
     }
-    publications.l15_expectation_resolver = (
-        lambda season, requested_cutoff: expected
+    publications.l15_expectation_resolver = _WindowGovernanceResolver(
+        season=expected,
+        l15=expected,
     )
     payload = _candidate_payload(expected, mode=mode)
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -440,7 +481,10 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
     operations = CollectionOperationsService(
         engine,
         publication_service=publications,
-        l15_expectation_resolver=lambda season, requested_cutoff: expected,
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=expected,
+            l15=expected,
+        ),
         clock=lambda: RETRIEVED_AT,
     )
     return engine, operations, stream_key, candidate_id, cutoff
@@ -1952,7 +1996,10 @@ def test_compose_rejects_invalid_nba_payload_without_advancing_pointer(
     }
     publications = PublicationService(
         engine,
-        l15_expectation_resolver=lambda season, cutoff: expected,
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=expected,
+            l15=expected,
+        ),
     )
     stream_key = "exact_shot_zones_opponent_l15"
     publications.register_stream(
@@ -2208,7 +2255,10 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
     _, l15_ids, _ = _governance(_canonical_league_games())
     publications = PublicationService(
         engine,
-        l15_expectation_resolver=lambda season, cutoff: l15_ids,
+        l15_expectation_resolver=_WindowGovernanceResolver(
+            season=l15_ids,
+            l15=l15_ids,
+        ),
     )
     stream_key = "exact_shot_zones_opponent_l15"
     publications.register_stream(
@@ -2327,6 +2377,83 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_checksum_mismatch"
     assert read.age_seconds is not None
+
+
+def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
+    engine = _engine(tmp_path)
+    _, l15_ids, _ = _governance(_canonical_league_games())
+    resolver = ActiveManifestLedgerGovernanceReader(engine)
+    publications = PublicationService(
+        engine,
+        l15_expectation_resolver=resolver,
+    )
+    stream_key = "exact_shot_zones_opponent_l15"
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("l15",),
+        enabled=True,
+    )
+    with engine.connect() as connection:
+        pointer = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+    current = publications.compose(
+        stream_key,
+        season="2025-26",
+        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+        payload=_per48_only_payload(l15_ids),
+        expected_fence=pointer["fence"],
+        manifest_id=DEFAULT_MANIFEST_ID,
+    )
+    with engine.connect() as connection:
+        prior_id = connection.execute(
+            select(PublicationPointer.previous_publication_id).where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).scalar_one()
+
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == current.publication_id
+            ).values(manifest_id=None)
+        )
+    with pytest.raises(ValueError, match="rehearsal publication authority mismatch"):
+        HistoricalRehearsalRunner(
+            engine, environment="unit"
+        )._load_isolated_publications(
+            {stream_key: current.publication_id},
+            season="2025-26",
+            cutoff=AS_OF,
+        )
+
+    with engine.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == current.publication_id
+            ).values(**_publication_authority_values())
+        )
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == prior_id
+            ).values(event_catalog_checksum="mismatched-authority")
+        )
+    with pytest.raises(
+        ControlPlaneError, match="publication_governance_unavailable"
+    ):
+        publications.rollback(stream_key, reason="reject invalid authority")
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(PublicationPointer.active_publication_id).where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).scalar_one() == current.publication_id
 
 
 def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):

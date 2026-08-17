@@ -65,6 +65,21 @@ def _immutable_event_catalog(events, cutoff, *, published_at=None):
                 "status": event.get("status_text", "Scheduled"),
                 "status_code": event.get("status_code"),
                 "scheduled_at": event["scheduled_at"].isoformat(),
+                **(
+                    {"completed": event["completed"]}
+                    if "completed" in event
+                    else {}
+                ),
+                **(
+                    {"postponed_status": event["postponed_status"]}
+                    if "postponed_status" in event
+                    else {}
+                ),
+                **(
+                    {"postponement_evidence": event["postponement_evidence"]}
+                    if "postponement_evidence" in event
+                    else {}
+                ),
             }
             for event in events
         ]
@@ -244,6 +259,57 @@ def test_date_cutoff_lookup_uses_eastern_slate_day_across_fall_back(tmp_path):
         manifest_id="fall-back-manifest",
     )
     assert by_date == by_instant
+
+
+def test_immutable_governance_excludes_false_completion_and_postponed_final(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'event-truth.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    events = _catalog_events(_league_games()[:1], cutoff)
+    events.extend((
+        {
+            **events[0],
+            "nba_game_id": "scheduled-string-false",
+            "status_text": "Scheduled",
+            "status_code": 1,
+            "completed": "false",
+        },
+        {
+            **events[0],
+            "nba_game_id": "final-but-postponed",
+            "status_text": "Final",
+            "status_code": 3,
+            "postponed_status": "postponed",
+            "postponement_evidence": {"reason": "weather"},
+        },
+    ))
+    catalog = _immutable_event_catalog(events, cutoff)
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="event-truth-manifest",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="event-truth-manifest",
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+            status="active",
+            created_at=cutoff,
+        ))
+    game_ids = ActiveManifestLedgerGovernanceReader(engine).resolve_team_game_ids(
+        "2025-26",
+        cutoff,
+        window="season",
+        manifest_id="event-truth-manifest",
+    )
+    governed = frozenset().union(*game_ids.values())
+    assert "scheduled-string-false" not in governed
+    assert "final-but-postponed" not in governed
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
@@ -456,7 +522,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
 
 
-def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
+def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
     tmp_path,
 ):
     from app.services.ledger_matchup_materialization import (
@@ -468,7 +534,9 @@ def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
     repository = CanonicalGameLedgerRepository(engine)
     games = _league_games()
     repository.replace_games_atomic(games)
-    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    # 23:30 EST on November 2 is November 3 in UTC.
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    slate_date = date(2025, 11, 2)
     team_ids = frozenset(range(1, 31))
     expected = frozenset(game.game_id for game in games)
     expected_l15 = {
@@ -500,6 +568,14 @@ def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
         TeamMatchupRepository(engine),
         clock=lambda: cutoff + timedelta(hours=1),
     )
+    listed_through = []
+    list_games = repository.list_games
+
+    def capture_list_games(season, *, through=None):
+        listed_through.append(through)
+        return list_games(season, through=through)
+
+    repository.list_games = capture_list_games
     runtime = LedgerRuntime(
         backfill=None,
         repository=repository,
@@ -516,8 +592,10 @@ def test_compose_queued_publishes_ledger_matchup_facts_at_the_shared_cutoff(
     assert runtime.compose_queued("2025-26") == 1
 
     season = TeamMatchupRepository(engine).get_snapshot(
-        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+        TeamMatchupSnapshotScope("2025-26", slate_date)
     )
+    assert listed_through
+    assert set(listed_through) == {slate_date}
     assert {item.surface for item in season.observations} == {
         "traditional",
         "assist_locations",

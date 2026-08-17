@@ -12,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Connection
 
+from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import CollectionManifest, CompositionJob
 
 from app.services.canonical_game_ledger import (
@@ -234,7 +235,10 @@ class LedgerMaterializationService:
         publication_cutoff = cutoff or datetime.combine(
             as_of, datetime.min.time(), timezone.utc
         )
-        if publication_cutoff.tzinfo is None or publication_cutoff.date() != as_of:
+        if (
+            publication_cutoff.tzinfo is None
+            or slate_date_for_instant(publication_cutoff) != as_of
+        ):
             raise LedgerMaterializationUnavailable(
                 "publication cutoff must be aware and match the materialization date"
             )

@@ -170,7 +170,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                 publication_strategy, supported_windows, schema_versions,
                 completeness_rule, freshness_rule, enabled, created_at
             ) VALUES (
-                'migration-stream', 'nba', 'collector', '[]',
+                'exact_shot_zones_opponent_season', 'nba', 'collector', '[]',
                 'snapshot_replace', '[\"season\"]', '[1, 2]',
                 'base_complete', 'cutoff_current', 0, :cutoff
             )
@@ -178,7 +178,6 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         for catalog_id, catalog_cutoff in (
             ("catalog-only", cutoff),
             ("catalog-a", ambiguous_cutoff),
-            ("catalog-b", ambiguous_cutoff),
         ):
             connection.execute(text("""
                 INSERT INTO collection_catalog_publications (
@@ -197,7 +196,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         for manifest_id, manifest_cutoff, catalog_id in (
             ("manifest-only", cutoff, "catalog-only"),
             ("manifest-a", ambiguous_cutoff, "catalog-a"),
-            ("manifest-b", ambiguous_cutoff, "catalog-b"),
+            ("manifest-b-unbound", ambiguous_cutoff, None),
         ):
             connection.execute(text("""
                 INSERT INTO collection_manifests (
@@ -208,13 +207,14 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                 ) VALUES (
                     :manifest_id, '2025-26', :cutoff, :collect_before,
                     '[1]', '[\"canonical_game_ledger\"]', :manifest_id,
-                    :catalog_id, :catalog_id, 'superseded', :cutoff
+                    :catalog_id, :catalog_checksum, 'superseded', :cutoff
                 )
             """), {
                 "manifest_id": manifest_id,
                 "cutoff": manifest_cutoff,
                 "collect_before": manifest_cutoff + timedelta(hours=1),
                 "catalog_id": catalog_id,
+                "catalog_checksum": catalog_id,
             })
         for publication_id, publication_cutoff, version in (
             ("version-only", cutoff, 1),
@@ -225,7 +225,8 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
                     publication_id, stream_key, season, cutoff, version,
                     status, checksum, payload, created_at, fence
                 ) VALUES (
-                    :publication_id, 'migration-stream', '2025-26', :cutoff,
+                    :publication_id, 'exact_shot_zones_opponent_season',
+                    '2025-26', :cutoff,
                     :version, 'candidate', :publication_id, '{}', :cutoff, 0
                 )
             """), {

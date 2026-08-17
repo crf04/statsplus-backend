@@ -34,6 +34,7 @@ from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
+from app.domain.nba_events import is_completed_non_postponed_event
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     SHOT_TYPE_DISPLAY_TO_STORED,
@@ -1075,13 +1076,11 @@ class CollectionControlService(_SessionService):
     def _catalog_completed_ids(cls, payload: Any) -> set[str]:
         rows = _catalog_rows(payload, catalog_type="event") or []
         completed: set[str] = set()
-        terminal = {"final", "finished", "completed", "closed", "game over", "3"}
         for row in rows:
             if not isinstance(row, Mapping):
                 continue
             identity = cls._catalog_event_id(row)
-            status = str(row.get("status", row.get("status_text", row.get("status_code", "")))).strip().lower()
-            if status in terminal or status.startswith("final") or row.get("completed") is True:
+            if is_completed_non_postponed_event(row):
                 completed.add(identity)
         return completed
 
@@ -3065,6 +3064,13 @@ class PublicationService(_SessionService):
                 raise ControlPlaneError("rollback_unavailable")
             if not publication_payload_matches_checksum(prior.payload, prior.checksum):
                 raise ControlPlaneError("publication_checksum_mismatch")
+            if stream_key in NBA_PUBLICATION_STREAM_KEYS:
+                try:
+                    verify_publication_authority(session, prior)
+                except ValueError as error:
+                    raise ControlPlaneError(
+                        "publication_governance_unavailable"
+                    ) from error
             pointer.fence += 1
             version = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=prior.season,
                 cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,
@@ -3885,12 +3891,7 @@ def _completed_game_count(payload: str, *, cutoff: datetime) -> int:
             if phase not in {"regular season", "regular"}:
                 continue
             game_id = event.get("nba_game_id", event.get("game_id", event.get("id")))
-            status = str(event.get("status", event.get("status_text", ""))).lower()
-            status_code = event.get("status_code")
-            completed = bool(event.get("completed")) or status in {
-                "final", "finished", "completed", "closed", "game over", "3",
-            } or status.startswith("final") or status_code in {3, "3"}
-            if not completed or not game_id:
+            if not is_completed_non_postponed_event(event) or not game_id:
                 continue
             scheduled = event.get("scheduled_at", event.get("date"))
             if scheduled:
@@ -4055,6 +4056,8 @@ def _validate_catalog_payload(value: Any, catalog_type: str, *,
                 raise ValueError("event phase required")
             phases.add(normalized_phase)
             status = row.get("status", row.get("status_text", row.get("status_code")))
+            if "completed" in row and not isinstance(row["completed"], bool):
+                raise ValueError("event completed flag invalid")
             if status in (None, "") and "completed" not in row:
                 raise ValueError("event status required")
             if status not in (None, ""):

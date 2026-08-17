@@ -20,6 +20,12 @@ def slate_day_bounds_utc(slate_date: date) -> tuple[datetime, datetime]:
     return start, end
 
 
+def slate_date_for_instant(value: datetime) -> date:
+    """Return the Eastern slate date containing one UTC-aware instant."""
+
+    return assume_utc(value).astimezone(EASTERN).date()
+
+
 def slate_day_end_utc(slate_date: date) -> datetime:
     """Return the exclusive UTC instant at the end of one Eastern slate day."""
 
@@ -39,4 +45,5 @@ __all__ = [
     "publication_cutoff_is_after_slate_day",
     "slate_day_bounds_utc",
     "slate_day_end_utc",
+    "slate_date_for_instant",
 ]

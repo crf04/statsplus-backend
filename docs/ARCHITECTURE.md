@@ -1067,8 +1067,13 @@ governed NBA PublicationVersion to the exact manifest and Event Catalog
 publication/checksum that authorized it. Compose records that identity and
 activation, rehearsal, materialization, and reads verify it, so a later
 same-cutoff manifest cannot reinterpret an older candidate. Legacy versions
-are backfilled only when exactly one bound manifest is available; ambiguous
-rows remain unbound and fail closed.
+are backfilled only when one relevant manifest, one complete Event Catalog,
+and any normalized observation provenance agree on the same authority;
+ambiguous or unbound rows remain unbound and fail closed. Runtime converts
+immutable UTC cutoffs to their DST-aware Eastern slate date before ledger
+selection and matchup materialization. Governed game sets use the shared NBA
+final/non-postponed semantics, including strict boolean completion evidence
+and structured postponement fields.
 PBP responses
 remain staged until complete-game and identity validation succeeds; acceptance,
 ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime

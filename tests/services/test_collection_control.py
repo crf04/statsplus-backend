@@ -964,6 +964,20 @@ def test_catalog_validation_rejects_empty_fabricated_and_incomplete_evidence(con
             "events": [{"id": "g1", "status": "Final", "phase": "Regular Season",
                         "scheduled_at": cutoff.isoformat()}],
         }, version="malformed")
+    false_completion = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    false_completion_payload = _catalog_payload("event")
+    false_completion_payload["events"][0].update(
+        status="Scheduled",
+        completed="false",
+    )
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(
+            false_completion.request_id,
+            false_completion_payload,
+            version="string-completion",
+        )
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event-v1")
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)

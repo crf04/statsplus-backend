@@ -72,10 +72,18 @@ def is_postponed_event(event: Mapping[str, object]) -> bool:
 def is_final_event(event: Mapping[str, object]) -> bool:
     """Whether governed code or normalized terminal text says a game is final."""
 
+    status = event.get("status_text", event.get("status", ""))
     return bool(
-        event.get("status_code") == NBAGameStatus.FINAL
-        or str(event.get("status_text", "")).casefold().startswith("final")
+        event.get("status_code") in {NBAGameStatus.FINAL, "3"}
+        or str(status).casefold().startswith("final")
     )
+
+
+def is_completed_non_postponed_event(event: Mapping[str, object]) -> bool:
+    """Whether strict completion evidence names an eligible final game."""
+
+    completed = event.get("completed") is True or is_final_event(event)
+    return completed and not is_postponed_event(event)
 
 
 def player_game_log_season_type(event: Mapping[str, object]) -> str | None:
@@ -184,6 +192,7 @@ __all__ = [
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
+    "is_completed_non_postponed_event",
     "is_final_event",
     "is_ordinary_classification",
     "is_postponed_event",

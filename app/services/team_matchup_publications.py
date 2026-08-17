@@ -132,6 +132,11 @@ def resolve_governed_team_game_ids(
 
     if window not in NBA_PUBLICATION_WINDOWS or resolver is None:
         raise ValueError("publication_governance_unavailable")
+    authority_requested = any((
+        manifest_id,
+        event_catalog_publication_id,
+        event_catalog_checksum,
+    ))
     result = None
     method_names = (
         "resolve_team_game_ids",
@@ -142,6 +147,8 @@ def resolve_governed_team_game_ids(
     for name in method_names:
         operation = getattr(resolver, name, None)
         if callable(operation):
+            if authority_requested and name != "resolve_team_game_ids":
+                raise ValueError("publication_governance_unavailable")
             if name == "resolve_team_game_ids":
                 try:
                     result = operation(
@@ -155,15 +162,21 @@ def resolve_governed_team_game_ids(
                         event_catalog_checksum=event_catalog_checksum,
                     )
                 except TypeError:
+                    if authority_requested:
+                        raise ValueError(
+                            "publication_governance_unavailable"
+                        ) from None
                     # Small offline/test adapters may implement the earlier
-                    # season/cutoff vocabulary. The exact authority is still
-                    # enforced by the persisted PublicationVersion binding.
+                    # season/cutoff vocabulary only when no immutable
+                    # authority was requested.
                     result = operation(season, cutoff, window=window)
             else:
                 result = operation(season, cutoff)
             break
     else:
         if callable(resolver):
+            if authority_requested:
+                raise ValueError("publication_governance_unavailable")
             result = resolver(season, cutoff)
         else:
             raise ValueError("publication_governance_unavailable")

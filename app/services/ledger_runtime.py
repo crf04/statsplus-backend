@@ -10,7 +10,8 @@ from typing import Mapping, Protocol
 from sqlalchemy import select, update
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
-from app.domain.slate_time import slate_day_bounds_utc
+from app.domain.nba_events import is_completed_non_postponed_event
+from app.domain.slate_time import slate_date_for_instant, slate_day_bounds_utc
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -325,13 +326,10 @@ class ActiveManifestLedgerGovernanceReader:
             ):
                 raise ValueError("immutable Event Catalog governance is inconsistent")
             seen.add(game_id)
-            status = str(row.get("status", row.get("status_text", ""))).strip().lower()
-            status_code = row.get("status_code")
-            postponed = status in {"postponed", "canceled", "cancelled"}
-            completed = bool(row.get("completed")) or status in {
-                "final", "finished", "completed", "closed", "game over", "3",
-            } or status.startswith("final") or status_code in {3, "3"}
-            if completed and not postponed and scheduled_at <= manifest_cutoff:
+            if (
+                is_completed_non_postponed_event(row)
+                and scheduled_at <= manifest_cutoff
+            ):
                 eligible.append({
                     "nba_game_id": game_id,
                     "home_team_id": home_team_id,
@@ -463,6 +461,7 @@ class LedgerRuntime:
                 cutoff,
                 manifest_id,
             )
+            slate_date = slate_date_for_instant(cutoff)
             if self.matchup_materialization is not None:
                 # Publish the disposable ledger-owned matchup read model at the
                 # exact composition cutoff before composing publication streams,
@@ -470,20 +469,20 @@ class LedgerRuntime:
                 # observations instead of approximating a league window.
                 self.matchup_materialization.materialize(
                     season,
-                    as_of=cutoff.date(),
+                    as_of=slate_date,
                     expected_game_ids=governance.expected_game_ids,
                     expected_l15_game_ids=governance.expected_l15_game_ids,
                     team_ids=governance.team_ids,
                 )
             games = tuple(
                 game
-                for summary in self.repository.list_games(season, through=cutoff.date())
+                for summary in self.repository.list_games(season, through=slate_date)
                 if (game := self.repository.get_game(summary.game_id)) is not None
             )
             materialized = self.materialization.compose(
                 games,
                 season=season,
-                as_of=cutoff.date(),
+                as_of=slate_date,
                 cutoff=cutoff,
                 expected_game_ids=governance.expected_game_ids,
                 expected_l15_game_ids=governance.expected_l15_game_ids,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime as PythonDateTime, timezone
+import json
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -1072,8 +1073,11 @@ def _bind_publication_versions_to_manifest_authority(
     from app.models.collection_control import (
         CatalogPublication,
         CollectionManifest,
+        CollectionObservation,
+        PublicationObservation,
         PublicationVersion,
     )
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
 
     preparer = connection.dialect.identifier_preparer
     table_name = preparer.quote(PublicationVersion.__tablename__)
@@ -1119,48 +1123,88 @@ def _bind_publication_versions_to_manifest_authority(
         version_table.c.season,
         version_table.c.cutoff,
         version_table.c.manifest_id,
+        version_table.c.stream_key,
     )).mappings()
     for version in versions:
-        if version["manifest_id"]:
+        if (
+            version["manifest_id"]
+            or version["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+        ):
             continue
         manifests = list(connection.execute(
             select(
                 manifest_table.c.manifest_id,
                 manifest_table.c.cutoff,
+                manifest_table.c.scopes,
+                manifest_table.c.accepted_versions,
                 manifest_table.c.event_catalog_publication_id,
                 manifest_table.c.event_catalog_checksum,
             ).where(
                 manifest_table.c.season == version["season"],
-                manifest_table.c.event_catalog_publication_id.is_not(None),
-                manifest_table.c.event_catalog_checksum.is_not(None),
             )
         ).mappings())
-        manifests = [
-            manifest
-            for manifest in manifests
-            if normalized_cutoff(manifest["cutoff"])
-            == normalized_cutoff(version["cutoff"])
-        ]
+        try:
+            manifests = [
+                manifest
+                for manifest in manifests
+                if (
+                    normalized_cutoff(manifest["cutoff"])
+                    == normalized_cutoff(version["cutoff"])
+                    and "canonical_game_ledger"
+                    in set(json.loads(manifest["scopes"]))
+                    and 1 in set(json.loads(manifest["accepted_versions"]))
+                )
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
         if len(manifests) != 1:
             continue
         manifest = manifests[0]
-        catalog = connection.execute(select(
+        if (
+            not manifest["event_catalog_publication_id"]
+            or not manifest["event_catalog_checksum"]
+        ):
+            continue
+        catalogs = list(connection.execute(select(
             catalog_table.c.publication_id,
             catalog_table.c.cutoff,
             catalog_table.c.checksum,
         ).where(
-            catalog_table.c.publication_id
-            == manifest["event_catalog_publication_id"],
             catalog_table.c.season == version["season"],
             catalog_table.c.catalog_type == "event",
             catalog_table.c.complete.is_(True),
-            catalog_table.c.checksum == manifest["event_catalog_checksum"],
-        )).mappings().one_or_none()
+        )).mappings())
+        catalogs = [
+            catalog
+            for catalog in catalogs
+            if normalized_cutoff(catalog["cutoff"])
+            == normalized_cutoff(version["cutoff"])
+        ]
         if (
-            catalog is None
-            or normalized_cutoff(catalog["cutoff"])
-            != normalized_cutoff(version["cutoff"])
+            len(catalogs) != 1
+            or catalogs[0]["publication_id"]
+            != manifest["event_catalog_publication_id"]
+            or catalogs[0]["checksum"] != manifest["event_catalog_checksum"]
         ):
+            continue
+        catalog = catalogs[0]
+        provenance_manifest_ids = set(connection.scalars(
+            select(CollectionObservation.manifest_id)
+            .select_from(
+                PublicationObservation.__table__.join(
+                    CollectionObservation.__table__,
+                    PublicationObservation.observation_id
+                    == CollectionObservation.observation_id,
+                )
+            )
+            .where(
+                PublicationObservation.publication_id
+                == version["publication_id"]
+            )
+        ))
+        if provenance_manifest_ids and provenance_manifest_ids != {
+            manifest["manifest_id"]
+        }:
             continue
         connection.execute(version_table.update().where(
             version_table.c.publication_id == version["publication_id"]
