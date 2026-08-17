@@ -1076,7 +1076,11 @@ final/non-postponed semantics, including strict boolean completion evidence
 and structured postponement fields.
 Provider numeric NBA status codes are normalized to canonical status text, and
 stored-versus-incoming catalog comparisons use that same strict predicate so
-identical non-final or postponed snapshots remain idempotent. Publication
+identical non-final or postponed snapshots remain idempotent.
+Explicit boolean `completed: true` is persisted as canonical `Final`/status
+code 3 only when structured postponement evidence is absent; postponed and
+non-final rows remain excluded on both first publication and replay.
+Publication
 authority additionally requires the manifest's canonical-ledger scope and
 schema version 1. Governed activation always resolves the exact game set from
 that bound authority; caller-supplied game maps cannot replace a missing

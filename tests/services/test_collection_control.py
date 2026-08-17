@@ -1430,7 +1430,7 @@ def test_athlete_catalog_uses_last_good_event_when_newer_event_attempt_is_incomp
     assert athlete.complete is True
 
 
-def test_identical_nonfinal_and_postponed_catalog_republish_is_idempotent(
+def test_identical_completion_and_postponement_republish_is_idempotent(
     control_db,
 ):
     now = datetime(2026, 8, 12, tzinfo=UTC)
@@ -1444,12 +1444,39 @@ def test_identical_nonfinal_and_postponed_catalog_republish_is_idempotent(
         postponed_status="postponed",
         postponement_evidence={"reason": "weather"},
     )
+    payload["events"][2].pop("status")
+    payload["events"][2]["completed"] = True
+    payload["events"][3].pop("status")
+    payload["events"][3].update(
+        completed=True,
+        postponed_status="postponed",
+        postponement_evidence={"reason": "arena"},
+    )
     first_request = control.create_bootstrap_request(
         "2025-26", "event", cutoff=cutoff
     )
     assert control.publish_catalog(
         first_request.request_id, payload, version="event-first"
     ).complete
+    with control_db.connect() as connection:
+        stored = {
+            row.nba_game_id: row
+            for row in connection.execute(
+                select(
+                    EventCatalogEntry.nba_game_id,
+                    EventCatalogEntry.status_text,
+                    EventCatalogEntry.status_code,
+                ).where(
+                    EventCatalogEntry.nba_game_id.in_(("game-2", "game-3"))
+                )
+            )
+        }
+    assert (stored["game-2"].status_text, stored["game-2"].status_code) == (
+        "Final",
+        3,
+    )
+    assert stored["game-3"].status_text == "Scheduled"
+    assert stored["game-3"].status_code is None
     athlete_request = control.create_bootstrap_request(
         "2025-26", "athlete", cutoff=cutoff
     )

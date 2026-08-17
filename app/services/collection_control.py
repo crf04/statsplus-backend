@@ -1103,8 +1103,20 @@ class CollectionControlService(_SessionService):
             status_code = int(status_code) if status_code not in (None, "") else None
         except (TypeError, ValueError):
             status_code = None
-        if is_final_event({"status": status, "status_code": status_code}):
+        event_state = {
+            "status": status,
+            "status_code": status_code,
+            "completed": row.get("completed"),
+            "is_postponed": row.get("is_postponed"),
+            "postponed_status": row.get("postponed_status"),
+            "postponement_evidence": row.get("postponement_evidence"),
+        }
+        if is_completed_non_postponed_event(event_state):
             status = "Final"
+            status_code = 3
+        elif is_final_event(event_state):
+            status = "Final"
+            status_code = 3
         existing = session.get(EventCatalogEntry, game_id)
         values = {
             "season": season, "home_team_id": home_id,
