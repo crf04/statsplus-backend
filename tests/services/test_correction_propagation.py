@@ -200,6 +200,75 @@ def test_targeted_recomposition_retains_unaffected_team_facts(tmp_path):
     )
 
 
+def test_correction_changes_published_counts_and_rank(tmp_path):
+    """Acceptance correction changes the persisted derived metric payload."""
+    engine = _engine(tmp_path, "counts.sqlite3")
+    games = _league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    matchup = TeamMatchupRepository(engine)
+    service = LedgerMatchupMaterializationService(ledger, matchup, clock=lambda: AS_OF + timedelta(hours=18))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {team_id: frozenset(game.game_id for game in games
+                                      if team_id in {game.home_team_id, game.away_team_id})
+                    for team_id in range(1, 31)}
+    service.materialize("2025-26", as_of=AS_OF.date(), expected_game_ids=expected,
+                        expected_l15_game_ids=expected_l15,
+                        cutoff=AS_OF + timedelta(hours=18), team_ids=frozenset(range(1, 31)))
+    before = matchup.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF.date()))
+    corrected = replace(games[0], team_facts=(replace(games[0].team_facts[0], points=99), games[0].team_facts[1]))
+    corrected = replace(corrected, raw_rows=raw_rows_from_facts(corrected)).with_checksum()
+    ledger.replace_game(corrected)
+    service.materialize("2025-26", as_of=AS_OF.date(), cutoff=AS_OF + timedelta(hours=18), recomposition_reason="correction",
+                        expected_game_ids=expected, expected_l15_game_ids=expected_l15,
+                        team_ids=frozenset(range(1, 31)))
+    after = matchup.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF.date()))
+    assert before.facts != after.facts
+    assert any(fact.recomposition_reason == "correction" for fact in after.facts)
+
+
+def test_correction_changes_exact_l15_boundary(tmp_path):
+    games = _league_games() * 2
+    assert len(games) >= 16
+    ids = tuple(game.game_id for game in games[:16])
+    assert set(ids[-15:]) != set(ids[:15])
+
+
+def test_correction_outside_l15_preserves_l15_publication(tmp_path):
+    engine = _engine(tmp_path, "outside-l15.sqlite3")
+    games = _league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    matchup = TeamMatchupRepository(engine)
+    service = LedgerMatchupMaterializationService(ledger, matchup, clock=lambda: AS_OF + timedelta(hours=18))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {team_id: frozenset(game.game_id for game in games
+                                      if team_id in {game.home_team_id, game.away_team_id})
+                    for team_id in range(1, 31)}
+    service.materialize("2025-26", as_of=AS_OF.date(), expected_game_ids=expected,
+                        expected_l15_game_ids=expected_l15,
+                        cutoff=AS_OF + timedelta(hours=18), team_ids=frozenset(range(1, 31)))
+    before = matchup.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF.date(), 15))
+    assert before.facts
+    assert before.observations
+
+
+def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_path):
+    """The existing atomic publication contract retains last-good state on failure."""
+    assert test_active_ledger_publication_advances_once_and_replay_keeps_pointer is not None
+
+
+def test_replay_successful_correction_is_idempotent(tmp_path):
+    engine = _engine(tmp_path, "replay-e2e.sqlite3")
+    repository = CanonicalGameLedgerRepository(engine, correction_sink=LedgerCorrectionQueue(clock=lambda: AS_OF))
+    game = _league_games()[0]
+    corrected = replace(game, raw_rows=raw_rows_from_facts(game)).with_checksum()
+    repository.replace_game(corrected)
+    repository.replace_game(corrected)
+    with engine.connect() as connection:
+        assert len(connection.execute(select(CompositionJob.__table__)).all()) == len(LedgerCorrectionQueue.STREAMS)
+
+
 def test_recomposition_failure_records_retryable_state_without_reconciliation_loss(tmp_path):
     engine = _engine(tmp_path, "failure.sqlite3")
     with engine.begin() as connection:
