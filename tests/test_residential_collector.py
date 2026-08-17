@@ -57,6 +57,7 @@ from app.services.collection_control import (
     PublicationService,
     _collector_scope_descriptors,
 )
+from app.services import collection_control as collection_control_module
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.ledger_runtime import LedgerRuntime
 from app.services.database_first_activation import DatabaseFirstPublicationReader
@@ -452,7 +453,7 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
-    tmp_path: Path, evidence_mode: str, expected_composed: int,
+    tmp_path: Path, evidence_mode: str, expected_composed: int, monkeypatch,
 ):
     control_db = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
     run_migrations(control_db)
@@ -1062,21 +1063,40 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 assert stale_pointer is not None
                 initial_fence = stale_pointer.fence
                 initial_active = stale_pointer.active_publication_id
-                with advancing_session.begin():
-                    concurrent = publications.compose_from_observations(
+                original_compose_payload = (
+                    collection_control_module._compose_nba_observation_payload
+                )
+                concurrent = None
+                advance_started = False
+
+                def advance_during_stale_derivation(*args, **kwargs):
+                    nonlocal advance_started, concurrent
+                    if not advance_started:
+                        advance_started = True
+                        with advancing_session.begin():
+                            concurrent = publications.compose_from_observations(
+                                stream_key, season="2025-26", cutoff=cutoff,
+                                manifest_id=manifest.manifest_id,
+                                session=advancing_session,
+                            )
+                    return original_compose_payload(*args, **kwargs)
+
+                monkeypatch.setattr(
+                    collection_control_module,
+                    "_compose_nba_observation_payload",
+                    advance_during_stale_derivation,
+                )
+                with pytest.raises(ControlPlaneError, match="stale_composition"):
+                    publications.compose_from_observations(
                         stream_key, season="2025-26", cutoff=cutoff,
                         manifest_id=manifest.manifest_id,
-                        session=advancing_session,
+                        session=stale_session,
                     )
-                final = publications.compose_from_observations(
-                    stream_key, season="2025-26", cutoff=cutoff,
-                    manifest_id=manifest.manifest_id,
-                    session=stale_session,
-                )
-                stale_session.commit()
+                stale_session.rollback()
             finally:
                 stale_session.close()
                 advancing_session.close()
+            assert concurrent is not None
             with control_db.connect() as connection:
                 pointer = connection.execute(select(PublicationPointer).where(
                     PublicationPointer.stream_key == stream_key
@@ -1084,16 +1104,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 versions = connection.execute(select(PublicationVersion).where(
                     PublicationVersion.stream_key == stream_key
                 )).all()
-            assert pointer.fence == initial_fence + 2
-            assert pointer.previous_publication_id == concurrent.publication_id
-            assert pointer.active_publication_id == final.publication_id
+            assert pointer.fence == initial_fence + 1
+            assert pointer.previous_publication_id == initial_active
+            assert pointer.active_publication_id == concurrent.publication_id
             assert {
                 row.publication_id for row in versions if row.status == "active"
-            } == {final.publication_id}
+            } == {concurrent.publication_id}
             assert all(
                 row.status == "superseded"
                 for row in versions
-                if row.publication_id in {initial_active, concurrent.publication_id}
+                if row.publication_id == initial_active
             )
     with control_db.connect() as connection:
         assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)

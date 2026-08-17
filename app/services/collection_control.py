@@ -3094,7 +3094,8 @@ class PublicationService(_SessionService):
                 expected_fence: int | None = None, reason: str | None = None,
                 manifest_id: str | None = None,
                 session: Session | None = None,
-                _derive_fence_from_lock: bool = False) -> PublicationVersion:
+                _pointer_expectation: tuple[int, str | None] | None = None,
+    ) -> PublicationVersion:
         now = self.clock()
         with self._session_scope(session) as session:
             stream = session.get(PublicationStream, stream_key)
@@ -3199,6 +3200,8 @@ class PublicationService(_SessionService):
                 ).with_for_update().execution_options(populate_existing=True)
             )
             if pointer is None:
+                if _pointer_expectation not in (None, (0, None)):
+                    raise ControlPlaneError("stale_composition")
                 if expected_fence not in (None, 0):
                     raise ControlPlaneError("stale_composition")
                 pointer = PublicationPointer(stream_key=stream_key, fence=0, updated_at=now)
@@ -3207,8 +3210,12 @@ class PublicationService(_SessionService):
                     session.flush()
                 except IntegrityError as error:
                     raise ControlPlaneError("stale_composition") from error
-            elif _derive_fence_from_lock:
-                expected_fence = int(pointer.fence)
+            elif _pointer_expectation is not None:
+                if (
+                    int(pointer.fence), pointer.active_publication_id
+                ) != _pointer_expectation:
+                    raise ControlPlaneError("stale_composition")
+                expected_fence = _pointer_expectation[0]
             elif expected_fence is None:
                 raise ControlPlaneError("expected_fence_required")
             if expected_fence is not None and pointer.fence != expected_fence:
@@ -3483,11 +3490,33 @@ class PublicationService(_SessionService):
         if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
             raise ControlPlaneError("stream_unsupported")
         with self._session_scope(session) as session:
+            pointer_expectation = self._read_pointer_expectation(
+                session, stream_key,
+            )
             return self.compose(
                 stream_key, season=season, cutoff=cutoff, payload=None,
                 manifest_id=manifest_id, session=session,
-                _derive_fence_from_lock=True,
+                _pointer_expectation=pointer_expectation,
             )
+
+    @staticmethod
+    def _read_pointer_expectation(
+        session: Session,
+        stream_key: str,
+    ) -> tuple[int, str | None]:
+        """Capture concurrency identity without caching an ORM pointer row."""
+
+        row = session.execute(select(
+            PublicationPointer.fence,
+            PublicationPointer.active_publication_id,
+        ).where(
+            PublicationPointer.stream_key == stream_key
+        )).one_or_none()
+        return (
+            (int(row.fence), row.active_publication_id)
+            if row is not None
+            else (0, None)
+        )
 
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:
