@@ -43,6 +43,7 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.team_matchup_repository import (
+    _LedgerRecompositionAuthority,
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupRepository,
@@ -120,7 +121,7 @@ class LedgerMatchupMaterializationService:
         affected_team_ids: frozenset[int] | None = None,
         trigger_game_id: str | None = None,
         trigger_game_ids: frozenset[str] | None = None,
-        claimed_job_generations: Mapping[str, int] | None = None,
+        write_authority: _LedgerRecompositionAuthority | None = None,
         session: Session | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
@@ -238,14 +239,14 @@ class LedgerMatchupMaterializationService:
             )
         else:
             snapshots.append((l15_scope, l15_facts, l15_observations))
-        if claimed_job_generations is not None:
+        if write_authority is not None:
             if session is None:
                 raise PermissionError("ledger_recomposition_session_required")
             self.matchup_repository.replace_ledger_snapshots(
                 snapshots,
                 **snapshot_kwargs,
                 session=session,
-                claimed_job_generations=claimed_job_generations,
+                authority=write_authority,
             )
         elif session is None:
             self.matchup_repository.replace_snapshots(snapshots, **snapshot_kwargs)
@@ -260,6 +261,23 @@ class LedgerMatchupMaterializationService:
             as_of=as_of,
             season_selection=self._selection(season_window, season_scope, checksums),
             l15_selection=self._selection(l15_window, l15_scope, checksums),
+        )
+
+    def _issue_runtime_write_authority(
+        self,
+        session: Session,
+        *,
+        claimed_job_generations: Mapping[str, int],
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None,
+    ) -> _LedgerRecompositionAuthority:
+        return self.matchup_repository._issue_ledger_recomposition_authority(
+            session,
+            claimed_job_generations=claimed_job_generations,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
         )
 
     def _load_games(

@@ -26,6 +26,54 @@ from app.utils.db import is_demo_database_url
 
 EASTERN = ZoneInfo("America/New_York")
 
+_LEDGER_SURFACE_BY_STREAM = {
+    "traditional_opponent_season": (0, "traditional"),
+    "traditional_opponent_l15": (15, "traditional"),
+    "assist_locations_season": (0, "assist_locations"),
+    "assist_locations_l15": (15, "assist_locations"),
+}
+_REQUIRED_LEDGER_MATCHUP_STREAMS = frozenset(_LEDGER_SURFACE_BY_STREAM)
+_LEDGER_AUTHORITY_KEY = object()
+
+
+class _LedgerRecompositionAuthority:
+    """One-use proof bound to one claimed runtime transaction and slice."""
+
+    __slots__ = (
+        "_issuer",
+        "_session",
+        "_transaction",
+        "claims",
+        "season",
+        "cutoff",
+        "manifest_id",
+        "allowed_surfaces",
+    )
+
+    def __init__(
+        self,
+        key,
+        *,
+        issuer,
+        session,
+        transaction,
+        claims,
+        season,
+        cutoff,
+        manifest_id,
+        allowed_surfaces,
+    ) -> None:
+        if key is not _LEDGER_AUTHORITY_KEY:
+            raise TypeError("ledger recomposition authority is private")
+        self._issuer = issuer
+        self._session = session
+        self._transaction = transaction
+        self.claims = dict(claims)
+        self.season = season
+        self.cutoff = assume_utc(cutoff)
+        self.manifest_id = manifest_id
+        self.allowed_surfaces = frozenset(allowed_surfaces)
+
 
 @dataclass(frozen=True, slots=True)
 class TeamMatchupSnapshotScope:
@@ -116,6 +164,7 @@ class TeamMatchupRepository:
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
+        self._ledger_authorities: set[_LedgerRecompositionAuthority] = set()
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -164,7 +213,7 @@ class TeamMatchupRepository:
         *,
         retrieved_at: datetime,
         session: Session,
-        claimed_job_generations: Mapping[str, int],
+        authority: _LedgerRecompositionAuthority,
         affected_team_ids_by_scope: Mapping[
             TeamMatchupSnapshotScope, frozenset[int] | None
         ] | None = None,
@@ -172,30 +221,152 @@ class TeamMatchupRepository:
     ) -> None:
         """Replace ledger-owned surfaces inside an authorized runtime transaction."""
 
-        claims = {str(job_id): int(generation) for job_id, generation in (
-            claimed_job_generations or {}
-        ).items()}
-        claimed_rows = session.execute(select(
-            CompositionJob.job_id,
-            CompositionJob.generation,
-            CompositionJob.claimed_generation,
-            CompositionJob.status,
-        ).where(CompositionJob.job_id.in_(claims))).all() if claims else ()
-        if not claims or {
-            str(row.job_id): int(row.generation)
-            for row in claimed_rows
-            if row.status == "running"
-            and int(row.claimed_generation or 0) == int(row.generation)
-        } != claims:
+        received = tuple(
+            (scope, tuple(facts), tuple(observations))
+            for scope, facts, observations in snapshots
+        )
+        if not self._authority_allows(
+            authority,
+            session=session,
+            snapshots=received,
+        ):
             raise PermissionError("ledger_recomposition_write_not_authorized")
+        self._ledger_authorities.discard(authority)
         self._replace_snapshots(
-            snapshots,
+            received,
             retrieved_at=retrieved_at,
             affected_team_ids_by_scope=affected_team_ids_by_scope,
             affected_team_ids=affected_team_ids,
             session=session,
             enforce_legacy_fence=False,
         )
+
+    def _issue_ledger_recomposition_authority(
+        self,
+        session: Session,
+        *,
+        claimed_job_generations: Mapping[str, int],
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None,
+    ) -> _LedgerRecompositionAuthority:
+        """Issue one private proof after re-locking the exact running job slice."""
+
+        transaction = session.get_transaction()
+        claims = {
+            str(job_id): int(generation)
+            for job_id, generation in claimed_job_generations.items()
+        }
+        rows = self._claimed_slice_rows(
+            session,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+        )
+        row_claims = {
+            str(row.job_id): int(row.generation)
+            for row in rows
+            if row.status == "running"
+            and int(row.claimed_generation or 0) == int(row.generation)
+        }
+        represented_streams = {str(row.stream_key) for row in rows}
+        if (
+            transaction is None
+            or not transaction.is_active
+            or not claims
+            or row_claims != claims
+            or not _REQUIRED_LEDGER_MATCHUP_STREAMS & represented_streams
+        ):
+            raise PermissionError("ledger_recomposition_write_not_authorized")
+        authority = _LedgerRecompositionAuthority(
+            _LEDGER_AUTHORITY_KEY,
+            issuer=self,
+            session=session,
+            transaction=transaction,
+            claims=claims,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+            # Matchup projection replaces Season + exact-L15 atomically. Any
+            # represented matchup job authorizes that single coupled batch;
+            # a player-log/per36-only slice authorizes none of it.
+            allowed_surfaces=set(_LEDGER_SURFACE_BY_STREAM.values()),
+        )
+        self._ledger_authorities.add(authority)
+        return authority
+
+    @staticmethod
+    def _claimed_slice_rows(
+        session: Session,
+        *,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None,
+    ):
+        statement = select(
+            CompositionJob.job_id,
+            CompositionJob.stream_key,
+            CompositionJob.generation,
+            CompositionJob.claimed_generation,
+            CompositionJob.status,
+        ).where(
+            CompositionJob.season == season,
+            CompositionJob.cutoff == assume_utc(cutoff),
+            CompositionJob.manifest_id == manifest_id,
+            CompositionJob.status == "running",
+        )
+        return session.execute(statement.with_for_update()).all()
+
+    def _authority_allows(
+        self,
+        authority,
+        *,
+        session: Session,
+        snapshots,
+    ) -> bool:
+        if (
+            not isinstance(authority, _LedgerRecompositionAuthority)
+            or authority._issuer is not self
+            or authority._session is not session
+            or authority._transaction is not session.get_transaction()
+            or not session.in_transaction()
+            or authority not in self._ledger_authorities
+        ):
+            return False
+        rows = self._claimed_slice_rows(
+            session,
+            season=authority.season,
+            cutoff=authority.cutoff,
+            manifest_id=authority.manifest_id,
+        )
+        if {
+            str(row.job_id): int(row.generation)
+            for row in rows
+            if int(row.claimed_generation or 0) == int(row.generation)
+        } != authority.claims:
+            return False
+        if {scope.stored_window_games for scope, _, _ in snapshots} != {0, 15}:
+            return False
+        for scope, facts, observations in snapshots:
+            if scope.season != authority.season or scope.as_of != authority.cutoff.date():
+                return False
+            surfaces = {
+                *(fact.base for fact in facts),
+                *(observation.surface for observation in observations),
+            }
+            if any(
+                (scope.stored_window_games, surface)
+                not in authority.allowed_surfaces
+                for surface in surfaces
+            ):
+                return False
+            if any(
+                item.cutoff is None
+                or assume_utc(item.cutoff) != authority.cutoff
+                for item in (*facts, *observations)
+            ):
+                return False
+        return True
 
     def _replace_snapshots(
         self,

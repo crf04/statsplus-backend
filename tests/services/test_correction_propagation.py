@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, select, update
+from sqlalchemy.orm import sessionmaker
 
 from app.migrations import run_migrations
 from app.models.collection_control import (
@@ -46,7 +47,12 @@ from app.services.ledger_runtime import (
     LedgerGovernance,
     LedgerRuntime,
 )
-from app.services.team_matchup_repository import TeamMatchupRepository, TeamMatchupSnapshotScope
+from app.services.team_matchup_repository import (
+    TeamMatchupFact,
+    TeamMatchupObservation,
+    TeamMatchupRepository,
+    TeamMatchupSnapshotScope,
+)
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
 
@@ -1068,6 +1074,139 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
         and job["recomposition_reason"] is None
         for job in jobs
     )
+
+
+def test_ledger_matchup_write_authority_is_transaction_scoped_and_single_use(
+    tmp_path,
+):
+    engine = _engine(tmp_path, "matchup-authority.sqlite3")
+    repository = TeamMatchupRepository(engine)
+    manifest_id = "authority-manifest"
+    streams = LedgerCorrectionQueue.STREAMS
+    claims = {f"authority-{index}": 7 for index, _ in enumerate(streams)}
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert(), [
+            {
+                "job_id": job_id,
+                "stream_key": stream_key,
+                "manifest_id": manifest_id,
+                "season": "2025-26",
+                "cutoff": AS_OF,
+                "status": "running",
+                "attempts": 0,
+                "created_at": AS_OF,
+                "updated_at": AS_OF,
+                "generation": generation,
+                "claimed_generation": generation,
+            }
+            for (job_id, generation), stream_key in zip(claims.items(), streams)
+        ])
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="unrelated-authority",
+            stream_key="player_game_logs",
+            manifest_id=manifest_id,
+            season="2025-26",
+            cutoff=AS_OF + timedelta(days=1),
+            status="running",
+            attempts=0,
+            created_at=AS_OF,
+            updated_at=AS_OF,
+            generation=7,
+            claimed_generation=7,
+        ))
+
+    season_scope = TeamMatchupSnapshotScope("2025-26", AS_OF.date())
+    l15_scope = TeamMatchupSnapshotScope("2025-26", AS_OF.date(), 15)
+
+    def snapshot(scope):
+        return (
+            scope,
+            (
+                TeamMatchupFact(
+                    team_id=1,
+                    base="traditional",
+                    slice_key="traditional",
+                    stat_key="OPP_REB",
+                    raw_value=10,
+                    denominator_value=48,
+                    denominator_unit="minutes",
+                    provider="ledger",
+                    cutoff=AS_OF,
+                ),
+            ),
+            (
+                TeamMatchupObservation(
+                    "traditional", "available", cutoff=AS_OF
+                ),
+                TeamMatchupObservation(
+                    "assist_locations", "available", cutoff=AS_OF
+                ),
+            ),
+        )
+
+    valid_snapshots = (snapshot(season_scope), snapshot(l15_scope))
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    with sessions() as session, session.begin():
+        with pytest.raises(PermissionError, match="not_authorized"):
+            repository._issue_ledger_recomposition_authority(
+                session,
+                claimed_job_generations={"unrelated-authority": 7},
+                season="2025-26",
+                cutoff=AS_OF + timedelta(days=1),
+                manifest_id=manifest_id,
+            )
+        authority = repository._issue_ledger_recomposition_authority(
+            session,
+            claimed_job_generations=claims,
+            season="2025-26",
+            cutoff=AS_OF,
+            manifest_id=manifest_id,
+        )
+        with sessions() as other, other.begin():
+            with pytest.raises(PermissionError, match="not_authorized"):
+                repository.replace_ledger_snapshots(
+                    valid_snapshots,
+                    retrieved_at=AS_OF + timedelta(hours=18),
+                    session=other,
+                    authority=authority,
+                )
+        with pytest.raises(PermissionError, match="not_authorized"):
+            repository.replace_ledger_snapshots(
+                (
+                    snapshot(TeamMatchupSnapshotScope("1999-00", AS_OF.date())),
+                    snapshot(TeamMatchupSnapshotScope("1999-00", AS_OF.date(), 15)),
+                ),
+                retrieved_at=AS_OF + timedelta(hours=18),
+                session=session,
+                authority=authority,
+            )
+        with pytest.raises(PermissionError, match="not_authorized"):
+            repository.replace_ledger_snapshots(
+                (
+                    snapshot(TeamMatchupSnapshotScope(
+                        "2025-26", AS_OF.date() + timedelta(days=1)
+                    )),
+                    snapshot(TeamMatchupSnapshotScope(
+                        "2025-26", AS_OF.date() + timedelta(days=1), 15
+                    )),
+                ),
+                retrieved_at=AS_OF + timedelta(hours=18),
+                session=session,
+                authority=authority,
+            )
+        repository.replace_ledger_snapshots(
+            valid_snapshots,
+            retrieved_at=AS_OF + timedelta(hours=18),
+            session=session,
+            authority=authority,
+        )
+        with pytest.raises(PermissionError, match="not_authorized"):
+            repository.replace_ledger_snapshots(
+                valid_snapshots,
+                retrieved_at=AS_OF + timedelta(hours=18),
+                session=session,
+                authority=authority,
+            )
 
 
 def test_correction_changes_exact_l15_boundary(tmp_path):

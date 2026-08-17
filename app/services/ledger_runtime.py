@@ -453,6 +453,19 @@ class LedgerRuntime:
                         # Matchup facts, surface observations, ledger metadata,
                         # candidates, enabled publications, and pointer fences
                         # all use this same session transaction.
+                        write_authority = (
+                            self.matchup_materialization
+                            ._issue_runtime_write_authority(
+                                session,
+                                claimed_job_generations={
+                                    str(row["job_id"]): int(row["generation"])
+                                    for row in slice_jobs
+                                },
+                                season=season,
+                                cutoff=cutoff,
+                                manifest_id=manifest_id,
+                            )
+                        )
                         self.matchup_materialization.materialize(
                             season,
                             as_of=cutoff.date(),
@@ -464,10 +477,7 @@ class LedgerRuntime:
                             expected_game_ids=governance.expected_game_ids,
                             expected_l15_game_ids=governance.expected_l15_game_ids,
                             team_ids=governance.team_ids,
-                            claimed_job_generations={
-                                str(row["job_id"]): int(row["generation"])
-                                for row in slice_jobs
-                            },
+                            write_authority=write_authority,
                             session=session,
                         )
                     materialized = self.materialization.compose(
