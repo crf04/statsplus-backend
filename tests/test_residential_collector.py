@@ -7,9 +7,11 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+import pandas as pd
+from sqlalchemy import create_engine, select, update
 
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
@@ -17,6 +19,8 @@ from app.collector.config import CollectorConfig, CollectorConfigurationError, l
 from app.collector.contracts import ProviderContractError
 from app.collector.normalizers import (
     normalize_grouped_shot_response,
+    normalize_opponent_grouped_shot_response,
+    normalize_opponent_zone_response,
     normalize_roster_response,
     normalize_schedule_response,
     normalize_synergy_response,
@@ -32,20 +36,21 @@ from app.collector.runner import (
 )
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
-    NBA_PUBLICATION_TAXONOMY,
 )
 from app.models.collection_control import CollectionObservation, CompositionJob
 from app.migrations import run_migrations
 from app.services.collection_control import (
     CollectorTokenService,
     CollectionControlService,
+    ControlPlaneError,
     NBA_TEAM_IDS,
-    NBA_TEAM_ID_TO_TRICODE,
     ObservationIngestionService,
     PublicationService,
     _collector_scope_descriptors,
 )
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from app.services.ledger_runtime import LedgerRuntime
+from app.services.database_first_activation import DatabaseFirstPublicationReader
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=UTC)
@@ -156,6 +161,63 @@ def test_live_schedule_shape_selects_regular_season_by_canonical_game_id():
     assert result.payload["records"][0]["phase"] == "Regular Season"
 
 
+def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
+    shot = normalize_opponent_grouped_shot_response(
+        pd.DataFrame([{
+            "TEAM_ID": 1610612737,
+            "GENERAL_RANGE": "Catch and Shoot",
+            "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
+        }]),
+        season="2025-26", cutoff=NOW, team_id=1610612737,
+        category="Catch and Shoot",
+    )
+    assert shot.observation_type == "shot_types_opponent"
+    assert {
+        key: shot.payload["records"][0][key]
+        for key in ("FG2M", "FG2A", "FG3M", "FG3A")
+    } == {"FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6}
+
+    columns = [("", "TEAM_ID")]
+    values = [1610612737]
+    for zone in (
+        "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+        "Corner 3", "Above the Break 3",
+    ):
+        columns.extend(((zone, "OPP_FGM"), (zone, "OPP_FGA")))
+        values.extend((4, 8))
+    zone = normalize_opponent_zone_response(
+        pd.DataFrame([values], columns=pd.MultiIndex.from_tuples(columns)),
+        season="2025-26", cutoff=NOW, team_id=1610612737,
+    )
+    assert zone.observation_type == "shot_zones_opponent"
+    assert len(zone.payload["records"]) == 5
+    assert {
+        (row["category"], row["FGM"], row["FGA"])
+        for row in zone.payload["records"]
+    } == {
+        (zone_name, 4, 8)
+        for zone_name in (
+            "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+            "Corner 3", "Above the Break 3",
+        )
+    }
+
+
+def test_schedule_normalizer_canonicalizes_terminal_alias_and_postponement():
+    row = {
+        **_schedule()[0],
+        "status": "Game Finished",
+        "is_postponed": True,
+        "postponement_evidence": {"reason": "weather"},
+    }
+    event = normalize_schedule_response(
+        [row], season="2025-26", cutoff=NOW
+    ).payload["records"][0]
+    assert event["status"] == "Final"
+    assert event["is_postponed"] is True
+    assert event["postponement_evidence"] == {"reason": "weather"}
+
+
 def test_live_roster_shape_skips_inactive_unaffiliated_players_before_team_validation():
     rows = [
         {
@@ -255,6 +317,8 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     assert len(synergy) == 11
     assert {item["parameters"]["window"] for item in synergy} == {"season"}
     assert {item["parameters"]["subject_code"] for item in synergy} == {"T"}
+    assert {item["parameters"]["type_grouping"] for item in synergy} == {"Defensive"}
+    assert {item["parameters"]["per_mode"] for item in synergy} == {"Totals"}
     assert not any(item["scope"] in {"grouped_shot_types", "exact_shot_zones"} for item in opponent)
 
     l15_only = _collector_scope_descriptors(
@@ -274,8 +338,12 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     } == {"2025-11-01"}
 
 
+@pytest.mark.parametrize(
+    ("evidence_mode", "expected_composed"),
+    (("complete", 5), ("partial", 4), ("tampered", 4)),
+)
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
-    tmp_path: Path,
+    tmp_path: Path, evidence_mode: str, expected_composed: int,
 ):
     control_db = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
     run_migrations(control_db)
@@ -337,23 +405,31 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     class OpponentProvider(FakeProvider):
         def fetch_synergy_play_types(self, category, **kwargs):
             assert kwargs["player_or_team_abbreviation"] == "T"
-            return [{
+            assert kwargs["type_grouping"] == "Defensive"
+            assert kwargs["per_mode_simple"] == "Totals"
+            rows = [{
                 "team_id": int(team_id), "category": category,
                 "POSS": 10, "PTS": 12,
             } for team_id in team_ids]
+            return rows[:1] if evidence_mode == "partial" and category == "Transition" else rows
 
         def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
             return [{
                 "team_id": kwargs["team_id"], "category": category,
-                "FGA": 10, "FGM": 5,
+                "FG2M": 4, "FG2A": 8, "FG3M": 2, "FG3A": 6,
             }]
 
         def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
             return [{
                 "team_id": kwargs["team_id"],
-                "Restricted Area": 1, "In The Paint (Non-RA)": 2,
-                "Mid-Range": 3, "Corner 3": 4,
-                "Above the Break 3": 5,
+                **{
+                    f"{zone}_{stat}": value
+                    for zone in (
+                        "Restricted Area", "In The Paint (Non-RA)",
+                        "Mid-Range", "Corner 3", "Above the Break 3",
+                    )
+                    for stat, value in (("OPP_FGM", 4), ("OPP_FGA", 8))
+                },
             }]
 
     collector, transport, outbox = _collector(
@@ -411,46 +487,81 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             document.pop("payload"), sort_keys=True, separators=(",", ":")
         ).encode()
         ingestion.ingest(claims, document, payload)
+    if evidence_mode == "tampered":
+        with control_db.begin() as connection:
+            observations = connection.execute(select(CollectionObservation).where(
+                CollectionObservation.observation_type == "shot_types_opponent"
+            )).mappings().all()
+            target = next(
+                row for row in observations
+                if json.loads(row["scope"])["window"] == "season"
+            )
+            connection.execute(update(CollectionObservation).where(
+                CollectionObservation.observation_id == target["observation_id"]
+            ).values(payload=target["payload"] + " "))
     with control_db.connect() as connection:
         assert {
             row.stream_key
             for row in connection.execute(select(CompositionJob))
         } == publication_streams
 
-    activated = set()
-    for base, template in NBA_PUBLICATION_STREAMS.items():
-        for window in ("season", "l15"):
-            if base == "play_types" and window == "l15":
-                continue
-            stream_key = template.format(window=window)
-            games_by_team = governance.resolve_team_game_ids(
-                "2025-26", cutoff, window=window,
-                manifest_id=manifest.manifest_id,
-                event_catalog_publication_id=manifest.event_catalog_publication_id,
-                event_catalog_checksum=manifest.event_catalog_checksum,
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose(
+            "synergy_play_types_opponent_season", season="2025-26",
+            cutoff=cutoff, payload={"rows": []},
+            manifest_id=manifest.manifest_id,
+        )
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=SimpleNamespace(engine=control_db),
+        materialization=None,
+        governance=governance,
+        publication_service=publications,
+        clock=lambda: NOW,
+    )
+    assert runtime.compose_queued("2025-26") == expected_composed
+    with control_db.connect() as connection:
+        job_statuses = {
+            row.stream_key: row.status
+            for row in connection.execute(select(CompositionJob))
+        }
+    assert job_statuses == {
+        stream_key: (
+            "failed"
+            if (
+                evidence_mode == "partial"
+                and stream_key == "synergy_play_types_opponent_season"
+            ) or (
+                evidence_mode == "tampered"
+                and stream_key == "grouped_shot_types_opponent_season"
             )
-            payload = {"rows": [{
-                "team_id": int(team_id),
-                "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
-                "game_ids": sorted(games_by_team[int(team_id)]),
-                "game_count": len(games_by_team[int(team_id)]),
-                "per48": {
-                    metric: float(index + 1)
-                    for index, metric in enumerate(sorted(NBA_PUBLICATION_TAXONOMY[base]))
-                },
-            } for team_id in team_ids]}
-            publication = publications.compose(
-                stream_key, season="2025-26", cutoff=cutoff,
-                payload=payload, manifest_id=manifest.manifest_id,
-            )
-            assert publication.status == "active"
-            activated.add(stream_key)
-    assert activated == {
-        template.format(window=window)
-        for base, template in NBA_PUBLICATION_STREAMS.items()
-        for window in ("season", "l15")
-        if not (base == "play_types" and window == "l15")
+            else "succeeded"
+        )
+        for stream_key in publication_streams
     }
+    reader = DatabaseFirstPublicationReader(control_db, clock=lambda: NOW)
+    expected_values = {
+        "synergy_play_types_opponent_season": ("Transition_PTS", 12 / 15),
+        "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 4 / 15),
+        "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 4 / 15),
+        "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4 / 15),
+        "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4 / 15),
+    }
+    if evidence_mode == "partial":
+        expected_values.pop("synergy_play_types_opponent_season")
+        assert not reader.read(
+            "synergy_play_types_opponent_season", season="2025-26"
+        ).available
+    if evidence_mode == "tampered":
+        expected_values.pop("grouped_shot_types_opponent_season")
+        assert not reader.read(
+            "grouped_shot_types_opponent_season", season="2025-26"
+        ).available
+    for stream_key, (metric, expected) in expected_values.items():
+        read = reader.read(stream_key, season="2025-26")
+        assert read.available and len(read.decoded or ()) == 30
+        assert (read.decoded or ())[0].per48[metric] == pytest.approx(expected)
+        assert read.payload["source_observations"]
     with control_db.connect() as connection:
         assert len(connection.execute(select(CollectionObservation)).all()) == len(uploaded)
     outbox.close()

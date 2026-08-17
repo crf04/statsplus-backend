@@ -62,10 +62,12 @@ def is_ordinary_classification(value: str) -> bool:
 def is_postponed_event(event: Mapping[str, object]) -> bool:
     """Whether normalized status or non-empty structured evidence says postponed."""
 
+    status = event.get("status_text", event.get("status", ""))
     return bool(
         event.get("is_postponed") is True
         or event.get("postponed_status")
         or event.get("postponement_evidence")
+        or str(status).strip().casefold() == "postponed"
     )
 
 
@@ -78,7 +80,9 @@ def is_final_event(event: Mapping[str, object]) -> bool:
         event.get("status_code") in {NBAGameStatus.FINAL, "3"}
         or status_text == "3"
         or status_text.startswith("final")
-        or status_text in {"finished", "completed", "closed", "game over"}
+        or status_text in {
+            "finished", "completed", "closed", "game over", "game finished",
+        }
     )
 
 

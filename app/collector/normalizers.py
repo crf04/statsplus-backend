@@ -52,6 +52,15 @@ def _canonical_event_kind(game_id: str, provider_classification: str) -> str:
 
 def _records(response: Any) -> list[dict[str, Any]]:
     if pd is not None and isinstance(response, pd.DataFrame):
+        if isinstance(response.columns, pd.MultiIndex):
+            response = response.copy()
+            response.columns = [
+                "_".join(
+                    str(part).strip() for part in column
+                    if str(part).strip() and str(part).strip().lower() != "nan"
+                )
+                for column in response.columns
+            ]
         return [dict(row) for row in response.to_dict(orient="records")]
     if isinstance(response, Mapping):
         result_sets = response.get("resultSets")
@@ -107,6 +116,10 @@ def _plain(value: Any) -> Any:
         if value.tzinfo is None:
             raise ProviderContractError("provider_timestamp_unaware")
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, Mapping):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
     if pd is not None:
         try:
             if pd.isna(value):
@@ -265,8 +278,9 @@ def normalize_schedule_response(
             "completed": "Final",
             "closed": "Final",
             "game over": "Final",
+            "game finished": "Final",
         }.get(status_key, status)
-        normalized.append({
+        event = {
             "nba_game_id": game_id,
             "home_team_id": home,
             "away_team_id": away,
@@ -274,7 +288,22 @@ def normalize_schedule_response(
             "status": status,
             "phase": "Regular Season",
             "classification": "Regular Season",
-        })
+        }
+        is_postponed = _value(row, "is_postponed")
+        postponed_status = _value(row, "postponed_status")
+        postponement_evidence = _value(row, "postponement_evidence")
+        if status_key == "postponed":
+            is_postponed = True
+            postponed_status = postponed_status or "postponed"
+        if is_postponed is not None:
+            if not isinstance(is_postponed, bool):
+                raise ProviderContractError("provider_schema_changed")
+            event["is_postponed"] = is_postponed
+        if postponed_status not in (None, ""):
+            event["postponed_status"] = _text(postponed_status)
+        if postponement_evidence not in (None, "", {}, []):
+            event["postponement_evidence"] = _plain(postponement_evidence)
+        normalized.append(event)
     normalized.sort(key=lambda item: (item["scheduled_at"], item["nba_game_id"]))
     payload = {
         "events": normalized,
@@ -415,6 +444,12 @@ def _stat_rows(
             (("fga_frequency", "FGA_FREQUENCY"), "share"),
             (("fgm", "FGM"), "makes"),
             (("fga", "FGA"), "attempts"),
+            (("fg2m", "FG2M"), "FG2M"),
+            (("fg2a", "FG2A"), "FG2A"),
+            (("fg3m", "FG3M"), "FG3M"),
+            (("fg3a", "FG3A"), "FG3A"),
+            (("poss", "POSS"), "POSS"),
+            (("pts", "PTS"), "PTS"),
         ):
             aliases = source if isinstance(source, tuple) else (source,)
             raw = _value(row, *aliases)
@@ -430,6 +465,11 @@ def _stat_rows(
         # Makes never exceed attempts.  This handles both NBA and rehearsal
         # aliases without deriving or filling provider values.
         if "makes" in stats and "attempts" in stats and stats["makes"] > stats["attempts"]:
+            raise ProviderContractError("value_invariant_failed")
+        if any(
+            made in stats and attempted in stats and stats[made] > stats[attempted]
+            for made, attempted in (("FG2M", "FG2A"), ("FG3M", "FG3A"))
+        ):
             raise ProviderContractError("value_invariant_failed")
         normalized.append(stats)
     normalized.sort(key=lambda item: tuple(str(item.get(key, "")) for key in (*required_identity, "category")))
@@ -546,12 +586,28 @@ def _zone_response(
         for field in identity:
             aliases = (field, field.upper())
             identity_values[field] = _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
-        values: dict[str, Any] = {}
+        values: dict[str, dict[str, Any]] = {}
         for zone in SHOT_ZONES:
-            raw = _value(row, zone, zone.upper(), zone.replace(" ", "_"))
-            if raw is None:
+            if observation_type == "exact_shot_zones":
+                raw = _value(row, zone, zone.upper(), zone.replace(" ", "_"))
+                if raw is None:
+                    raise ProviderContractError("provider_schema_changed")
+                values[zone] = {"value": _number(raw)}
+                continue
+            flattened = zone.replace(" ", "_")
+            makes = _value(
+                row, f"{zone}_OPP_FGM", f"{flattened}_OPP_FGM",
+                f"{zone}_FGM", f"{flattened}_FGM",
+            )
+            attempts = _value(
+                row, f"{zone}_OPP_FGA", f"{flattened}_OPP_FGA",
+                f"{zone}_FGA", f"{flattened}_FGA",
+            )
+            if makes is None or attempts is None:
                 raise ProviderContractError("provider_schema_changed")
-            values[zone] = _number(raw)
+            values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}
+            if values[zone]["FGM"] > values[zone]["FGA"]:
+                raise ProviderContractError("value_invariant_failed")
         key = tuple(identity_values.values())
         if key in seen:
             raise ProviderContractError("duplicate_identity")
@@ -565,7 +621,7 @@ def _zone_response(
                 "base": "shot_zones",
                 "category": zone,
                 "slice_key": zone,
-                "value": values[zone],
+                **values[zone],
             })
             output.append(zone_record)
     output.sort(key=lambda item: tuple(str(item.get(field, "")) for field in (*identity, "category")))

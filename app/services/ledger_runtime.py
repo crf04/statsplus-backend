@@ -18,9 +18,11 @@ from app.models.collection_control import (
     CollectionManifest,
     CompositionJob,
 )
+from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
+from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +411,7 @@ class LedgerRuntime:
         materialization: LedgerMaterializationService,
         governance: LedgerGovernanceReader,
         matchup_materialization=None,
+        publication_service: PublicationService | None = None,
         clock=None,
     ) -> None:
         self.backfill = backfill
@@ -416,6 +419,7 @@ class LedgerRuntime:
         self.materialization = materialization
         self.governance = governance
         self.matchup_materialization = matchup_materialization
+        self.publication_service = publication_service
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def refresh(
@@ -456,6 +460,47 @@ class LedgerRuntime:
                 if stored_cutoff.tzinfo is None
                 else stored_cutoff
             )
+            slice_jobs = [
+                row for row in jobs
+                if row["cutoff"] == stored_cutoff
+                and row["manifest_id"] == manifest_id
+            ]
+            nba_jobs = [
+                row for row in slice_jobs
+                if row["stream_key"] in NBA_PUBLICATION_STREAM_KEYS
+            ]
+            publication_service = self.publication_service
+            if nba_jobs and publication_service is None:
+                publication_service = PublicationService(
+                    self.repository.engine,
+                    l15_expectation_resolver=self.governance,
+                )
+            for job in nba_jobs:
+                try:
+                    if not manifest_id:
+                        raise ControlPlaneError("publication_governance_unavailable")
+                    publication_service.compose_from_observations(
+                        job["stream_key"], season=season, cutoff=cutoff,
+                        manifest_id=manifest_id,
+                    )
+                except (ControlPlaneError, ValueError) as error:
+                    status, last_error = "failed", str(error)[:255]
+                else:
+                    status, last_error = "succeeded", None
+                    completed += 1
+                with self.repository.engine.begin() as connection:
+                    connection.execute(update(table).where(
+                        table.c.job_id == job["job_id"],
+                    ).values(
+                        status=status, updated_at=self.clock(),
+                        last_error=last_error,
+                    ))
+            ledger_jobs = [
+                row for row in slice_jobs
+                if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+            ]
+            if not ledger_jobs:
+                continue
             governance = self.governance.read_for_composition(
                 season,
                 cutoff,
@@ -506,11 +551,7 @@ class LedgerRuntime:
                 if materialized.l15_window.complete:
                     succeeded |= {"assist_locations_l15"}
             with self.repository.engine.begin() as connection:
-                for job in (
-                    row for row in jobs
-                    if row["cutoff"] == stored_cutoff
-                    and row["manifest_id"] == manifest_id
-                ):
+                for job in ledger_jobs:
                     success = job["stream_key"] in succeeded
                     connection.execute(update(table).where(
                         table.c.job_id == job["job_id"],

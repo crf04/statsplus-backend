@@ -145,6 +145,7 @@ class ResidentialScopeExecutor:
                     self.provider, "fetch_synergy_play_types", category,
                     player_or_team_abbreviation=str(parameters.get("subject_code", "P")),
                     type_grouping=str(parameters.get("type_grouping", "season")),
+                    per_mode_simple=str(parameters.get("per_mode", "Totals")),
                     season=work.season,
                     season_type="Regular Season",
                 )
@@ -272,6 +273,7 @@ class _StandaloneNBAProvider:
     def fetch_synergy_play_types(
         self, play_type: str, *, player_or_team_abbreviation: str,
         type_grouping: str, season: str, season_type: str,
+        per_mode_simple: str = "Totals",
     ) -> Any:
         from nba_api.stats import endpoints
         return self._request(lambda: endpoints.SynergyPlayTypes(
@@ -280,6 +282,7 @@ class _StandaloneNBAProvider:
             type_grouping_nullable=type_grouping,
             season=season,
             season_type_all_star=season_type,
+            per_mode_simple=per_mode_simple,
             league_id="00",
             timeout=self.timeout,
         ))
@@ -322,7 +325,7 @@ class _StandaloneNBAProvider:
             season_type_all_star=season_type,
             team_id_nullable=team_id,
             last_n_games_nullable=last_n_games,
-            per_mode_simple="PerGame",
+            per_mode_simple="Totals",
             league_id="00",
             timeout=self.timeout,
         ))
@@ -335,7 +338,7 @@ class _StandaloneNBAProvider:
         return self._request(lambda: endpoints.LeagueDashTeamShotLocations(
             distance_range="By Zone",
             measure_type_simple="Opponent",
-            per_mode_detailed="PerGame",
+            per_mode_detailed="Totals",
             date_from_nullable=date_from,
             date_to_nullable=date_to,
             season=season,

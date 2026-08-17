@@ -26,7 +26,9 @@ def test_final_event_accepts_governed_code_and_terminal_text(event):
     assert is_final_event(event)
 
 
-@pytest.mark.parametrize("status", ["Finished", "Completed", "Closed", "Game Over"])
+@pytest.mark.parametrize(
+    "status", ["Finished", "Completed", "Closed", "Game Over", "Game Finished"]
+)
 def test_final_event_accepts_exact_provider_terminal_aliases(status):
     assert is_final_event({"status": status})
 
@@ -114,6 +116,7 @@ def test_unknown_game_id_prefix_uses_stored_classification_as_kind_fallback():
         {"postponed_status": "Postponed"},
         {"postponement_evidence": {"reason": "weather"}},
         {"postponement_evidence": ["provider flag"]},
+        {"status": "Postponed"},
     ],
 )
 def test_postponement_truth_accepts_normalized_status_or_structured_evidence(event):

@@ -37,6 +37,7 @@ from app.domain.nba_teams import (
 from app.domain.nba_events import is_completed_non_postponed_event, is_final_event
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_TAXONOMY,
     PLAY_TYPES,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_ZONE_SLICES,
@@ -266,7 +267,8 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
     if opponent_synergy:
         descriptors.extend({"scope": opponent_synergy, "parameters": {
             "window": "season", "subject": "opponent", "play_type": category,
-            "subject_code": "T", "type_grouping": "season",
+            "subject_code": "T", "type_grouping": "Defensive",
+            "per_mode": "Totals",
         }} for category in PLAY_TYPES)
     date_to = slate_date_for_instant(_aware(cutoff)).isoformat()
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
@@ -407,6 +409,117 @@ def _requires_team_window_expectation(stream_key: str) -> bool:
         stream_key in NBA_PUBLICATION_STREAM_KEYS
         and publication_base_for_stream(stream_key) is not None
     )
+
+
+def _compose_nba_observation_payload(
+    session: Session,
+    *,
+    stream: PublicationStream,
+    stream_key: str,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str,
+    provenance_ids: set[str],
+    expected_game_ids_by_team: Mapping[int, frozenset[str]],
+) -> dict[str, Any]:
+    """Derive one governed NBA payload only from immutable observations."""
+
+    base = publication_base_for_stream(stream_key)
+    window = "l15" if stream_key.endswith("_l15") else "season"
+    required_types = set(json.loads(stream.required_observations))
+    expected_metrics = set(NBA_PUBLICATION_TAXONOMY.get(base or "", ()))
+    expected_teams = {int(team_id) for team_id in NBA_TEAM_IDS}
+    if not base or not expected_metrics or set(expected_game_ids_by_team) != expected_teams:
+        raise ValueError("publication governance is incomplete")
+    observations = [
+        session.get(CollectionObservation, observation_id)
+        for observation_id in sorted(provenance_ids)
+    ]
+    values: dict[int, dict[str, float]] = {
+        team_id: {} for team_id in expected_teams
+    }
+    sources: list[dict[str, str]] = []
+    stat_keys = {
+        "play_types": ("PTS", "POSS"),
+        "shot_types": ("FG2M", "FG2A", "FG3M", "FG3A"),
+        "shot_zones": ("FGM", "FGA"),
+    }[base]
+    for observation in observations:
+        if (
+            observation is None
+            or observation.manifest_id != manifest_id
+            or observation.season != season
+            or _aware(observation.cutoff) != cutoff
+            or observation.provider != stream.provider
+            or observation.observation_type not in required_types
+        ):
+            raise ValueError("publication observation authority mismatch")
+        try:
+            scope = json.loads(observation.scope)
+            document = json.loads(observation.payload)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("publication observation malformed") from error
+        if (
+            not isinstance(scope, Mapping)
+            or str(scope.get("window", "")).casefold() != window
+            or not isinstance(document, Mapping)
+            or not hmac.compare_digest(
+                _checksum(observation.payload), observation.checksum
+            )
+        ):
+            raise ValueError("publication observation integrity mismatch")
+        records = document.get("records")
+        if not isinstance(records, list):
+            raise ValueError("publication observation rows missing")
+        sources.append({
+            "observation_id": observation.observation_id,
+            "checksum": observation.checksum,
+        })
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise ValueError("publication observation row malformed")
+            try:
+                team_id = int(record["team_id"])
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                raise ValueError("publication team identity missing") from error
+            if team_id not in expected_teams:
+                raise ValueError("publication team identity invalid")
+            category = str(
+                record.get("slice_key", record.get("category", ""))
+            ).strip()
+            if base == "shot_types":
+                category = SHOT_TYPE_DISPLAY_TO_STORED.get(category, category)
+            for stat_key in stat_keys:
+                if stat_key not in record:
+                    continue
+                metric_key = f"{category}_{stat_key}"
+                if metric_key not in expected_metrics or metric_key in values[team_id]:
+                    raise ValueError("publication observation taxonomy mismatch")
+                raw = record[stat_key]
+                if isinstance(raw, bool):
+                    raise ValueError("publication observation value invalid")
+                numeric = float(raw)
+                if not math.isfinite(numeric) or numeric < 0:
+                    raise ValueError("publication observation value invalid")
+                values[team_id][metric_key] = numeric
+    if any(set(team_values) != expected_metrics for team_values in values.values()):
+        raise ValueError("publication observation league incomplete")
+    rows = []
+    for team_id in sorted(expected_teams):
+        game_ids = sorted(expected_game_ids_by_team[team_id])
+        if not game_ids:
+            raise ValueError("publication governed game set empty")
+        rows.append({
+            "team_id": team_id,
+            "team_tricode": NBA_TEAM_ID_TO_TRICODE[str(team_id)],
+            "game_ids": game_ids,
+            "game_count": len(game_ids),
+            "per48": {
+                metric: values[team_id][metric] / len(game_ids)
+                for metric in sorted(expected_metrics)
+            },
+        })
+    return {"rows": rows, "source_observations": sources}
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
@@ -2820,7 +2933,6 @@ class PublicationService(_SessionService):
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None,
                 manifest_id: str | None = None) -> PublicationVersion:
-        encoded = _json(payload)
         now = self.clock()
         with self.session() as session, session.begin():
             stream = session.get(PublicationStream, stream_key)
@@ -2865,12 +2977,34 @@ class PublicationService(_SessionService):
                         raise ControlPlaneError(
                             "publication_governance_unavailable"
                         ) from error
+                try:
+                    derived_payload = _compose_nba_observation_payload(
+                        session,
+                        stream=stream,
+                        stream_key=stream_key,
+                        season=season,
+                        cutoff=_aware(cutoff),
+                        manifest_id=authority.manifest_id,
+                        provenance_ids=provenance_ids,
+                        expected_game_ids_by_team=expected_game_ids_by_team or {},
+                    )
+                except (TypeError, ValueError) as error:
+                    raise ControlPlaneError("publication_candidate_invalid") from error
+                if payload is not None and not hmac.compare_digest(
+                    canonical_publication_json(payload),
+                    canonical_publication_json(derived_payload),
+                ):
+                    raise ControlPlaneError("publication_candidate_invalid")
+                payload = derived_payload
+                encoded = _json(payload)
                 _validate_activation_candidate_payload(
                     stream_key,
                     encoded,
                     season=season,
                     expected_game_ids_by_team=expected_game_ids_by_team,
                 )
+            else:
+                encoded = _json(payload)
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
             ).with_for_update())
@@ -3146,6 +3280,22 @@ class PublicationService(_SessionService):
                          manifest_id: str | None = None) -> PublicationVersion:
         return self.compose(stream_key, season=season, cutoff=cutoff, payload=payload,
                             expected_fence=expected_fence, manifest_id=manifest_id)
+
+    def compose_from_observations(
+        self, stream_key: str, *, season: str, cutoff: datetime,
+        manifest_id: str,
+    ) -> PublicationVersion:
+        """Compose a governed NBA publication from its accepted evidence."""
+
+        if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
+            raise ControlPlaneError("stream_unsupported")
+        with self.session() as session:
+            pointer = session.get(PublicationPointer, stream_key)
+            expected_fence = pointer.fence if pointer is not None else None
+        return self.compose(
+            stream_key, season=season, cutoff=cutoff, payload=None,
+            expected_fence=expected_fence, manifest_id=manifest_id,
+        )
 
     def current(self, stream_key: str) -> PublicationVersion | None:
         with self.session() as session:

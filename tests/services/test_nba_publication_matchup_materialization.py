@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from statistics import fmean, pstdev
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event, select
@@ -272,6 +273,49 @@ def _publication_authority_values(
         "event_catalog_publication_id": catalog_id,
         "event_catalog_checksum": checksum,
     }
+
+
+def _advance_test_publication(engine, stream_key, payload, publication_id):
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    checksum = hashlib.sha256(encoded.encode()).hexdigest()
+    with engine.begin() as connection:
+        pointer = connection.execute(
+            PublicationPointer.__table__.select().where(
+                PublicationPointer.stream_key == stream_key
+            )
+        ).mappings().one()
+        prior_id = pointer["active_publication_id"]
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == prior_id
+            ).values(status="superseded")
+        )
+        connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
+            publication_id=publication_id,
+            stream_key=stream_key,
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            version=99,
+            status="active",
+            checksum=checksum,
+            payload=encoded,
+            created_at=RETRIEVED_AT,
+            fence=pointer["fence"] + 1,
+        ))
+        connection.execute(
+            PublicationPointer.__table__.update().where(
+                PublicationPointer.stream_key == stream_key
+            ).values(
+                previous_publication_id=prior_id,
+                active_publication_id=publication_id,
+                fence=pointer["fence"] + 1,
+            )
+        )
+    return SimpleNamespace(
+        publication_id=publication_id, payload=encoded,
+        version=99, checksum=checksum,
+    )
 
 
 def _insert_publication_authority(
@@ -2165,28 +2209,14 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
                 PublicationPointer.stream_key == l15_stream
             )
         ).mappings().one()
-    composed = publications.compose(
-        l15_stream,
-        season="2025-26",
-        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
-        payload=_per48_only_payload(l15_ids),
-        expected_fence=l15_pointer["fence"],
-    )
-    assert composed.manifest_id == DEFAULT_MANIFEST_ID
-    assert composed.event_catalog_publication_id == DEFAULT_EVENT_CATALOG_ID
-    assert composed.event_catalog_checksum == _publication_authority_values()[
-        "event_catalog_checksum"
-    ]
-    rehearsal_publications = HistoricalRehearsalRunner(
-        engine, environment="unit"
-    )._load_isolated_publications(
-        {l15_stream: composed.publication_id},
-        season="2025-26",
-        cutoff=date(2025, 10, 14),
-    )
-    assert rehearsal_publications[l15_stream].publication_id == (
-        composed.publication_id
-    )
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose(
+            l15_stream,
+            season="2025-26",
+            cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            payload=_per48_only_payload(l15_ids),
+            expected_fence=l15_pointer["fence"],
+        )
 
     season_stream = "exact_shot_zones_opponent_season"
     publications.register_stream(
@@ -2315,18 +2345,9 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
         supported_windows=("l15",),
         enabled=True,
     )
-    with engine.connect() as connection:
-        pointer = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
-            )
-        ).mappings().one()
-    current = publications.compose(
-        stream_key,
-        season="2025-26",
-        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
-        payload=_per48_only_payload(l15_ids),
-        expected_fence=pointer["fence"],
+    current = _advance_test_publication(
+        engine, stream_key, _per48_only_payload(l15_ids),
+        "checksum-current",
     )
     with engine.begin() as connection:
         prior_id = connection.execute(
@@ -2442,19 +2463,9 @@ def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
         supported_windows=("l15",),
         enabled=True,
     )
-    with engine.connect() as connection:
-        pointer = connection.execute(
-            PublicationPointer.__table__.select().where(
-                PublicationPointer.stream_key == stream_key
-            )
-        ).mappings().one()
-    current = publications.compose(
-        stream_key,
-        season="2025-26",
-        cutoff=datetime(2025, 10, 15, tzinfo=timezone.utc),
-        payload=_per48_only_payload(l15_ids),
-        expected_fence=pointer["fence"],
-        manifest_id=DEFAULT_MANIFEST_ID,
+    current = _advance_test_publication(
+        engine, stream_key, _per48_only_payload(l15_ids),
+        "authority-current",
     )
     with engine.connect() as connection:
         prior_id = connection.execute(
