@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from flask import current_app
-from sqlalchemy.engine import Engine
 from sqlalchemy import inspect
+from sqlalchemy.engine import Engine
 
-from app.config.settings import RuntimeSettings
+from app.config.settings import ConfigurationError, RuntimeSettings
 from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
 
 
@@ -60,6 +60,9 @@ class ApplicationDependencies:
     ledger_backfill_service: Any | None = None
     ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
+    projection_archive: Any | None = None
+    projection_recorder: Any | None = None
+    projection_player_pool_reader: Any | None = None
 
 
 def build_dependencies(
@@ -77,6 +80,7 @@ def build_dependencies(
     from app.providers.prizepicks import PrizePicksAdapter
     from app.providers.underdog import UnderdogAdapter
     from app.providers.rotowire import RotoWireInjuryProvider
+    from app.providers.dfs import NBAMarketQuery
     from app.services.athlete_catalog_service import AthleteCatalogService
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
@@ -93,6 +97,14 @@ def build_dependencies(
     from app.services.player_service import PlayerService
     from app.services.player_diet import PlayerDietService
     from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
+    from app.services.projection_archive import (
+        LatestProjectionPlayerPoolReader,
+        ProjectionArchive,
+        ProjectionArchiveReadScope,
+        ProjectionRecordingService,
+        ProjectionSelectionPlayerPoolReader,
+        require_projection_archive_schema,
+    )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -134,6 +146,12 @@ def build_dependencies(
 
     engine = get_engine(settings)
     demo_database = is_demo_database_url(settings.database.url)
+    if demo_database and settings.features.projection_archive_read_enabled:
+        raise ConfigurationError(
+            "PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database"
+        )
+    if settings.features.projection_archive_read_enabled:
+        require_projection_archive_schema(engine)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     publication_reader = None
     write_fence = None
@@ -428,10 +446,56 @@ def build_dependencies(
         statistic_catalog,
         snapshot_repository=player_pool_snapshot_repository,
     )
+    projection_archive = (
+        None
+        if demo_database
+        else ProjectionArchive(
+            engine,
+            statistic_catalog,
+            max_markets=settings.providers.projection_archive_max_markets,
+        )
+    )
+    projection_query = NBAMarketQuery(season=settings.nba.current_season)
+    projection_read_scopes = tuple(
+        ProjectionArchiveReadScope(
+            provider=provider,
+            query=projection_query,
+        )
+        for provider in (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
+    )
+    projection_read_scopes_by_provider = {
+        scope.provider: scope for scope in projection_read_scopes
+    }
+    projection_record_scopes = tuple(
+        projection_read_scopes_by_provider[provider]
+        for provider in settings.providers.dfs_enabled_providers
+    )
+    projection_record_default_scope = projection_read_scopes_by_provider[
+        settings.features.projection_archive_read_provider
+    ]
+    projection_recorder = (
+        None
+        if projection_archive is None
+        else ProjectionRecordingService(
+            projection_archive,
+            projection_record_scopes,
+            default_scope=projection_record_default_scope,
+        )
+    )
+    projection_player_pool_reader = (
+        LatestProjectionPlayerPoolReader(
+            engine,
+            projection_read_scopes,
+            required_providers=settings.providers.dfs_enabled_providers,
+        )
+        if settings.features.projection_archive_read_enabled
+        else None
+    )
+    slate_player_pool = projection_player_pool_reader or player_pool_service
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
-        player_pool=player_pool_service,
+        player_pool=slate_player_pool,
         injuries=matchup_injury_service,
     )
     from app.domain.freshness import time_window_timedelta
@@ -479,9 +543,17 @@ def build_dependencies(
         if player_pool_snapshot_repository is not None
         else None
     )
+    matchup_player_pool_reader = (
+        projection_player_pool_reader or stored_player_pool_reader
+    )
+    selection_player_pool_reader = (
+        ProjectionSelectionPlayerPoolReader(projection_player_pool_reader)
+        if projection_player_pool_reader is not None
+        else stored_player_pool_reader
+    )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
-        player_pool=stored_player_pool_reader,
+        player_pool=selection_player_pool_reader,
         player_logs=player_game_log_repository,
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,
@@ -490,7 +562,7 @@ def build_dependencies(
     )
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,
-        player_pool=stored_player_pool_reader,
+        player_pool=matchup_player_pool_reader,
         player_logs=player_game_log_repository,
         player_diets=player_diet_service,
         team_matchups=team_matchup_query_service,
@@ -543,6 +615,9 @@ def build_dependencies(
         ledger_backfill_service=ledger_backfill_service,
         ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
+        projection_archive=projection_archive,
+        projection_recorder=projection_recorder,
+        projection_player_pool_reader=projection_player_pool_reader,
     )
 
 

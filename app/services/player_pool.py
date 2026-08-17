@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 import logging
@@ -91,10 +91,19 @@ class PlayerPool:
     players: tuple[PoolPlayer, ...]
     team_counts: Mapping[int, int]
     freshness: Mapping[str, Any]
+    game_states: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def unavailable_freshness() -> dict[str, Any]:
         return {"status": "unavailable", "retrieved_at": None, "providers": {}}
+
+    @staticmethod
+    def missing_projection_freshness() -> dict[str, Any]:
+        """Extend unavailable freshness with the archive reader's public state."""
+
+        freshness = PlayerPool.unavailable_freshness()
+        freshness.update({"state": "missing", "observed_at": None})
+        return freshness
 
 
 @dataclass(slots=True)
@@ -153,6 +162,12 @@ class PlayerPoolSnapshotReaderWriter(Protocol):
 
 class PlayerPoolReader(Protocol):
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool: ...
+
+
+class SingleGamePlayerPoolReader(Protocol):
+    """Read one game's governed Player Pool without prescribing storage."""
+
+    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None: ...
 
 
 class StoredPlayerPoolSnapshotReader(Protocol):
@@ -702,6 +717,7 @@ __all__ = [
     "DFSBoardReader",
     "PlayerPool",
     "PlayerPoolReader",
+    "SingleGamePlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
     "StoredPlayerPoolReader",

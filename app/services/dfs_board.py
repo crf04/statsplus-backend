@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import requests
 
-from app.config.settings import ConfigurationError, RuntimeSettings
+from app.config.settings import RuntimeSettings
 from app.dfs_catalog import DFS_PROVIDER_NAMES
 from app.domain.freshness import exact_age_seconds
 from app.errors import ProviderUnavailableError
@@ -971,10 +971,6 @@ class DFSBoardService:
             }
             registry = self._build_registry(registry)
         enabled = tuple(registry)
-        if settings is not None and settings.environment == "production" and not enabled:
-            raise ConfigurationError(
-                "DFS_ENABLED_PROVIDERS must explicitly configure at least one provider in production"
-            )
 
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency < 1:
             raise ValueError("DFS board max_concurrency must be a positive integer")

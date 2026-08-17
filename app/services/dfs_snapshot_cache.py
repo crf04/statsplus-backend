@@ -456,13 +456,16 @@ def _query_payload(query: NBAMarketQuery) -> dict[str, Any]:
 
 
 def serialize_provider_snapshot(
-    snapshot: ProviderSnapshot, query: NBAMarketQuery | None = None
+    snapshot: ProviderSnapshot,
+    query: NBAMarketQuery | None = None,
+    *,
+    allow_partial: bool = False,
 ) -> str:
-    """Serialize one complete immutable snapshot using a strict versioned schema."""
+    """Serialize one immutable snapshot using a strict versioned schema."""
 
     if not isinstance(snapshot, ProviderSnapshot):
         raise TypeError("snapshot must be ProviderSnapshot")
-    if snapshot.status is not SnapshotStatus.COMPLETE:
+    if snapshot.status is not SnapshotStatus.COMPLETE and not allow_partial:
         raise ValueError("only complete provider snapshots may be cached")
     # Statistic resolution happens in the board above this seam, so a resolved
     # market is not a value this codec ever writes.
@@ -493,6 +496,7 @@ def deserialize_provider_snapshot(
     expected_contract_version: str | None = None,
     expected_provider: str | None = None,
     expected_query: NBAMarketQuery | None = None,
+    allow_partial: bool = False,
 ) -> ProviderSnapshot:
     """Validate and decode a Redis payload into a fresh immutable snapshot."""
 
@@ -578,7 +582,9 @@ def deserialize_provider_snapshot(
         raise SnapshotCacheError("snapshot query is not canonical")
     if expected_query is not None and _query_payload(encoded_query) != _query_payload(expected_query):
         raise SnapshotCacheError("snapshot query is incompatible")
-    if data["status"] != SnapshotStatus.COMPLETE.value:
+    if data["status"] != SnapshotStatus.COMPLETE.value and not (
+        allow_partial and data["status"] == SnapshotStatus.PARTIAL.value
+    ):
         raise SnapshotCacheError("only complete snapshots may be cached")
     markets = data["markets"]
     if not isinstance(markets, list):
@@ -595,7 +601,7 @@ def deserialize_provider_snapshot(
         snapshot = ProviderSnapshot(**decoded)
     except (*_CORRUPT_VALUE_ERRORS, MalformedProviderResponseError) as error:
         raise SnapshotCacheError("snapshot values are incompatible") from error
-    if snapshot.status is not SnapshotStatus.COMPLETE:
+    if snapshot.status is not SnapshotStatus.COMPLETE and not allow_partial:
         raise SnapshotCacheError("cached snapshot is not complete")
     # The payload must be exactly the bytes this codec writes, compared against
     # the text as it was stored rather than a normalizing re-dump: surrounding
@@ -603,7 +609,11 @@ def deserialize_provider_snapshot(
     # anything a constructor normalized, dropped, canonicalized from an alias, or
     # deduplicated -- that is corrupt data, not a usable cache value.
     try:
-        canonical = serialize_provider_snapshot(snapshot, encoded_query)
+        canonical = serialize_provider_snapshot(
+            snapshot,
+            encoded_query,
+            allow_partial=allow_partial,
+        )
     except ValueError as error:
         # A decoded value the canonical encoder refuses -- a nonfinite float
         # reached by numeric overflow rather than by a NaN token -- is corrupt

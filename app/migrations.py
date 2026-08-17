@@ -25,6 +25,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.sql import func
 
 
@@ -1176,6 +1177,254 @@ def _create_publication_player_game_log_projection(
             continue
 
 
+def _create_projection_archive_tables(connection: Connection) -> None:
+    """Create immutable projection evidence and its live read model."""
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionArchiveScopeLock,
+        ProjectionMaterializationGeneration,
+        ProjectionObservation,
+        ProjectionProviderSnapshot,
+        ProviderPoll,
+    )
+
+    # Foreign-key dependencies determine the portable creation order.
+    ProjectionArchiveScopeLock.__table__.create(connection, checkfirst=True)
+    ProjectionProviderSnapshot.__table__.create(connection, checkfirst=True)
+    ProviderPoll.__table__.create(connection, checkfirst=True)
+    ProjectionMaterializationGeneration.__table__.create(
+        connection, checkfirst=True
+    )
+    ProjectionObservation.__table__.create(connection, checkfirst=True)
+    LatestPlayerProjection.__table__.create(connection, checkfirst=True)
+
+
+def _v40_projection_poll_promoted_predicate(
+    *,
+    poll_ref: str,
+    generation_ref: str,
+    poll_table: str,
+    generation_table: str,
+) -> str:
+    """Reconstruct whether one v40 poll crossed its temporal promotion fence."""
+
+    return (
+        f"({generation_ref}.source_poll_id = {poll_ref}.poll_id OR ("
+        f"{poll_ref}.outcome = 'unchanged' "
+        f"AND {poll_ref}.retrieved_at >= {generation_ref}.retrieved_at "
+        "AND NOT EXISTS (SELECT 1 "
+        f"FROM {poll_table} AS newer_poll "
+        f"JOIN {generation_table} AS newer_generation "
+        "ON newer_generation.generation_id = newer_poll.generation_id "
+        f"WHERE newer_poll.provider = {poll_ref}.provider "
+        f"AND newer_poll.season = {poll_ref}.season "
+        f"AND newer_poll.query_key = {poll_ref}.query_key "
+        "AND newer_generation.outcome IN ('advanced', 'rematerialized') "
+        f"AND newer_poll.completed_at < {poll_ref}.completed_at "
+        f"AND newer_poll.retrieved_at > {poll_ref}.retrieved_at)))"
+    )
+
+
+def _upgrade_projection_archive_transitions(connection: Connection) -> None:
+    """Upgrade migration-40 projection tables for truthful poll transitions."""
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionMaterializationGeneration,
+        ProjectionObservation,
+        ProviderPoll,
+    )
+
+    inspector = inspect(connection)
+    poll_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("projection_provider_polls")
+    }
+    latest_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("latest_player_projections")
+    }
+    already_current = (
+        {"failure_reason", "promoted"} <= set(poll_columns)
+        and poll_columns["retrieved_at"]["nullable"]
+        and poll_columns["generation_id"]["nullable"]
+        and "confirmed_at" in latest_columns
+        and not latest_columns["confirmed_at"]["nullable"]
+    )
+    if already_current:
+        return
+
+    if connection.dialect.name == "sqlite":
+        _rebuild_projection_transition_tables_sqlite(
+            connection,
+            (
+                ProviderPoll.__table__,
+                ProjectionMaterializationGeneration.__table__,
+                ProjectionObservation.__table__,
+                LatestPlayerProjection.__table__,
+            ),
+        )
+        return
+
+    poll_name = connection.dialect.identifier_preparer.quote(
+        "projection_provider_polls"
+    )
+    generation_name = connection.dialect.identifier_preparer.quote(
+        "projection_materialization_generations"
+    )
+    latest_name = connection.dialect.identifier_preparer.quote(
+        "latest_player_projections"
+    )
+    promotion_predicate = _v40_projection_poll_promoted_predicate(
+        poll_ref="poll",
+        generation_ref="generation",
+        poll_table=poll_name,
+        generation_table=generation_name,
+    )
+    if "failure_reason" not in poll_columns:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD COLUMN failure_reason VARCHAR(64)"
+        ))
+    if "promoted" not in poll_columns:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD COLUMN promoted BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        connection.execute(text(
+            f"UPDATE {poll_name} AS poll SET promoted = EXISTS ("
+            f"SELECT 1 FROM {generation_name} AS generation "
+            "WHERE generation.generation_id = poll.generation_id "
+            "AND generation.outcome IN ('advanced', 'rematerialized') "
+            f"AND {promotion_predicate})"
+        ))
+    connection.execute(text(
+        f"ALTER TABLE {poll_name} ALTER COLUMN retrieved_at DROP NOT NULL"
+    ))
+    connection.execute(text(
+        f"ALTER TABLE {poll_name} ALTER COLUMN generation_id DROP NOT NULL"
+    ))
+    if "confirmed_at" not in latest_columns:
+        connection.execute(text(
+            f"ALTER TABLE {latest_name} ADD COLUMN confirmed_at TIMESTAMP WITH TIME ZONE"
+        ))
+        connection.execute(text(
+            f"UPDATE {latest_name} AS latest SET confirmed_at = COALESCE (("
+            f"SELECT MAX(poll.retrieved_at) FROM {poll_name} AS poll "
+            f"JOIN {generation_name} AS generation "
+            "ON generation.generation_id = poll.generation_id "
+            "WHERE poll.generation_id = latest.generation_id "
+            "AND generation.outcome IN ('advanced', 'rematerialized') "
+            f"AND {promotion_predicate}"
+            "), latest.observed_at)"
+        ))
+        connection.execute(text(
+            f"ALTER TABLE {latest_name} ALTER COLUMN confirmed_at SET NOT NULL"
+        ))
+    constraint_names = {
+        constraint["name"]
+        for constraint in inspect(connection).get_check_constraints(
+            "projection_provider_polls"
+        )
+    }
+    if "ck_projection_provider_poll_outcome" not in constraint_names:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_outcome "
+            "CHECK (outcome IN ('changed', 'partial', 'rematerialized', 'unchanged', 'failed'))"
+        ))
+    if "ck_projection_provider_poll_payload" not in constraint_names:
+        connection.execute(text(
+            f"ALTER TABLE {poll_name} ADD CONSTRAINT ck_projection_provider_poll_payload CHECK ("
+            "(outcome = 'failed' AND promoted = FALSE AND snapshot_id IS NULL "
+            "AND generation_id IS NULL AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
+            "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
+            "AND retrieved_at IS NOT NULL AND failure_reason IS NULL))"
+        ))
+
+
+def _rebuild_projection_transition_tables_sqlite(
+    connection: Connection,
+    tables: tuple[Table, ...],
+) -> None:
+    """Rebuild the v40 FK-connected projection cluster on SQLite."""
+
+    suffix = "__041"
+    names = {table.name: f"{table.name}{suffix}" for table in tables}
+    for table in tables:
+        ddl = str(CreateTable(table).compile(dialect=connection.dialect))
+        for original, temporary in sorted(
+            names.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            ddl = ddl.replace(original, temporary)
+        connection.exec_driver_sql(ddl)
+
+    inspector = inspect(connection)
+    for table in tables:
+        source_columns = {
+            column["name"]
+            for column in inspector.get_columns(table.name)
+        }
+        destinations = [column.name for column in table.columns]
+        expressions = []
+        for column in destinations:
+            if column in source_columns:
+                expressions.append(column)
+            elif column == "confirmed_at":
+                promotion_predicate = _v40_projection_poll_promoted_predicate(
+                    poll_ref="poll",
+                    generation_ref="generation",
+                    poll_table="projection_provider_polls",
+                    generation_table="projection_materialization_generations",
+                )
+                expressions.append(
+                    "COALESCE((SELECT MAX(poll.retrieved_at) "
+                    "FROM projection_provider_polls AS poll "
+                    "JOIN projection_materialization_generations AS generation "
+                    "ON generation.generation_id = poll.generation_id "
+                    f"WHERE poll.generation_id = {table.name}.generation_id "
+                    "AND generation.outcome IN ('advanced', 'rematerialized') "
+                    f"AND {promotion_predicate}), "
+                    "observed_at) AS confirmed_at"
+                )
+            elif column == "promoted":
+                promotion_predicate = _v40_projection_poll_promoted_predicate(
+                    poll_ref=table.name,
+                    generation_ref="generation",
+                    poll_table="projection_provider_polls",
+                    generation_table="projection_materialization_generations",
+                )
+                expressions.append(
+                    "CASE WHEN EXISTS (SELECT 1 "
+                    "FROM projection_materialization_generations AS generation "
+                    f"WHERE generation.generation_id = {table.name}.generation_id "
+                    "AND generation.outcome IN ('advanced', 'rematerialized') "
+                    f"AND {promotion_predicate}) "
+                    "THEN 1 ELSE 0 END AS promoted"
+                )
+            elif column == "failure_reason":
+                expressions.append("NULL AS failure_reason")
+            else:
+                raise RuntimeError(
+                    f"migration 041 cannot backfill projection column {column}"
+                )
+        connection.exec_driver_sql(
+            f"INSERT INTO {names[table.name]} ({', '.join(destinations)}) "
+            f"SELECT {', '.join(expressions)} FROM {table.name}"
+        )
+
+    for table in reversed(tables):
+        connection.exec_driver_sql(f"DROP TABLE {table.name}")
+    for table in tables:
+        connection.exec_driver_sql(
+            f"ALTER TABLE {names[table.name]} RENAME TO {table.name}"
+        )
+    for table in tables:
+        for index in table.indexes:
+            connection.exec_driver_sql(
+                str(CreateIndex(index).compile(dialect=connection.dialect))
+            )
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+    if violations:
+        raise RuntimeError("migration 041 left invalid projection foreign keys")
 def _bind_manifests_to_event_catalog_publications(
     connection: Connection,
 ) -> None:
@@ -1463,6 +1712,12 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         39,
         "039_bind_publication_versions_to_manifest_authority",
         _bind_publication_versions_to_manifest_authority,
+    ),
+    Migration(40, "040_projection_archive", _create_projection_archive_tables),
+    Migration(
+        41,
+        "041_projection_archive_transitions",
+        _upgrade_projection_archive_transitions,
     ),
 )
 

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from app.dfs_catalog import DFS_PROVIDER_NAME_SET
+from app.dfs_catalog import DFS_DABBLE, DFS_PROVIDER_NAME_SET
 from app.domain.freshness import cache_window_policy, time_window_seconds
 from app.domain.market_content import NumericDomainError
 
@@ -152,6 +152,18 @@ class FeatureSettings(BaseModel):
 
     dfs_board_enabled: bool = False
     injury_report_enabled: bool = False
+    projection_archive_read_enabled: bool = False
+    projection_archive_read_provider: str = DFS_DABBLE
+
+    @field_validator("projection_archive_read_provider", mode="before")
+    @classmethod
+    def validate_projection_archive_read_provider(cls, value: Any) -> str:
+        provider = str(value).strip().casefold()
+        if provider not in DFS_PROVIDER_NAME_SET:
+            raise ValueError(
+                "PROJECTION_ARCHIVE_READ_PROVIDER must name a supported DFS provider"
+            )
+        return provider
 
 
 class ProviderSettings(BaseModel):
@@ -174,6 +186,8 @@ class ProviderSettings(BaseModel):
     # The post-filter comparison-board ceiling.  A larger board is refused with
     # the observed count and the supported narrowing filters, never truncated.
     dfs_comparison_max_markets: int = Field(default=10000, ge=1)
+    # The independent pre-persistence ceiling for one archived provider snapshot.
+    projection_archive_max_markets: int = Field(default=10000, ge=1)
     # A scalar applies to every enabled DFS provider.  A mapping may override
     # one or more providers when their publication cadence differs.  Both are
     # exact decimal seconds inside the shared time-window domain, so the window
@@ -664,6 +678,12 @@ def _build_settings(
         FeatureSettings,
         dfs_board_enabled=reader.boolean("DFS_BOARD_ENABLED", False),
         injury_report_enabled=reader.boolean("INJURY_REPORT_ENABLED", False),
+        projection_archive_read_enabled=reader.boolean(
+            "PROJECTION_ARCHIVE_READ_ENABLED", False
+        ),
+        projection_archive_read_provider=reader.text(
+            "PROJECTION_ARCHIVE_READ_PROVIDER", DFS_DABBLE
+        ),
     )
     providers = _validated_model(
         ProviderSettings,
@@ -689,6 +709,9 @@ def _build_settings(
         ),
         dfs_comparison_max_markets=reader.integer(
             "DFS_COMPARISON_MAX_MARKETS", 10000
+        ),
+        projection_archive_max_markets=reader.integer(
+            "PROJECTION_ARCHIVE_MAX_MARKETS", 10000
         ),
         dfs_cache_fresh_seconds=(
             {"*": dfs_cache_fresh, **fresh_overrides}
@@ -808,6 +831,7 @@ def _build_settings(
     _validate_environment_requirements(
         settings,
         cors_origins_configured=cors_origins is not None,
+        dfs_providers_configured=configured_dfs_providers is not None,
     )
     return settings
 
@@ -831,14 +855,16 @@ def _validate_environment_requirements(
     settings: RuntimeSettings,
     *,
     cors_origins_configured: bool | None = None,
+    dfs_providers_configured: bool | None = None,
 ) -> None:
     """Enforce settings that are required for a safe production process."""
 
     errors: list[str] = []
     if settings.environment == "production":
-        if not settings.providers.dfs_enabled_providers:
+        if dfs_providers_configured is False:
             errors.append(
-                "DFS_ENABLED_PROVIDERS must explicitly configure at least one provider"
+                "DFS_ENABLED_PROVIDERS must be explicitly configured; an empty "
+                "value disables all providers"
             )
         if cors_origins_configured is None:
             cors_origins_configured = (

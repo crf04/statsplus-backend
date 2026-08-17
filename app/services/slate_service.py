@@ -147,6 +147,9 @@ class SlateService:
                         0,
                     )
             for game in games:
+                projection_state = pool.game_states.get(game["game_id"])
+                if projection_state is not None:
+                    game["projection_state"] = dict(projection_state)
                 for side in ("away_team", "home_team"):
                     team = game[side]
                     team["targetable_player_count"] = targetable_counts.get(

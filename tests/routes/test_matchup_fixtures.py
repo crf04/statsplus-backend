@@ -1,7 +1,7 @@
 """Offline persisted-fixture proof for the complete matchup endpoint."""
 
 from datetime import date, datetime, timedelta, timezone
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 from pathlib import Path
@@ -9,13 +9,16 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 
 from app import create_app
+from app.dependencies import build_dependencies
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
+    FeatureSettings,
     NBASeasonSettings,
+    ProviderSettings,
     RuntimeSettings,
 )
 from app.migrations import run_migrations
@@ -30,7 +33,28 @@ from app.models.canonical_game_ledger import (
     LedgerObservationEvidence,
     LedgerParityArtifact,
 )
+from app.models.projection_archive import (
+    LatestPlayerProjection,
+    ProjectionMaterializationGeneration,
+    ProjectionObservation,
+    ProjectionProviderSnapshot,
+    ProviderPoll,
+)
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
+from app.providers.dfs import (
+    AthleteEvidence,
+    CoverageEvidence,
+    EventEvidence,
+    MarketStatus,
+    MarketVariant,
+    NBAMarketQuery,
+    PlayerProjectionMarket,
+    ProviderSnapshot,
+    SnapshotStatus,
+    StatisticEvidence,
+    TeamEvidence,
+)
 from app.services.event_catalog_service import EventCatalogService
 from app.services.database_first_activation import (
     DatabaseFirstPublicationReader,
@@ -51,6 +75,12 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRepository,
 )
 from app.services.player_pool import StoredPlayerPoolReader
+from app.services.projection_archive import (
+    LatestProjectionPlayerPoolReader,
+    ProjectionArchive,
+    ProjectionRecordingService,
+    ProjectionSelectionPlayerPoolReader,
+)
 from app.services.player_pool_snapshot_repository import (
     PlayerPoolSnapshotRepository,
     PlayerPoolSnapshotScope,
@@ -90,6 +120,55 @@ COMMON_POSTED_MARKETS = (
     "BLK",
     "STKS",
 )
+
+
+def _recorded_projection_snapshot(catalog, *, provider="dabble"):
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(
+        provider_id="pts",
+        canonical_id=statistic.id,
+        label="Points",
+        components=statistic.components,
+    )
+    return ProviderSnapshot(
+        provider=provider,
+        status=SnapshotStatus.COMPLETE,
+        markets=(
+            PlayerProjectionMarket(
+                provider=provider,
+                market_id="fixture-market-points",
+                athlete=AthleteEvidence(
+                    provider_id="fixture-lebron",
+                    canonical_id=2544,
+                    name="LeBron James",
+                    team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+                ),
+                event=EventEvidence(
+                    provider_id="fixture-event",
+                    canonical_id=GAME_ID,
+                ),
+                team=TeamEvidence(canonical_id=LAL, abbreviation="LAL"),
+                statistic=evidence,
+                statistic_match=StatisticMatch(
+                    state=MatchState.CANONICAL,
+                    evidence=evidence,
+                    scoring_period=ScoringPeriod.FULL_GAME,
+                    canonical=statistic,
+                    provider=provider,
+                ),
+                status=MarketStatus.AVAILABLE,
+                variant=MarketVariant.STANDARD,
+                scoring_period=ScoringPeriod.FULL_GAME,
+            ),
+        ),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=1,
+        ),
+        retrieved_at=NOW,
+    )
 
 
 class _NoProvider:
@@ -1291,3 +1370,756 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     }
     assert selection_response.get_json()["h2h"]["rows"]
     assert provider_calls == {"nba": 0, "pbp": 0}
+
+
+@pytest.fixture
+def projection_route_context(tmp_path, monkeypatch):
+    database_url = f"sqlite:///{tmp_path / 'projection-route.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        database={"url": database_url},
+        features=FeatureSettings(projection_archive_read_enabled=True),
+        providers=ProviderSettings(
+            dfs_enabled_providers=("dabble", "prizepicks"),
+        ),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    monkeypatch.setattr("app.utils.db.get_engine", lambda _settings=None: engine)
+    monkeypatch.setattr(
+        "app.providers.nba_stats.NBAStatsAdapter",
+        lambda **_kwargs: _NoProvider(),
+    )
+    monkeypatch.setattr(
+        "app.providers.pbp_stats.PBPStatsAdapter",
+        lambda **_kwargs: _NoProvider(),
+    )
+    monkeypatch.setattr(
+        "app.providers.pbp_game_logs.PBPGameLogAdapter",
+        lambda **_kwargs: _NoProvider(),
+    )
+    assembled = build_dependencies(settings)
+    assert isinstance(
+        assembled.projection_player_pool_reader,
+        LatestProjectionPlayerPoolReader,
+    )
+    assert assembled.slate_service.player_pool is assembled.projection_player_pool_reader
+    assert assembled.matchup_service.player_pool is assembled.projection_player_pool_reader
+
+    catalog = StatisticCatalog.load_default()
+    event_catalog = _event_catalog(engine, settings)
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    player_logs = _player_logs(engine, catalog)
+    player_diets = _player_diets(engine)
+    team_matchups = _team_matchups(engine)
+    archetypes = assembled.matchup_selection_service.archetypes
+    route_now = [NOW]
+
+    def route_client(dependencies):
+        template = dependencies.projection_player_pool_reader
+        assert isinstance(template, LatestProjectionPlayerPoolReader)
+        reader = LatestProjectionPlayerPoolReader(
+            engine,
+            template.scopes,
+            clock=lambda: route_now[0],
+            required_providers=template.required_providers,
+        )
+        route_settings = dependencies.settings
+        route_dependencies = replace(
+            dependencies,
+            projection_player_pool_reader=reader,
+            slate_service=SlateService(
+                event_catalog,
+                settings=route_settings,
+                player_pool=reader,
+                injuries=None,
+                clock=lambda: route_now[0],
+            ),
+            matchup_service=MatchupService(
+                event_catalog=event_catalog,
+                player_pool=reader,
+                player_logs=player_logs,
+                player_diets=player_diets,
+                team_matchups=team_matchups,
+                stats_freshness=stats_freshness,
+                settings=route_settings,
+                injuries=None,
+                clock=lambda: route_now[0],
+            ),
+            matchup_selection_service=MatchupSelectionService(
+                event_catalog=event_catalog,
+                player_pool=ProjectionSelectionPlayerPoolReader(reader),
+                player_logs=player_logs,
+                archetypes=archetypes,
+                statistic_catalog=catalog,
+                settings=route_settings,
+                publication_reader=dependencies.publication_reader,
+            ),
+        )
+        route_app = create_app(
+            {
+                "TESTING": True,
+                "RUNTIME_SETTINGS": route_settings,
+                "DEPENDENCIES": route_dependencies,
+                "SKIP_FIREBASE_INIT": True,
+                "SKIP_TABLE_CREATE": True,
+            }
+        )
+        return route_app.test_client(), reader
+
+    client, pool = route_client(assembled)
+
+    return SimpleNamespace(
+        engine=engine,
+        settings=settings,
+        assembled=assembled,
+        catalog=catalog,
+        route_now=route_now,
+        route_client=route_client,
+        client=client,
+        pool=pool,
+    )
+
+
+def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
+    projection_route_context,
+):
+    context = projection_route_context
+    settings = context.settings
+    assembled = context.assembled
+    route_now = context.route_now
+    route_client = context.route_client
+    client = context.client
+    missing_selection = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert missing_selection.status_code == 503
+    assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
+
+    query = NBAMarketQuery(season=SEASON)
+    preflight_empty_at = NOW - timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        ProviderSnapshot(
+            provider="prizepicks",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+            retrieved_at=preflight_empty_at,
+        ),
+        query=query,
+        accepted_at=preflight_empty_at,
+    )
+    dabble_only_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ("dabble",)}
+            )
+        }
+    )
+    dabble_only_dependencies = build_dependencies(dabble_only_settings)
+    dabble_only_client, dabble_only_reader = route_client(dabble_only_dependencies)
+    assert isinstance(dabble_only_reader, LatestProjectionPlayerPoolReader)
+    disabled_empty_matchup = dabble_only_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    disabled_empty_slate = dabble_only_client.get(
+        "/api/games/slate?date=2026-01-15"
+    )
+    assert disabled_empty_matchup.get_json()["freshness"]["pool"] == {
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {
+            "dabble": {"status": "missing", "retrieved_at": None},
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": preflight_empty_at.isoformat(),
+            },
+        },
+    }
+    assert disabled_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+
+    mixed_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    mixed_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert mixed_empty_matchup.get_json()["freshness"]["pool"]["state"] == "missing"
+    assert "status" not in mixed_empty_matchup.get_json()["freshness"]["pool"]
+    assert mixed_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+
+    empty_registry_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ()}
+            )
+        }
+    )
+    empty_registry_dependencies = build_dependencies(empty_registry_settings)
+    empty_registry_client, empty_registry_reader = route_client(
+        empty_registry_dependencies
+    )
+    assert isinstance(empty_registry_reader, LatestProjectionPlayerPoolReader)
+    all_disabled_empty_matchup = empty_registry_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    all_disabled_empty_slate = empty_registry_client.get(
+        "/api/games/slate?date=2026-01-15"
+    )
+    assert all_disabled_empty_matchup.get_json()["freshness"]["pool"]["state"] == "live"
+    assert all_disabled_empty_matchup.get_json()["players"] == []
+    assert all_disabled_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": preflight_empty_at.isoformat(),
+    }
+    route_now[0] = preflight_empty_at + timedelta(
+        minutes=15,
+        microseconds=1,
+    )
+    expired_empty_matchup = empty_registry_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    expired_empty_slate = empty_registry_client.get(
+        "/api/games/slate?date=2026-01-15"
+    )
+    assert expired_empty_matchup.get_json()["freshness"]["pool"] == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {},
+    }
+    assert expired_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+
+
+def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
+    projection_route_context,
+):
+    context = projection_route_context
+    engine = context.engine
+    assembled = context.assembled
+    catalog = context.catalog
+    route_now = context.route_now
+    client = context.client
+    query = NBAMarketQuery(season=SEASON)
+    route_now[0] = NOW
+    recorded_snapshot = _recorded_projection_snapshot(catalog)
+    prizepicks_snapshot = _recorded_projection_snapshot(catalog, provider="prizepicks")
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        assembled.projection_recorder.record_complete_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=NOW,
+        )
+
+    unchanged_at = NOW + timedelta(minutes=1)
+    unchanged_snapshots = tuple(
+        replace(snapshot, retrieved_at=unchanged_at)
+        for snapshot in (recorded_snapshot, prizepicks_snapshot)
+    )
+    for snapshot in unchanged_snapshots:
+        assembled.projection_recorder.record_complete_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=unchanged_at,
+        )
+    assembled.projection_recorder.record_complete_snapshot(
+        unchanged_snapshots[0],
+        query=query,
+        accepted_at=unchanged_at,
+    )
+
+    rematerialized_at = NOW + timedelta(minutes=2)
+    route_now[0] = rematerialized_at
+    rematerialized_catalog = StatisticCatalog(
+        statistics=tuple(
+            replace(statistic, market_category="PRA")
+            if statistic.id == "points"
+            else statistic
+            for statistic in catalog.statistics
+        )
+    )
+    rematerializing_recorder = ProjectionRecordingService(
+        ProjectionArchive(engine, rematerialized_catalog),
+        tuple(assembled.projection_recorder.scopes.values()),
+        default_scope=assembled.projection_recorder.default_scope,
+    )
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        rematerializing_recorder.record_complete_snapshot(
+            replace(snapshot, retrieved_at=rematerialized_at),
+            query=query,
+            accepted_at=rematerialized_at,
+        )
+
+    with engine.connect() as connection:
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 6
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionProviderSnapshot)
+        ).scalar_one() == 2
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 4
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one() == 4
+
+    slate = client.get("/api/games/slate?date=2026-01-15")
+    matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert slate.status_code == 200
+    assert matchup.status_code == 200
+    assert slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": rematerialized_at.isoformat(),
+    }
+    assert matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": rematerialized_at.isoformat(),
+        "retrieved_at": rematerialized_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": rematerialized_at.isoformat(),
+            },
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": rematerialized_at.isoformat(),
+            },
+        },
+    }
+    assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [
+        2544
+    ]
+
+    with engine.connect() as connection:
+        before_rejection = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionObservation)
+            ).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        assembled.projection_recorder.record_complete_snapshot(
+            _recorded_projection_snapshot(catalog, provider="underdog"),
+            query=query,
+            accepted_at=rematerialized_at,
+        )
+    with engine.connect() as connection:
+        after_rejection = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionObservation)
+            ).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    assert after_rejection == before_rejection
+
+    partial_at = rematerialized_at + timedelta(minutes=1)
+    partial = replace(
+        recorded_snapshot,
+        status=SnapshotStatus.PARTIAL,
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=2,
+            warning_codes=("page_fetch_failed",),
+        ),
+        retrieved_at=partial_at,
+    )
+    assembled.projection_recorder.record_snapshot(
+        partial,
+        query=query,
+        accepted_at=partial_at,
+    )
+    route_now[0] = partial_at
+    assert client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()[
+        "freshness"
+    ]["pool"]["status"] == "fresh"
+
+    failed_at = partial_at + timedelta(minutes=16)
+    failure_started_at = failed_at - timedelta(minutes=1)
+    assembled.projection_recorder.record_failed_poll(
+        provider="dabble",
+        query=query,
+        poll_started_at=failure_started_at,
+        completed_at=failed_at,
+        failure_reason="access_denied",
+    )
+    route_now[0] = failed_at
+    failed_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert failed_matchup.status_code == 200
+    failed_freshness = failed_matchup.get_json()["freshness"]["pool"]
+    assert "status" not in failed_freshness
+    assert failed_freshness["providers"] == {
+        "dabble": {
+            "status": "stale-served",
+            "retrieved_at": partial_at.isoformat(),
+        },
+        "prizepicks": {"status": "missing", "retrieved_at": None},
+    }
+    assert [
+        player["canonical_id"] for player in failed_matchup.get_json()["players"]
+    ] == [2544]
+
+    late_accepted_at = failed_at + timedelta(seconds=1)
+    late_retrieved_at = partial_at + timedelta(minutes=10)
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(
+            recorded_snapshot,
+            markets=(
+                replace(recorded_snapshot.markets[0], market_id="late-market"),
+            ),
+            retrieved_at=late_retrieved_at,
+        ),
+        query=query,
+        accepted_at=late_accepted_at,
+    )
+    route_now[0] = late_accepted_at
+    late_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert "status" not in late_matchup.get_json()["freshness"]["pool"]
+    assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
+
+    assembled.projection_recorder.record_complete_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+            retrieved_at=late_retrieved_at,
+        ),
+        query=query,
+        accepted_at=late_accepted_at + timedelta(seconds=1),
+    )
+    route_now[0] = late_accepted_at + timedelta(seconds=1)
+    late_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    late_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert [
+        player["canonical_id"]
+        for player in late_empty_matchup.get_json()["players"]
+    ] == [2544]
+    assert late_empty_matchup.get_json()["freshness"]["pool"]["providers"][
+        "dabble"
+    ]["status"] == "stale-served"
+    assert late_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": partial_at.isoformat(),
+    }
+
+    recovered_at = failed_at + timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=recovered_at),
+        query=query,
+        accepted_at=recovered_at,
+    )
+    route_now[0] = recovered_at
+    recovered_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert [
+        player["canonical_id"] for player in recovered_matchup.get_json()["players"]
+    ] == [2544]
+    assert recovered_matchup.get_json()["freshness"]["pool"]["providers"][
+        "dabble"
+    ] == {
+        "status": "fresh",
+        "retrieved_at": recovered_at.isoformat(),
+    }
+
+    empty_at = failed_at + timedelta(minutes=2)
+    for provider in ("dabble", "prizepicks"):
+        assembled.projection_recorder.record_complete_snapshot(
+            ProviderSnapshot(
+                provider=provider,
+                status=SnapshotStatus.COMPLETE,
+                markets=(),
+                coverage=CoverageEvidence(
+                    fetched_count=0,
+                    eligible_count=0,
+                    normalized_count=0,
+                    expected_total=0,
+                ),
+                retrieved_at=empty_at,
+            ),
+            query=query,
+            accepted_at=empty_at,
+        )
+    route_now[0] = empty_at
+    empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert empty_slate.status_code == 200
+    assert empty_matchup.status_code == 200
+    empty_game = empty_slate.get_json()["games"][0]
+    assert empty_game["projection_state"] == {
+        "state": "live",
+        "observed_at": empty_at.isoformat(),
+    }
+    assert empty_game["away_team"]["targetable_player_count"] == 0
+    assert empty_game["home_team"]["targetable_player_count"] == 0
+    assert empty_matchup.get_json()["players"] == []
+    assert empty_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": empty_at.isoformat(),
+        "retrieved_at": empty_at.isoformat(),
+        "providers": {
+            provider: {
+                "status": "fresh",
+                "retrieved_at": empty_at.isoformat(),
+            }
+            for provider in ("dabble", "prizepicks")
+        },
+    }
+    empty_selection = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert empty_selection.status_code == 404
+    assert empty_selection.get_json()["error"]["code"] == "resource_not_found"
+
+
+def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
+    projection_route_context,
+):
+    context = projection_route_context
+    engine = context.engine
+    settings = context.settings
+    assembled = context.assembled
+    catalog = context.catalog
+    route_now = context.route_now
+    route_client = context.route_client
+    query = NBAMarketQuery(season=SEASON)
+    recorded_snapshot = _recorded_projection_snapshot(catalog)
+    prizepicks_snapshot = _recorded_projection_snapshot(
+        catalog,
+        provider="prizepicks",
+    )
+    disabled_at = NOW
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        assembled.projection_recorder.record_complete_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=disabled_at,
+        )
+    all_disabled_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ()}
+            )
+        }
+    )
+    all_disabled_dependencies = build_dependencies(all_disabled_settings)
+    all_disabled_pool = all_disabled_dependencies.projection_player_pool_reader
+    all_disabled_recorder = all_disabled_dependencies.projection_recorder
+    assert isinstance(all_disabled_pool, LatestProjectionPlayerPoolReader)
+    assert isinstance(all_disabled_recorder, ProjectionRecordingService)
+    assert all_disabled_recorder.scopes == {}
+    assert {scope.provider for scope in all_disabled_pool.scopes} == {
+        "dabble",
+        "prizepicks",
+        "underdog",
+    }
+    assert all_disabled_pool.required_providers == frozenset()
+    with engine.connect() as connection:
+        before_disabled_rejections = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                        LatestPlayerProjection.confirmed_at,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    rejected_at = disabled_at + timedelta(minutes=14)
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        for _attempt in range(2):
+            with pytest.raises(
+                ValueError,
+                match="outside the configured recording scope",
+            ):
+                all_disabled_recorder.record_complete_snapshot(
+                    replace(snapshot, retrieved_at=rejected_at),
+                    query=query,
+                    accepted_at=rejected_at,
+                )
+            with pytest.raises(
+                ValueError,
+                match="outside the configured recording scope",
+            ):
+                all_disabled_recorder.record_failed_poll(
+                    provider=snapshot.provider,
+                    query=query,
+                    completed_at=rejected_at,
+                    failure_reason="access_denied",
+                )
+    with engine.connect() as connection:
+        after_disabled_rejections = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                        LatestPlayerProjection.confirmed_at,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    assert after_disabled_rejections == before_disabled_rejections
+    all_disabled_client, controlled_all_disabled_pool = route_client(
+        all_disabled_dependencies
+    )
+    assert controlled_all_disabled_pool.required_providers == frozenset()
+    route_now[0] = disabled_at + timedelta(minutes=14)
+    disabled_live_matchup = all_disabled_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    assert disabled_live_matchup.status_code == 200
+    assert [
+        player["canonical_id"]
+        for player in disabled_live_matchup.get_json()["players"]
+    ] == [2544]
+    assert disabled_live_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": disabled_at.isoformat(),
+        "retrieved_at": disabled_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": disabled_at.isoformat(),
+            },
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": disabled_at.isoformat(),
+            },
+        },
+    }
+    all_disabled_at = disabled_at + timedelta(minutes=16)
+    route_now[0] = all_disabled_at
+    all_disabled_matchup = all_disabled_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    assert all_disabled_matchup.status_code == 200
+    assert all_disabled_matchup.get_json()["players"] == []
+    assert all_disabled_matchup.get_json()["freshness"]["pool"] == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {},
+    }
+    all_disabled_selection = all_disabled_client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert all_disabled_selection.status_code == 503
+    assert all_disabled_selection.get_json()["error"]["code"] == "provider_unavailable"
+
+    partially_enabled_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ("dabble",)}
+            )
+        }
+    )
+    partially_enabled_dependencies = build_dependencies(partially_enabled_settings)
+    partially_enabled_pool = partially_enabled_dependencies.projection_player_pool_reader
+    partially_enabled_recorder = partially_enabled_dependencies.projection_recorder
+    assert isinstance(partially_enabled_pool, LatestProjectionPlayerPoolReader)
+    assert isinstance(partially_enabled_recorder, ProjectionRecordingService)
+    assert set(partially_enabled_recorder.scopes) == {"dabble"}
+    assert {scope.provider for scope in partially_enabled_pool.scopes} == {
+        "dabble",
+        "prizepicks",
+        "underdog",
+    }
+    assert partially_enabled_pool.required_providers == frozenset({"dabble"})
+    partially_enabled_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=all_disabled_at),
+        query=query,
+        accepted_at=all_disabled_at,
+    )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        partially_enabled_recorder.record_complete_snapshot(
+            replace(prizepicks_snapshot, retrieved_at=all_disabled_at),
+            query=query,
+            accepted_at=all_disabled_at,
+        )
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        partially_enabled_recorder.record_failed_poll(
+            provider="prizepicks",
+            query=query,
+            completed_at=all_disabled_at,
+            failure_reason="access_denied",
+        )
+    partially_enabled_client, controlled_partially_enabled_pool = route_client(
+        partially_enabled_dependencies
+    )
+    assert controlled_partially_enabled_pool.required_providers == frozenset(
+        {"dabble"}
+    )
+    route_now[0] = all_disabled_at
+    partially_enabled_matchup = partially_enabled_client.get(
+        f"/api/games/matchup?game_id={GAME_ID}"
+    )
+    assert partially_enabled_matchup.status_code == 200
+    assert partially_enabled_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": all_disabled_at.isoformat(),
+        "retrieved_at": all_disabled_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": all_disabled_at.isoformat(),
+            }
+        },
+    }
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(LatestPlayerProjection).where(
+                LatestPlayerProjection.provider == "prizepicks"
+            )
+        ).scalar_one() == 1

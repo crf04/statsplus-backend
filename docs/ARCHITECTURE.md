@@ -328,6 +328,194 @@ counted separately, while a governed event on another Slate is irrelevant and
 not counted. Aggregate pool `retrieved_at` is the oldest usable contributor
 snapshot.
 
+#### Projection archive expansion path
+
+Migration 040 adds the durable projection evidence path without replacing the
+legacy Player Pool reader. Migration 041 upgrades already-migrated databases
+with poll promotion/failure state and per-offering confirmation time; it
+backfills poll promotion only when the referenced v40 generation was a winner,
+including unchanged confirmations that reference that winning generation and
+are not older than its retrieval fence. Older/late unchanged polls and older or
+equal-time losing changed generations remain non-promoted, while Latest
+confirmation advances only to the newest temporally valid winning poll
+retrieval time.
+`ProjectionRecordingService.record_snapshot()` and
+`record_failed_poll()` are the application recording boundaries and delegate
+durable work to `ProjectionArchive`. They accept an already retrieved Complete
+or Partial normalized `ProviderSnapshot`, or one bounded failure, and its
+canonical season query. They write only when the provider and canonical query
+key match the configured `ProjectionArchiveReadScope` set shared with the
+request reader; a mismatch is
+rejected before persistence instead of creating invisible evidence. The
+lower-level archive retains multi-scope capability for internal use. It then
+applies the independent `PROJECTION_ARCHIVE_MAX_MARKETS` pre-persistence bound;
+the Comparison Board's `DFS_COMPARISON_MAX_MARKETS` never governs archival
+evidence. It writes one Provider Poll for every distinct accepted provider
+observation. A changed observation writes
+one checksummed source-evidence document, immutable market observations, and
+one materialization generation atomically. The evidence checksum covers the
+entire canonical document, including `retrieved_at`, for later verification. A
+normalized snapshot's markets are ordered first by governed provider market
+reference and then by complete retained source evidence before serialization,
+checksumming, ordinal assignment, or materialization. Provider array order
+therefore cannot split one observation identity; supplied IDs, ID-less
+references, and distinct variants remain separate deterministic offerings. A
+separate query-scoped content checksum excludes only that retrieval timestamp,
+so a later poll confirming identical markets and coverage records an unchanged
+poll without duplicating the snapshot, observations, or generation when its
+governed mapping inputs are also unchanged. Each generation additionally stores
+a deterministic materialization checksum over resolved canonical identities,
+category authority, targetability, and the other governed fields used by the
+read model. If provider content is unchanged but that checksum changes, the
+poll outcome is `rematerialized`: no Provider Snapshot is duplicated, while a
+new immutable mapped-observation set and generation atomically replace Latest.
+The generation and every mapped observation reference the exact accepted poll
+that supplied their observation time. Their representative Provider Snapshot
+may therefore have an older retrieval time when identical provider content was
+deduplicated; `load_source_snapshot()` verifies that representative content,
+while the poll link is the authority for the rematerialization event.
+A caller
+may supply the actual poll
+start; otherwise `started_at` stays null rather than inventing a poll window,
+and the acceptance time is the completion time. Poll outcomes are `changed`,
+`partial`, `rematerialized`, `unchanged`, or `failed`. Failed polls carry a
+bounded reason but no snapshot or generation; unchanged evidence points at the
+existing immutable snapshot and generation.
+Each poll also records whether it promoted materialized state. Valid late polls
+remain immutable health evidence, but they cannot lower an offering's
+confirmation time or mask an intervening provider failure. The temporal
+promotion fence includes the newest completed failed attempt in the same
+provider/query scope, using its actual poll start when supplied and otherwise
+its honest completion time. The archive reads this chronology only after it
+owns the durable scope fence; it does not discard a failure merely because that
+failure committed after the waiting ingestion captured its acceptance time.
+Evidence retrieved before that attempt remains
+auditable as `older_not_promoted`, even when it arrives later, and cannot retire
+Latest rows or clear the six-hour failure fallback. Evidence genuinely retrieved
+after the failed attempt may promote and restore successful health. Read health
+uses that same attempt chronology rather than failure completion order, so a
+success retrieved after a failed attempt began remains the recovery even when
+the older attempt finishes and is recorded later. Exact failed-attempt replay
+retains its original poll identity and cannot change that ordering.
+Accepted snapshot identity is provider, governed query, provider retrieval
+instant, and exact evidence checksum. Delayed delivery of that same evidence
+returns its persisted result without adding a poll, generation, observation,
+or Latest mutation, regardless of a different start or acceptance time. Replay
+lookup also joins that identity through the persisted snapshot, so poll IDs
+created before the transition migration remain idempotent after upgrade. A
+newer provider retrieval instant with unchanged content is a distinct health
+confirmation. Failed-attempt identity remains separately tied to its actual
+attempt timing. Query status filters are sorted exactly as the
+Provider Snapshot codec sorts them, so caller order cannot split one archive
+scope. `observation_count` always means the number of normalized observations
+present in that accepted snapshot, including unchanged attempts; it is not the
+number of newly inserted rows. Provider polling and scheduling remain outside
+this slice.
+Each newer changed Complete snapshot replaces that provider/query's eligible
+set in `latest_player_projections`, so suspended, unresolved, omitted, and
+content-reidentified markets cannot leave an older latest pointer behind. An
+accepted Partial snapshot replaces only explicitly observed market references;
+omitted offerings keep their prior immutable observation and are carried into
+the new atomic state generation. Failed polls change no Latest pointers. An
+older snapshot remains immutable evidence but cannot move Latest backward. An
+identical snapshot at the same observation time is idempotent. Conflicting
+documents at the same provider/query observation time use one auditable fence:
+the first snapshot accepted while holding the durable scope lock is the sole
+promoted generation for that instant. Every later equal-time conflict is
+retained as `same_time_not_promoted` evidence and cannot replace Latest, even
+when its provider content checksum matches another conflicting evidence
+document. An exact-evidence retry cannot rematerialize under changed governed
+statistic/category inputs; mapping replay and advancement is a separate
+workflow, not an ingestion-idempotency exception.
+`older_not_promoted` records the corresponding older-snapshot decision.
+Every write first enters a provider/season/query scope transaction. PostgreSQL
+serializes both the initial unique scope-lock row insertion race and subsequent
+decisions with the durable row selected `FOR UPDATE`. SQLite ignores that
+clause, so the archive explicitly begins an `IMMEDIATE` write transaction
+before inserting or reading the lock row; this makes
+separate engine instances still serialize writers; SQLite therefore has
+database-wide rather than per-scope writer concurrency. The in-process lock is
+an additional same-engine optimization, not the durable guarantee. The
+change decision, evidence inserts, full Latest replacement, and poll commit
+therefore serialize as one transaction, and Latest can contain rows from only
+one generation for the scope.
+Thresholds, selections, modifiers, prices, provider labels, and source
+identity round-trip through the existing strict Provider Snapshot codec; raw
+upstream payloads are never stored. Governed identities and targetability are
+relational fields beside that immutable evidence. Valid unresolved and
+non-targetable markets stay in the archive but do not enter the live read
+model. Provider market IDs use the established deterministic market-reference
+authority, including its content-derived fallback when an ID is absent.
+Conflicting repeated provider IDs are already rejected by the normalized
+`ProviderSnapshot` contract, while equivalent repeats are collapsed there. If
+ID-less markets nevertheless produce the same content-derived reference, every
+occurrence stays in immutable observations and the first targetable occurrence
+by source ordinal is the sole Latest pointer for that reference.
+
+`LatestProjectionPlayerPoolReader` is the database-only read interface. Its
+constructor requires one or more provider scopes sharing one canonical query,
+and every read filters by those scopes. Within them it unions current Latest Player
+Projections by canonical player, category, and provider without holding a DFS
+Board or calling a provider registry. Each offering has a separate confirmation
+time. Complete and unchanged Complete polls confirm the whole scope; Partial
+polls confirm only included references. Confirmation is live through the
+inclusive 15-minute window. After a failed poll it may be stale-served only
+through the inclusive six-hour fallback. A disabled provider receives no new
+confirmations and expires without deleting Latest or immutable history.
+Both the 15-minute live maximum and six-hour failure-fallback maximum enter
+through `app.domain.freshness`, including direct reader-constructor overrides.
+Populated Latest rows and successful Complete-empty evidence share one
+`within_max_age` classification, so both inclusive endpoints are identical and
+out-of-domain windows are rejected during construction.
+Without an injected test clock the reader uses `app.domain.utc.utc_now`; stored
+confirmation timestamps never substitute for the present and therefore cannot
+freeze freshness.
+`DFS_ENABLED_PROVIDERS` is the sole enablement authority. Dependency assembly
+always retains read scopes for every supported archive provider (`dabble`,
+`prizepicks`, and `underdog`), independently of the enabled set, so rebuilding
+the graph cannot hide a just-disabled provider. Removing the final provider
+leaves those historical read scopes intact for expiry and audit, but the
+application recording service owns an empty authorization set: every snapshot
+and failure submission is rejected before persistence. With a partial enabled
+set it authorizes only those provider/query scopes. The deprecated
+`PROJECTION_ARCHIVE_READ_PROVIDER` supplies a compatibility/default recorder
+identity only and never adds write authority. No disabled provider is required
+or receives the failure fallback beyond the 15-minute live window. A targetable
+row requires the canonical athlete's name as well as its governed IDs; an ID is
+never displayed as a fabricated name. A game with current evidence reports
+`state: live` and its oldest included `observed_at`; a game without current
+evidence reports `state: missing` and `observed_at: null`. Latest rows and their
+promotion-aware poll health are read in one database snapshot. PostgreSQL uses
+`REPEATABLE READ`; SQLite uses one explicit read transaction. A writer
+committing between those queries therefore cannot pair old Latest state with
+new poll health. Every required provider is seeded into the public freshness
+document. If it has no eligible row, its entry is `missing` with a null
+retrieval time, except that a promoted Complete-empty poll is fresh successful
+evidence with its actual retrieval time. A pool backed only by current
+Complete-empty evidence is therefore live/fresh with zero players; its
+game-specific state is also live with the successful evidence time when every
+required provider is currently Complete-empty, so Slate and Matchup describe
+the same empty board. A non-required provider's empty evidence remains explicit
+at provider level but cannot lift missing required coverage to aggregate live.
+With no required providers, eligible empty evidence may remain live only
+through the same inclusive 15-minute disabled-provider window. Mixed or
+incomplete provider coverage remains missing.
+Mixed
+provider states omit aggregate `status`; `partial` remains
+reserved for a multi-game archive read containing both live and missing game
+states.
+`PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
+is enabled, dependency assembly gives the same archive reader to Slate and
+Matchup. Matchup Selection uses a thin adapter over that reader which translates
+a single game's explicit missing state to its established stored-pool
+unavailable contract; it does not select or call a legacy source. One request
+never combines archive and legacy facts. The gate is refused when the
+configured database is the read-only demo
+fixture, which cannot contain the archive schema. The legacy collection/reader
+behavior above remains selected while the gate is off. Scheduled collection,
+mapping replay, closing sets, and final cutover remain later slices of the
+projection-archive parent contract.
+
 ### Matchup injury snapshots
 
 `MatchupInjuryService` owns injury collection and Player Pool overrides. The
@@ -2429,9 +2617,10 @@ unauthenticated request is 401 and is recorded as no board request at all.
 *and* `DFS_ENABLED_PROVIDERS` names at least one provider. Both are off by
 default in every environment, so development and tests opt in explicitly.
 Enabling the flag without a registry fails startup with `ConfigurationError`
-rather than exposing a route that can never call a provider; production
-additionally requires a non-empty registry regardless of the flag. An
-unpublished board answers an authenticated request with 404
+rather than exposing a route that can never call a provider. Production always
+requires `DFS_ENABLED_PROVIDERS` to be present; an explicit empty value is the
+supported all-disabled state, while omission is invalid. An unpublished board
+answers an authenticated request with 404
 `dfs_board_disabled` and calls no provider.
 
 **Outcomes.** A read is 200 when at least one provider produced a *readable*
