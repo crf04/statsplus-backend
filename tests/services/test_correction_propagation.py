@@ -446,8 +446,6 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     correction_observation = _boundary_observation_values(
         corrected_game, cutoff=cutoff, manifest_id=manifest_id
     )
-    correction_observation["accepted_at"] = cutoff + timedelta(hours=2)
-    correction_observation["retrieved_at"] = cutoff + timedelta(hours=2)
     first_result = ledger.replace_games_atomic(
         (corrected_game,),
         accepted_observations={

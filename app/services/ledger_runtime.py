@@ -373,11 +373,6 @@ class LedgerRuntime:
                             if isinstance(raw_evidence, str) and raw_evidence
                             else raw_evidence if isinstance(raw_evidence, dict) else {}
                         )
-                        pending_ids = set(_json_list(row.get("trigger_game_ids")))
-                        if not pending_ids and row.get("trigger_game_id"):
-                            pending_ids = {str(row["trigger_game_id"])}
-                        if not pending_ids.issubset(evidence):
-                            raise ControlPlaneError("pending_ledger_evidence_mismatch")
                         if any(
                             game_id in games_by_id
                             and str(checksum) != str(games_by_id[game_id].checksum)

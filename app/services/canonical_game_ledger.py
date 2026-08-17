@@ -1917,7 +1917,6 @@ class CanonicalGameLedgerRepository:
         tables = self._tables()
         results: list[LedgerWriteResult] = []
         with self.engine.begin() as connection:
-            stale_game_ids: set[str] = set()
             if accepted_observations is not None:
                 expected_observations = {game.source_observation_id for game in candidates}
                 if set(accepted_observations) != expected_observations:
@@ -1953,26 +1952,6 @@ class CanonicalGameLedgerRepository:
                         candidate_by_observation[observation_id],
                     )
                 }
-                # Decide ordering before inserting observation envelopes. A
-                # late correction must not become durable accepted evidence.
-                for candidate in candidates:
-                    existing = connection.execute(select(tables["game"]).where(
-                        tables["game"].c.game_id == candidate.game_id,
-                    ).with_for_update()).mappings().one_or_none()
-                    if existing is None or self._is_idempotent_replay(existing, candidate):
-                        continue
-                    incoming_at = assume_utc(
-                        accepted_observations[candidate.source_observation_id]["accepted_at"]
-                    )
-                    existing_at = connection.scalar(select(CollectionObservation.accepted_at).where(
-                        CollectionObservation.observation_id == existing["source_observation_id"],
-                    ))
-                    if existing_at is not None and incoming_at <= assume_utc(existing_at):
-                        stale_game_ids.add(candidate.game_id)
-                pending_observations = {
-                    observation_id: row for observation_id, row in pending_observations.items()
-                    if candidate_by_observation[observation_id].game_id not in stale_game_ids
-                }
                 if pending_observations:
                     connection.execute(
                         CollectionObservation.__table__.insert(),
@@ -1994,8 +1973,6 @@ class CanonicalGameLedgerRepository:
                         existing_at = connection.scalar(select(CollectionObservation.accepted_at).where(
                             CollectionObservation.observation_id == existing["source_observation_id"],
                         ))
-                        if candidate.game_id in stale_game_ids:
-                            continue
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
 
