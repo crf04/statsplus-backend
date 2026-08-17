@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
 
@@ -37,9 +37,6 @@ from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
 
 
-LIVE_PROJECTION_MAX_AGE = timedelta(minutes=15)
-
-
 @dataclass(frozen=True, slots=True)
 class ProjectionArchiveResult:
     """Observable result of accepting one normalized provider snapshot."""
@@ -53,6 +50,10 @@ class ProjectionArchiveResult:
 def _digest(prefix: str, *values: object) -> str:
     payload = "\x1f".join(str(value) for value in values).encode("utf-8")
     return f"{prefix}_{sha256(payload).hexdigest()}"
+
+
+def _snapshot_checksum(query_key: str, document: str) -> str:
+    return sha256(f"{query_key}\x1f{document}".encode("utf-8")).hexdigest()
 
 
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
@@ -112,7 +113,7 @@ class ProjectionArchive:
         source = _source_snapshot(snapshot)
         query_key = _query_key(query)
         document = serialize_provider_snapshot(source, query)
-        checksum = sha256(f"{query_key}\x1f{document}".encode("utf-8")).hexdigest()
+        checksum = _snapshot_checksum(query_key, document)
         snapshot_id = f"psn_{checksum}"
         generation_id = _digest("gen", snapshot_id)
         poll_id = _digest("poll", snapshot_id, accepted.isoformat())
@@ -146,6 +147,13 @@ class ProjectionArchive:
                     observation_count=len(snapshot.markets),
                 )
 
+            advances_latest = self._advances_latest(
+                connection,
+                snapshot=snapshot,
+                season=query.season,
+                query_key=query_key,
+            )
+
             connection.execute(
                 insert(snapshot_table).values(
                     snapshot_id=snapshot_id,
@@ -175,14 +183,15 @@ class ProjectionArchive:
                     created_at=accepted,
                 )
             )
-            self._advance_latest(
-                connection,
-                observation_rows,
-                provider=snapshot.provider,
-                season=query.season,
-                query_key=query_key,
-                generation_id=generation_id,
-            )
+            if advances_latest:
+                self._advance_latest(
+                    connection,
+                    observation_rows,
+                    provider=snapshot.provider,
+                    season=query.season,
+                    query_key=query_key,
+                    generation_id=generation_id,
+                )
             self._record_poll(
                 connection,
                 poll_id=poll_id,
@@ -222,12 +231,46 @@ class ProjectionArchive:
         if row is None:
             return None
         document = str(row["evidence_document"])
-        checksum = sha256(
-            f"{row['query_key']}\x1f{document}".encode("utf-8")
-        ).hexdigest()
+        checksum = _snapshot_checksum(str(row["query_key"]), document)
         if checksum != row["checksum"]:
             raise ValueError("archived projection snapshot checksum is invalid")
         return deserialize_provider_snapshot(document)
+
+    @staticmethod
+    def _advances_latest(
+        connection: Any,
+        *,
+        snapshot: ProviderSnapshot,
+        season: str,
+        query_key: str,
+    ) -> bool:
+        generation_table = ProjectionMaterializationGeneration.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
+        current_retrieved_at = connection.execute(
+            select(snapshot_table.c.retrieved_at)
+            .select_from(
+                generation_table.join(
+                    snapshot_table,
+                    generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                )
+            )
+            .where(
+                generation_table.c.provider == snapshot.provider,
+                generation_table.c.season == season,
+                generation_table.c.query_key == query_key,
+            )
+            .order_by(snapshot_table.c.retrieved_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if current_retrieved_at is None:
+            return True
+        incoming = assume_utc(snapshot.retrieved_at)
+        current = assume_utc(current_retrieved_at)
+        if incoming == current:
+            raise ValueError(
+                "different projection snapshots cannot share the same observation time"
+            )
+        return incoming > current
 
     @staticmethod
     def _record_poll(
@@ -371,18 +414,10 @@ class ProjectionArchive:
 
 
 class LatestProjectionPlayerPoolReader:
-    """Read only fresh Latest Player Projections; never call a provider."""
+    """Read the current Latest Player Projections; never call a provider."""
 
-    def __init__(
-        self,
-        engine: Engine,
-        *,
-        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        maximum_age: timedelta = LIVE_PROJECTION_MAX_AGE,
-    ) -> None:
+    def __init__(self, engine: Engine) -> None:
         self.engine = engine
-        self.clock = clock
-        self.maximum_age = maximum_age
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
         return self.get_pool(season=season, game_ids=(game_id,))
@@ -390,7 +425,7 @@ class LatestProjectionPlayerPoolReader:
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested_games:
-            return PlayerPool((), {}, self._missing_freshness(), {})
+            return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
         table = LatestPlayerProjection.__table__
         with self.engine.connect() as connection:
             rows = (
@@ -404,23 +439,22 @@ class LatestProjectionPlayerPoolReader:
                 .all()
             )
 
-        now = assume_utc(self.clock())
-        fresh_rows = [
-            row
-            for row in rows
-            if timedelta(0) <= now - assume_utc(row["observed_at"]) <= self.maximum_age
-        ]
         game_states = {
             game_id: self._state_for_rows(
-                [row for row in fresh_rows if row["canonical_game_id"] == game_id]
+                [row for row in rows if row["canonical_game_id"] == game_id]
             )
             for game_id in requested_games
         }
-        if not fresh_rows:
-            return PlayerPool((), {}, self._missing_freshness(), game_states)
+        if not rows:
+            return PlayerPool(
+                (),
+                {},
+                PlayerPool.missing_projection_freshness(),
+                game_states,
+            )
 
         contributions: dict[int, dict[str, Any]] = {}
-        for row in fresh_rows:
+        for row in rows:
             player_id = int(row["canonical_player_id"])
             entry = contributions.setdefault(
                 player_id,
@@ -457,9 +491,9 @@ class LatestProjectionPlayerPoolReader:
         team_counts: dict[int, int] = {}
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
-        observed_at = min(assume_utc(row["observed_at"]) for row in fresh_rows)
+        observed_at = min(assume_utc(row["observed_at"]) for row in rows)
         provider_observed_at: dict[str, datetime] = {}
-        for row in fresh_rows:
+        for row in rows:
             provider = str(row["provider"])
             row_observed_at = assume_utc(row["observed_at"])
             provider_observed_at[provider] = min(
@@ -473,15 +507,18 @@ class LatestProjectionPlayerPoolReader:
             }
             for provider in sorted(provider_observed_at)
         }
+        aggregate_status = (
+            "partial"
+            if any(state["state"] == "missing" for state in game_states.values())
+            else "fresh"
+        )
         freshness = {
-            "status": "fresh",
+            "status": aggregate_status,
             "state": "live",
             "observed_at": observed_at.isoformat(),
             "retrieved_at": observed_at.isoformat(),
             "providers": providers,
         }
-        if any(state["state"] == "missing" for state in game_states.values()):
-            freshness.pop("status")
         return PlayerPool(players, team_counts, freshness, game_states)
 
     @staticmethod
@@ -490,11 +527,6 @@ class LatestProjectionPlayerPoolReader:
             return {"state": "missing", "observed_at": None}
         observed_at = min(assume_utc(row["observed_at"]) for row in rows)
         return {"state": "live", "observed_at": observed_at.isoformat()}
-
-    @staticmethod
-    def _missing_freshness() -> dict[str, Any]:
-        return PlayerPool.missing_projection_freshness()
-
 
 __all__ = [
     "LatestProjectionPlayerPoolReader",

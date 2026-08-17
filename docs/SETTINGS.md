@@ -72,7 +72,10 @@ migrations include the archive schema. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
 `false`; when enabled on an application database, one database-only reader is
-used by Slate, Matchup, and Matchup Selection.
+used by Slate, Matchup, and Matchup Selection. Dependency assembly also exposes
+the archive writer on application databases so an operator-owned collection
+boundary can submit a Complete normalized snapshot without adding a scheduler
+to this slice.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and

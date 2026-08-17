@@ -60,6 +60,7 @@ class ApplicationDependencies:
     ledger_backfill_service: Any | None = None
     ledger_matchup_materialization_service: Any | None = None
     publication_reader: Any | None = None
+    projection_archive: Any | None = None
     projection_player_pool_reader: Any | None = None
 
 
@@ -96,6 +97,7 @@ def build_dependencies(
     from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
+        ProjectionArchive,
     )
     from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -420,6 +422,9 @@ def build_dependencies(
         statistic_catalog,
         snapshot_repository=player_pool_snapshot_repository,
     )
+    projection_archive = (
+        None if demo_database else ProjectionArchive(engine, statistic_catalog)
+    )
     projection_player_pool_reader = (
         LatestProjectionPlayerPoolReader(engine)
         if settings.features.projection_archive_read_enabled
@@ -544,6 +549,7 @@ def build_dependencies(
         ledger_backfill_service=ledger_backfill_service,
         ledger_matchup_materialization_service=ledger_matchup_materialization_service,
         publication_reader=publication_reader,
+        projection_archive=projection_archive,
         projection_player_pool_reader=projection_player_pool_reader,
     )
 

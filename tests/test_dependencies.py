@@ -196,7 +196,10 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
 
     from app.dependencies import build_dependencies
     from app.migrations import run_migrations
-    from app.services.projection_archive import LatestProjectionPlayerPoolReader
+    from app.services.projection_archive import (
+        LatestProjectionPlayerPoolReader,
+        ProjectionArchive,
+    )
 
     engine = create_engine("sqlite:///:memory:")
     run_migrations(engine)
@@ -213,6 +216,8 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     reader = dependencies.projection_player_pool_reader
 
     assert isinstance(reader, LatestProjectionPlayerPoolReader)
+    assert isinstance(dependencies.projection_archive, ProjectionArchive)
+    assert dependencies.projection_archive.engine is dependencies.engine
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
     assert dependencies.matchup_selection_service.player_pool is reader

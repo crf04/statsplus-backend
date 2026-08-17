@@ -340,9 +340,12 @@ one materialization generation atomically. A caller may supply the actual poll
 start; otherwise `started_at` stays null rather than inventing a poll window,
 and the acceptance time is the completion time. Poll outcomes are `changed` or
 `unchanged`; unchanged evidence points at the existing immutable snapshot.
-Each changed Complete snapshot replaces that provider/query's eligible set in
-`latest_player_projections`, so suspended, unresolved, omitted, and
-content-reidentified markets cannot leave an older latest pointer behind.
+Each newer changed Complete snapshot replaces that provider/query's eligible
+set in `latest_player_projections`, so suspended, unresolved, omitted, and
+content-reidentified markets cannot leave an older latest pointer behind. An
+older snapshot remains immutable evidence but cannot move Latest backward. An
+identical snapshot at the same observation time is idempotent; a different
+document at the same provider/query observation time is refused as ambiguous.
 Thresholds, selections, modifiers, prices, provider labels, and source
 identity round-trip through the existing strict Provider Snapshot codec; raw
 upstream payloads are never stored. Governed identities and targetability are
@@ -352,13 +355,14 @@ model. Provider market IDs use the established deterministic market-reference
 authority, including its content-derived fallback when an ID is absent.
 
 `LatestProjectionPlayerPoolReader` is the database-only read interface. It
-unions Latest Player Projections no more than 15 minutes old (an inclusive
-maximum age) by canonical player, category, and provider without holding a DFS
-Board or provider registry. A targetable row requires the canonical athlete's
-name as well as its governed IDs; an ID is never displayed as a fabricated
-name. A game with fresh
-evidence reports `state: live` and its oldest included `observed_at`; a game
-without fresh evidence reports `state: missing` and `observed_at: null`.
+unions current Latest Player Projections by canonical player, category, and
+provider without holding a DFS Board or provider registry. Latest remains
+current until a newer Complete snapshot replaces its provider/query set; this
+slice does not invent a separate wall-clock expiry policy. A targetable row
+requires the canonical athlete's name as well as its governed IDs; an ID is
+never displayed as a fabricated name. A game with current evidence reports
+`state: live` and its oldest included `observed_at`; a game without current
+evidence reports `state: missing` and `observed_at: null`.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
 is enabled, dependency assembly gives the same archive reader to Slate,
 Matchup, and Matchup Selection; one request never combines archive and legacy

@@ -1268,7 +1268,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         query=NBAMarketQuery(season=SEASON),
         accepted_at=NOW,
     )
-    pool = LatestProjectionPlayerPoolReader(engine, clock=lambda: NOW)
+    pool = LatestProjectionPlayerPoolReader(engine)
     event_catalog = _event_catalog(engine, settings)
     stats_freshness = StatsFreshnessRepository(engine)
     stats_freshness.record_success(NOW)

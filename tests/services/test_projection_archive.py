@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine, select
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
@@ -111,9 +112,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         query=NBAMarketQuery(season=SEASON),
         accepted_at=OBSERVED_AT,
     )
-    pool = LatestProjectionPlayerPoolReader(
-        engine, clock=lambda: OBSERVED_AT
-    ).get_pool_for_game(
+    pool = LatestProjectionPlayerPoolReader(engine).get_pool_for_game(
         season=SEASON,
         game_id=GAME_ID,
     )
@@ -180,11 +179,17 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
         accepted_at=later_observation,
     )
     combined = LatestProjectionPlayerPoolReader(
-        engine, clock=lambda: later_observation
+        engine
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert combined.freshness["providers"]["dabble"][
         "retrieved_at"
     ] == OBSERVED_AT.isoformat()
+    much_later = LatestProjectionPlayerPoolReader(engine).get_pool_for_game(
+        season=SEASON,
+        game_id=GAME_ID,
+    )
+    assert much_later.freshness["state"] == "live"
+    assert much_later.players == pool.players
 
 
 def test_non_targetable_normalized_evidence_is_archived_but_not_published(tmp_path):
@@ -226,9 +231,9 @@ def test_non_targetable_normalized_evidence_is_archived_but_not_published(tmp_pa
         query=NBAMarketQuery(season=SEASON),
         accepted_at=OBSERVED_AT,
     )
-    pool = LatestProjectionPlayerPoolReader(
-        engine, clock=lambda: OBSERVED_AT
-    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    pool = LatestProjectionPlayerPoolReader(engine).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    )
 
     assert result.observation_count == 1
     assert archive.load_source_snapshot(result.snapshot_id).markets == (market,)
@@ -302,11 +307,58 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
         accepted_at=replacement_time,
     )
 
+    older_result = archive.ingest_complete_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(
+                replace(
+                    market,
+                    threshold=MarketThreshold("19.5", "count"),
+                ),
+            ),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=1,
+            ),
+            retrieved_at=OBSERVED_AT + timedelta(seconds=30),
+        ),
+        query=query,
+        accepted_at=replacement_time + timedelta(minutes=1),
+    )
+    assert older_result.changed is True
+
+    same_time_conflict = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(
+            replace(
+                market,
+                threshold=MarketThreshold("18.5", "count"),
+            ),
+        ),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=1,
+        ),
+        retrieved_at=replacement_time,
+    )
+    with pytest.raises(ValueError, match="same observation time"):
+        archive.ingest_complete_snapshot(
+            same_time_conflict,
+            query=query,
+            accepted_at=replacement_time + timedelta(minutes=2),
+        )
+
     with engine.connect() as connection:
         assert connection.execute(select(LatestPlayerProjection.__table__)).all() == []
-    pool = LatestProjectionPlayerPoolReader(
-        engine, clock=lambda: replacement_time
-    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    pool = LatestProjectionPlayerPoolReader(engine).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    )
     assert pool.freshness == {
         "status": "unavailable",
         "state": "missing",
@@ -316,7 +368,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
     }
 
 
-def test_multi_game_pool_omits_aggregate_status_when_any_game_is_missing(tmp_path):
+def test_multi_game_pool_reports_partial_status_when_any_game_is_missing(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'partial-games.sqlite3'}")
     run_migrations(engine)
     catalog = StatisticCatalog.load_default()
@@ -361,11 +413,11 @@ def test_multi_game_pool_omits_aggregate_status_when_any_game_is_missing(tmp_pat
         accepted_at=OBSERVED_AT,
     )
 
-    pool = LatestProjectionPlayerPoolReader(engine, clock=lambda: OBSERVED_AT).get_pool(
+    pool = LatestProjectionPlayerPoolReader(engine).get_pool(
         season=SEASON, game_ids=(GAME_ID, "missing-game")
     )
 
-    assert "status" not in pool.freshness
+    assert pool.freshness["status"] == "partial"
     assert pool.freshness["state"] == "live"
     assert pool.game_states[GAME_ID]["state"] == "live"
     assert pool.game_states["missing-game"] == {
