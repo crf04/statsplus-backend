@@ -90,12 +90,14 @@ operator-owned collector can submit an already retrieved Complete or Partial
 normalized snapshot or bounded failure. The recorder and reader share the same
 current-season canonical query scope, and the recorder rejects a different provider or query
 before writing. Provider polling and scheduling belong to later slices.
-The reader retains scopes for registered providers so a provider removed from
-`DFS_ENABLED_PROVIDERS` ages out through the 15-minute eligibility window rather
-than disappearing at process restart; disabled providers are not counted as
-required coverage and immutable evidence is not deleted. Removing the last
-enabled provider follows the same rule: its contribution expires after 15
-minutes and never receives the six-hour enabled-provider fallback.
+The reader retains scopes for every supported archive provider (`dabble`,
+`prizepicks`, and `underdog`) independently of the enabled registry. A provider
+removed from `DFS_ENABLED_PROVIDERS` therefore ages out through the 15-minute
+eligibility window rather than disappearing when dependencies are rebuilt;
+disabled providers are not counted as required coverage and immutable evidence
+is not deleted. Removing the last enabled provider follows the same rule: its
+contribution expires after 15 minutes and never receives the six-hour
+enabled-provider fallback.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and

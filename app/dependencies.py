@@ -451,21 +451,16 @@ def build_dependencies(
         )
         for provider in projection_record_providers
     )
-    projection_read_providers = (
-        (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
-        if settings.providers.dfs_enabled_providers
-        else projection_record_providers
-    )
-    projection_read_scopes = (
-        projection_record_scopes
-        if projection_read_providers == projection_record_providers
-        else tuple(
-            ProjectionArchiveReadScope(
-                provider=provider,
-                query=NBAMarketQuery(season=settings.nba.current_season),
-            )
-            for provider in projection_read_providers
+    projection_record_scopes_by_provider = {
+        scope.provider: scope for scope in projection_record_scopes
+    }
+    projection_read_scopes = tuple(
+        projection_record_scopes_by_provider.get(provider)
+        or ProjectionArchiveReadScope(
+            provider=provider,
+            query=NBAMarketQuery(season=settings.nba.current_season),
         )
+        for provider in (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
     )
     projection_recorder = (
         None

@@ -374,6 +374,62 @@ def test_first_fenced_equal_time_snapshot_is_the_only_promoted_winner(tmp_path):
     ]
 
 
+def test_first_fenced_same_time_materialization_is_the_only_promoted_winner(tmp_path):
+    catalog = StatisticCatalog.load_default()
+    snapshot = _snapshot(
+        "dabble",
+        SnapshotStatus.COMPLETE,
+        (_market(catalog, player_id=7),),
+        OBSERVED_AT,
+    )
+    latest_categories = []
+    for index, first_category in enumerate(("PTS", "PRA")):
+        engine = create_engine(
+            f"sqlite:///{tmp_path / f'same-time-materialization-{index}.sqlite3'}"
+        )
+        run_migrations(engine)
+        first = ProjectionArchive(engine, catalog)
+        second = ProjectionArchive(engine, catalog)
+        first.market_categories["points"] = first_category
+        second.market_categories["points"] = (
+            "PRA" if first_category == "PTS" else "PTS"
+        )
+
+        first_result = first.ingest_snapshot(
+            snapshot,
+            query=QUERY,
+            accepted_at=OBSERVED_AT,
+        )
+        second_result = second.ingest_snapshot(
+            snapshot,
+            query=QUERY,
+            accepted_at=OBSERVED_AT + timedelta(seconds=1),
+        )
+
+        assert first_result.materialization_outcome == "advanced"
+        assert second_result.materialization_outcome == "same_time_not_promoted"
+        with engine.connect() as connection:
+            polls = connection.execute(
+                select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
+                    ProviderPoll.completed_at
+                )
+            ).all()
+            generations = connection.execute(
+                select(ProjectionMaterializationGeneration.outcome).order_by(
+                    ProjectionMaterializationGeneration.created_at
+                )
+            ).scalars().all()
+            latest_categories.append(
+                connection.execute(
+                    select(LatestPlayerProjection.market_category)
+                ).scalar_one()
+            )
+        assert polls == [("changed", True), ("rematerialized", False)]
+        assert generations == ["advanced", "same_time_not_promoted"]
+
+    assert latest_categories == ["PTS", "PRA"]
+
+
 def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()

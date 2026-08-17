@@ -244,6 +244,11 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert dependencies.projection_recorder.scope.query_key == reader.scope.query_key
     assert reader.scope.provider == "dabble"
     assert reader.required_providers == frozenset()
+    assert {scope.provider for scope in reader.scopes} == {
+        "dabble",
+        "prizepicks",
+        "underdog",
+    }
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
     selection_reader = dependencies.matchup_selection_service.player_pool

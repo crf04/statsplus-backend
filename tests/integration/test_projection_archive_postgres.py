@@ -274,6 +274,98 @@ def test_first_fenced_equal_time_postgres_writer_is_the_only_promoted_generation
     loser_engine.dispose()
 
 
+@pytest.mark.parametrize("winner_category", ("PTS", "PRA"))
+def test_first_fenced_same_time_postgres_materialization_is_the_only_winner(
+    projection_pg_engine,
+    winner_category,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    snapshot = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT,
+        player_ids=(7, 8),
+        thresholds=("20.5", "10.5"),
+    )
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    winner_engine = create_engine(database_url)
+    loser_engine = create_engine(database_url)
+    winner_locked = Event()
+    loser_attempting = Event()
+    scope = ProjectionArchiveReadScope(provider="dabble", query=query)
+    with projection_pg_engine.begin() as connection:
+        connection.execute(
+            insert(ProjectionArchiveScopeLock).values(
+                provider="dabble",
+                season=SEASON,
+                query_key=scope.query_key,
+            )
+        )
+
+    @event.listens_for(winner_engine, "after_cursor_execute")
+    def hold_winner_lock(_conn, _cursor, statement, _parameters, _context, _many):
+        if "projection_archive_scope_locks" in statement and "FOR UPDATE" in statement:
+            winner_locked.set()
+            assert loser_attempting.wait(timeout=10)
+
+    @event.listens_for(loser_engine, "before_cursor_execute")
+    def observe_loser_attempt(_conn, _cursor, statement, _parameters, _context, _many):
+        if "projection_archive_scope_locks" in statement and "FOR UPDATE" in statement:
+            loser_attempting.set()
+
+    winner_archive = ProjectionArchive(winner_engine, catalog)
+    loser_archive = ProjectionArchive(loser_engine, catalog)
+    winner_archive.market_categories["points"] = winner_category
+    loser_archive.market_categories["points"] = (
+        "PRA" if winner_category == "PTS" else "PTS"
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner = executor.submit(
+            winner_archive.ingest_snapshot,
+            snapshot,
+            query=query,
+            accepted_at=OBSERVED_AT,
+        )
+        assert winner_locked.wait(timeout=10)
+        loser = executor.submit(
+            loser_archive.ingest_snapshot,
+            snapshot,
+            query=query,
+            accepted_at=OBSERVED_AT + timedelta(seconds=1),
+        )
+        results = (winner.result(timeout=10), loser.result(timeout=10))
+
+    with projection_pg_engine.connect() as connection:
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.market_category,
+            )
+        ).all()
+        polls = connection.execute(
+            select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
+                ProviderPoll.completed_at
+            )
+        ).all()
+        generation_outcomes = connection.execute(
+            select(ProjectionMaterializationGeneration.outcome)
+        ).scalars().all()
+    assert len(latest) == 2
+    assert len({row.generation_id for row in latest}) == 1
+    assert {row.market_category for row in latest} == {winner_category}
+    assert tuple(result.materialization_outcome for result in results) == (
+        "advanced",
+        "same_time_not_promoted",
+    )
+    assert polls == [("changed", True), ("rematerialized", False)]
+    assert sorted(generation_outcomes) == ["advanced", "same_time_not_promoted"]
+    event.remove(winner_engine, "after_cursor_execute", hold_winner_lock)
+    event.remove(loser_engine, "before_cursor_execute", observe_loser_attempt)
+    winner_engine.dispose()
+    loser_engine.dispose()
+
+
 def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_engine):
     catalog = StatisticCatalog.load_default()
     query = NBAMarketQuery(season=SEASON)

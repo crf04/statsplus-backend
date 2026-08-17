@@ -397,7 +397,10 @@ identical snapshot at the same observation time is idempotent. Conflicting
 documents at the same provider/query observation time use one auditable fence:
 the first snapshot accepted while holding the durable scope lock is the sole
 promoted generation for that instant. Every later equal-time conflict is
-retained as `same_time_not_promoted` evidence and cannot replace Latest.
+retained as `same_time_not_promoted` evidence and cannot replace Latest, even
+when its content is identical but governed statistic/category materialization
+differs. Mapping replay and advancement is a separate workflow, not an
+equal-time ingestion exception.
 `older_not_promoted` records the corresponding older-snapshot decision.
 Every write first enters a provider/season/query scope transaction. PostgreSQL
 serializes both the initial unique scope-lock row insertion race and subsequent
@@ -433,10 +436,13 @@ polls confirm only included references. Confirmation is live through the
 inclusive 15-minute window. After a failed poll it may be stale-served only
 through the inclusive six-hour fallback. A disabled provider receives no new
 confirmations and expires without deleting Latest or immutable history.
-`DFS_ENABLED_PROVIDERS` is the sole enablement authority: removing the final
-provider leaves compatibility read/record scopes intact for expiry and audit,
-but no provider is required and none receives the failure fallback beyond the
-15-minute live window. A targetable row
+`DFS_ENABLED_PROVIDERS` is the sole enablement authority. Dependency assembly
+always retains read scopes for every supported archive provider (`dabble`,
+`prizepicks`, and `underdog`), independently of the enabled set, so rebuilding
+the graph cannot hide a just-disabled provider. Removing the final provider
+leaves those historical read scopes and the compatibility record scope intact
+for expiry and audit, but no provider is required and none receives the failure
+fallback beyond the 15-minute live window. A targetable row
 requires the canonical athlete's name as well as its governed IDs; an ID is
 never displayed as a fabricated name. A game with current evidence reports
 `state: live` and its oldest included `observed_at`; a game without current

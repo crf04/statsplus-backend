@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 
 from app import create_app
+from app.dependencies import build_dependencies
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
@@ -1576,47 +1577,53 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             query=query,
             accepted_at=disabled_at,
         )
-    expired_at = disabled_at + timedelta(minutes=16)
-    assembled.projection_recorder.record_complete_snapshot(
-        replace(recorded_snapshot, retrieved_at=expired_at),
-        query=query,
-        accepted_at=expired_at,
+    all_disabled_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ()}
+            )
+        }
     )
-    disabled_pool = LatestProjectionPlayerPoolReader(
-        engine,
-        pool.scopes,
-        clock=lambda: expired_at,
-        required_providers=("dabble",),
-    )
-    route_dependencies = app.extensions["dependencies"]
-    route_dependencies.slate_service.player_pool = disabled_pool
-    route_dependencies.matchup_service.player_pool = disabled_pool
-    disabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    assert disabled_matchup.status_code == 200
-    assert disabled_matchup.get_json()["freshness"]["pool"] == {
-        "status": "fresh",
-        "state": "live",
-        "observed_at": expired_at.isoformat(),
-        "retrieved_at": expired_at.isoformat(),
-        "providers": {
-            "dabble": {
-                "status": "fresh",
-                "retrieved_at": expired_at.isoformat(),
-            }
-        },
+    all_disabled_dependencies = build_dependencies(all_disabled_settings)
+    all_disabled_pool = all_disabled_dependencies.projection_player_pool_reader
+    assert isinstance(all_disabled_pool, LatestProjectionPlayerPoolReader)
+    assert {scope.provider for scope in all_disabled_pool.scopes} == {
+        "dabble",
+        "prizepicks",
+        "underdog",
     }
-    all_disabled_at = expired_at + timedelta(minutes=16)
-    all_disabled_pool = LatestProjectionPlayerPoolReader(
-        engine,
-        pool.scopes,
-        clock=lambda: all_disabled_at,
-        required_providers=(),
-    )
+    assert all_disabled_pool.required_providers == frozenset()
+    route_dependencies = app.extensions["dependencies"]
     route_dependencies.slate_service.player_pool = all_disabled_pool
     route_dependencies.matchup_service.player_pool = all_disabled_pool
     route_dependencies.matchup_selection_service.player_pool = (
         ProjectionSelectionPlayerPoolReader(all_disabled_pool)
     )
+    all_disabled_pool.clock = lambda: disabled_at + timedelta(minutes=14)
+    disabled_live_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert disabled_live_matchup.status_code == 200
+    assert [
+        player["canonical_id"]
+        for player in disabled_live_matchup.get_json()["players"]
+    ] == [2544]
+    assert disabled_live_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": disabled_at.isoformat(),
+        "retrieved_at": disabled_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": disabled_at.isoformat(),
+            },
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": disabled_at.isoformat(),
+            },
+        },
+    }
+    all_disabled_at = disabled_at + timedelta(minutes=16)
+    all_disabled_pool.clock = lambda: all_disabled_at
     all_disabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert all_disabled_matchup.status_code == 200
     assert all_disabled_matchup.get_json()["players"] == []
@@ -1632,6 +1639,44 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     )
     assert all_disabled_selection.status_code == 503
     assert all_disabled_selection.get_json()["error"]["code"] == "provider_unavailable"
+
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=all_disabled_at),
+        query=query,
+        accepted_at=all_disabled_at,
+    )
+    partially_enabled_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ("dabble",)}
+            )
+        }
+    )
+    partially_enabled_dependencies = build_dependencies(partially_enabled_settings)
+    partially_enabled_pool = partially_enabled_dependencies.projection_player_pool_reader
+    assert isinstance(partially_enabled_pool, LatestProjectionPlayerPoolReader)
+    assert {scope.provider for scope in partially_enabled_pool.scopes} == {
+        "dabble",
+        "prizepicks",
+        "underdog",
+    }
+    assert partially_enabled_pool.required_providers == frozenset({"dabble"})
+    partially_enabled_pool.clock = lambda: all_disabled_at
+    route_dependencies.matchup_service.player_pool = partially_enabled_pool
+    partially_enabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert partially_enabled_matchup.status_code == 200
+    assert partially_enabled_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": all_disabled_at.isoformat(),
+        "retrieved_at": all_disabled_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": all_disabled_at.isoformat(),
+            }
+        },
+    }
     with engine.connect() as connection:
         durable_counts = {
             "snapshots": connection.execute(

@@ -357,15 +357,6 @@ class ProjectionArchive:
             provider_content_unchanged = (
                 current is not None and current["content_checksum"] == content_checksum
             )
-            if (
-                provider_content_unchanged
-                and materialization_outcome == "same_time_not_promoted"
-            ):
-                # A governed mapping correction can rematerialize the exact
-                # confirmed provider observation without inventing a newer
-                # provider time. Same-time conflicting provider content still
-                # remains non-promoting below.
-                materialization_outcome = "advanced"
             existing = connection.execute(
                 select(snapshot_table.c.snapshot_id).where(
                     snapshot_table.c.checksum == checksum

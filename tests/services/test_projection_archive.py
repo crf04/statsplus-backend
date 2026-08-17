@@ -262,7 +262,7 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
 
     remapped_archive = ProjectionArchive(engine, catalog)
     remapped_archive.market_categories["points"] = "PRA"
-    remapped_at = OBSERVED_AT + timedelta(minutes=1)
+    remapped_at = repeated_retrieved_at + timedelta(seconds=1)
     remapped = remapped_archive.ingest_complete_snapshot(
         replace(snapshot, retrieved_at=remapped_at),
         query=scope.query,
