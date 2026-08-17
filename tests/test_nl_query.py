@@ -145,15 +145,30 @@ class TestBaseQueryParser(unittest.TestCase):
 
     def test_exact_player_fallback_counts_as_covered_deterministic_text(self):
         # Keep this player out of the initialized spaCy ruler so the parser's
-        # exact database-name fallback owns extraction, matching the live
-        # Donovan Mitchell regression.
+        # exact database-name fallback owns extraction.
+        self.parser.players.append("Brandin Podziemski")
+
+        components = self.parser.parse("Brandin Podziemski this year")
+
+        self.assertEqual(components.player_name, "Brandin Podziemski")
+        self.assertEqual(components.time_period, "season")
+        self.assertEqual(components.confidence_breakdown.coverage_score, 1.0)
+        self.assertFalse(components.confidence_breakdown.should_use_llm)
+
+    def test_exact_full_name_is_not_ambiguous_when_last_name_is_shared(self):
+        # Production contains multiple Mitchells. A full canonical name is
+        # unambiguous even though a surname-only query would not be.
         self.parser.players.append("Donovan Mitchell")
+        self.parser.confidence_calculator.ambiguity_detector.players = [
+            *self.parser.players,
+            "Davion Mitchell",
+            "Ajay Mitchell",
+        ]
 
         components = self.parser.parse("Donovan Mitchell this year")
 
         self.assertEqual(components.player_name, "Donovan Mitchell")
-        self.assertEqual(components.time_period, "season")
-        self.assertEqual(components.confidence_breakdown.coverage_score, 1.0)
+        self.assertEqual(components.confidence_breakdown.details['ambiguities'], [])
         self.assertFalse(components.confidence_breakdown.should_use_llm)
     
     def test_query_preprocessing(self):
