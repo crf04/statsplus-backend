@@ -474,6 +474,10 @@ def test_migration_012_stores_window_ready_facts_and_surface_observations(tmp_pa
         "retrieved_at",
         "game_ids",
         "ledger_checksum",
+        "publication_id",
+        "publication_cutoff",
+        "publication_freshness",
+        "publication_version",
     }
 
 

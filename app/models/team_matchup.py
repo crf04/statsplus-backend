@@ -47,6 +47,12 @@ class TeamMatchupFactRow(Base):
     #: provider-collected legacy facts; ledger-owned facts always carry both.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
+    #: Immutable NBA publication lineage; legacy and ledger-owned facts keep
+    #: these columns NULL.
+    publication_id = Column(String(128), nullable=True)
+    publication_cutoff = Column(String(64), nullable=True)
+    publication_freshness = Column(String(32), nullable=True)
+    publication_version = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_facts_window"),
@@ -87,6 +93,10 @@ class TeamMatchupSurfaceObservationRow(Base):
     #: provider-collected legacy observations.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
+    publication_id = Column(String(128), nullable=True)
+    publication_cutoff = Column(String(64), nullable=True)
+    publication_freshness = Column(String(32), nullable=True)
+    publication_version = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_observations_window"),

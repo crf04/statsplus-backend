@@ -19,11 +19,19 @@ from app.services.team_matchup_repository import (
 )
 from app.services.database_first_activation import (
     PublicationPayloadError,
+    PublicationRead,
     decode_team_window,
 )
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+NBA_PUBLICATION_BASES = frozenset({"play_types", "shot_types", "shot_zones"})
+SHOT_TYPE_DISPLAY_TO_STORED = {
+    "Catch and Shoot": "catch_and_shoot",
+    "Pullups": "pullups",
+    "Less Than 10 ft": "less_than_10_ft",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,18 +197,42 @@ class TeamMatchupQueryService:
                 }
             )
         reads = {
-            base: publication_reads[stream_key]
+            base: publication_reads.get(
+                stream_key,
+                PublicationRead(
+                    stream_key=stream_key,
+                    publication_id=None,
+                    season=season,
+                    cutoff=None,
+                    version=None,
+                    status="missing",
+                    freshness="missing",
+                    age_seconds=None,
+                    payload=None,
+                ),
+            )
             for base, stream_key in stream_by_base.items()
         }
         active = {
             base: read
             for base, read in reads.items()
-            if not read.legacy_fallback_allowed
+            # NBA-owned shot/play surfaces are never allowed to borrow a
+            # legacy PBP value, even if a generic reader labels an inactive
+            # stream as legacy-fallback eligible.  Only ledger-owned
+            # traditional/assist surfaces retain that compatibility path.
+            if base in NBA_PUBLICATION_BASES or not read.legacy_fallback_allowed
         }
         if not active:
             return legacy
         base_windows: dict[str, TeamMatchupWindow | None] = {}
         for base, read in active.items():
+            cutoff_reason = self._publication_cutoff_reason(read, cutoff)
+            if cutoff_reason is not None:
+                read = replace(
+                    read,
+                    status="unavailable",
+                    unavailable_reason=cutoff_reason,
+                )
             if not read.available:
                 base_windows[base] = None
                 continue
@@ -222,6 +254,10 @@ class TeamMatchupQueryService:
                 base=base,
                 rows=rows,
                 retrieved_at=read.retrieved_at or self._clock(),
+                publication_id=read.publication_id,
+                publication_cutoff=read.cutoff,
+                publication_freshness=read.freshness,
+                publication_version=read.version,
             )
         scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
             season=season, as_of=cutoff, window_games=window_games
@@ -261,6 +297,10 @@ class TeamMatchupQueryService:
                         read.unavailable_reason or f"publication_{read.status}"
                     ),
                     retrieved_at=read.retrieved_at or self._clock(),
+                    publication_id=read.publication_id,
+                    publication_cutoff=read.cutoff,
+                    publication_freshness=read.freshness,
+                    publication_version=read.version,
                 ))
                 continue
             league.extend(window.league_metrics)
@@ -284,6 +324,26 @@ class TeamMatchupQueryService:
         )
 
     @staticmethod
+    def _publication_cutoff_reason(read, cutoff: date) -> str | None:
+        """Reject a publication whose facts are newer than the requested window."""
+
+        value = getattr(read, "cutoff", None)
+        if value is None:
+            return None
+        try:
+            if isinstance(value, datetime):
+                publication_date = value.date()
+            else:
+                publication_date = datetime.fromisoformat(str(value)).date()
+        except ValueError:
+            return "publication_cutoff_invalid"
+        return (
+            "publication_cutoff_after_as_of"
+            if publication_date > cutoff
+            else None
+        )
+
+    @staticmethod
     def _publication_base_window(
         season: str,
         *,
@@ -292,6 +352,10 @@ class TeamMatchupQueryService:
         base: str,
         rows,
         retrieved_at: datetime,
+        publication_id: str | None = None,
+        publication_cutoff: str | None = None,
+        publication_freshness: str | None = None,
+        publication_version: int | None = None,
     ) -> TeamMatchupWindow:
         stat_names = {
             "traditional": {
@@ -316,42 +380,43 @@ class TeamMatchupQueryService:
             # one of those streams is active; project exactly the keys the
             # immutable payload supplied.
             keys = tuple(rows[0].league_average)
-            stat_names = {
-                key: key.rsplit("_", 1)[-1] if "_" in key else key
+            identities = tuple(
+                (
+                    *TeamMatchupQueryService._publication_metric_identity(base, key),
+                    key,
+                )
                 for key in keys
-            }
+            )
+        else:
+            identities = tuple(
+                (display_key, display_key, metric_key)
+                for display_key, metric_key in stat_names.items()
+            )
         league_by_key = rows[0].league_average
         sigma_by_key = rows[0].population_sigma
         league_metrics = []
-        for display_key, metric_key in stat_names.items():
-            if metric_key not in league_by_key:
-                # For canonical grouped metric keys, ``display_key`` itself
-                # is the map key.  The fallback keeps the decoder compatible
-                # with both ledger and normalized provider payloads.
-                metric_key = display_key
+        for slice_key, stat_key, metric_key in identities:
             if metric_key not in league_by_key:
                 continue
             league_metrics.append(LeagueMatchupMetric(
                 base=base,
-                slice_key=display_key,
-                stat_key=display_key,
+                slice_key=slice_key,
+                stat_key=stat_key,
                 average_allowed_per_48=league_by_key[metric_key],
                 sigma=sigma_by_key[metric_key],
                 team_count=len(rows),
             ))
         team_metrics = defaultdict(list)
         for row in rows:
-            for display_key, metric_key in stat_names.items():
-                if metric_key not in row.per48:
-                    metric_key = display_key
+            for slice_key, stat_key, metric_key in identities:
                 if metric_key not in row.per48:
                     continue
                 average = row.league_average[metric_key]
                 value = row.per48[metric_key]
                 team_metrics[row.team_id].append(TeamMatchupMetric(
                     base=base,
-                    slice_key=display_key,
-                    stat_key=display_key,
+                    slice_key=slice_key,
+                    stat_key=stat_key,
                     allowed_per_48=value,
                     percent_vs_league_average=(
                         (value / average - 1) * 100 if average else None
@@ -370,6 +435,13 @@ class TeamMatchupQueryService:
             status="available" if league_metrics and team_metrics else "unavailable",
             unavailable_reason=None if league_metrics and team_metrics else "publication_surface_incomplete",
             retrieved_at=retrieved_at,
+            game_ids=tuple(sorted({
+                game_id for row in rows for game_id in row.game_ids
+            })),
+            publication_id=publication_id,
+            publication_cutoff=publication_cutoff,
+            publication_freshness=publication_freshness,
+            publication_version=publication_version,
         )
         return TeamMatchupWindow(
             scope=scope,
@@ -379,6 +451,18 @@ class TeamMatchupQueryService:
             team_metrics={team_id: tuple(metrics) for team_id, metrics in team_metrics.items()},
             observations=(observation,),
         )
+
+
+    @staticmethod
+    def _publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
+        """Split one NBA publication key into registered taxonomy and stat."""
+
+        if "_" not in metric_key:
+            return metric_key, metric_key
+        slice_key, stat_key = metric_key.rsplit("_", 1)
+        if base == "shot_types":
+            slice_key = SHOT_TYPE_DISPLAY_TO_STORED.get(slice_key, slice_key)
+        return slice_key, stat_key
 
     def _build_window(
         self,
@@ -391,6 +475,31 @@ class TeamMatchupQueryService:
         grouped = defaultdict(list)
         invalid_surfaces: dict[str, str] = {}
         fact_rows = tuple(facts)
+        observation_rows = tuple(observations)
+        observations_by_surface = {
+            observation.surface: observation for observation in observation_rows
+        }
+        unavailable_nba_surfaces = {
+            surface
+            for surface in NBA_PUBLICATION_BASES
+            if (
+                (observation := observations_by_surface.get(surface)) is not None
+                and observation.status != "available"
+                and (
+                    observation.publication_id is not None
+                    or observation.publication_freshness
+                    in {"missing", "unavailable", "legacy_fallback"}
+                )
+            )
+        }
+        fact_rows = tuple(
+            fact for fact in fact_rows if fact.base not in unavailable_nba_surfaces
+        )
+        for surface in unavailable_nba_surfaces:
+            observation = observations_by_surface[surface]
+            invalid_surfaces[surface] = (
+                observation.unavailable_reason or "surface_unavailable"
+            )
         for fact in fact_rows:
             try:
                 value = self._allowed_per_48(
@@ -440,9 +549,6 @@ class TeamMatchupQueryService:
                         rank=ranks[value],
                     )
                 )
-        observations_by_surface = {
-            observation.surface: observation for observation in observations
-        }
         for surface, reason in invalid_surfaces.items():
             observation = observations_by_surface.get(surface)
             if observation is None:

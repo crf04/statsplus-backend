@@ -262,6 +262,37 @@ def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
             )
 
 
+def _add_team_matchup_publication_lineage(connection: Connection) -> None:
+    """Add immutable NBA publication lineage to matchup read models.
+
+    Publication-backed facts and observations retain the source publication,
+    coverage cutoff, freshness classification, and version that were used at
+    composition time.  Legacy and ledger-owned rows remain nullable.
+    """
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "publication_id": "VARCHAR(128)",
+        "publication_cutoff": "VARCHAR(64)",
+        "publication_freshness": "VARCHAR(32)",
+        "publication_version": "INTEGER",
+    }
+    for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        table = preparer.quote(table_name)
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        for name, type_sql in additions.items():
+            if name in existing:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE {table} ADD COLUMN "
+                    f"{preparer.quote(name)} {type_sql}"
+                )
+            )
+
+
 def _backfill_governed_catalog_freshness(connection: Connection) -> None:
     """Expose accepted governed catalogs through canonical freshness reads."""
 
@@ -1012,6 +1043,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         36,
         "036_publication_player_game_log_projection",
         _create_publication_player_game_log_projection,
+    ),
+    Migration(
+        37,
+        "037_team_matchup_publication_lineage",
+        _add_team_matchup_publication_lineage,
     ),
 )
 

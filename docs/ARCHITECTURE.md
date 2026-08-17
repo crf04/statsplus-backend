@@ -1555,8 +1555,31 @@ surface still publishes. Migration 034
 (`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
 `ledger_checksum` columns to `team_matchup_facts` and
 `team_matchup_surface_observations`; provider-collected legacy rows keep both
-columns NULL, and the existing authenticated Matchups and player-game-log HTTP
-contracts are unchanged and remain provider-free at request time.
+columns NULL. Migration 037 adds nullable publication ID, version, cutoff, and
+freshness lineage to those same rows. The existing authenticated Matchups and
+player-game-log HTTP contracts are unchanged and remain provider-free at
+request time.
+
+### Governed NBA team-window publications (#115)
+
+The same materialization seam may receive a request-scoped
+`DatabaseFirstPublicationReader` generation for the NBA-owned team-window
+streams: exact shot zones, grouped shot types, and Season Synergy play types.
+Each available publication row is projected into the existing
+`team_matchup_facts` read model with its registered taxonomy and the source
+publication ID, version, coverage cutoff, freshness label, and publication
+game IDs. Ledger-owned traditional and assist facts retain their own ledger
+lineage; the two authorities are never blended.
+
+Publication reads are independent per surface. A missing, stale-invalid, or
+unsupported publication records only that surface's unavailable/missing
+observation and never falls back to a PBP fact. Synergy Last-15 remains
+`unavailable/provider_window_unsupported`, and Season values are never copied
+into that window. The database-first Matchups query keeps this fence even for
+legacy-fallback-shaped readers, while preserving the existing compatibility
+fallback for ledger-owned traditional and assist surfaces. Publication
+provenance and mixed freshness/cutoff metadata remain additive and request
+time provider-free.
 
 ### Canonical athlete catalog
 

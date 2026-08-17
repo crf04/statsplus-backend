@@ -22,6 +22,7 @@ from app.utils.db import is_demo_database_url
 
 
 EASTERN = ZoneInfo("America/New_York")
+NBA_PUBLICATION_SURFACES = frozenset({"play_types", "shot_types", "shot_zones"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,34 @@ class TeamMatchupFact:
     #: collected legacy facts leave both empty.
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
+    publication_id: str | None = None
+    publication_cutoff: str | None = None
+    publication_freshness: str | None = None
+    publication_version: int | None = None
+
+    @property
+    def source_publication_id(self) -> str | None:
+        return self.publication_id
+
+    @property
+    def source_cutoff(self) -> str | None:
+        return self.publication_cutoff
+
+    @property
+    def source_publication_cutoff(self) -> str | None:
+        return self.publication_cutoff
+
+    @property
+    def source_freshness(self) -> str | None:
+        return self.publication_freshness
+
+    @property
+    def source_publication_freshness(self) -> str | None:
+        return self.publication_freshness
+
+    @property
+    def source_version(self) -> int | None:
+        return self.publication_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +101,34 @@ class TeamMatchupObservation:
     unavailable_reason: str | None = None
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
+    publication_id: str | None = None
+    publication_cutoff: str | None = None
+    publication_freshness: str | None = None
+    publication_version: int | None = None
+
+    @property
+    def source_publication_id(self) -> str | None:
+        return self.publication_id
+
+    @property
+    def source_cutoff(self) -> str | None:
+        return self.publication_cutoff
+
+    @property
+    def source_publication_cutoff(self) -> str | None:
+        return self.publication_cutoff
+
+    @property
+    def source_freshness(self) -> str | None:
+        return self.publication_freshness
+
+    @property
+    def source_publication_freshness(self) -> str | None:
+        return self.publication_freshness
+
+    @property
+    def source_version(self) -> int | None:
+        return self.publication_version
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +277,18 @@ class TeamMatchupRepository:
                     for observation in observation_rows:
                         if observation.surface not in changed_surfaces:
                             continue
+                        # This repository is shared by legacy writers and the
+                        # governed publication materializer. The write fence
+                        # protects only legacy provider writes; publication
+                        # lineage is already the authorized immutable source.
+                        if (
+                            observation.surface in NBA_PUBLICATION_SURFACES
+                            and (
+                                observation.publication_id is not None
+                                or observation.publication_freshness is not None
+                            )
+                        ):
+                            continue
                         stream_keys = stream_by_surface.get(observation.surface, ())
                         for stream_key in stream_keys:
                             checker(stream_key, connection=connection)
@@ -266,6 +335,10 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(fact.game_ids),
                                 "ledger_checksum": fact.ledger_checksum,
+                                "publication_id": fact.publication_id,
+                                "publication_cutoff": fact.publication_cutoff,
+                                "publication_freshness": fact.publication_freshness,
+                                "publication_version": fact.publication_version,
                             }
                             for fact in changed_fact_rows
                         ],
@@ -287,6 +360,10 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(observation.game_ids),
                                 "ledger_checksum": observation.ledger_checksum,
+                                "publication_id": observation.publication_id,
+                                "publication_cutoff": observation.publication_cutoff,
+                                "publication_freshness": observation.publication_freshness,
+                                "publication_version": observation.publication_version,
                             }
                             for observation in changed_observations
                         ],
@@ -308,6 +385,10 @@ class TeamMatchupRepository:
             assume_utc(row["retrieved_at"]),
             _parse_game_ids(row["game_ids"]),
             row["ledger_checksum"],
+            row["publication_id"],
+            row["publication_cutoff"],
+            row["publication_freshness"],
+            row["publication_version"],
         )
 
     @classmethod
@@ -330,6 +411,10 @@ class TeamMatchupRepository:
             or _parse_game_ids(existing_observation["game_ids"])
             != observation.game_ids
             or existing_observation["ledger_checksum"] != observation.ledger_checksum
+            or existing_observation["publication_id"] != observation.publication_id
+            or existing_observation["publication_cutoff"] != observation.publication_cutoff
+            or existing_observation["publication_freshness"] != observation.publication_freshness
+            or existing_observation["publication_version"] != observation.publication_version
         ):
             return True
         if observation.status != "available":
@@ -350,6 +435,10 @@ class TeamMatchupRepository:
                     observed_at,
                     fact.game_ids,
                     fact.ledger_checksum,
+                    fact.publication_id,
+                    fact.publication_cutoff,
+                    fact.publication_freshness,
+                    fact.publication_version,
                 )
                 for fact in facts
             )
@@ -489,6 +578,10 @@ class TeamMatchupRepository:
                     window_end_date=row["window_end_date"],
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
+                    publication_id=row["publication_id"],
+                    publication_cutoff=row["publication_cutoff"],
+                    publication_freshness=row["publication_freshness"],
+                    publication_version=row["publication_version"],
                 )
                 for row in fact_rows
             ),
@@ -500,6 +593,10 @@ class TeamMatchupRepository:
                     retrieved_at=assume_utc(row["retrieved_at"]),
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
+                    publication_id=row["publication_id"],
+                    publication_cutoff=row["publication_cutoff"],
+                    publication_freshness=row["publication_freshness"],
+                    publication_version=row["publication_version"],
                 )
                 for row in observation_rows
             ),

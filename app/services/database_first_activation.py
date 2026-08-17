@@ -57,6 +57,15 @@ PUBLICATION_FRESHNESS_SECONDS: dict[str, int] = {
     "request_time": 0,
 }
 
+NBA_TEAM_MATCHUP_PUBLICATION_STREAMS = frozenset({
+    "synergy_play_types_opponent_season",
+    "synergy_play_types_opponent_l15",
+    "grouped_shot_types_opponent_season",
+    "grouped_shot_types_opponent_l15",
+    "exact_shot_zones_opponent_season",
+    "exact_shot_zones_opponent_l15",
+})
+
 
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
@@ -600,7 +609,12 @@ class PublicationReadSnapshot:
         """Build coverage metadata without a second pointer query."""
 
         cutoff_states = {
-            read.cutoff if read.cutoff is not None else f"status:{read.status}"
+            (
+                read.cutoff
+                if read.cutoff is not None
+                and read.status in {"active", "rollback", "stale"}
+                else f"status:{read.status}"
+            )
             for read in self.reads.values()
         }
         freshness_states = {
@@ -830,17 +844,49 @@ class DatabaseFirstPublicationReader:
                 reason="provider_window_unsupported",
             )
         if require_active and not bool(stream.enabled):
+            if stream_key in NBA_TEAM_MATCHUP_PUBLICATION_STREAMS:
+                return self._missing(
+                    stream_key,
+                    "unavailable",
+                    reason="publication_inactive",
+                    fence=pointer.fence if pointer else None,
+                )
             return self._legacy_fallback(stream_key, fence=pointer.fence if pointer else None)
         if pointer is None or not pointer.active_publication_id:
             return self._missing(stream_key, "missing")
         if publication is None or publication.status not in {"active", "rollback"}:
-            return self._missing(stream_key, "missing", fence=pointer.fence)
+            return self._missing(
+                stream_key,
+                "missing",
+                reason="publication_not_active" if publication is not None else None,
+                fence=pointer.fence,
+                publication_id=(
+                    publication.publication_id if publication is not None else None
+                ),
+                season=(publication.season if publication is not None else None),
+                cutoff=(
+                    _utc(publication.cutoff).isoformat()
+                    if publication is not None
+                    else None
+                ),
+                version=(int(publication.version) if publication is not None else None),
+                retrieved_at=(
+                    _utc(publication.created_at) if publication is not None else None
+                ),
+                checksum=(publication.checksum if publication is not None else None),
+            )
         if season is not None and publication.season != season:
             return self._missing(
                 stream_key,
                 "missing",
                 reason="publication_season_mismatch",
                 fence=pointer.fence,
+                publication_id=publication.publication_id,
+                season=publication.season,
+                cutoff=_utc(publication.cutoff).isoformat(),
+                version=int(publication.version),
+                retrieved_at=_utc(publication.created_at),
+                checksum=publication.checksum,
             )
         retrieved_at = _utc(publication.created_at)
         age = max(0, int((now - retrieved_at).total_seconds()))
@@ -881,6 +927,13 @@ class DatabaseFirstPublicationReader:
                 "unavailable",
                 reason="publication_payload_invalid",
                 fence=pointer.fence,
+                publication_id=publication.publication_id,
+                season=publication.season,
+                cutoff=_utc(publication.cutoff).isoformat(),
+                version=int(publication.version),
+                retrieved_at=retrieved_at,
+                checksum=publication.checksum,
+                freshness=freshness,
             )
         try:
             decoded = _decode_known_publication_payload(
@@ -895,6 +948,13 @@ class DatabaseFirstPublicationReader:
                 "unavailable",
                 reason="publication_payload_invalid",
                 fence=pointer.fence,
+                publication_id=publication.publication_id,
+                season=publication.season,
+                cutoff=_utc(publication.cutoff).isoformat(),
+                version=int(publication.version),
+                retrieved_at=retrieved_at,
+                checksum=publication.checksum,
+                freshness=freshness,
             )
         return PublicationRead(
             stream_key=stream_key,
@@ -927,17 +987,29 @@ class DatabaseFirstPublicationReader:
         *,
         reason: str | None = None,
         fence: int | None = None,
+        publication_id: str | None = None,
+        season: str | None = None,
+        cutoff: str | None = None,
+        version: int | None = None,
+        retrieved_at: datetime | None = None,
+        checksum: str | None = None,
+        freshness: str | None = None,
     ) -> PublicationRead:
         return PublicationRead(
             stream_key=stream_key,
-            publication_id=None,
-            season=None,
-            cutoff=None,
-            version=None,
+            publication_id=publication_id,
+            season=season,
+            cutoff=cutoff,
+            version=version,
             status=status,
-            freshness="missing" if status == "missing" else "unavailable",
+            freshness=(
+                freshness
+                or ("missing" if status == "missing" else "unavailable")
+            ),
             age_seconds=None,
             payload=None,
+            retrieved_at=retrieved_at,
+            checksum=checksum,
             fence=fence,
             unavailable_reason=reason,
         )

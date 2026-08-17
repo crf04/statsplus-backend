@@ -355,6 +355,7 @@ def build_dependencies(
                 LedgerMatchupMaterializationService(
                     canonical_game_ledger_repository,
                     team_matchup_repository,
+                    publication_reader=publication_reader,
                 )
             )
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)

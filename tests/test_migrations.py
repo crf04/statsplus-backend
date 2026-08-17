@@ -76,6 +76,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -360,6 +361,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (34, "034_team_matchup_ledger_lineage"),
             (35, "035_governed_catalog_freshness"),
             (36, "036_publication_player_game_log_projection"),
+            (37, "037_team_matchup_publication_lineage"),
         ]
 
 
@@ -408,6 +410,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
     assert result.applied == (
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -479,7 +482,10 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
 
     result = run_migrations(engine)
 
-    assert result.applied == ("036_publication_player_game_log_projection",)
+    assert result.applied == (
+        "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
+    )
     with engine.connect() as connection:
         projected = connection.execute(
             text(
@@ -512,7 +518,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 36
+    assert repaired.current_version == 37
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -548,8 +554,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
-    assert upgraded.current_version == 36
+    assert upgraded.current_version == 37
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -618,8 +625,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
-    assert upgraded.current_version == 36
+    assert upgraded.current_version == 37
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -689,6 +697,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -740,8 +749,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
-    assert upgraded.current_version == 36
+    assert upgraded.current_version == 37
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -816,6 +826,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
 
 
@@ -858,7 +869,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 36
+    assert result.current_version == 37
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -1132,6 +1143,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -1189,10 +1201,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
-    assert upgraded.current_version == 36
+    assert upgraded.current_version == 37
     assert repeated.applied == ()
-    assert repeated.current_version == 36
+    assert repeated.current_version == 37
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -1259,6 +1272,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "034_team_matchup_ledger_lineage",
         "035_governed_catalog_freshness",
         "036_publication_player_game_log_projection",
+        "037_team_matchup_publication_lineage",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
