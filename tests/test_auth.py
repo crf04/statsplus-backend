@@ -81,6 +81,39 @@ def test_require_auth_allows_explicit_testing_bypass(monkeypatch):
     assert response.get_json() == {"uid": "dev-user"}
 
 
+def test_repeated_required_auth_still_verifies_every_token(monkeypatch):
+    verified_tokens = []
+    synchronized_users = []
+
+    class RecordingUserService:
+        def create_or_update_user(self, user_data):
+            synchronized_users.append(user_data["uid"])
+            return None
+
+    app = _make_app(auth.require_auth)
+    app.extensions["dependencies"].user_service = RecordingUserService()
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+
+    def verify(token):
+        verified_tokens.append(token)
+        return {"uid": "repeat-user", "email": "repeat@example.com"}
+
+    monkeypatch.setattr(auth, "verify_firebase_token", verify)
+    client = app.test_client()
+
+    first = client.get(
+        "/protected", headers={"Authorization": "Bearer first-token"}
+    )
+    second = client.get(
+        "/protected", headers={"Authorization": "Bearer second-token"}
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert verified_tokens == ["first-token", "second-token"]
+    assert synchronized_users == ["repeat-user", "repeat-user"]
+
+
 def test_require_auth_rejects_legacy_config_bypass_without_environment_flag(monkeypatch):
     app = _make_app(auth.require_auth, AUTH_BYPASS_ENABLED=True)
     monkeypatch.delenv("FLASK_ENV", raising=False)

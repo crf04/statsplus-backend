@@ -6,7 +6,7 @@ including creating, updating, and retrieving user information.
 """
 
 from typing import Optional, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -15,6 +15,8 @@ from app.models import get_session, User
 from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
+
+USER_LOGIN_TOUCH_INTERVAL = timedelta(minutes=15)
 
 
 def _days_since(timestamp: Optional[datetime]) -> int:
@@ -33,6 +35,17 @@ def _days_since(timestamp: Optional[datetime]) -> int:
         now = now.replace(tzinfo=None)
 
     return (now - timestamp).days
+
+
+def _login_touch_due(timestamp: Optional[datetime], now: datetime) -> bool:
+    """Return whether durable activity is old enough to write again."""
+
+    if timestamp is None:
+        return True
+    if timestamp.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    return now - timestamp >= USER_LOGIN_TOUCH_INTERVAL
+
 
 class UserService:
     """
@@ -76,22 +89,37 @@ class UserService:
             existing_user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             
             if existing_user:
-                # Update existing user
-                existing_user.email = firebase_user_data.get('email', existing_user.email)
-                existing_user.display_name = (
+                email = firebase_user_data.get('email', existing_user.email)
+                display_name = (
                     firebase_user_data.get('name') or 
                     firebase_user_data.get('display_name') or 
                     existing_user.display_name
                 )
-                existing_user.photo_url = (
+                photo_url = (
                     firebase_user_data.get('picture') or 
                     firebase_user_data.get('photo_url') or 
                     existing_user.photo_url
                 )
-                existing_user.last_login = datetime.now(timezone.utc)
-                
-                session.commit()
-                logger.info(f"Updated user: {existing_user.email}")
+                profile_changed = (
+                    existing_user.email != email
+                    or existing_user.display_name != display_name
+                    or existing_user.photo_url != photo_url
+                )
+                if profile_changed:
+                    existing_user.email = email
+                    existing_user.display_name = display_name
+                    existing_user.photo_url = photo_url
+
+                now = datetime.now(timezone.utc)
+                login_touched = _login_touch_due(existing_user.last_login, now)
+                if login_touched:
+                    existing_user.last_login = now
+
+                if profile_changed or login_touched:
+                    session.commit()
+                    logger.info("Updated user: %s", existing_user.email)
+                else:
+                    logger.debug("User sync already current: %s", existing_user.email)
                 return existing_user
             else:
                 # Create new user

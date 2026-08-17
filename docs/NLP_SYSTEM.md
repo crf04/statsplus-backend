@@ -60,6 +60,11 @@ The parser depends on spaCy and project-specific rule logic. `requirements.txt` 
 python -m spacy download en_core_web_sm
 ```
 
+The accepted query vocabulary is English. Every general `dateparser` fallback
+therefore declares English explicitly; allowing automatic language discovery
+would compile hundreds of locale patterns on each worker's first otherwise
+deterministic query.
+
 Player aliases live in `app/config/player_aliases.yaml`, and fuzzy matching is used where services need to resolve names against database tables.
 
 ## LLM fallback
