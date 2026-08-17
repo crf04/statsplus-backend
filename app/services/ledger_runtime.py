@@ -26,6 +26,7 @@ from app.services.ledger_materialization import LedgerMaterialization, LedgerMat
 from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_materialization import LedgerMaterializationUnavailable
 from app.services.ledger_derivations import LedgerDerivationUnavailable
+from app.services.ledger_lineage import LedgerLineage
 from app.services.collection_control import ControlPlaneError
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,9 @@ class LedgerRuntime:
                             "trigger_game_ids": row.trigger_game_ids,
                             "affected_team_ids": row.affected_team_ids,
                             "source_observation_ids": row.source_observation_ids,
+                            "ledger_checksum": row.ledger_checksum,
+                            "game_set_checksum": row.game_set_checksum,
+                            "ledger_evidence": row.ledger_evidence,
                             "recomposition_reason": row.recomposition_reason,
                         }
                         for row in rows
@@ -373,6 +377,27 @@ class LedgerRuntime:
                             if isinstance(raw_evidence, str) and raw_evidence
                             else raw_evidence if isinstance(raw_evidence, dict) else {}
                         )
+                        pending_ids = set(_json_list(row.get("trigger_game_ids")))
+                        if not pending_ids and row.get("trigger_game_id"):
+                            pending_ids = {str(row["trigger_game_id"])}
+                        if pending_ids != set(evidence):
+                            raise ControlPlaneError("pending_ledger_evidence_mismatch")
+                        if evidence:
+                            expected_ledger_checksum = (
+                                next(iter(evidence.values()))
+                                if len(evidence) == 1
+                                else LedgerLineage.evidence_checksum(evidence)
+                            )
+                            expected_game_set_checksum = LedgerLineage.for_game_ids(
+                                evidence
+                            )
+                            if (
+                                str(row.get("ledger_checksum") or "")
+                                != expected_ledger_checksum
+                                or str(row.get("game_set_checksum") or "")
+                                != expected_game_set_checksum
+                            ):
+                                raise ControlPlaneError("pending_ledger_evidence_mismatch")
                         if any(
                             game_id in games_by_id
                             and str(checksum) != str(games_by_id[game_id].checksum)
@@ -465,6 +490,20 @@ class LedgerRuntime:
                                 None if success
                                 else _composition_failure_reason(job["stream_key"], materialized)
                             ),
+                            # These columns are a pending-work envelope, not
+                            # a second publication audit log.  Successful
+                            # provenance is retained by PublicationObservation
+                            # for the version that was composed; leaving it on
+                            # a succeeded job makes reconciliation mistake an
+                            # already-composed source for new work.
+                            trigger_game_id=None if success else table.c.trigger_game_id,
+                            trigger_game_ids="[]" if success else table.c.trigger_game_ids,
+                            affected_team_ids="[]" if success else table.c.affected_team_ids,
+                            source_observation_ids="[]" if success else table.c.source_observation_ids,
+                            recomposition_reason=None if success else table.c.recomposition_reason,
+                            ledger_checksum=None if success else table.c.ledger_checksum,
+                            game_set_checksum=None if success else table.c.game_set_checksum,
+                            ledger_evidence="{}" if success else table.c.ledger_evidence,
                         ))
                         if result.rowcount != 1:
                             cas_failed = True

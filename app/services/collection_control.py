@@ -2660,6 +2660,48 @@ class PublicationService(_SessionService):
                     )).all()
                     if row.provider == observation_provider
                 ]
+                canonical_source_ids = {
+                    str(row.game_id): str(row.source_observation_id)
+                    for row in session.execute(select(
+                        CanonicalGameLedgerGame.game_id,
+                        CanonicalGameLedgerGame.source_observation_id,
+                    ).where(
+                        CanonicalGameLedgerGame.game_id.in_(tuple(
+                            str(_safe_json_mapping(row.scope).get("game_id") or "")
+                            for row in matching
+                            if _safe_json_mapping(row.scope).get("game_id")
+                        )),
+                    )).all()
+                }
+                # One game can retain many immutable accepted observations.
+                # Reconciliation compares the pending job with the latest
+                # accepted observation for each game, never with every
+                # superseded source in the audit table.  Otherwise a queued
+                # correction for game A would be perpetually re-enqueued by
+                # A's original observation after the source list was narrowed
+                # to the actual pending correction.
+                latest_matching: dict[str, CollectionObservation] = {}
+                for observation in matching:
+                    scope = _safe_json_mapping(observation.scope)
+                    identity = str(scope.get("game_id") or observation.observation_id)
+                    previous = latest_matching.get(identity)
+                    if previous is None:
+                        latest_matching[identity] = observation
+                        continue
+                    previous_at = _aware(previous.accepted_at or previous.retrieved_at)
+                    observation_at = _aware(observation.accepted_at or observation.retrieved_at)
+                    canonical_source_id = canonical_source_ids.get(identity)
+                    if (
+                        observation_at,
+                        str(observation.observation_id) == canonical_source_id,
+                        str(observation.observation_id),
+                    ) > (
+                        previous_at,
+                        str(previous.observation_id) == canonical_source_id,
+                        str(previous.observation_id),
+                    ):
+                        latest_matching[identity] = observation
+                matching = tuple(latest_matching.values())
                 created = False
                 job = session.scalar(select(CompositionJob).where(
                     CompositionJob.stream_key == stream_key,
@@ -2676,6 +2718,31 @@ class PublicationService(_SessionService):
                     session.add(job)
                     session.flush()
                     created = True
+                # A succeeded job's pending lineage is deliberately cleared
+                # after composition.  Its audit lives on immutable
+                # PublicationObservation rows.  Compare the latest accepted
+                # source IDs with that audit: an exact replay is already
+                # represented and does nothing, while a newer accepted source
+                # must still requeue even when an older publication is active.
+                composed_source_ids = set(session.scalars(select(
+                    PublicationObservation.observation_id,
+                ).join(
+                    PublicationVersion,
+                    PublicationVersion.publication_id == PublicationObservation.publication_id,
+                ).where(
+                    PublicationVersion.stream_key == stream_key,
+                    PublicationVersion.season == season,
+                    PublicationVersion.cutoff == cutoff,
+                )))
+                latest_source_ids = {
+                    str(observation.observation_id) for observation in matching
+                }
+                if (
+                    job.status == "succeeded"
+                    and latest_source_ids
+                    and latest_source_ids <= composed_source_ids
+                ):
+                    continue
                 was_failed = job.status == "failed"
                 represented_sources = set(_safe_json_values(job.source_observation_ids))
                 represented_games = set(_safe_json_values(job.trigger_game_ids))

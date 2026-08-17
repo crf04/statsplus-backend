@@ -40,7 +40,7 @@ from app.services.ledger_parity import (
     SemanticDifference,
     compare_ledger_to_legacy,
 )
-from app.services.ledger_lineage import LedgerLineage
+from app.services.ledger_lineage import LedgerEvidence, LedgerLineage
 
 
 class LedgerMaterializationUnavailable(ValueError):
@@ -433,7 +433,17 @@ class LedgerCorrectionQueue:
             cutoff = datetime.combine(now.date(), datetime.min.time(), timezone.utc)
         else:
             cutoff = manifest["cutoff"]
-        for stream_key in self.STREAMS:
+        # Every writer takes stream rows in this one order.  The runtime uses
+        # the same mapping when it acquires PostgreSQL row locks; keeping the
+        # enqueue traversal derived from the mapping prevents two correction
+        # writers from taking the six stream locks in opposite orders.
+        stream_order = tuple(
+            stream
+            for stream, _ in sorted(
+                self.STREAM_ORDER.items(), key=lambda item: item[1]
+            )
+        )
+        for stream_key in stream_order:
             existing_statement = select(
                 table.c.job_id,
                 table.c.status,
@@ -471,55 +481,33 @@ class LedgerCorrectionQueue:
                     game_ids=previous_game_ids,
                     fallback_checksum=existing["ledger_checksum"],
                 )
-                previous_lineage = LedgerLineage(
-                    {
-                        game_id: {
-                            "checksum": checksum,
-                            "source_observation_id": (
-                                previous_source_ids[index]
-                                if index < len(previous_source_ids)
-                                else ""
-                            ),
-                            "accepted_at": (
-                                _observation_accepted_at(
-                                    connection,
-                                    previous_source_ids,
-                                    game_id,
-                                )
-                                if recomposition_reason == "correction"
-                                else None
-                            ),
-                        }
-                        for index, (game_id, checksum) in enumerate(
-                            sorted(previous_evidence.items())
-                        )
-                    },
+                previous_lineage = _stored_lineage(
+                    connection,
+                    evidence=previous_evidence,
+                    source_observation_ids=previous_source_ids,
                     cutoff=cutoff,
-                    recomposition_reason=str(
+                    reason=str(
                         existing["recomposition_reason"] or "initial_acceptance"
                     ),
                 )
-                lineage = previous_lineage.merge(LedgerLineage.single(
+                current_lineage = LedgerLineage.single(
                     game_id=game.game_id,
                     source_observation_id=str(game.source_observation_id),
                     ledger_checksum=game.checksum,
                     cutoff=cutoff,
                     reason=recomposition_reason,
                     accepted_at=(
-                        (
-                            _observation_accepted_at(
-                                connection,
-                                (str(game.source_observation_id),),
-                                game.game_id,
-                            )
-                            or game.retrieved_at
+                        _observation_accepted_at(
+                            connection,
+                            (str(game.source_observation_id),),
+                            game.game_id,
                         )
-                        if recomposition_reason == "correction"
-                        else None
+                        or game.retrieved_at
                     ),
-                ))
+                )
                 evidence = {
-                    item.game_id: item.ledger_checksum for item in lineage.evidence
+                    item.game_id: item.ledger_checksum
+                    for item in current_lineage.evidence
                 }
                 previous_team_ids = {
                     int(team_id)
@@ -530,6 +518,7 @@ class LedgerCorrectionQueue:
                     *previous_team_ids,
                     *affected_team_ids,
                 })
+                lineage = previous_lineage
                 trigger_game_ids = lineage.game_ids
                 trigger_game_id = (
                     lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
@@ -539,10 +528,24 @@ class LedgerCorrectionQueue:
                     # that already ran.  A later correction must invalidate
                     # only its new game/team target; queued coalescing still
                     # unions all work that has not been composed yet.
+                    lineage = current_lineage
                     trigger_game_ids = (game.game_id,)
                     trigger_game_id = game.game_id
                     merged_team_ids = affected_team_ids
                     evidence = {game.game_id: game.checksum}
+                else:
+                    # A queued/failed job contains only work that has not yet
+                    # composed.  Merge it by game identity, never by the
+                    # incidental order of parallel arrays in legacy rows.
+                    lineage = previous_lineage.merge(current_lineage)
+                    evidence = {
+                        item.game_id: item.ledger_checksum
+                        for item in lineage.evidence
+                    }
+                    trigger_game_ids = lineage.game_ids
+                    trigger_game_id = (
+                        lineage.game_ids[0] if len(lineage.game_ids) == 1 else None
+                    )
                 connection.execute(
                     update(table).where(table.c.job_id == existing["job_id"]).values(
                         status="queued",
@@ -555,7 +558,10 @@ class LedgerCorrectionQueue:
                         ),
                         trigger_game_id=trigger_game_id,
                         affected_team_ids=json.dumps(merged_team_ids, separators=(",", ":")),
-                        source_observation_ids=json.dumps(lineage.source_observation_ids, separators=(",", ":")),
+                        source_observation_ids=json.dumps(
+                            lineage.source_observation_ids,
+                            separators=(",", ":"),
+                        ),
                         recomposition_reason=lineage.recomposition_reason,
                         ledger_checksum=(next(iter(evidence.values())) if len(evidence) == 1
                                          else LedgerLineage.evidence_checksum(dict(sorted(evidence.items())))),
@@ -705,6 +711,81 @@ def _stored_evidence(
     if len(game_ids) == 1 and fallback_checksum:
         return {game_ids[0]: str(fallback_checksum)}
     return {}
+
+
+def _stored_lineage(
+    connection: Connection,
+    *,
+    evidence: Mapping[str, str],
+    source_observation_ids: Iterable[str],
+    cutoff: datetime,
+    reason: str,
+) -> LedgerLineage:
+    """Rebuild keyed lineage without pairing parallel legacy arrays.
+
+    Older composition rows stored game IDs, checksums, and source IDs in
+    separate arrays.  Their ordering is not an identity contract: correcting
+    game A must never make game B inherit A's checksum merely because the
+    arrays happen to have the same length.  Accepted observation scopes are
+    the authoritative source-to-game binding; genuinely unbound legacy IDs
+    remain audit IDs without an invented game association.
+    """
+
+    source_ids = tuple(sorted({str(value) for value in source_observation_ids if str(value)}))
+    rows = connection.execute(select(
+        CollectionObservation.observation_id,
+        CollectionObservation.scope,
+        CollectionObservation.accepted_at,
+        CollectionObservation.retrieved_at,
+    ).where(CollectionObservation.observation_id.in_(source_ids))).mappings().all() if source_ids else ()
+    by_game: dict[str, list[tuple[datetime | None, str]]] = {}
+    for row in rows:
+        try:
+            scope = json.loads(row["scope"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        game_id = str(scope.get("game_id") or "") if isinstance(scope, Mapping) else ""
+        observation_id = str(row["observation_id"] or "")
+        if not game_id or not observation_id:
+            continue
+        accepted_at = row["accepted_at"] or row["retrieved_at"]
+        if accepted_at is not None:
+            accepted_at = accepted_at if accepted_at.tzinfo is not None else accepted_at.replace(tzinfo=timezone.utc)
+            accepted_at = accepted_at.astimezone(timezone.utc)
+        by_game.setdefault(game_id, []).append((accepted_at, observation_id))
+
+    entries: list[LedgerEvidence] = []
+    for game_id, checksum in sorted(evidence.items()):
+        candidates = by_game.get(str(game_id), [])
+        if candidates:
+            source, accepted_at = max(
+                ((observation_id, accepted_at) for accepted_at, observation_id in candidates),
+                key=lambda item: (
+                    item[1] is not None,
+                    item[1] or datetime.min.replace(tzinfo=timezone.utc),
+                    item[0],
+                ),
+            )
+        else:
+            source = ""
+            accepted_at = None
+        entries.append(LedgerEvidence(
+            str(game_id),
+            str(checksum),
+            source,
+            accepted_at,
+        ))
+
+    # Keep every legacy source ID in the lineage's audit set, but do not
+    # invent a game binding when its scope is absent or malformed.  Pairing an
+    # unbound source with a game by array position would let one game's
+    # checksum travel with another game's correction.
+    return LedgerLineage._from_parts(
+        tuple(entries),
+        cutoff=cutoff,
+        reason=reason,
+        source_ids=source_ids,
+    )
 
 
 def _cutoffs_equal(left, right: datetime) -> bool:

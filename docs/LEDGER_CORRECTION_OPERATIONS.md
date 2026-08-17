@@ -17,6 +17,12 @@ checksum, and `recomposition_reason=correction`.
 An identical checksum replay is a no-op: it does not replace facts, add
 observation evidence, create a second job, or advance a publication pointer.
 
+The lineage columns on `composition_jobs` describe only work still waiting to
+be composed.  Once a stream succeeds, those pending fields are cleared; the
+immutable `publication_observations` rows attached to the composed publication
+retain the source lineage for audit and replay.  Scheduled reconciliation can
+therefore distinguish a completed correction from a new pending source.
+
 ## Targeted rebuild
 
 Run the normal worker from the backend root:

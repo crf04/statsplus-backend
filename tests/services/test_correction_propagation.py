@@ -437,7 +437,7 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
         original_game,
         team_facts=corrected_team_facts,
         source_observation_id="obs:replay:corrected",
-        retrieved_at=cutoff + timedelta(hours=1),
+        retrieved_at=cutoff + timedelta(days=20),
     )
     corrected_game = replace(
         corrected_game,
@@ -500,12 +500,14 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     assert len(after_success_durable["publication_lineage"]) == 2700
     assert all(row[2] == "succeeded" for row in after_success_durable["jobs"])
     assert all(
-        corrected_game.source_observation_id in json.loads(row[9])
-        for row in after_success_durable["jobs"]
-    )
-    assert all(
-        row[6] == original_game.game_id
-        and json.loads(row[7]) == [original_game.game_id]
+        row[6] is None
+        and json.loads(row[7]) == []
+        and json.loads(row[8]) == []
+        and json.loads(row[9]) == []
+        and row[10] is None
+        and row[11] is None
+        and json.loads(row[12]) == {}
+        and row[13] is None
         for row in after_success_durable["jobs"]
     )
     baseline_pointers = dict(
@@ -555,7 +557,7 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     assert replay_result.row_count == 0
     assert publications.reconcile_pending(
         season="2025-26", cutoff=cutoff
-    ) == len(streams)
+    ) == 0
     assert runtime.compose_queued("2025-26") == 0
 
     after_replay_public = public_state()
@@ -958,7 +960,7 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
         original,
         team_facts=corrected_team_facts,
         source_observation_id=f"obs:correction:{original.game_id}",
-        retrieved_at=cutoff + timedelta(hours=1),
+        retrieved_at=cutoff + timedelta(days=20),
     )
     corrected = replace(
         corrected, raw_rows=raw_rows_from_facts(corrected)
@@ -1021,7 +1023,13 @@ def test_correction_changes_published_counts_and_rank(tmp_path):
     assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
     assert all(job["status"] == "succeeded" for job in jobs)
     assert all(
-        corrected.source_observation_id in json.loads(job["source_observation_ids"])
+        job["trigger_game_id"] is None
+        and json.loads(job["trigger_game_ids"]) == []
+        and json.loads(job["source_observation_ids"]) == []
+        and job["ledger_checksum"] is None
+        and job["game_set_checksum"] is None
+        and json.loads(job["ledger_evidence"]) == {}
+        and job["recomposition_reason"] is None
         for job in jobs
     )
 
@@ -1340,10 +1348,14 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
         jobs = connection.execute(select(CompositionJob)).mappings().all()
     assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
     assert all(job["status"] == "succeeded" for job in jobs)
-    assert all(job["recomposition_reason"] == "correction" for job in jobs)
     assert all(
-        corrected_boundary_game.source_observation_id
-        in json.loads(job["source_observation_ids"])
+        job["trigger_game_id"] is None
+        and json.loads(job["trigger_game_ids"]) == []
+        and json.loads(job["source_observation_ids"]) == []
+        and job["ledger_checksum"] is None
+        and job["game_set_checksum"] is None
+        and json.loads(job["ledger_evidence"]) == {}
+        and job["recomposition_reason"] is None
         for job in jobs
     )
 
@@ -1642,7 +1654,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         original_game,
         team_facts=corrected_team_facts,
         source_observation_id="obs:outside:corrected",
-        retrieved_at=cutoff + timedelta(hours=2),
+        retrieved_at=cutoff + timedelta(days=20),
     )
     corrected_game = replace(
         corrected_game,
@@ -2346,7 +2358,7 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
         game, cutoff=cutoff, manifest_id=manifest_id
     )
     raw_only_values["observation_id"] = raw_only_source
-    raw_only_values["accepted_at"] = cutoff + timedelta(hours=1)
+    raw_only_values["accepted_at"] = cutoff + timedelta(days=20)
     with engine.begin() as connection:
         connection.execute(CollectionObservation.__table__.insert().values(
             observation_id=raw_only_source,
@@ -2363,8 +2375,8 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
             payload_bytes=raw_only_values["payload_bytes"],
             schema_version=raw_only_values["schema_version"],
             checksum=hashlib.sha256(raw_only_values["payload"].encode()).hexdigest(),
-            retrieved_at=cutoff + timedelta(hours=1),
-            accepted_at=cutoff + timedelta(hours=1),
+            retrieved_at=cutoff + timedelta(days=20),
+            accepted_at=cutoff + timedelta(days=20),
         ))
     publications = PublicationService(engine, clock=lambda: AS_OF)
     publications.register_default_streams()
@@ -2372,6 +2384,28 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
         connection.execute(PublicationStream.__table__.update().where(
             PublicationStream.stream_key == "traditional_opponent_season",
         ).values(enabled=True))
+        # An older publication proves the original accepted source was
+        # composed, but must not hide a newer source that reconciliation still
+        # needs to queue.
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="prior-reconcile-publication",
+            stream_key="traditional_opponent_season",
+            season=game.season,
+            cutoff=cutoff,
+            version=1,
+            status="active",
+            checksum="p" * 64,
+            payload="{}",
+            created_at=cutoff,
+            reason="initial_acceptance",
+            fence=1,
+        ))
+        connection.execute(PublicationObservation.__table__.insert().values(
+            publication_id="prior-reconcile-publication",
+            observation_id=game.source_observation_id,
+            role="completeness_evidence",
+            created_at=cutoff,
+        ))
         connection.execute(CompositionJob.__table__.insert().values(
             job_id="successful-but-unrepresented",
             stream_key="traditional_opponent_season",
@@ -2398,9 +2432,7 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
     assert job["generation"] == 2
     assert json.loads(job["trigger_game_ids"]) == [game.game_id]
     assert raw_only_source in json.loads(job["source_observation_ids"])
-    assert set(json.loads(job["source_observation_ids"])) == {
-        game.source_observation_id, raw_only_source,
-    }
+    assert set(json.loads(job["source_observation_ids"])) == {raw_only_source}
     assert json.loads(job["ledger_evidence"]) == {game.game_id: game.checksum}
     assert job["recomposition_reason"] == "correction"
 

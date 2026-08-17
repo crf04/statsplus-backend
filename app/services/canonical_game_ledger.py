@@ -1926,53 +1926,65 @@ class CanonicalGameLedgerRepository:
                     candidates,
                     accepted_observations,
                 )
-                candidate_by_observation = {
-                    candidate.source_observation_id: candidate
-                    for candidate in candidates
-                }
-                existing_rows = {
-                    row["game_id"]: row
-                    for row in connection.execute(select(
-                        tables["game"].c.game_id,
-                        tables["game"].c.checksum,
-                        tables["game"].c.raw_checksum,
-                    ).where(tables["game"].c.game_id.in_(
-                        [candidate.game_id for candidate in candidates]
-                    ))).mappings()
-                }
-                # An identical replay is an idempotent no-op: persist no new
-                # observation evidence for it.  Inserting the observation before
-                # the checksum no-op would otherwise append evidence on every
-                # replay, and reusing one observation identity would collide.
-                pending_observations = {
-                    observation_id: accepted_observations[observation_id]
-                    for observation_id in expected_observations
-                    if not self._is_idempotent_replay(
-                        existing_rows.get(candidate_by_observation[observation_id].game_id),
-                        candidate_by_observation[observation_id],
-                    )
-                }
-                if pending_observations:
-                    connection.execute(
-                        CollectionObservation.__table__.insert(),
-                        [dict(pending_observations[observation_id]) for observation_id in sorted(pending_observations)],
-                    )
             for candidate in candidates:
-                # Serialize revisions of one game and reject an older
-                # acceptance that raced a newer one.  The accepted timestamp
-                # is the authoritative ordering, independent of arrival or
-                # checksum ordering.
+                # An accepted candidate is ordered while its canonical game
+                # row is locked.  The lock must cover the ordering decision,
+                # observation insert, complete replacement, and correction
+                # queue write; otherwise a late correction can insert an
+                # observation and then be overwritten by an older arrival.
                 if accepted_observations is not None:
                     existing = connection.execute(select(tables["game"]).where(
                         tables["game"].c.game_id == candidate.game_id,
                     ).with_for_update()).mappings().one_or_none()
                     if existing is not None:
+                        if self._is_idempotent_replay(existing, candidate):
+                            results.append(LedgerWriteResult(
+                                candidate.game_id,
+                                candidate.checksum or "",
+                                False,
+                                False,
+                                0,
+                            ))
+                            continue
                         incoming_at = assume_utc(
                             accepted_observations[candidate.source_observation_id]["accepted_at"]
                         )
                         existing_at = connection.scalar(select(CollectionObservation.accepted_at).where(
                             CollectionObservation.observation_id == existing["source_observation_id"],
                         ))
+                        if (
+                            existing_at is not None
+                            and incoming_at <= assume_utc(existing_at)
+                        ):
+                            # A stale or equal non-identical candidate is a
+                            # durable no-op.  In particular, do not persist
+                            # its accepted observation or enqueue a correction.
+                            results.append(LedgerWriteResult(
+                                candidate.game_id,
+                                str(existing["checksum"] or ""),
+                                False,
+                                False,
+                                0,
+                            ))
+                            continue
+                if accepted_observations is not None:
+                    observation = accepted_observations[candidate.source_observation_id]
+                    stored_observation = connection.execute(select(
+                        CollectionObservation.__table__,
+                    ).where(
+                        CollectionObservation.observation_id
+                        == candidate.source_observation_id,
+                    )).mappings().one_or_none()
+                    if stored_observation is None:
+                        connection.execute(
+                            CollectionObservation.__table__.insert().values(
+                                **dict(observation)
+                            )
+                        )
+                    elif stored_observation["checksum"] != observation["checksum"]:
+                        raise LedgerValidationError(
+                            "accepted observation identity conflicts with stored evidence"
+                        )
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
 
