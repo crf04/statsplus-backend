@@ -316,7 +316,10 @@ provider/query scope and remain fresh successful provider evidence. When every
 required provider is current and Complete-empty, the database-first pool is
 `live`/`fresh` with zero players rather than unavailable, and each requested
 Slate game's `projection_state` is `live` with that accepted evidence time and
-zero targetable players. A direct Matchup
+zero targetable players. Empty evidence from a disabled/non-required provider
+is still reported at provider level but cannot make missing required coverage
+aggregate `live`; with every provider disabled it expires after the inclusive
+15-minute live window. A direct Matchup
 Selection request for a player outside that derived empty pool returns the
 existing `404 resource_not_found`; never-polled or failed-without-successful-
 evidence scopes remain missing and keep the documented `503 provider_unavailable`.

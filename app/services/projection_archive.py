@@ -25,6 +25,7 @@ from app.domain.freshness import (
     exact_timedelta,
     within_max_age,
 )
+from app.domain.market_content import market_evidence_key
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
@@ -220,6 +221,23 @@ def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
     )
 
 
+def _canonical_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
+    """Order normalized offerings by identity and retained source evidence."""
+
+    return replace(
+        snapshot,
+        markets=tuple(
+            sorted(
+                snapshot.markets,
+                key=lambda market: (
+                    market_reference(market),
+                    market_evidence_key(replace(market, statistic_match=None)),
+                ),
+            )
+        ),
+    )
+
+
 def _query_key(query: NBAMarketQuery) -> str:
     return _digest(
         "qry",
@@ -291,6 +309,7 @@ class ProjectionArchive:
             raise ValueError("projection archive queries require a canonical season")
         if len(snapshot.markets) > self.max_markets:
             raise ValueError("projection snapshot exceeds the configured market limit")
+        snapshot = _canonical_snapshot(snapshot)
 
         accepted = assume_utc(accepted_at or datetime.now(timezone.utc))
         poll_started = None if poll_started_at is None else assume_utc(poll_started_at)
@@ -1267,16 +1286,40 @@ class LatestProjectionPlayerPoolReader:
             )
             for game_id in requested_games
         }
-        if (
+        empty_board_covered = (
             not rows
             and empty_provider_observed_at
             and self.required_providers <= set(empty_provider_observed_at)
-        ):
+        )
+        if empty_board_covered:
             empty_observed_at = min(empty_provider_observed_at.values()).isoformat()
             game_states = {
                 game_id: {"state": "live", "observed_at": empty_observed_at}
                 for game_id in requested_games
             }
+        elif not rows and empty_provider_observed_at:
+            providers = {
+                provider: {
+                    "status": provider_statuses[provider],
+                    "retrieved_at": observed_at.isoformat(),
+                }
+                for provider, observed_at in sorted(
+                    empty_provider_observed_at.items()
+                )
+            }
+            for provider in sorted(self.required_providers - set(providers)):
+                providers[provider] = {"status": "missing", "retrieved_at": None}
+            return PlayerPool(
+                (),
+                {},
+                {
+                    "state": "missing",
+                    "observed_at": None,
+                    "retrieved_at": None,
+                    "providers": dict(sorted(providers.items())),
+                },
+                game_states,
+            )
         if not rows and not empty_provider_observed_at:
             missing_freshness = PlayerPool.missing_projection_freshness()
             missing_freshness["providers"] = {

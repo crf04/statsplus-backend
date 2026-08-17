@@ -353,6 +353,11 @@ observation. A changed observation writes
 one checksummed source-evidence document, immutable market observations, and
 one materialization generation atomically. The evidence checksum covers the
 entire canonical document, including `retrieved_at`, for later verification. A
+normalized snapshot's markets are ordered first by governed provider market
+reference and then by complete retained source evidence before serialization,
+checksumming, ordinal assignment, or materialization. Provider array order
+therefore cannot split one observation identity; supplied IDs, ID-less
+references, and distinct variants remain separate deterministic offerings. A
 separate query-scoped content checksum excludes only that retrieval timestamp,
 so a later poll confirming identical markets and coverage records an unchanged
 poll without duplicating the snapshot, observations, or generation when its
@@ -466,7 +471,11 @@ evidence with its actual retrieval time. A pool backed only by current
 Complete-empty evidence is therefore live/fresh with zero players; its
 game-specific state is also live with the successful evidence time when every
 required provider is currently Complete-empty, so Slate and Matchup describe
-the same empty board. Mixed or incomplete provider coverage remains missing.
+the same empty board. A non-required provider's empty evidence remains explicit
+at provider level but cannot lift missing required coverage to aggregate live.
+With no required providers, eligible empty evidence may remain live only
+through the same inclusive 15-minute disabled-provider window. Mixed or
+incomplete provider coverage remains missing.
 Mixed
 provider states omit aggregate `status`; `partial` remains
 reserved for a multi-game archive read containing both live and missing game

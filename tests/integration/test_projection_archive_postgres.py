@@ -367,16 +367,25 @@ def test_same_evidence_postgres_mapping_change_replays_the_first_winner(
 def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_engine):
     catalog = StatisticCatalog.load_default()
     query = NBAMarketQuery(season=SEASON)
-    snapshot = _snapshot(catalog, OBSERVED_AT, "20.5")
+    snapshot = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT,
+        player_ids=(7, 8),
+        thresholds=("20.5", "10.5"),
+    )
     barrier = Barrier(2)
     database_url = projection_pg_engine.url.render_as_string(hide_password=False)
 
-    def ingest(_index):
+    def ingest(index):
         barrier.wait(timeout=5)
         worker_engine = create_engine(database_url)
         try:
             return ProjectionArchive(worker_engine, catalog).ingest_snapshot(
-                snapshot,
+                (
+                    snapshot
+                    if index == 0
+                    else replace(snapshot, markets=tuple(reversed(snapshot.markets)))
+                ),
                 query=query,
                 accepted_at=OBSERVED_AT,
             )
@@ -397,6 +406,14 @@ def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_eng
                 select(ProjectionMaterializationGeneration.generation_id)
             ).all()
         ) == 1
+        assert len(
+            connection.execute(select(ProjectionObservation.observation_id)).all()
+        ) == 2
+        latest = connection.execute(
+            select(LatestPlayerProjection.generation_id)
+        ).scalars().all()
+        assert len(latest) == 2
+        assert len(set(latest)) == 1
 
 
 def test_delayed_retry_postgres_worker_reuses_the_exact_evidence_poll(

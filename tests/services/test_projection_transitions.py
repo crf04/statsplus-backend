@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 
 from app.config.settings import ConfigurationError, ProviderSettings
+from app.domain.comparisons import market_reference
 from app.domain.freshness import MAX_TIME_WINDOW_SECONDS
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
@@ -420,6 +421,83 @@ def test_delayed_retry_of_exact_evidence_is_one_idempotent_poll(tmp_path):
             )
         ).one()
     assert latest == (first.generation_id, "PTS")
+
+
+@pytest.mark.parametrize("identity_kind", ("supplied", "idless_variants"))
+def test_market_order_is_canonical_for_exact_replay_and_new_health_confirmation(
+    tmp_path,
+    identity_kind,
+):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    if identity_kind == "supplied":
+        markets = (
+            _market(catalog, market_id="market-z", player_id=7),
+            _market(catalog, market_id="market-a", player_id=8),
+        )
+    else:
+        base = _market(catalog, market_id=None, player_id=7)
+        markets = (base, replace(base, variant=MarketVariant.ALTERNATE))
+    snapshot = _snapshot("dabble", SnapshotStatus.COMPLETE, markets, OBSERVED_AT)
+    reversed_snapshot = replace(snapshot, markets=tuple(reversed(markets)))
+    archive = ProjectionArchive(engine, catalog)
+
+    first = archive.ingest_snapshot(
+        snapshot,
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    replay = archive.ingest_snapshot(
+        reversed_snapshot,
+        query=QUERY,
+        accepted_at=OBSERVED_AT + timedelta(seconds=1),
+        poll_started_at=OBSERVED_AT + timedelta(microseconds=1),
+    )
+    newer_retrieved_at = OBSERVED_AT + timedelta(minutes=1)
+    newer = archive.ingest_snapshot(
+        replace(reversed_snapshot, retrieved_at=newer_retrieved_at),
+        query=QUERY,
+        accepted_at=newer_retrieved_at + timedelta(seconds=1),
+    )
+
+    assert replay == first
+    assert newer.changed is False
+    assert newer.materialization_outcome == "unchanged"
+    archived = archive.load_source_snapshot(first.snapshot_id)
+    assert archived is not None
+    assert tuple(market_reference(market) for market in archived.markets) == tuple(
+        sorted(market_reference(market) for market in markets)
+    )
+    assert {market.variant for market in archived.markets} == {
+        market.variant for market in markets
+    }
+    assert all(market.statistic_match is None for market in archived.markets)
+    with engine.connect() as connection:
+        polls = connection.execute(
+            select(ProviderPoll.outcome, ProviderPoll.retrieved_at).order_by(
+                ProviderPoll.retrieved_at
+            )
+        ).all()
+        observations = connection.execute(
+            select(
+                ProjectionObservation.ordinal,
+                ProjectionObservation.market_reference,
+            ).order_by(ProjectionObservation.ordinal)
+        ).all()
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionProviderSnapshot)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 1
+    assert [poll.outcome for poll in polls] == ["changed", "unchanged"]
+    assert polls[1].retrieved_at == newer_retrieved_at.replace(tzinfo=None)
+    assert observations == [
+        (ordinal, reference)
+        for ordinal, reference in enumerate(
+            sorted(market_reference(market) for market in markets)
+        )
+    ]
 
 
 def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
@@ -843,6 +921,85 @@ def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
         season=SEASON,
         game_id=GAME_ID,
     ) is not None
+
+
+@pytest.mark.parametrize(
+    "required_providers",
+    (("dabble",), ("dabble", "prizepicks")),
+)
+def test_nonrequired_or_mixed_complete_empty_cannot_cover_missing_required_providers(
+    tmp_path,
+    required_providers,
+):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    ProjectionArchive(engine, catalog).ingest_snapshot(
+        _snapshot("prizepicks", SnapshotStatus.COMPLETE, (), OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+
+    pool = _reader(
+        engine,
+        ("dabble", "prizepicks"),
+        OBSERVED_AT,
+        required_providers=required_providers,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.players == ()
+    assert pool.freshness == {
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {
+            "dabble": {"status": "missing", "retrieved_at": None},
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": OBSERVED_AT.isoformat(),
+            },
+        },
+    }
+    assert pool.game_states[GAME_ID] == {"state": "missing", "observed_at": None}
+
+
+def test_all_disabled_complete_empty_expires_at_the_inclusive_live_boundary(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    ProjectionArchive(engine, catalog).ingest_snapshot(
+        _snapshot("prizepicks", SnapshotStatus.COMPLETE, (), OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+
+    at_cutoff = _reader(
+        engine,
+        ("dabble", "prizepicks"),
+        OBSERVED_AT + timedelta(minutes=15),
+        required_providers=(),
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert at_cutoff.freshness["state"] == "live"
+    assert at_cutoff.game_states[GAME_ID] == {
+        "state": "live",
+        "observed_at": OBSERVED_AT.isoformat(),
+    }
+
+    expired = _reader(
+        engine,
+        ("dabble", "prizepicks"),
+        OBSERVED_AT + timedelta(minutes=15, microseconds=1),
+        required_providers=(),
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert expired.freshness == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {},
+    }
+    assert expired.game_states[GAME_ID] == {
+        "state": "missing",
+        "observed_at": None,
+    }
 
 
 def test_older_complete_empty_does_not_cover_a_newer_nonempty_generation(tmp_path):

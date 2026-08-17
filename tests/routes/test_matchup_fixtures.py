@@ -1345,6 +1345,116 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
 
     query = NBAMarketQuery(season=SEASON)
+    preflight_empty_at = NOW - timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        ProviderSnapshot(
+            provider="prizepicks",
+            status=SnapshotStatus.COMPLETE,
+            markets=(),
+            coverage=CoverageEvidence(
+                fetched_count=0,
+                eligible_count=0,
+                normalized_count=0,
+                expected_total=0,
+            ),
+            retrieved_at=preflight_empty_at,
+        ),
+        query=query,
+        accepted_at=preflight_empty_at,
+    )
+    route_dependencies = app.extensions["dependencies"]
+
+    def use_projection_reader(reader):
+        route_dependencies.slate_service.player_pool = reader
+        route_dependencies.matchup_service.player_pool = reader
+        route_dependencies.matchup_selection_service.player_pool = (
+            ProjectionSelectionPlayerPoolReader(reader)
+        )
+
+    dabble_only_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ("dabble",)}
+            )
+        }
+    )
+    dabble_only_reader = build_dependencies(
+        dabble_only_settings
+    ).projection_player_pool_reader
+    assert isinstance(dabble_only_reader, LatestProjectionPlayerPoolReader)
+    dabble_only_reader.clock = lambda: NOW
+    use_projection_reader(dabble_only_reader)
+    disabled_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    disabled_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert disabled_empty_matchup.get_json()["freshness"]["pool"] == {
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {
+            "dabble": {"status": "missing", "retrieved_at": None},
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": preflight_empty_at.isoformat(),
+            },
+        },
+    }
+    assert disabled_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+
+    pool.clock = lambda: NOW
+    use_projection_reader(pool)
+    mixed_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    mixed_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert mixed_empty_matchup.get_json()["freshness"]["pool"]["state"] == "missing"
+    assert "status" not in mixed_empty_matchup.get_json()["freshness"]["pool"]
+    assert mixed_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+
+    empty_registry_settings = settings.model_copy(
+        update={
+            "providers": settings.providers.model_copy(
+                update={"dfs_enabled_providers": ()}
+            )
+        }
+    )
+    empty_registry_reader = build_dependencies(
+        empty_registry_settings
+    ).projection_player_pool_reader
+    assert isinstance(empty_registry_reader, LatestProjectionPlayerPoolReader)
+    empty_registry_reader.clock = lambda: NOW
+    use_projection_reader(empty_registry_reader)
+    all_disabled_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    all_disabled_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert all_disabled_empty_matchup.get_json()["freshness"]["pool"]["state"] == "live"
+    assert all_disabled_empty_matchup.get_json()["players"] == []
+    assert all_disabled_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "live",
+        "observed_at": preflight_empty_at.isoformat(),
+    }
+    empty_registry_reader.clock = lambda: preflight_empty_at + timedelta(
+        minutes=15,
+        microseconds=1,
+    )
+    expired_empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    expired_empty_slate = client.get("/api/games/slate?date=2026-01-15")
+    assert expired_empty_matchup.get_json()["freshness"]["pool"] == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {},
+    }
+    assert expired_empty_slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+
+    pool.clock = lambda: NOW
+    use_projection_reader(pool)
     recorded_snapshot = _recorded_projection_snapshot(catalog)
     prizepicks_snapshot = _recorded_projection_snapshot(catalog, provider="prizepicks")
     for snapshot in (recorded_snapshot, prizepicks_snapshot):
@@ -1382,13 +1492,13 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         )
 
     with engine.connect() as connection:
-        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 6
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 7
         assert connection.execute(
             select(func.count()).select_from(ProjectionProviderSnapshot)
-        ).scalar_one() == 2
+        ).scalar_one() == 3
         assert connection.execute(
             select(func.count()).select_from(ProjectionMaterializationGeneration)
-        ).scalar_one() == 4
+        ).scalar_one() == 5
         assert connection.execute(
             select(func.count()).select_from(ProjectionObservation)
         ).scalar_one() == 4
@@ -1710,9 +1820,9 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             )
         ).scalar_one() == 1
     assert durable_counts == {
-        "snapshots": 8,
-        "polls": 14,
-        "generations": 10,
+        "snapshots": 9,
+        "polls": 15,
+        "generations": 11,
         "observations": 8,
         "latest": 2,
     }
