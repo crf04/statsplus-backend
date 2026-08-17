@@ -396,7 +396,10 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         )
         repeated_migration = run_migrations(upgraded_engine)
 
-    assert upgraded.applied == ("041_projection_archive_transitions",)
+    assert upgraded.applied == (
+        "041_projection_archive_transitions",
+        "042_team_matchup_provider_provenance",
+    )
     assert replay == first
     assert repeated_migration.applied == ()
     with upgraded_engine.connect() as connection:

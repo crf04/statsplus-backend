@@ -357,9 +357,12 @@ def _add_team_matchup_provider_provenance(connection: Connection) -> None:
     reject it until a fresh materialization replaces it.
     """
     preparer = connection.dialect.identifier_preparer
+    inspector = inspect(connection)
     for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        if not inspector.has_table(table_name):
+            continue
         existing = {
-            column["name"] for column in inspect(connection).get_columns(table_name)
+            column["name"] for column in inspector.get_columns(table_name)
         }
         table = preparer.quote(table_name)
         for name, type_sql in {

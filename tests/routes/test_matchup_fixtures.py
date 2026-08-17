@@ -13,10 +13,6 @@ from sqlalchemy import create_engine, func, select
 
 from app import create_app
 from app.dependencies import build_dependencies
-from app.domain.publication_integrity import (
-    canonical_publication_json,
-    publication_payload_checksum,
-)
 from app.config.settings import (
     AuthenticationSettings,
     CacheSettings,
