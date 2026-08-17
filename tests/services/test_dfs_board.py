@@ -242,19 +242,30 @@ def test_default_board_telemetry_uses_bounded_events_without_provider_failure_co
         telemetry.clear_recorded_provider_events()
 
 
-def test_production_settings_require_an_explicit_nonempty_provider_list():
+def _production_environment(**overrides):
+    environ = {
+        "FLASK_ENV": "production",
+        "DATABASE_URL": "postgresql://statsplus.example/db",
+        "CORS_ALLOWED_ORIGINS": "https://statsplus.example",
+        "FIREBASE_SERVICE_ACCOUNT_JSON": (
+            '{"project_id":"p","private_key":"k","client_email":"e"}'
+        ),
+    }
+    environ.update(overrides)
+    return environ
+
+
+def test_production_settings_require_an_explicit_provider_list():
     with pytest.raises(ConfigurationError, match="DFS_ENABLED_PROVIDERS"):
-        load_settings(
-            environ={
-                "FLASK_ENV": "production",
-                "DATABASE_URL": "postgresql://statsplus.example/db",
-                "CORS_ALLOWED_ORIGINS": "https://statsplus.example",
-                "FIREBASE_SERVICE_ACCOUNT_JSON": (
-                    '{"project_id":"p","private_key":"k","client_email":"e"}'
-                ),
-                "DFS_ENABLED_PROVIDERS": "",
-            }
-        )
+        load_settings(environ=_production_environment())
+
+
+def test_production_settings_accept_an_explicit_all_disabled_provider_list():
+    settings = load_settings(
+        environ=_production_environment(DFS_ENABLED_PROVIDERS="")
+    )
+
+    assert settings.providers.dfs_enabled_providers == ()
 
 
 def test_disabled_providers_are_metadata_not_failed_outcomes():
