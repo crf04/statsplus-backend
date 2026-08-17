@@ -71,10 +71,12 @@ def validate_publication_rows(
     rows,
     *,
     expected_l15_game_ids=None,
+    expected_team_ids=None,
 ) -> tuple[str, ...]:
     """Apply the governed league, taxonomy, and optional L15 game-set rules."""
     expected_keys = tuple(_PUBLICATION_TAXONOMY[base])
-    if len(rows) != 30 or len({row.team_id for row in rows}) != 30:
+    required_team_ids = set(expected_team_ids or NBA_TEAM_ID_TO_TRICODE)
+    if len(rows) != 30 or {row.team_id for row in rows} != required_team_ids:
         raise PublicationValidationError("publication_surface_incomplete")
     expected = set(expected_keys)
     for row in rows:

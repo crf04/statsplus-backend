@@ -222,6 +222,7 @@ class LedgerMatchupMaterializationService:
                     window="season",
                     reads=publication_reads,
                     expected_l15_game_ids=None,
+                    expected_team_ids=set(team_ids),
                 )
             )
             l15_publication_facts, l15_publication_observations = (
@@ -231,6 +232,7 @@ class LedgerMatchupMaterializationService:
                     window="l15",
                     reads=publication_reads,
                     expected_l15_game_ids=expected_l15_game_ids,
+                    expected_team_ids=set(team_ids),
                 )
             )
             season_facts = (*season_facts, *season_publication_facts)
@@ -265,6 +267,7 @@ class LedgerMatchupMaterializationService:
         window: str,
         reads: Mapping[str, object],
         expected_l15_game_ids: Mapping[int, frozenset[str]] | None,
+        expected_team_ids: set[int],
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Project governed NBA team-window publications into raw facts.
 
@@ -303,6 +306,7 @@ class LedgerMatchupMaterializationService:
                 season=season,
                 as_of=as_of,
                 expected_l15_game_ids=expected_l15_game_ids,
+                expected_team_ids=expected_team_ids,
             )
             facts.extend(surface_facts)
             observations.append(observation)
@@ -342,6 +346,7 @@ class LedgerMatchupMaterializationService:
         season: str,
         as_of: date,
         expected_l15_game_ids: Mapping[int, frozenset[str]] | None,
+        expected_team_ids: set[int] | None,
     ) -> tuple[tuple[TeamMatchupFact, ...], TeamMatchupObservation]:
         """Decode one NBA publication without borrowing another surface."""
 
@@ -388,7 +393,8 @@ class LedgerMatchupMaterializationService:
             )
         try:
             metric_keys = validate_publication_rows(
-                base, rows, expected_l15_game_ids=expected_l15_game_ids
+                base, rows, expected_l15_game_ids=expected_l15_game_ids,
+                expected_team_ids=expected_team_ids,
             )
         except ValueError as exc:
             return (), TeamMatchupObservation(

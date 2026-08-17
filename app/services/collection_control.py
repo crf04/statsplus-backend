@@ -29,7 +29,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
-from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
+from app.domain.nba_teams import (
+    NBA_TEAM_ID_TO_TRICODE as _NBA_TEAM_ID_TO_TRICODE,
+    NBA_TEAM_TRICODES,
+    canonical_nba_team_abbreviation,
+)
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.team_matchup_publications import publication_stream
 
@@ -97,18 +101,7 @@ FRESHNESS_RULE_SECONDS = {
     "request_time": 0,
 }
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
-NBA_TEAM_ID_TO_TRICODE = {
-    "1610612737": "ATL", "1610612738": "BOS", "1610612739": "CLE",
-    "1610612740": "NOP", "1610612741": "CHI", "1610612742": "DAL",
-    "1610612743": "DEN", "1610612744": "GSW", "1610612745": "HOU",
-    "1610612746": "LAC", "1610612747": "LAL", "1610612748": "MIA",
-    "1610612749": "MIL", "1610612750": "MIN", "1610612751": "BKN",
-    "1610612752": "NYK", "1610612753": "ORL", "1610612754": "IND",
-    "1610612755": "PHI", "1610612756": "PHX", "1610612757": "POR",
-    "1610612758": "SAC", "1610612759": "SAS", "1610612760": "OKC",
-    "1610612761": "TOR", "1610612762": "UTA", "1610612763": "MEM",
-    "1610612764": "WAS", "1610612765": "DET", "1610612766": "CHA",
-}
+NBA_TEAM_ID_TO_TRICODE = {str(key): value for key, value in _NBA_TEAM_ID_TO_TRICODE.items()}
 NBA_TRICODE_TO_TEAM_ID = {value: int(key) for key, value in NBA_TEAM_ID_TO_TRICODE.items()}
 REGISTERED_BASES = frozenset({"play_types", "shot_zones", "shot_types", "assist_locations"})
 STREAM_BASES: dict[str, frozenset[str]] = {

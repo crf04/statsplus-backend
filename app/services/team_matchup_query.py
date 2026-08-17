@@ -144,6 +144,7 @@ class TeamMatchupQueryService:
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
             expected_l15_game_ids=expected_l15_game_ids,
+            expected_team_ids=set(legacy_window.team_metrics),
         )
 
     def get_window(
@@ -164,6 +165,7 @@ class TeamMatchupQueryService:
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
             expected_l15_game_ids=expected_l15_game_ids,
+            expected_team_ids=set(legacy_window.team_metrics),
         )
 
     def _database_first_window(
@@ -175,6 +177,7 @@ class TeamMatchupQueryService:
         legacy: TeamMatchupWindow | None,
         publication_snapshot=None,
         expected_l15_game_ids=None,
+        expected_team_ids=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
 
@@ -259,6 +262,7 @@ class TeamMatchupQueryService:
                     validate_publication_rows(
                         base,
                         rows,
+            expected_team_ids=(expected_team_ids or set(range(1, 31))),
                         expected_l15_game_ids=(
                             expected_l15_game_ids if window_games is not None else None
                         ),
@@ -456,6 +460,9 @@ class TeamMatchupQueryService:
             return source()
         if source is not None:
             return source
+        # Backward-compatible callers without an injected governance source
+        # retain the persisted expectation; production wiring supplies the
+        # independent governed selector.
         return self._expected_l15_game_ids(facts)
 
     def _build_window(
