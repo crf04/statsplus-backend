@@ -822,7 +822,7 @@ class ProjectionArchive:
             raise ValueError("projection poll cannot start after it completes")
         query_key = _query_key(query)
         poll_id = _digest(
-            "poll_failure",
+            "pollf",
             normalized_provider,
             query_key,
             normalized_reason,
@@ -833,9 +833,23 @@ class ProjectionArchive:
         with self._scope_transaction(
             normalized_provider, query.season, query_key
         ) as connection:
-            if connection.execute(
-                select(table.c.poll_id).where(table.c.poll_id == poll_id)
-            ).scalar_one_or_none() is None:
+            identity = (
+                table.c.provider == normalized_provider,
+                table.c.season == query.season,
+                table.c.query_key == query_key,
+                table.c.outcome == ProviderPollOutcome.FAILED.value,
+                table.c.failure_reason == normalized_reason,
+                table.c.completed_at == completed,
+                (
+                    table.c.started_at.is_(None)
+                    if started is None
+                    else table.c.started_at == started
+                ),
+            )
+            existing_poll_id = connection.execute(
+                select(table.c.poll_id).where(*identity).order_by(table.c.poll_id).limit(1)
+            ).scalar_one_or_none()
+            if existing_poll_id is None:
                 connection.execute(
                     insert(table).values(
                         poll_id=poll_id,
@@ -853,6 +867,8 @@ class ProjectionArchive:
                         observation_count=0,
                     )
                 )
+            else:
+                poll_id = str(existing_poll_id)
         return ProjectionPollResult(
             poll_id=poll_id,
             outcome=ProviderPollOutcome.FAILED,

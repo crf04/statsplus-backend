@@ -1332,7 +1332,12 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
     catalog = StatisticCatalog.load_default()
     query = NBAMarketQuery(season=SEASON)
     ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
-        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        _two_market_snapshot(
+            catalog,
+            OBSERVED_AT,
+            player_ids=(7, 8),
+            thresholds=("20.5", "10.5"),
+        ),
         query=query,
         accepted_at=OBSERVED_AT,
     )

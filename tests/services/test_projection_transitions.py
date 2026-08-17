@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pytest
-from sqlalchemy import create_engine, event, func, select
+from sqlalchemy import create_engine, event, func, insert, select
 
 from app.config.settings import ConfigurationError, ProviderSettings
 from app.domain.comparisons import market_reference
@@ -15,6 +15,7 @@ from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
     LatestPlayerProjection,
+    ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
     ProjectionObservation,
     ProjectionProviderSnapshot,
@@ -633,6 +634,102 @@ def test_failure_completion_does_not_mask_recovery_after_its_attempt_began(tmp_p
         assert connection.execute(
             select(func.count()).select_from(ProviderPoll)
         ).scalar_one() == 4
+
+
+def test_generated_archive_identifiers_fit_their_modeled_columns(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    accepted = archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, market_id="bounded", player_id=7),),
+            OBSERVED_AT,
+        ),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    failed = archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        poll_started_at=OBSERVED_AT + timedelta(minutes=1),
+        completed_at=OBSERVED_AT + timedelta(minutes=2),
+        failure_reason="access_denied",
+    )
+
+    with engine.connect() as connection:
+        poll_ids = connection.execute(select(ProviderPoll.poll_id)).scalars().all()
+        snapshot_ids = connection.execute(
+            select(ProjectionProviderSnapshot.snapshot_id)
+        ).scalars().all()
+        generation_ids = connection.execute(
+            select(ProjectionMaterializationGeneration.generation_id)
+        ).scalars().all()
+        observation_ids = connection.execute(
+            select(ProjectionObservation.observation_id)
+        ).scalars().all()
+        query_keys = connection.execute(
+            select(ProjectionArchiveScopeLock.query_key)
+        ).scalars().all()
+        market_references = connection.execute(
+            select(LatestPlayerProjection.market_reference)
+        ).scalars().all()
+
+    identifiers = (
+        (ProviderPoll.poll_id, poll_ids),
+        (ProjectionProviderSnapshot.snapshot_id, snapshot_ids),
+        (ProjectionMaterializationGeneration.generation_id, generation_ids),
+        (ProjectionObservation.observation_id, observation_ids),
+        (ProjectionArchiveScopeLock.query_key, query_keys),
+        (LatestPlayerProjection.market_reference, market_references),
+    )
+    for column, values in identifiers:
+        assert all(len(value) <= column.type.length for value in values)
+    assert failed.poll_id in poll_ids
+    assert accepted.snapshot_id in snapshot_ids
+    assert accepted.generation_id in generation_ids
+
+
+def test_failed_poll_replay_reuses_a_legacy_oversized_sqlite_identity(tmp_path):
+    engine = _engine(tmp_path)
+    archive = ProjectionArchive(engine, StatisticCatalog.load_default())
+    scope = ProjectionArchiveReadScope(provider="dabble", query=QUERY)
+    started_at = OBSERVED_AT + timedelta(minutes=1)
+    completed_at = OBSERVED_AT + timedelta(minutes=2)
+    legacy_poll_id = f"poll_failure_{'a' * 64}"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(ProviderPoll.__table__).values(
+                poll_id=legacy_poll_id,
+                provider="dabble",
+                season=SEASON,
+                query_key=scope.query_key,
+                started_at=started_at,
+                completed_at=completed_at,
+                retrieved_at=None,
+                outcome="failed",
+                promoted=False,
+                failure_reason="access_denied",
+                snapshot_id=None,
+                generation_id=None,
+                observation_count=0,
+            )
+        )
+
+    replay = archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        poll_started_at=started_at,
+        completed_at=completed_at,
+        failure_reason="access_denied",
+    )
+
+    assert replay.poll_id == legacy_poll_id
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProviderPoll)
+        ).scalar_one() == 1
 
 
 def test_failure_attempt_fences_late_changed_and_empty_evidence_until_recovery(
