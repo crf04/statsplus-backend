@@ -30,10 +30,11 @@ caller-authored materialization JSON. Legacy rows must carry a non-null exact
 cutoff, manifest/Event Catalog publication ID and checksum, and provider
 window identity. LeagueDashTeamStats and PBP totals are aggregate endpoints and
 are not treated as membership evidence: production runs call the independent
-NBA Stats TeamGameLog detail endpoint for exact returned IDs, compare those IDs
-with immutable authority, and bind both traditional and assist aggregates to
-that evidence. Missing IDs, wrong same-count IDs, or an unavailable detail
-endpoint fail the window closed; game-point equality alone is insufficient.
+NBA Stats TeamGameLog detail endpoint for traditional IDs and the independent
+PBP Stats team game-log detail endpoint for assist IDs, compare each returned
+set with immutable authority, and bind both aggregates to their own evidence.
+Missing IDs, wrong same-count IDs, or an unavailable detail endpoint fail the
+window closed; game-point equality alone is insufficient.
 The `cutoff` must be the exact
 aware immutable manifest cutoff, never a fabricated midnight: it is the same
 cutoff both materializers ran at, and it is what the artifacts are bound to.
@@ -79,8 +80,11 @@ checksums), whether the two cutoffs align, whether deterministic rankings
 Integer counts compare exactly. Only floating denominators (effective team
 minutes, with seconds normalized to minutes) and the per-48 rates recomputed
 from counts and denominators use the single documented tolerance
-(`MATCHUP_PARITY_TOLERANCE`, `1e-6`). Reports retain exact legacy and ledger
-game-ID maps/checksums and both sides' manifest/Event Catalog identities;
+(`MATCHUP_PARITY_TOLERANCE`, `1e-6`). The ledger payload's served per-48 and
+competition-rank values must also match the values recomputed from its counts
+and denominator; missing or incorrect served values are hard failures. Reports
+retain exact legacy and ledger game-ID maps/checksums and both sides' manifest/
+Event Catalog identities;
 activation validates these fields against the candidate rather than trusting a
 boolean status, and recomputes the report game-set and candidate payload
 checksums before activation. A missing surface, a single missing

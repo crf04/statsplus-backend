@@ -1864,6 +1864,14 @@ Season stream. The runner records one artifact per ledger-owned stream
 to its exact Publication and payload checksum. Both `assist_locations_*`
 streams are parity-required for activation, exactly like the traditional and
 per-36 streams.
+The legacy writer proves membership independently for both parity surfaces:
+NBA Stats TeamGameLog supplies traditional IDs and the PBP Stats team
+game-log detail endpoint supplies assist IDs, each bounded to the governed
+window. Aggregate game counts cannot stand in for membership, and a
+same-count or missing-ID response leaves that surface unavailable. The
+persisted provider-window identity retains both exact source memberships and
+the immutable Event Catalog authority rather than relabeling catalog IDs after
+collection.
 Activation requires the complete aligned four-stream Season+L15 cohort at one
 exact cutoff; activation selects the newest fully valid artifact per stream,
 ignores rejected/superseded historical reruns, and verifies that the supplied
@@ -1880,7 +1888,10 @@ a single missing metric fails. Integer counts — the four traditional opponent
 counts and the six assist surfaces — compare exactly; the single documented
 tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-6`) applies only to floating
 denominators (effective team minutes, with seconds normalized to minutes) and
-to the per-48 rates recomputed from counts and denominators. Deterministic
+to the per-48 rates recomputed from counts and denominators. The ledger
+publication's served per-48 and competition-rank fields are also bound to
+those recomputed values; a missing or incorrect served value is a hard
+`served_rate_mismatch` or `served_rank_mismatch` failure. Deterministic
 competition ranks (`1, 1, 3` ties) are re-derived per metric from each side's
 per-48 values and compared, so a sub-tolerance near-tie flip that would change
 a ranking still fails. Independent per-surface availability is compared, and
@@ -1892,7 +1903,8 @@ vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `ranking_difference`, `availability_difference`, `cutoff_mismatch`,
 `missing_surface`, `missing_metric`, `extra_metric`, `duplicate_metric`,
 `l15_game_count_mismatch`, `scope_mismatch`, `authority_mismatch`, and
-`invalid_denominator`). Hard classifications produce `failed` evidence that
+`invalid_denominator`, `served_rate_mismatch`, and `served_rank_mismatch`).
+Hard classifications produce `failed` evidence that
 cannot be manually approved; only the documented floating semantic
 differences may be `adjudication_required`; ranking differences are hard and
 never manually adjudicable.

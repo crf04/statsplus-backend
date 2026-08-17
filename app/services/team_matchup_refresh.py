@@ -87,6 +87,22 @@ class TeamMatchupProvenance:
     canonical_ledger_pointer_publication_id: str | None = None
 
 
+class _ProviderGameMembership(dict[int, tuple[str, ...]]):
+    """Common governed IDs plus the exact independently returned source sets."""
+
+    def __init__(
+        self,
+        common: Mapping[int, tuple[str, ...]],
+        *,
+        by_source: Mapping[str, Mapping[int, tuple[str, ...]]],
+    ) -> None:
+        super().__init__(common)
+        self.by_source = {
+            source: dict(membership)
+            for source, membership in by_source.items()
+        }
+
+
 class TeamWindowBoundaryResolver:
     """Resolve rolling windows from the canonical governed schedule."""
 
@@ -354,6 +370,10 @@ class TeamMatchupRefreshService:
                 window="season",
                 game_ids_by_team=season_game_ids_by_team,
                 provider_game_ids_by_team=season_provider_game_ids,
+                provider_sources=(
+                    "nba_stats.team_game_log",
+                    "pbp_stats.team_game_log",
+                ),
                 expected_counts={
                     team_id: len(game_ids)
                     for team_id, game_ids in season_game_ids_by_team.items()
@@ -414,6 +434,10 @@ class TeamMatchupRefreshService:
                     window="l15",
                     game_ids_by_team=rolling_game_ids_by_team,
                     provider_game_ids_by_team=rolling_provider_game_ids,
+                    provider_sources=(
+                        "nba_stats.team_game_log",
+                        "pbp_stats.team_game_log",
+                    ),
                     expected_counts={
                         team_id: 15 for team_id in rolling_game_ids_by_team
                     },
@@ -702,6 +726,7 @@ class TeamMatchupRefreshService:
         *, window: str, game_ids_by_team: Mapping[int, tuple[str, ...]],
         provider_game_ids_by_team: Mapping[int, tuple[str, ...]],
         expected_counts: Mapping[int, int],
+        provider_sources: tuple[str, ...] = ("nba_stats.team_game_log",),
         collect_before: datetime | None = None,
     ) -> str:
         """Record provider request evidence only after count verification.
@@ -726,9 +751,38 @@ class TeamMatchupRefreshService:
             raise _ProviderWindowUnverified("provider game IDs do not match authority")
         if collect_before is None:
             raise _ProviderWindowUnverified("provider collection fence is unavailable")
+        source_memberships = getattr(provider_game_ids_by_team, "by_source", None)
+        if source_memberships is None:
+            source_memberships = {
+                provider_sources[0]: provider_game_ids_by_team,
+            }
+        if set(source_memberships) != {
+            "nba_stats.team_game_log",
+            "pbp_stats.team_game_log",
+        }:
+            raise _ProviderWindowUnverified(
+                "independent provider sources are incomplete"
+            )
+        for membership in source_memberships.values():
+            if set(membership) != set(game_ids_by_team) or any(
+                frozenset(membership[team_id])
+                != frozenset(game_ids_by_team[team_id])
+                for team_id in game_ids_by_team
+            ):
+                raise _ProviderWindowUnverified(
+                    "provider source membership does not match authority"
+                )
         return json.dumps({
             "window": window,
             "provider_source": "nba_stats.team_game_log",
+            "provider_sources": list(provider_sources),
+            "provider_game_ids_by_source": {
+                source: {
+                    str(team_id): sorted(ids)
+                    for team_id, ids in sorted(membership.items())
+                }
+                for source, membership in sorted(source_memberships.items())
+            },
             "collect_before": assume_utc(collect_before).isoformat(),
             "teams": {
                 str(team_id): {
@@ -931,8 +985,18 @@ class TeamMatchupRefreshService:
                     failures["play_types"] = self._provider_failure(error)
         try:
             if verify_window:
-                provider_ids = provider_ids_by_surface.get("traditional")
-                if provider_ids is None:
+                provider_ids_by_surface["assist_locations"] = (
+                    self._independent_provider_game_ids(
+                        provider=self.pbp_stats,
+                        season=season,
+                        season_type="Regular Season",
+                        team_ids=team_ids,
+                        date_from=None,
+                        date_to=date_to,
+                        expected_game_ids_by_team=expected_game_ids_by_team,
+                    )
+                )
+                if provider_ids_by_surface["traditional"] is None:
                     raise _ProviderWindowUnverified(
                         "independent provider game membership is unavailable"
                     )
@@ -951,9 +1015,6 @@ class TeamMatchupRefreshService:
                     expected_game_ids_by_team=expected_game_ids_by_team,
                     require_game_ids=False,
                 )
-                provider_ids_by_surface["assist_locations"] = (
-                    provider_ids_by_surface["traditional"]
-                )
             facts_by_surface["assist_locations"] = self._require_governed_roster(
                 self._assist_facts(assist_frame),
                 team_ids,
@@ -964,7 +1025,13 @@ class TeamMatchupRefreshService:
         traditional_ids = provider_ids_by_surface.get("traditional")
         assist_ids = provider_ids_by_surface.get("assist_locations")
         if traditional_ids is not None and assist_ids == traditional_ids:
-            provider_game_ids = traditional_ids
+            provider_game_ids = _ProviderGameMembership(
+                traditional_ids,
+                by_source={
+                    "nba_stats.team_game_log": traditional_ids,
+                    "pbp_stats.team_game_log": assist_ids,
+                },
+            )
         return (
             [
                 fact
@@ -1119,8 +1186,18 @@ class TeamMatchupRefreshService:
             if "assist_locations" not in failures:
                 try:
                     if verify_window:
-                        provider_ids = provider_ids_by_surface["traditional"].get(team_id)
-                        if provider_ids is None:
+                        provider_ids = self._independent_provider_game_ids(
+                            provider=self.pbp_stats,
+                            season=season,
+                            season_type=season_type,
+                            team_ids=(team_id,),
+                            date_from=boundary.from_date.isoformat(),
+                            date_to=boundary.to_date.isoformat(),
+                            expected_game_ids_by_team={
+                                team_id: boundary.game_ids,
+                            },
+                        )
+                        if provider_ids.get(team_id) is None:
                             raise _ProviderWindowUnverified(
                                 "independent provider game membership is unavailable"
                             )
@@ -1147,7 +1224,7 @@ class TeamMatchupRefreshService:
                     )
                     if verify_window:
                         provider_ids_by_surface["assist_locations"][team_id] = (
-                            provider_ids_by_surface["traditional"][team_id]
+                            provider_ids[team_id]
                         )
                     facts_by_surface["assist_locations"].extend(
                         self._with_start(
@@ -1171,7 +1248,15 @@ class TeamMatchupRefreshService:
             and provider_ids_by_surface["assist_locations"]
             == provider_ids_by_surface["traditional"]
         ):
-            provider_game_ids = provider_ids_by_surface["traditional"]
+            provider_game_ids = _ProviderGameMembership(
+                provider_ids_by_surface["traditional"],
+                by_source={
+                    "nba_stats.team_game_log": provider_ids_by_surface["traditional"],
+                    "pbp_stats.team_game_log": provider_ids_by_surface[
+                        "assist_locations"
+                    ],
+                },
+            )
         return facts, failures, provider_game_ids
 
     @staticmethod
@@ -1181,6 +1266,7 @@ class TeamMatchupRefreshService:
     def _independent_provider_game_ids(
         self,
         *,
+        provider=None,
         season: str,
         season_type: str,
         team_ids: Iterable[int],
@@ -1195,7 +1281,7 @@ class TeamMatchupRefreshService:
         providers must expose the same optional seam in governed runs or the
         window is unavailable rather than being relabeled from the catalog.
         """
-        fetcher = getattr(self.nba_stats, "fetch_team_game_ids", None)
+        fetcher = getattr(provider or self.nba_stats, "fetch_team_game_ids", None)
         if not callable(fetcher):
             raise _ProviderWindowUnverified(
                 "provider detail endpoint cannot prove exact game membership"

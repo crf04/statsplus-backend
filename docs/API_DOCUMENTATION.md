@@ -738,12 +738,12 @@ unresolved-team telemetry instead of disappearing silently.
 surfaces and additionally reports `player_game_logs`, per-Base
 `player_diets.surfaces`, and Season/Last-15
 `team_matchups[window].surfaces`. Team-window surface timestamps are the
-request's database snapshot time so switching between equivalent legacy and
-ledger sources does not change the public byte contract; immutable source
-retrieval timestamps remain available in the database-first reader and
-activation audit. Missing observations carry null. Pool freshness and
-per-provider status are passed through from the selected stored snapshot.
-Other stored observations carry their actual timezone-aware `retrieved_at`.
+stored observation or publication timestamp; a missing or unavailable source
+therefore carries null rather than a request-time timestamp. Switching between
+equivalent legacy and ledger sources keeps the matchup facts stable, while
+truthful source-specific provenance and freshness may change at cutover.
+Pool freshness and per-provider status are passed through from the selected
+stored snapshot.
 When the projection-archive reader is activated, this block additionally
 contains `state: live | missing` and `observed_at`; the Matchup `game` header
 does not duplicate the Slate-only `projection_state` block.
@@ -1189,12 +1189,14 @@ Reports retain their existing live/snapshot contract; statistical activation
 does not change injury behavior. Existing fields remain
 backward compatible. Additive `provenance` stream entries identify the exact
 Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state for
-player and diet streams. Team-window entries intentionally expose only
-source-independent availability/status in the public Matchups response so an
-equivalent legacy-to-ledger cutover is byte-compatible; their exact
-Publication ID, authority, and cutoff remain available from the
-database-first reader and activation audit. Inactive streams explicitly
-report `legacy_database` fallback. Additive
+player and diet streams. Team-window entries expose the selected stored
+source's truthful availability, freshness, and retrieval metadata in the public
+Matchups response; inactive streams explicitly report `legacy_database`
+fallback with null publication, cutoff, age, and retrieval fields. Active or
+stale publications report their exact Publication ID, authority, cutoff, age,
+and stored creation timestamp. Consumers comparing legacy and ledger facts
+should ignore this additive provenance envelope rather than treating
+source-specific metadata as a semantic fact. Additive
 `coverage.mixed_cutoff` and `coverage.mixed_freshness` flags remain independent
 when one contributor is older or unavailable. A stale active Publication is
 served as the last good fact with its real age; a failed partial attempt never

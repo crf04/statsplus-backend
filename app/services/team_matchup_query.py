@@ -249,6 +249,10 @@ class TeamMatchupQueryService:
             if not read.available:
                 base_windows[base] = None
                 continue
+            if read.retrieved_at is None:
+                base_windows[base] = None
+                validation_failures[base] = "publication_provenance_unavailable"
+                continue
             publication_game_ids = None
             if base in NBA_PUBLICATION_BASES:
                 publication_game_ids = self._publication_game_ids(
@@ -299,7 +303,7 @@ class TeamMatchupQueryService:
                 window_games=window_games,
                 base=base,
                 rows=rows,
-                retrieved_at=read.retrieved_at or self._clock(),
+                retrieved_at=read.retrieved_at,
                 publication=publication_lineage(read),
             )
         scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
@@ -346,7 +350,7 @@ class TeamMatchupQueryService:
                         or read.unavailable_reason
                         or f"publication_{read.status}"
                     ),
-                    retrieved_at=read.retrieved_at or self._clock(),
+                    retrieved_at=read.retrieved_at,
                     publication=publication_lineage(read),
                 ))
                 continue

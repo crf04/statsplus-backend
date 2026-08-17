@@ -35,7 +35,11 @@ from app.services.ledger_parity import (
     matchup_parity_cohort_is_activatable,
 )
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
-from app.services.ledger_derivations import ASSIST_DERIVED_METRICS, TEAM_METRICS
+from app.services.ledger_derivations import (
+    ASSIST_DERIVED_METRICS,
+    TEAM_METRICS,
+    competition_ranks,
+)
 from app.services.matchup_parity import (
     CLASSIFICATION_AVAILABILITY_DIFFERENCE,
     CLASSIFICATION_AUTHORITY_MISMATCH,
@@ -49,6 +53,8 @@ from app.services.matchup_parity import (
     CLASSIFICATION_MISSING_METRIC,
     CLASSIFICATION_MISSING_SURFACE,
     CLASSIFICATION_RANKING_DIFFERENCE,
+    CLASSIFICATION_SERVED_RANK_MISMATCH,
+    CLASSIFICATION_SERVED_RATE_MISMATCH,
     HARD_CLASSIFICATIONS,
     MATCHUP_PARITY_TOLERANCE,
     MatchupMaterialization,
@@ -187,6 +193,62 @@ def test_exact_parity_when_counts_game_sets_and_denominators_match():
     assert not report.adjudication_required
     assert report.status == "exact"
     assert report.compared_count == 30 * len(TRADITIONAL_STATS)
+
+
+def _ledger_with_served_derivations():
+    base = _materialization()
+    rates = {
+        (fact.team_id, fact.stat_key): fact.raw_value * 48.0 / fact.denominator_value
+        for fact in base.facts
+    }
+    ranks = {
+        (team_id, stat_key): rank
+        for stat_key in TRADITIONAL_STATS + ASSIST_STATS
+        for team_id, rank in competition_ranks(
+            {
+                fact.team_id: rates[(fact.team_id, stat_key)]
+                for fact in base.facts
+                if fact.stat_key == stat_key
+            },
+            descending=False,
+        ).items()
+    }
+    return replace(
+        base,
+        producer=PRODUCER_LEDGER,
+        publication_id="publication",
+        payload_checksum="payload-checksum",
+        served_per48=rates,
+        served_ranks=ranks,
+    )
+
+
+def test_wrong_served_per48_cannot_activate():
+    ledger = _ledger_with_served_derivations()
+    served_per48 = dict(ledger.served_per48)
+    served_per48[(TEAM_A, "OPP_REB")] += 10_000.0
+
+    report = _compare(ledger=replace(ledger, served_per48=served_per48))
+
+    assert report.hard_failure
+    assert any(
+        difference.classification == CLASSIFICATION_SERVED_RATE_MISMATCH
+        for difference in report.differences
+    )
+
+
+def test_wrong_served_rank_cannot_activate():
+    ledger = _ledger_with_served_derivations()
+    served_ranks = dict(ledger.served_ranks)
+    served_ranks[(TEAM_A, "OPP_REB")] = 99
+
+    report = _compare(ledger=replace(ledger, served_ranks=served_ranks))
+
+    assert report.hard_failure
+    assert any(
+        difference.classification == CLASSIFICATION_SERVED_RANK_MISMATCH
+        for difference in report.differences
+    )
 
 
 def test_integer_count_difference_is_a_hard_failure():
@@ -412,6 +474,9 @@ def _publication_payload(game_ids_by_team, *, surface, offset=0, minutes=48.0):
     for team_id in TEAM_IDS:
         counts = {metric: float(team_id + offset) for metric in payload_metrics}
         per48 = {metric: value * 48.0 / minutes for metric, value in counts.items()}
+        competition_rank = {
+            metric: TEAM_IDS.index(team_id) + 1 for metric in payload_metrics
+        }
         rows.append({
             "team_id": team_id,
             "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
@@ -420,7 +485,7 @@ def _publication_payload(game_ids_by_team, *, surface, offset=0, minutes=48.0):
             "per48": per48,
             "league_average": {metric: 1.0 for metric in payload_metrics},
             "population_sigma": {metric: 1.0 for metric in payload_metrics},
-            "competition_rank": {metric: 1 for metric in payload_metrics},
+            "competition_rank": competition_rank,
             "counts": counts,
             "team_minutes": minutes,
         })
@@ -671,7 +736,21 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
     provider_identity = json.dumps({
         "window": window,
         "provider_source": "nba_stats.team_game_log",
+        "provider_sources": [
+            "nba_stats.team_game_log",
+            "pbp_stats.team_game_log",
+        ],
         "collect_before": (CUTOFF + timedelta(hours=1)).isoformat(),
+        "provider_game_ids_by_source": {
+            source: {
+                str(team_id): sorted(game_ids_by_team[team_id])
+                for team_id in TEAM_IDS
+            }
+            for source in (
+                "nba_stats.team_game_log",
+                "pbp_stats.team_game_log",
+            )
+        },
         "teams": {
             str(team_id): {
                 "expected_games": len(game_ids_by_team[team_id]),

@@ -60,6 +60,8 @@ from app.domain.matchup_parity_contract import (
     CLASSIFICATION_NON_INTEGER_COUNT,
     CLASSIFICATION_RANKING_DIFFERENCE,
     CLASSIFICATION_SCOPE_MISMATCH,
+    CLASSIFICATION_SERVED_RANK_MISMATCH,
+    CLASSIFICATION_SERVED_RATE_MISMATCH,
     HARD_CLASSIFICATIONS,
     SOFT_CLASSIFICATIONS,
 )
@@ -137,6 +139,8 @@ class MatchupMaterialization:
     publication_id: str | None = None
     payload_checksum: str | None = None
     provider_window_identity: str | None = None
+    served_per48: Mapping[tuple[int, str], float] = field(default_factory=dict)
+    served_ranks: Mapping[tuple[int, str], int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +152,8 @@ class LedgerTeamWindowRow:
     game_ids: tuple[str, ...]
     counts: Mapping[str, float]
     team_minutes: float
+    per48: Mapping[str, float] = field(default_factory=dict)
+    competition_rank: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +470,25 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
                 if not math.isfinite(number) or number < 0 or not number.is_integer():
                     raise ValueError("ledger publication count is invalid")
                 counts[str(key)] = number
+            per48_value = row["per48"]
+            if not isinstance(per48_value, dict) or frozenset(per48_value) != expected_metrics:
+                raise ValueError("ledger publication per48 taxonomy is invalid")
+            per48 = {}
+            for key, value in per48_value.items():
+                if isinstance(value, bool):
+                    raise ValueError("ledger publication per48 value is invalid")
+                number = float(value)
+                if not math.isfinite(number) or number < 0:
+                    raise ValueError("ledger publication per48 value is invalid")
+                per48[str(key)] = number
+            rank_value = row["competition_rank"]
+            if not isinstance(rank_value, dict) or frozenset(rank_value) != expected_metrics:
+                raise ValueError("ledger publication ranking taxonomy is invalid")
+            competition_rank = {}
+            for key, value in rank_value.items():
+                if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                    raise ValueError("ledger publication ranking is invalid")
+                competition_rank[str(key)] = value
             team_minutes = row["team_minutes"]
             if isinstance(team_minutes, bool):
                 raise ValueError("ledger publication denominator is invalid")
@@ -476,6 +501,8 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
                 game_ids=tuple(game_ids),
                 counts=counts,
                 team_minutes=team_minutes,
+                per48=per48,
+                competition_rank=competition_rank,
             ))
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as error:
             raise MatchupParityError("publication_payload_invalid") from error
@@ -494,6 +521,16 @@ def materialization_from_publication(
     if surface not in _SURFACE_COUNT_KEYS:
         raise MatchupParityError(f"unsupported matchup surface {surface}")
     stat_to_metric = _SURFACE_COUNT_KEYS[surface]
+    served_per48 = {
+        (row.team_id, stat_key): row.per48[metric]
+        for row in publication.rows
+        for stat_key, metric in stat_to_metric.items()
+    }
+    served_ranks = {
+        (row.team_id, stat_key): row.competition_rank[metric]
+        for row in publication.rows
+        for stat_key, metric in stat_to_metric.items()
+    }
     facts = tuple(
         TeamMatchupFact(
             team_id=row.team_id,
@@ -524,6 +561,8 @@ def materialization_from_publication(
         event_catalog_checksum=publication.event_catalog_checksum,
         publication_id=publication.publication_id,
         payload_checksum=publication.payload_checksum,
+        served_per48=served_per48,
+        served_ranks=served_ranks,
     )
 
 
@@ -631,11 +670,20 @@ class StoredLegacyMatchupSource:
         try:
             identity = json.loads(window_identity)
             identity_teams = identity["teams"]
+            provider_sources = identity.get("provider_sources")
+            if provider_sources is None:
+                provider_sources = (identity.get("provider_source"),)
+            source_memberships = identity["provider_game_ids_by_source"]
             if (
                 identity["window"] != window
-                or identity.get("provider_source") != "nba_stats.team_game_log"
+                or set(provider_sources) != {
+                    "nba_stats.team_game_log",
+                    "pbp_stats.team_game_log",
+                }
                 or not isinstance(identity.get("collect_before"), str)
                 or not isinstance(identity_teams, dict)
+                or not isinstance(source_memberships, dict)
+                or set(source_memberships) != set(provider_sources)
             ):
                 raise ValueError
             governed_collect_before = getattr(governance, "collect_before", None)
@@ -659,6 +707,13 @@ class StoredLegacyMatchupSource:
                     != game_ids
                 ):
                     raise ValueError
+            for source in provider_sources:
+                membership = source_memberships[source]
+                if set(membership) != set(actual_ids_by_team):
+                    raise ValueError
+                for team_id, game_ids in actual_ids_by_team.items():
+                    if sorted(str(game_id) for game_id in membership[team_id]) != game_ids:
+                        raise ValueError
             if set(identity_teams) != set(actual_ids_by_team):
                 raise ValueError
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
@@ -1022,8 +1077,33 @@ def compare_matchup_materializations(
                         ledger_minutes, legacy_minutes,
                         CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
                     ))
-                ledger_rate = _per48(ledger_fact.raw_value, ledger_minutes)
+                calculated_ledger_rate = _per48(
+                    ledger_fact.raw_value, ledger_minutes
+                )
                 legacy_rate = _per48(legacy_fact.raw_value, legacy_minutes)
+                if ledger.producer == PRODUCER_LEDGER:
+                    served_ledger_rate = ledger.served_per48.get(key)
+                    if served_ledger_rate is None or (
+                        calculated_ledger_rate is None
+                        or not math.isclose(
+                            served_ledger_rate,
+                            calculated_ledger_rate,
+                            rel_tol=tolerance,
+                            abs_tol=tolerance,
+                        )
+                    ):
+                        differences.append(MatchupParityDifference(
+                            window,
+                            surface,
+                            team_id,
+                            f"served_per48.{stat_key}",
+                            served_ledger_rate,
+                            calculated_ledger_rate,
+                            CLASSIFICATION_SERVED_RATE_MISMATCH,
+                        ))
+                    ledger_rate = served_ledger_rate
+                else:
+                    ledger_rate = calculated_ledger_rate
             if ledger_rate is not None and legacy_rate is not None and not math.isclose(
                 ledger_rate, legacy_rate, rel_tol=tolerance, abs_tol=tolerance
             ):
@@ -1060,6 +1140,24 @@ def compare_matchup_materializations(
             continue
         ledger_ranks = competition_ranks(ledger_metric, descending=False)
         legacy_ranks = competition_ranks(legacy_metric, descending=False)
+        if ledger.producer == PRODUCER_LEDGER:
+            served_ledger_ranks = {
+                team_id: ledger.served_ranks.get((team_id, stat_key))
+                for team_id in ledger_metric
+            }
+            if any(rank is None for rank in served_ledger_ranks.values()) or (
+                served_ledger_ranks != ledger_ranks
+            ):
+                rankings_deterministic = False
+                differences.append(MatchupParityDifference(
+                    window,
+                    surface,
+                    None,
+                    f"served_rank.{stat_key}",
+                    served_ledger_ranks,
+                    ledger_ranks,
+                    CLASSIFICATION_SERVED_RANK_MISMATCH,
+                ))
         if ledger_ranks != legacy_ranks:
             rankings_deterministic = False
             differences.append(MatchupParityDifference(
@@ -1288,6 +1386,8 @@ __all__ = [
     "CLASSIFICATION_NON_INTEGER_COUNT",
     "CLASSIFICATION_RANKING_DIFFERENCE",
     "CLASSIFICATION_SCOPE_MISMATCH",
+    "CLASSIFICATION_SERVED_RATE_MISMATCH",
+    "CLASSIFICATION_SERVED_RANK_MISMATCH",
     "HARD_CLASSIFICATIONS",
     "LEDGER_OWNED_SURFACES",
     "LegacyMatchupSource",

@@ -26,6 +26,7 @@ from app.services.team_matchup_repository import (
 )
 from app.services.team_matchup_refresh import (
     TeamMatchupRefreshService,
+    TeamWindowBoundary,
     TeamWindowBoundaryResolver,
 )
 from app.utils.telemetry import ProviderResponseError
@@ -178,6 +179,24 @@ class _FakeMatchupPBP:
                 for index, team_id in enumerate(team_ids)
             ]
         )
+
+
+class _TeamLogNBA(_FakeMatchupNBA):
+    def __init__(self, team_ids, game_ids_by_team):
+        super().__init__(team_ids)
+        self.game_ids_by_team = game_ids_by_team
+
+    def fetch_team_game_ids(self, *, team_id, **kwargs):
+        return self.game_ids_by_team[team_id]
+
+
+class _TeamLogPBP(_FakeMatchupPBP):
+    def __init__(self, team_ids, game_ids_by_team):
+        super().__init__(team_ids)
+        self.game_ids_by_team = game_ids_by_team
+
+    def fetch_team_game_ids(self, *, team_id, **kwargs):
+        return self.game_ids_by_team[team_id]
 
 
 def _fixture_team_ids():
@@ -340,6 +359,50 @@ def test_team_last_15_boundary_keeps_cross_phase_games_but_marks_them_unrepresen
 
     assert len(boundary.game_ids) == 15
     assert boundary.season_type is None
+
+
+def test_last_15_rejects_wrong_same_count_pbp_membership():
+    team_ids = tuple(_fixture_team_ids())
+    game_ids_by_team = {
+        team_id: tuple(f"game-{team_id}-{index}" for index in range(15))
+        for team_id in team_ids
+    }
+    wrong_pbp_ids = dict(game_ids_by_team)
+    wrong_pbp_ids[team_ids[0]] = (
+        "wrong-game",
+        *game_ids_by_team[team_ids[0]][1:],
+    )
+    boundaries = {
+        team_id: TeamWindowBoundary(
+            team_id=team_id,
+            from_date=date(2025, 3, 1),
+            to_date=date(2025, 4, 15),
+            game_ids=game_ids_by_team[team_id],
+            season_type="Regular Season",
+        )
+        for team_id in team_ids
+    }
+    engine = create_engine("sqlite:///:memory:")
+    service = TeamMatchupRefreshService(
+        repository=TeamMatchupRepository(engine),
+        event_catalog=FakeEventCatalog([]),
+        nba_stats_provider=_TeamLogNBA(team_ids, game_ids_by_team),
+        pbp_stats_provider=_TeamLogPBP(team_ids, wrong_pbp_ids),
+    )
+
+    _, failures, provider_game_ids = service._collect_last_15(
+        "2024-25",
+        snapshot_date=date(2025, 4, 15),
+        team_ids=team_ids,
+        boundaries=boundaries,
+        verify_window=True,
+    )
+
+    assert failures["assist_locations"] == (
+        "unavailable",
+        "provider_window_unverified",
+    )
+    assert provider_game_ids is None
 
 
 def test_refresh_rejects_a_future_as_of_before_provider_or_storage_work(tmp_path):

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -30,6 +31,7 @@ from app.utils.telemetry import (
 )
 
 PBP_TOTALS_URL = "https://api.pbpstats.com/get-totals/nba"
+PBP_GAME_LOGS_URL = "https://api.pbpstats.com/get-game-logs/nba"
 PBP_REGULAR_SEASON = "Regular+Season"
 
 # These are the columns consumed by the publication and assist-table
@@ -80,6 +82,21 @@ PBP_PLAYER_DIET_COLUMNS = (
 )
 
 
+def _date_key(value: object) -> str:
+    text = str(value).strip()
+    if len(text) < 10:
+        raise ProviderResponseError("PBP Stats returned an invalid game date.")
+    key = text[:10]
+    try:
+        if "/" in key:
+            parsed = datetime.strptime(key, "%m/%d/%Y").date()
+        else:
+            parsed = date.fromisoformat(key)
+    except ValueError as error:
+        raise ProviderResponseError("PBP Stats returned an invalid game date.") from error
+    return parsed.isoformat()
+
+
 class PBPTotalsAdapter:
     """Fetch and normalize PBP totals through the shared, retrying session."""
 
@@ -102,7 +119,13 @@ class PBPTotalsAdapter:
         return self.settings.providers.pbp_read_timeout_seconds
 
     @contextmanager
-    def _request(self, operation: str, params: dict[str, str]) -> Iterator[Any]:
+    def _request(
+        self,
+        operation: str,
+        params: dict[str, str],
+        *,
+        url: str | None = None,
+    ) -> Iterator[Any]:
         """Execute one instrumented PBP request and yield its response."""
 
         with provider_call(
@@ -111,13 +134,89 @@ class PBPTotalsAdapter:
             cache_status=CACHE_DISABLED,
         ) as tracker:
             response = self.session.get(
-                self.base_url,
+                url or self.base_url,
                 params=params,
                 timeout=(self.connect_timeout, self.read_timeout),
             )
             tracker.status_code = response.status_code
             response.raise_for_status()
             yield response
+
+    def fetch_team_game_ids(
+        self,
+        team_id: int,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[str, ...]:
+        """Return exact team membership from PBP's independent game-log seam.
+
+        ``get-totals`` proves only aggregate counts.  The game-log endpoint is
+        queried separately with the team identity and bounded dates so the
+        assist surface carries PBP-selected game IDs rather than IDs copied
+        from NBA Stats or the Event Catalog.
+        """
+
+        if not isinstance(team_id, int) or isinstance(team_id, bool) or team_id <= 0:
+            raise ValueError("team_id must be a positive integer")
+        params = {
+            "Season": season,
+            "SeasonType": (
+                PBP_REGULAR_SEASON
+                if season_type in {"Regular Season", PBP_REGULAR_SEASON}
+                else season_type
+            ),
+            "EntityType": "Team",
+            "EntityId": str(team_id),
+        }
+        if date_from is not None:
+            params["FromDate"] = date_from
+        if date_to is not None:
+            params["ToDate"] = date_to
+        with self._request(
+            "team_game_log",
+            params,
+            url=PBP_GAME_LOGS_URL,
+        ) as response:
+            try:
+                payload = response.json()
+            except ValueError as error:
+                raise ProviderResponseError(
+                    "PBP Stats returned a response that was not valid JSON."
+                ) from error
+        rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise ProviderResponseError(
+                "PBP Stats team game-log payload has an invalid row list."
+            )
+        lower_bound = _date_key(date_from) if date_from is not None else None
+        upper_bound = _date_key(date_to) if date_to is not None else None
+        game_ids: list[str] = []
+        for row in rows:
+            game_id = row.get("GameId", row.get("GAME_ID"))
+            played_on = row.get("Date", row.get("GAME_DATE"))
+            if game_id is None or played_on is None:
+                raise ProviderResponseError(
+                    "PBP Stats team game-log payload is missing game identity."
+                )
+            game_id = str(game_id).strip()
+            if not game_id:
+                raise ProviderResponseError(
+                    "PBP Stats team game-log payload has an empty game ID."
+                )
+            day = _date_key(played_on)
+            if lower_bound is not None and day < lower_bound:
+                continue
+            if upper_bound is not None and day > upper_bound:
+                continue
+            game_ids.append(game_id)
+        if len(game_ids) != len(set(game_ids)):
+            raise ProviderResponseError(
+                "PBP Stats team game-log payload contains duplicate game IDs."
+            )
+        return tuple(sorted(game_ids))
 
     def fetch_totals_frame(
         self,
@@ -280,6 +379,7 @@ class PBPTotalsAdapter:
 
 __all__ = [
     "PBP_TOTALS_URL",
+    "PBP_GAME_LOGS_URL",
     "PBP_REGULAR_SEASON",
     "PBP_PLAYER_REQUIRED_COLUMNS",
     "PBP_OPPONENT_REQUIRED_COLUMNS",

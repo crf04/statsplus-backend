@@ -75,7 +75,11 @@ from app.services.game_logs_source import StoredGameLogsSource
 from app.services.ledger_matchup_materialization import (
     LedgerMatchupMaterializationService,
 )
-from app.services.ledger_derivations import ASSIST_DERIVED_METRICS, TEAM_METRICS
+from app.services.ledger_derivations import (
+    ASSIST_DERIVED_METRICS,
+    TEAM_METRICS,
+    competition_ranks,
+)
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.matchup_parity import MatchupParityRunner, StoredLegacyMatchupSource
 from app.services.player_archetype_repository import PlayerArchetypeRepository
@@ -192,6 +196,18 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble"):
         ),
         retrieved_at=NOW,
     )
+
+
+def _source_independent_matchup_contract(response):
+    """Compare public matchup facts while retaining provenance separately."""
+
+    payload = json.loads(response.data)
+    payload.pop("provenance", None)
+    payload.pop("coverage", None)
+    freshness = payload.get("freshness")
+    if isinstance(freshness, dict):
+        freshness.pop("team_matchups", None)
+    return payload
 
 
 class _NoProvider:
@@ -1369,6 +1385,10 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         int(row["team_id"]): float(row["allowed"])
         for row in json.loads(TEAM_FIXTURE.read_text(encoding="utf-8"))
     }
+    route_ranks = {
+        metric: competition_ranks(route_values, descending=False)
+        for metric in (*TEAM_METRICS, *ASSIST_DERIVED_METRICS)
+    }
     parity_repository = TeamMatchupRepository(engine)
     for window in ("season", "l15"):
         scope = TeamMatchupSnapshotScope(
@@ -1400,7 +1420,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                 "per48": {metric: route_values[team_id] for metric in metrics},
                 "league_average": {metric: 1.0 for metric in metrics},
                 "population_sigma": {metric: 1.0 for metric in metrics},
-                "competition_rank": {metric: 1 for metric in metrics},
+                "competition_rank": {
+                    metric: route_ranks[metric][team_id] for metric in metrics
+                },
                 "counts": {metric: route_values[team_id] for metric in metrics},
                 "team_minutes": 48.0,
             }
@@ -1682,6 +1704,16 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     )
     assert pre_matchup_response.status_code == 200
     assert pre_player_game_log_response.status_code == 200
+    pre_matchup = pre_matchup_response.get_json()
+    for stream_key in (
+        *matchup_publications["season"].keys(),
+        *matchup_publications["l15"].keys(),
+    ):
+        provenance = pre_matchup["provenance"][stream_key]
+        assert provenance["source"] == "legacy_database"
+        assert provenance["legacy_fallback_allowed"] is True
+        assert provenance["publication_id"] is None
+        assert provenance["retrieved_at"] is None
 
     # The four ledger-owned Season/L15 surfaces are activated as one governed
     # cohort.  This is deliberately between two real HTTP reads; repeated
@@ -1755,7 +1787,9 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert slate_response.status_code == 200
     assert matchup_response.status_code == 200
     assert repeated_matchup_response.status_code == 200
-    assert matchup_response.data == pre_matchup_response.data
+    assert _source_independent_matchup_contract(matchup_response) == (
+        _source_independent_matchup_contract(pre_matchup_response)
+    )
     assert repeated_matchup_response.data == matchup_bytes
     assert selection_response.status_code == 200
     assert player_game_log_response.status_code == 200
@@ -1763,6 +1797,25 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert repeated_player_game_log_response.status_code == 200
     assert repeated_player_game_log_response.data == player_game_log_response.data
     matchup = matchup_response.get_json()
+    for stream_key in (
+        *matchup_publications["season"].keys(),
+        *matchup_publications["l15"].keys(),
+    ):
+        provenance = matchup["provenance"][stream_key]
+        assert provenance["source"] == "database"
+        assert provenance["legacy_fallback_allowed"] is False
+        assert provenance["publication_id"] == {
+            **matchup_publications["season"],
+            **matchup_publications["l15"],
+        }[stream_key]
+        assert provenance["manifest_id"] == matchup_governance.manifest_id
+        assert provenance["event_catalog_publication_id"] == (
+            matchup_governance.event_catalog_publication_id
+        )
+        assert provenance["event_catalog_checksum"] == (
+            matchup_governance.event_catalog_checksum
+        )
+        assert provenance["retrieved_at"] is not None
     assert matchup["provenance"]["player_game_logs"]["status"] == "rollback"
     assert matchup["provenance"]["player_game_logs"]["publication_id"] == rollback.resource.publication_id
     assert matchup["provenance"]["synergy_play_types"]["publication_id"] == diet_candidate
