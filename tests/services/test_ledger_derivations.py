@@ -34,7 +34,11 @@ from app.models.collection_control import (
     CollectionObservation,
     PublicationVersion,
 )
-from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
+from app.models.canonical_game_ledger import (
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+    LedgerPublication,
+)
 from tests.services.test_canonical_game_ledger import _game
 
 
@@ -347,6 +351,14 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
                 "payload_bytes": 2,
                 "retrieved_at": game.retrieved_at,
                 "accepted_at": game.retrieved_at,
+            }
+            for game in games
+        ])
+        connection.execute(LedgerObservationEvidence.__table__.insert(), [
+            {
+                "observation_id": game.source_observation_id,
+                "game_id": game.game_id,
+                "created_at": game.retrieved_at,
             }
             for game in games
         ])

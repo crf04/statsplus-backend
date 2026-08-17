@@ -864,11 +864,19 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         "mixed_governance_type_error",
         "mixed_governance_runtime_error", "mixed_governance_db_error",
     }:
-        assert runtime.compose_queued("2025-26") == 0
+        expected_failure = {
+            "projection_failure": RuntimeError,
+            "mixed_projection_failure": RuntimeError,
+            "mixed_governance_type_error": TypeError,
+            "mixed_governance_runtime_error": RuntimeError,
+            "mixed_governance_db_error": OperationalError,
+        }[evidence_mode]
+        with pytest.raises(expected_failure):
+            runtime.compose_queued("2025-26")
         with control_db.connect() as connection:
             assert {
                 row.status for row in connection.execute(select(CompositionJob))
-            } == {"queued"}
+            } == {"failed"}
             assert connection.execute(select(PublicationVersion)).all() == []
             assert connection.execute(
                 select(PublicationPointer.__table__)
@@ -876,6 +884,10 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         failed_snapshot = matchup_repository.get_snapshot(preserved_scope)
         assert {fact.base for fact in failed_snapshot.facts} == {"traditional"}
         publications.l15_expectation_resolver = original_resolver
+        with control_db.begin() as connection:
+            connection.execute(update(CompositionJob).where(
+                CompositionJob.status == "failed",
+            ).values(status="queued", last_error=None))
     composed = runtime.compose_queued("2025-26")
     with control_db.connect() as connection:
         composition_diagnostics = [
@@ -1028,7 +1040,8 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                     status="queued", last_error=None,
                 ))
             matchup_materialization.fail_once = True
-            assert runtime.compose_queued("2025-26") == 0
+            with pytest.raises(RuntimeError, match="injected matchup projection failure"):
+                runtime.compose_queued("2025-26")
             assert matchup_repository.get_snapshot(
                 TeamMatchupSnapshotScope("2025-26", cutoff.date())
             ) == season_snapshot
@@ -1041,7 +1054,11 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 assert {
                     row.status
                     for row in connection.execute(select(CompositionJob))
-                } == {"queued"}
+                } == {"failed"}
+            with control_db.begin() as connection:
+                connection.execute(update(CompositionJob).values(
+                    status="queued", last_error=None,
+                ))
             assert runtime.compose_queued("2025-26") == 5
             with control_db.connect() as connection:
                 versions_by_stream = {}
@@ -1049,7 +1066,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                     versions_by_stream[version.stream_key] = (
                         versions_by_stream.get(version.stream_key, 0) + 1
                     )
-                assert set(versions_by_stream.values()) == {2}
+                # Retrying after the failed projection reuses each unchanged
+                # publication rather than minting a duplicate generation.
+                assert set(versions_by_stream.values()) == {1}
                 assert {
                     row.status
                     for row in connection.execute(select(CompositionJob))
@@ -1073,12 +1092,19 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                     nonlocal advance_started, concurrent
                     if not advance_started:
                         advance_started = True
+                        derived_payload = original_compose_payload(*args, **kwargs)
                         with advancing_session.begin():
-                            concurrent = publications.compose_from_observations(
-                                stream_key, season="2025-26", cutoff=cutoff,
+                            concurrent = publications.compose(
+                                stream_key,
+                                season="2025-26",
+                                cutoff=cutoff,
+                                payload=derived_payload,
+                                reason="concurrent generation",
+                                expected_fence=initial_fence,
                                 manifest_id=manifest.manifest_id,
                                 session=advancing_session,
                             )
+                        return derived_payload
                     return original_compose_payload(*args, **kwargs)
 
                 monkeypatch.setattr(
