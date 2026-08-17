@@ -22,6 +22,7 @@ from app.services.ledger_runtime import (
     LedgerRuntime,
 )
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
+from app.collector.normalizers import normalize_schedule_response
 from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
 from app.services.team_matchup_repository import (
@@ -310,6 +311,61 @@ def test_immutable_governance_excludes_false_completion_and_postponed_final(
     governed = frozenset().union(*game_ids.values())
     assert "scheduled-string-false" not in governed
     assert "final-but-postponed" not in governed
+
+
+def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'numeric-final.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    normalized = normalize_schedule_response(
+        [{
+            "gameId": "0022500001",
+            "homeTeam_teamId": 1,
+            "awayTeam_teamId": 2,
+            "gameDateTimeUTC": "2025-11-02T23:30:00-05:00",
+            "gameStatus": 3,
+        }],
+        season="2025-26",
+        cutoff=cutoff,
+    )
+    assert normalized.payload["events"][0]["status"] == "Final"
+    encoded = json.dumps(
+        normalized.payload, separators=(",", ":"), sort_keys=True
+    )
+    checksum = hashlib.sha256(encoded.encode()).hexdigest()
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="numeric-final-catalog",
+            season="2025-26",
+            catalog_type="event",
+            cutoff=cutoff,
+            version="event-v1",
+            checksum=checksum,
+            payload=encoded,
+            complete=True,
+            published_at=cutoff,
+            expires_at=None,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="numeric-final-manifest",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="numeric-final-manifest",
+            event_catalog_publication_id="numeric-final-catalog",
+            event_catalog_checksum=checksum,
+            status="active",
+            created_at=cutoff,
+        ))
+    game_ids = ActiveManifestLedgerGovernanceReader(engine).resolve_team_game_ids(
+        "2025-26",
+        cutoff,
+        window="season",
+        manifest_id="numeric-final-manifest",
+    )
+    assert frozenset().union(*game_ids.values()) == {"0022500001"}
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import gzip
+import hashlib
 import json
 
 import pytest
@@ -350,15 +351,16 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             "blocks_per36": 1.0, "personal_fouls_per36": 1.0,
         }]
     })
+    valid_checksum = hashlib.sha256(valid_per36.encode()).hexdigest()
     with control_db.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="parity-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=1, status="candidate",
-            checksum="a" * 64, payload=valid_per36, created_at=now, fence=0,
+            checksum=valid_checksum, payload=valid_per36, created_at=now, fence=0,
         ))
         connection.execute(LedgerParityArtifact.__table__.insert().values(
             artifact_id="pending-parity", publication_id="parity-candidate",
-            payload_checksum="a" * 64, stream_key="player_per36",
+            payload_checksum=valid_checksum, stream_key="player_per36",
             season="2025-26", cutoff=now, status="pending_adjudication",
             report="{}", created_at=now,
         ))
@@ -385,11 +387,13 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
         candidate_publication_id="parity-candidate",
     )
     assert approved.enabled
+    corrected_payload = '{"corrected":true}'
     with control_db.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="corrected-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=2, status="candidate",
-            checksum="b" * 64, payload="{\"corrected\":true}", created_at=now, fence=0,
+            checksum=hashlib.sha256(corrected_payload.encode()).hexdigest(),
+            payload=corrected_payload, created_at=now, fence=0,
         ))
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
@@ -1424,6 +1428,61 @@ def test_athlete_catalog_uses_last_good_event_when_newer_event_attempt_is_incomp
         athlete_request.request_id, _catalog_payload("athlete"), version="athlete-complete"
     )
     assert athlete.complete is True
+
+
+def test_identical_nonfinal_and_postponed_catalog_republish_is_idempotent(
+    control_db,
+):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    payload = _catalog_payload("event")
+    payload["events"][0]["status"] = "Finished"
+    payload["events"][1].update(
+        status="Final",
+        postponed_status="postponed",
+        postponement_evidence={"reason": "weather"},
+    )
+    first_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        first_request.request_id, payload, version="event-first"
+    ).complete
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(
+        athlete_request.request_id,
+        _catalog_payload("athlete"),
+        version="athlete",
+    )
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["canonical_game_ledger"],
+        collect_before=now + timedelta(hours=1),
+    )
+    cycle = control.open_cycle(manifest.manifest_id)
+
+    repeat_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        repeat_request.request_id, payload, version="event-repeat"
+    ).complete
+    with control_db.connect() as connection:
+        assert connection.execute(
+            select(CollectionManifest.status).where(
+                CollectionManifest.manifest_id == manifest.manifest_id
+            )
+        ).scalar_one() == "active"
+        assert connection.execute(
+            select(CollectionCycle.status).where(
+                CollectionCycle.cycle_id == cycle.cycle_id
+            )
+        ).scalar_one() == "collecting"
 
 
 def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(control_db):

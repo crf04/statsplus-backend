@@ -308,7 +308,9 @@ def test_historical_rehearsal_runs_seven_dates_without_pointer_mutation(tmp_path
                 publication_id=f"rehearsal-{cutoff.isoformat()}",
                 stream_key="player_game_logs",
                 season="2025-26",
-                cutoff=datetime.combine(cutoff, datetime.min.time(), tzinfo=UTC),
+                cutoff=datetime.combine(
+                    cutoff, datetime.min.time(), tzinfo=UTC
+                ) + timedelta(hours=12),
                 version=1,
                 status="candidate",
                 checksum=hashlib.sha256(player_log_payload.encode()).hexdigest(),
@@ -320,7 +322,9 @@ def test_historical_rehearsal_runs_seven_dates_without_pointer_mutation(tmp_path
             publication_id="rehearsal-synergy",
             stream_key="synergy_play_types",
             season="2025-26",
-            cutoff=datetime.combine(dates[-1], datetime.min.time(), tzinfo=UTC),
+            cutoff=datetime.combine(
+                dates[-1], datetime.min.time(), tzinfo=UTC
+            ) + timedelta(hours=12),
             version=1,
             status="candidate",
             checksum=hashlib.sha256(synergy_payload.encode()).hexdigest(),

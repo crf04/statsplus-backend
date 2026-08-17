@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 
 from sqlalchemy import select
 
@@ -20,9 +21,18 @@ class PublicationAuthority:
 
 
 def _manifest_authority(session, manifest: CollectionManifest) -> PublicationAuthority:
+    try:
+        scopes = set(json.loads(manifest.scopes))
+        accepted_versions = {
+            int(value) for value in json.loads(manifest.accepted_versions)
+        }
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise ValueError("publication authority is unavailable") from None
     if (
         not manifest.event_catalog_publication_id
         or not manifest.event_catalog_checksum
+        or "canonical_game_ledger" not in scopes
+        or 1 not in accepted_versions
     ):
         raise ValueError("publication authority is unavailable")
     catalog = session.get(

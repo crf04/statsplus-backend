@@ -16,6 +16,7 @@ from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.canonical_game_ledger import raw_rows_from_facts
 from app.services.database_first_activation import (
+    DatabaseFirstActivationService,
     DatabaseFirstPublicationReader,
     PublicationRead,
     PublicationReadSnapshot,
@@ -534,6 +535,50 @@ def test_operator_l15_activation_accepts_exact_governed_unique_ids(tmp_path):
             )
         ).scalar_one_or_none()
     assert active_id is not None
+
+
+def test_governed_activation_never_trusts_caller_expected_game_ids(tmp_path):
+    engine, operations, stream_key, candidate_id, cutoff = (
+        _operator_activation_fixture(tmp_path)
+    )
+    operations.publication_service.l15_expectation_resolver = None
+    with engine.connect() as connection:
+        payload = json.loads(connection.execute(
+            select(PublicationVersion.payload).where(
+                PublicationVersion.publication_id == candidate_id
+            )
+        ).scalar_one())
+    self_asserted = {
+        int(row["team_id"]): frozenset(row["game_ids"])
+        for row in payload["rows"]
+    }
+
+    with pytest.raises(
+        ControlPlaneError, match="publication_governance_unavailable"
+    ):
+        operations.publication_service.activate_stream(
+            stream_key,
+            actor="operator",
+            reason="reject self asserted governance",
+            season="2025-26",
+            cutoff=cutoff,
+            candidate_publication_id=candidate_id,
+            expected_game_ids_by_team=self_asserted,
+        )
+
+    facade = DatabaseFirstActivationService(engine)
+    with pytest.raises(
+        ControlPlaneError, match="publication_governance_unavailable"
+    ):
+        facade.activate(
+            stream_key,
+            actor="operator",
+            reason="reject missing production resolver",
+            season="2025-26",
+            cutoff=cutoff,
+            candidate_publication_id=candidate_id,
+            expected_game_ids_by_team=self_asserted,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2137,7 +2182,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
     )._load_isolated_publications(
         {l15_stream: composed.publication_id},
         season="2025-26",
-        cutoff=AS_OF,
+        cutoff=date(2025, 10, 14),
     )
     assert rehearsal_publications[l15_stream].publication_id == (
         composed.publication_id
@@ -2351,7 +2396,7 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
         )._load_isolated_publications(
             {stream_key: candidate_id},
             season="2025-26",
-            cutoff=AS_OF,
+            cutoff=date(2025, 10, 14),
         )
 
     with engine.begin() as connection:
@@ -2430,7 +2475,7 @@ def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
         )._load_isolated_publications(
             {stream_key: current.publication_id},
             season="2025-26",
-            cutoff=AS_OF,
+            cutoff=date(2025, 10, 14),
         )
 
     with engine.begin() as connection:
@@ -2454,6 +2499,92 @@ def test_rehearsal_and_rollback_require_exact_publication_authority(tmp_path):
                 PublicationPointer.stream_key == stream_key
             )
         ).scalar_one() == current.publication_id
+
+
+@pytest.mark.parametrize(
+    "manifest_values",
+    (
+        {"scopes": '["synergy"]'},
+        {"accepted_versions": "[2]"},
+    ),
+)
+def test_publication_authority_requires_ledger_scope_and_schema_version(
+    tmp_path,
+    manifest_values,
+):
+    engine = _engine(tmp_path)
+    stream_key = "exact_shot_zones_opponent_season"
+    PublicationService(engine).register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=True,
+    )
+    publication_id = f"publication-{stream_key}"
+    with engine.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.update().where(
+                CollectionManifest.manifest_id == DEFAULT_MANIFEST_ID
+            ).values(**manifest_values)
+        )
+
+    read = DatabaseFirstPublicationReader(engine).read(
+        stream_key, season="2025-26"
+    )
+    assert read.status == "unavailable"
+    assert read.unavailable_reason == "publication_authority_invalid"
+    with pytest.raises(ValueError, match="rehearsal publication authority mismatch"):
+        HistoricalRehearsalRunner(
+            engine, environment="unit"
+        )._load_isolated_publications(
+            {stream_key: publication_id},
+            season="2025-26",
+            cutoff=date(2025, 10, 14),
+        )
+
+    capability = create_publication_write_capability(engine)
+    with engine.connect() as connection:
+        version = connection.execute(
+            PublicationVersion.__table__.select().where(
+                PublicationVersion.publication_id == publication_id
+            )
+        ).mappings().one()
+        with pytest.raises(ValueError, match="publication_write_context_invalid"):
+            capability._verify_authority_binding(connection, version)
+
+
+def test_rehearsal_date_uses_eastern_slate_day_for_utc_evening(tmp_path):
+    engine = _engine(tmp_path)
+    stream_key = "rehearsal-date-probe"
+    cutoff = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
+    publications = PublicationService(engine)
+    publications.register_stream(
+        stream_key,
+        provider="derived",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=True,
+    )
+    publication = publications.compose(
+        stream_key,
+        season="2025-26",
+        cutoff=cutoff,
+        payload={"value": 1},
+    )
+
+    loaded = HistoricalRehearsalRunner(
+        engine, environment="unit"
+    )._load_isolated_publications(
+        {stream_key: publication.publication_id},
+        season="2025-26",
+        cutoff=date(2025, 11, 1),
+    )
+    assert loaded[stream_key].publication_id == publication.publication_id
 
 
 def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):

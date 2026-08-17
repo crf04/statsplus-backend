@@ -1074,6 +1074,14 @@ immutable UTC cutoffs to their DST-aware Eastern slate date before ledger
 selection and matchup materialization. Governed game sets use the shared NBA
 final/non-postponed semantics, including strict boolean completion evidence
 and structured postponement fields.
+Provider numeric NBA status codes are normalized to canonical status text, and
+stored-versus-incoming catalog comparisons use that same strict predicate so
+identical non-final or postponed snapshots remain idempotent. Publication
+authority additionally requires the manifest's canonical-ledger scope and
+schema version 1. Governed activation always resolves the exact game set from
+that bound authority; caller-supplied game maps cannot replace a missing
+resolver. Collector request bounds and rehearsal dates use the same Eastern
+slate-day conversion as materialization.
 PBP responses
 remain staged until complete-game and identity validation succeeds; acceptance,
 ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime

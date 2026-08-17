@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.slate_time import slate_date_for_instant
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import PublicationPointer, PublicationVersion
 from app.services.publication_authority import verify_publication_authority
@@ -317,7 +318,10 @@ class HistoricalRehearsalRunner:
             row = by_id[publication_id]
             if row.stream_key != stream_key:
                 raise ValueError("rehearsal publication stream does not match its key")
-            if row.season != season or row.cutoff.date() != cutoff:
+            if (
+                row.season != season
+                or slate_date_for_instant(row.cutoff) != cutoff
+            ):
                 raise ValueError("rehearsal publication season/cutoff mismatch")
             if row.status not in {"candidate", "active", "rollback"}:
                 raise ValueError("rehearsal publication is not retained evidence")

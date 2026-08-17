@@ -232,6 +232,16 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     assert {item["parameters"]["date_to"] for item in opponent} == {NOW.date().isoformat()}
     assert all(item["parameters"]["date_from"] is None for item in opponent)
 
+    utc_evening = datetime(2025, 11, 2, 3, 30, tzinfo=timezone.utc)
+    prior_slate = _collector_scope_descriptors(
+        {"exact_shot_zones"}, utc_evening
+    )
+    assert {
+        item["parameters"]["date_to"]
+        for item in prior_slate
+        if item["parameters"].get("subject") == "opponent"
+    } == {"2025-11-01"}
+
 
 def test_windows_task_lifecycle_requires_explicit_named_promotion():
     root = Path(__file__).resolve().parents[1] / "scripts"

@@ -257,6 +257,11 @@ def normalize_schedule_response(
         status_key = status.casefold()
         if status_key not in {"1", "2", "3", "scheduled", "final", "finished", "completed", "closed", "live", "in progress", "postponed", "cancelled", "canceled", "game over", "game finished"}:
             raise ProviderContractError("provider_schema_changed")
+        status = {
+            "1": "Scheduled",
+            "2": "Live",
+            "3": "Final",
+        }.get(status_key, status)
         normalized.append({
             "nba_game_id": game_id,
             "home_team_id": home,

@@ -146,6 +146,19 @@ class PublicationWriteCapability:
                 CatalogPublication.publication_id == catalog_id
             )
         ).mappings().one_or_none()
+        try:
+            manifest_scopes = set(json.loads(manifest["scopes"]))
+            accepted_versions = {
+                int(value)
+                for value in json.loads(manifest["accepted_versions"])
+            }
+        except (
+            AttributeError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            raise ValueError("publication_write_context_invalid") from None
         if (
             manifest is None
             or catalog is None
@@ -153,6 +166,8 @@ class PublicationWriteCapability:
             or assume_utc(manifest["cutoff"]) != assume_utc(version["cutoff"])
             or manifest["event_catalog_publication_id"] != catalog_id
             or manifest["event_catalog_checksum"] != catalog_checksum
+            or "canonical_game_ledger" not in manifest_scopes
+            or 1 not in accepted_versions
             or catalog["season"] != version["season"]
             or catalog["catalog_type"] != "event"
             or assume_utc(catalog["cutoff"]) != assume_utc(version["cutoff"])

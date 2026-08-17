@@ -75,6 +75,7 @@ def is_final_event(event: Mapping[str, object]) -> bool:
     status = event.get("status_text", event.get("status", ""))
     return bool(
         event.get("status_code") in {NBAGameStatus.FINAL, "3"}
+        or str(status).strip() == "3"
         or str(status).casefold().startswith("final")
     )
 

@@ -34,7 +34,8 @@ from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
-from app.domain.nba_events import is_completed_non_postponed_event
+from app.domain.nba_events import is_completed_non_postponed_event, is_final_event
+from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     SHOT_TYPE_DISPLAY_TO_STORED,
@@ -224,7 +225,7 @@ def _collector_scope_descriptors(scopes: Iterable[str], cutoff: datetime) -> lis
         }} for category in SHOOTING_TYPES)
     if zones:
         descriptors.append({"scope": zones, "parameters": {"window": "season", "subject": "player"}})
-    date_to = _aware(cutoff).date().isoformat()
+    date_to = slate_date_for_instant(_aware(cutoff)).isoformat()
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
             governed = {"window": window, "subject": "opponent", "team_id": team_id,
@@ -1102,6 +1103,8 @@ class CollectionControlService(_SessionService):
             status_code = int(status_code) if status_code not in (None, "") else None
         except (TypeError, ValueError):
             status_code = None
+        if is_final_event({"status": status, "status_code": status_code}):
+            status = "Final"
         existing = session.get(EventCatalogEntry, game_id)
         values = {
             "season": season, "home_team_id": home_id,
@@ -1208,8 +1211,20 @@ class CollectionControlService(_SessionService):
                 EventCatalogEntry.season == request.season,
                 EventCatalogEntry.classification == "Regular Season",
             )):
-                status = str(event.status_text or "").strip().lower()
-                if status in {"final", "finished", "completed", "closed", "game over", "3"} or status.startswith("final"):
+                postponement_evidence = event.postponement_evidence
+                if isinstance(postponement_evidence, str):
+                    try:
+                        postponement_evidence = json.loads(
+                            postponement_evidence
+                        )
+                    except json.JSONDecodeError:
+                        pass
+                if is_completed_non_postponed_event({
+                    "status_text": event.status_text,
+                    "status_code": event.status_code,
+                    "postponed_status": event.postponed_status,
+                    "postponement_evidence": postponement_evidence,
+                }):
                     previous_completed.add(event.nba_game_id)
         for row in rows:
             if not isinstance(row, Mapping):
@@ -2478,7 +2493,9 @@ class PublicationService(_SessionService):
             if require_candidate and not candidate_publication_id:
                 raise ControlPlaneError("publication_candidate_required")
             expected_game_ids_by_team = (
-                expected_game_ids_by_team or expected_l15_game_ids
+                None
+                if _requires_team_window_expectation(stream_key)
+                else expected_game_ids_by_team or expected_l15_game_ids
             )
             candidate = None
             if candidate_publication_id is not None:
@@ -2515,28 +2532,27 @@ class PublicationService(_SessionService):
                         authority = verify_publication_authority(
                             session, candidate
                         )
-                        if self.l15_expectation_resolver is not None:
-                            expected_game_ids_by_team = (
-                                resolve_governed_team_game_ids(
-                                    self.l15_expectation_resolver,
-                                    candidate.season,
-                                    _aware(candidate.cutoff),
-                                    window=(
-                                        "l15"
-                                        if stream_key.endswith("_l15")
-                                        else "season"
-                                    ),
-                                    manifest_id=authority.manifest_id,
-                                    event_catalog_publication_id=(
-                                        authority.event_catalog_publication_id
-                                    ),
-                                    event_catalog_checksum=(
-                                        authority.event_catalog_checksum
-                                    ),
-                                )
-                            )
-                        elif expected_game_ids_by_team is None:
+                        if self.l15_expectation_resolver is None:
                             raise ValueError("publication governance unavailable")
+                        expected_game_ids_by_team = (
+                            resolve_governed_team_game_ids(
+                                self.l15_expectation_resolver,
+                                candidate.season,
+                                _aware(candidate.cutoff),
+                                window=(
+                                    "l15"
+                                    if stream_key.endswith("_l15")
+                                    else "season"
+                                ),
+                                manifest_id=authority.manifest_id,
+                                event_catalog_publication_id=(
+                                    authority.event_catalog_publication_id
+                                ),
+                                event_catalog_checksum=(
+                                    authority.event_catalog_checksum
+                                ),
+                            )
+                        )
                     except Exception as error:
                         raise ControlPlaneError(
                             "publication_governance_unavailable"
