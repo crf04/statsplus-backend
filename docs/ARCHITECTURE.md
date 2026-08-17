@@ -1826,51 +1826,65 @@ time provider-free.
 `app.services.matchup_parity` owns the bounded dual-run that proves the legacy
 provider-aggregate writer and the ledger materializer selected the same
 governed teams and games and produced the same contracted facts before the
-legacy writer is fenced. `compare_matchup_materializations(legacy_facts,
-legacy_observations, ledger_facts, ledger_observations, *, season, window,
-as_of, legacy_as_of, expected_team_ids, legacy_game_ids_by_team, tolerance)`
-returns an immutable `MatchupParityReport`. Both materializers populate the
-same disposable `team_matchup_facts` read model — legacy facts carry provider
-`nba_stats` or `pbp_stats` and no game-id lineage, while ledger facts carry
-provider `ledger` plus their exact per-team game IDs and ledger checksum — so
-one comparator compares the two stored generations at a shared season and
-Eastern as-of date. The comparison is bounded to the two ledger-owned non-shot
-surfaces (`traditional`, `assist_locations`); NBA-owned shot zones, grouped
-shot types, and Synergy play types are composed from governed publications and
-have no legacy-vs-ledger dual-run.
+legacy writer is fenced. The two materializers write the same
+`team_matchup_facts` surface rows, so their outputs never coexist in one
+stored snapshot and a fact's identity has no provider dimension; each side
+must be produced into its own isolated store or captured in memory and then
+handed to the comparator as an independent `MatchupMaterialization` (season,
+window, exact aware cutoff, facts, observations, and per-team game sets).
+`compare_matchup_materializations(legacy, ledger, *, surface,
+expected_team_ids, expected_game_ids_by_team, tolerance)` compares one surface
+per call — `traditional` or `assist_locations`, the two ledger-owned non-shot
+surfaces — and returns an immutable `MatchupParityReport`. NBA-owned shot
+zones, grouped shot types, and Synergy play types are composed from governed
+publications and have no legacy-vs-ledger dual-run.
+
+`MatchupParityRunner` is the bounded dual-run seam: it resolves the governed
+30-team roster and exact Season/L15 game sets from the injected governance
+reader — the checksummed immutable Event Catalog publication bound to the
+active manifest, never the mutable stored event table — and compares the two
+sides without reading or advancing a `PublicationPointer`. Each side's exact
+cutoff must be the same aware immutable manifest cutoff; the runner rejects
+mismatched cutoffs, and the persisted artifact is bound to that exact cutoff.
+`LedgerParityArtifactRepository.record_matchup_parity` rejects a `stream_key`
+that does not name the report's own surface and window and a cutoff that is
+not aware and equal to the report's, so an L15 artifact can never authorize a
+Season stream. The runner records one artifact per ledger-owned stream
+(`traditional_opponent_season`/`_l15`, `assist_locations_season`/`_l15`) bound
+to its exact Publication and payload checksum. Both `assist_locations_*`
+streams are parity-required for activation, exactly like the traditional and
+per-36 streams.
 
 The comparison rules match the parent's parity contract exactly. Team identity
 sets must be exactly equal and League Complete (the governed 30-team roster).
-Every team's exact Season/L15 game set must match between the legacy resolver
-(derived from the governed Event Catalog, as the legacy writer derives it) and
-the ledger's persisted `game_ids`. Integer counts — the four traditional
-opponent counts and the six assist surfaces — compare exactly; the single
-documented tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-6`) applies only to
-floating denominators (effective team minutes, with seconds normalized to
-minutes) and to the per-48 rates recomputed from counts and denominators.
-Deterministic competition ranks (`1, 1, 3` ties) are re-derived from each
-side's per-48 values and compared, so a sub-tolerance near-tie flip that would
-change a ranking still fails. Per-surface availability and the two cutoffs are
-also compared. Every produced difference carries exactly one classification
-from the closed vocabulary (`league_incomplete`, `missing_legacy_team`,
-`missing_ledger_team`, `game_set_mismatch`, `integer_count_difference`,
-`non_integer_count`, `denominator_tolerance_exceeded`,
-`derived_rate_difference`, `ranking_difference`, `availability_difference`,
-`cutoff_mismatch`, `missing_surface`); any difference makes the report
+Every team's exact Season/L15 game set must match the governed authority and
+each other, proven by byte-identical game-set checksums; a missing surface or
+a single missing metric fails. Integer counts — the four traditional opponent
+counts and the six assist surfaces — compare exactly; the single documented
+tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-6`) applies only to floating
+denominators (effective team minutes, with seconds normalized to minutes) and
+to the per-48 rates recomputed from counts and denominators. Deterministic
+competition ranks (`1, 1, 3` ties) are re-derived per metric from each side's
+per-48 values and compared, so a sub-tolerance near-tie flip that would change
+a ranking still fails. Independent per-surface availability is compared, and
+an unavailable or missing observation on either side is a real difference.
+Every produced difference carries exactly one classification from the closed
+vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
+`game_set_mismatch`, `integer_count_difference`, `non_integer_count`,
+`denominator_tolerance_exceeded`, `derived_rate_difference`,
+`ranking_difference`, `availability_difference`, `cutoff_mismatch`,
+`missing_surface`, `missing_metric`); any difference makes the report
 `adjudication_required`, so an unexplained required difference never reads as
 exact.
 
-`LedgerParityArtifactRepository.record_matchup_parity` persists the report into
-the existing `ledger_parity_artifacts` evidence table (migration 025/027) bound
-to the exact inactive ledger Publication and payload checksum, and the same
-`adjudicate` flow the semantic player-log/per-36 reports use approves or
-rejects it with an actor and reason. `scripts/matchup_parity.py compare`
-reads both stored snapshots, re-derives the legacy game sets from the stored
-Event Catalog, runs the comparator, and optionally records the artifact;
-`scripts/matchup_parity.py adjudicate` records the operator decision. The
-report is the evidence backend #87 consumes for database-first activation.
-See [MATCHUP_PARITY_OPERATIONS.md](MATCHUP_PARITY_OPERATIONS.md) for the
-operator runbook.
+`scripts/matchup_parity.py compare` reads two independently produced
+materialization JSON documents plus the exact aware cutoff, runs the
+`MatchupParityRunner` against the immutable authority, and records the
+per-stream artifacts; `scripts/matchup_parity.py adjudicate` records the
+operator decision. The reports are the evidence backend #87 consumes for
+database-first activation. See
+[MATCHUP_PARITY_OPERATIONS.md](MATCHUP_PARITY_OPERATIONS.md) for the operator
+runbook.
 
 Fencing is per stream and per surface. The legacy
 `TeamMatchupRefreshService` writes through
