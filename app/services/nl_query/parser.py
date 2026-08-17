@@ -1054,6 +1054,26 @@ class BaseQueryParser:
                     component_type="player",
                     extraction_method="spacy"
                 ))
+
+        # The exact database-name fallback can resolve a player that the
+        # initialized spaCy ruler did not recognize.  Count that exact text as
+        # covered too; otherwise a fully deterministic query is incorrectly
+        # scored below the LLM threshold solely because the two extraction
+        # paths report coverage differently.
+        if components.player_name:
+            player_start = query.lower().find(components.player_name.lower())
+            player_end = player_start + len(components.player_name)
+            if player_start >= 0 and any(
+                position not in coverage.covered_positions
+                for position in range(player_start, player_end)
+            ):
+                coverage.add_component(ParsedComponent(
+                    value=components.player_name,
+                    start_pos=player_start,
+                    end_pos=player_end,
+                    component_type="player",
+                    extraction_method="exact_database_name",
+                ))
         
         # Extract other components with position tracking
         components.team_name = self._extract_team_name(query, doc)
