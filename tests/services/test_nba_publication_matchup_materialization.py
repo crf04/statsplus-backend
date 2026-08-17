@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
@@ -25,6 +26,10 @@ from app.services.team_matchup_repository import (
     TeamMatchupObservation,
     TeamMatchupSnapshotScope,
 )
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAMS,
+    NBA_PUBLICATION_TAXONOMY,
+)
 from tests.services.test_ledger_derivations import _league_games
 from tests.services.test_ledger_matchup_materialization import _governance
 
@@ -39,19 +44,20 @@ def _engine(tmp_path):
     return engine
 
 
-def _rows(metric_key: str | tuple[str, ...]) -> tuple[PublicationTeamWindowRow, ...]:
+def _rows(
+    metric_key: str | tuple[str, ...],
+    game_ids_by_team: dict[int, tuple[str, ...]] | None = None,
+) -> tuple[PublicationTeamWindowRow, ...]:
     metric_keys = (metric_key,) if isinstance(metric_key, str) else metric_key
     return tuple(
         PublicationTeamWindowRow(
             team_id=team_id,
             team_tricode=f"T{team_id:02d}",
-            game_ids=(f"game-{team_id}",),
-            game_count=1,
+            game_ids=(game_ids_by_team or {}).get(team_id, (f"game-{team_id}",)),
+            game_count=len((game_ids_by_team or {}).get(team_id, (f"game-{team_id}",))),
             per48={
-                key: float(team_id + index)
-                for index, key in enumerate(
-                    metric_keys if team_id % 2 else reversed(metric_keys)
-                )
+                key: float(team_id)
+                for key in (metric_keys if team_id % 2 else reversed(metric_keys))
             },
             league_average={key: 15.5 for key in metric_keys},
             population_sigma={key: 8.655 for key in metric_keys},
@@ -67,17 +73,15 @@ def _reader(
     metric_keys_by_stream: dict[str, str | tuple[str, ...]] | None = None,
     cutoff_by_stream: dict[str, str] | None = None,
     freshness_by_stream: dict[str, str] | None = None,
+    game_ids_by_stream: dict[str, dict[int, tuple[str, ...]]] | None = None,
 ):
-    metrics = {
-        "synergy_play_types_opponent_season": "Transition_PTS",
-        "synergy_play_types_opponent_l15": "Transition_PTS",
-        "grouped_shot_types_opponent_season": "catch_and_shoot_FGA",
-        "grouped_shot_types_opponent_l15": "catch_and_shoot_FGA",
-        "exact_shot_zones_opponent_season": "Restricted Area_FGM",
-        "exact_shot_zones_opponent_l15": "Restricted Area_FGM",
+    stream_bases = {
+        template.format(window=window): base
+        for base, template in NBA_PUBLICATION_STREAMS.items()
+        for window in ("season", "l15")
     }
     reads = {}
-    for stream_key, metric_key in metrics.items():
+    for stream_key, base in stream_bases.items():
         if stream_key in unavailable:
             reads[stream_key] = PublicationRead(
                 stream_key=stream_key,
@@ -112,7 +116,12 @@ def _reader(
             age_seconds=90000,
             payload={"rows": []},
             retrieved_at=RETRIEVED_AT,
-            decoded=_rows((metric_keys_by_stream or {}).get(stream_key, metric_key)),
+            decoded=_rows(
+                (metric_keys_by_stream or {}).get(
+                    stream_key, tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+                ),
+                (game_ids_by_stream or {}).get(stream_key),
+            ),
         )
     for stream_key in (
         "traditional_opponent_season",
@@ -205,7 +214,7 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
     shot_type = next(item for item in snapshot.facts if item.base == "shot_types")
     assert (shot_type.slice_key, shot_type.stat_key) == (
         "catch_and_shoot",
-        "FGA",
+        "FG2A",
     )
     observations = {item.surface: item for item in snapshot.observations}
     assert observations["shot_zones"].status == "available"
@@ -216,7 +225,7 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
     assert any(metric.base == "shot_zones" for metric in window.league_metrics)
     assert any(
         (metric.base, metric.slice_key, metric.stat_key)
-        == ("shot_types", "catch_and_shoot", "FGA")
+        == ("shot_types", "catch_and_shoot", "FG2A")
         for metric in window.league_metrics
     )
 
@@ -226,7 +235,7 @@ def test_nba_publications_persist_independent_facts_with_lineage(tmp_path):
     ).get_window(snapshot.scope)
     assert any(
         (metric.base, metric.slice_key, metric.stat_key)
-        == ("shot_types", "catch_and_shoot", "FGA")
+        == ("shot_types", "catch_and_shoot", "FG2A")
         for metric in publication_window.league_metrics
     )
 
@@ -242,10 +251,9 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
         repository,
         publication_reader=_reader(
             metric_keys_by_stream={
-                "grouped_shot_types_opponent_season": (
-                    "catch_and_shoot_FGA",
-                    "catch_and_shoot_FGM",
-                )
+                "grouped_shot_types_opponent_season": tuple(
+                    reversed(sorted(NBA_PUBLICATION_TAXONOMY["shot_types"]))
+                ),
             }
         ),
         clock=lambda: RETRIEVED_AT,
@@ -263,7 +271,7 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
     fact = next(
         item
         for item in snapshot.facts
-        if item.base == "shot_types" and item.stat_key == "FGA"
+        if item.base == "shot_types" and item.stat_key == "FG2A"
     )
     assert fact.raw_value == 1.0
     assert fact.denominator_value == 48.0
@@ -271,12 +279,131 @@ def test_publication_per48_values_and_metric_key_order_are_preserved(tmp_path):
     metric = next(
         item
         for item in window.team_metrics[1]
-        if item.base == "shot_types" and item.stat_key == "FGA"
+        if item.base == "shot_types" and item.stat_key == "FG2A"
     )
     assert metric.allowed_per_48 == 1.0
     assert {
         item.stat_key for item in window.league_metrics if item.base == "shot_types"
-    } == {"FGA", "FGM"}
+    } == {"FG2A", "FG2M", "FG3A", "FG3M"}
+
+
+def test_l15_publication_requires_each_team_exact_governed_game_set(tmp_path):
+    engine = _engine(tmp_path)
+    games = _league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(engine)
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    l15_game_ids = {
+        team_id: tuple(sorted(game_ids))
+        for team_id, game_ids in expected_l15_game_ids.items()
+    }
+    reader = _reader(
+        game_ids_by_stream={
+            stream_key: l15_game_ids
+            for stream_key in (
+                "synergy_play_types_opponent_l15",
+                "grouped_shot_types_opponent_l15",
+                "exact_shot_zones_opponent_l15",
+            )
+        }
+    )
+    service = LedgerMatchupMaterializationService(
+        ledger, repository, publication_reader=reader, clock=lambda: RETRIEVED_AT
+    )
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+    snapshot = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
+    )
+    shot_zones = next(item for item in snapshot.observations if item.surface == "shot_zones")
+    assert shot_zones.status == "available"
+    assert any(fact.base == "shot_zones" for fact in snapshot.facts)
+
+    wrong_game_ids = dict(l15_game_ids)
+    wrong_game_ids[1] = ("wrong-game",)
+    wrong_reader = _reader(
+        game_ids_by_stream={
+            stream_key: wrong_game_ids
+            for stream_key in (
+                "synergy_play_types_opponent_l15",
+                "grouped_shot_types_opponent_l15",
+                "exact_shot_zones_opponent_l15",
+            )
+        }
+    )
+    wrong_path = tmp_path / "wrong"
+    wrong_path.mkdir()
+    wrong_engine = _engine(wrong_path)
+    wrong_ledger = CanonicalGameLedgerRepository(wrong_engine)
+    wrong_ledger.replace_games_atomic(games)
+    wrong_repository = TeamMatchupRepository(wrong_engine)
+    wrong_service = LedgerMatchupMaterializationService(
+        wrong_ledger,
+        wrong_repository,
+        publication_reader=wrong_reader,
+        clock=lambda: RETRIEVED_AT,
+    )
+    wrong_service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+    wrong_snapshot = wrong_repository.get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
+    )
+    wrong_observation = next(
+        item for item in wrong_snapshot.observations if item.surface == "shot_zones"
+    )
+    assert wrong_observation.status == "unavailable"
+    assert wrong_observation.unavailable_reason == "publication_game_set_mismatch"
+    assert not any(fact.base == "shot_zones" for fact in wrong_snapshot.facts)
+
+
+@pytest.mark.parametrize(
+    "metric_keys",
+    [
+        tuple(sorted(NBA_PUBLICATION_TAXONOMY["shot_types"] - {"pullups_FG2A"})),
+        tuple(sorted(NBA_PUBLICATION_TAXONOMY["shot_types"] | {"uncontracted_PTS"})),
+    ],
+    ids=("missing_registered_metric", "extra_uncontracted_metric"),
+)
+def test_publication_requires_exact_registered_metric_taxonomy(tmp_path, metric_keys):
+    engine = _engine(tmp_path)
+    games = _league_games()
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(engine)
+    service = LedgerMatchupMaterializationService(
+        ledger,
+        repository,
+        publication_reader=_reader(
+            metric_keys_by_stream={
+                "grouped_shot_types_opponent_season": metric_keys,
+            }
+        ),
+        clock=lambda: RETRIEVED_AT,
+    )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+    )
+    snapshot = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
+    observation = next(item for item in snapshot.observations if item.surface == "shot_types")
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_metric_taxonomy_mismatch"
+    assert not any(fact.base == "shot_types" for fact in snapshot.facts)
 
 
 def test_nba_unavailable_surfaces_do_not_retain_pbp_fallback(tmp_path):

@@ -45,9 +45,12 @@ from app.services.database_first_activation import (
 )
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAMS,
+    NBA_PUBLICATION_WINDOWS,
     publication_cutoff_reason,
     publication_lineage,
     publication_metric_identity,
+    publication_metric_keys,
+    publication_stream,
 )
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
@@ -206,9 +209,9 @@ class LedgerMatchupMaterializationService:
         if self.publication_reader is not None:
             publication_reads = self._publication_reads(
                 tuple(
-                    template.format(window=window)
-                    for window in ("season", "l15")
-                    for template in NBA_PUBLICATION_STREAMS.values()
+                    publication_stream(base, window)
+                    for window in NBA_PUBLICATION_WINDOWS
+                    for base in NBA_PUBLICATION_STREAMS
                 ),
                 canonical_season,
             )
@@ -218,6 +221,7 @@ class LedgerMatchupMaterializationService:
                     as_of=as_of,
                     window="season",
                     reads=publication_reads,
+                    expected_l15_game_ids=None,
                 )
             )
             l15_publication_facts, l15_publication_observations = (
@@ -226,6 +230,7 @@ class LedgerMatchupMaterializationService:
                     as_of=as_of,
                     window="l15",
                     reads=publication_reads,
+                    expected_l15_game_ids=expected_l15_game_ids,
                 )
             )
             season_facts = (*season_facts, *season_publication_facts)
@@ -259,6 +264,7 @@ class LedgerMatchupMaterializationService:
         as_of: date,
         window: str,
         reads: Mapping[str, object],
+        expected_l15_game_ids: Mapping[int, frozenset[str]] | None,
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Project governed NBA team-window publications into raw facts.
 
@@ -271,8 +277,8 @@ class LedgerMatchupMaterializationService:
         """
 
         stream_by_base = {
-            base: template.format(window=window)
-            for base, template in NBA_PUBLICATION_STREAMS.items()
+            base: publication_stream(base, window)
+            for base in NBA_PUBLICATION_STREAMS
         }
         facts: list[TeamMatchupFact] = []
         observations: list[TeamMatchupObservation] = []
@@ -296,6 +302,7 @@ class LedgerMatchupMaterializationService:
                 read,
                 season=season,
                 as_of=as_of,
+                expected_l15_game_ids=expected_l15_game_ids,
             )
             facts.extend(surface_facts)
             observations.append(observation)
@@ -334,6 +341,7 @@ class LedgerMatchupMaterializationService:
         *,
         season: str,
         as_of: date,
+        expected_l15_game_ids: Mapping[int, frozenset[str]] | None,
     ) -> tuple[tuple[TeamMatchupFact, ...], TeamMatchupObservation]:
         """Decode one NBA publication without borrowing another surface."""
 
@@ -388,6 +396,34 @@ class LedgerMatchupMaterializationService:
                 unavailable_reason="publication_surface_incomplete",
                 publication=lineage,
             )
+        expected_metric_keys = publication_metric_keys(base)
+        metric_identities = {
+            publication_metric_identity(base, key) for key in metric_keys
+        }
+        expected_metric_identities = {
+            publication_metric_identity(base, key)
+            for key in expected_metric_keys
+        }
+        if metric_identities != expected_metric_identities:
+            return (), TeamMatchupObservation(
+                surface=base,
+                status="unavailable",
+                unavailable_reason="publication_metric_taxonomy_mismatch",
+                publication=lineage,
+            )
+        if expected_l15_game_ids is not None:
+            expected_team_ids = set(expected_l15_game_ids)
+            actual_team_ids = {row.team_id for row in rows}
+            if actual_team_ids != expected_team_ids or any(
+                set(row.game_ids) != set(expected_l15_game_ids[row.team_id])
+                for row in rows
+            ):
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_game_set_mismatch",
+                    publication=lineage,
+                )
         game_ids = tuple(sorted({game_id for row in rows for game_id in row.game_ids}))
         facts = tuple(
             TeamMatchupFact(

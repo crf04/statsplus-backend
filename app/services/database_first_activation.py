@@ -31,6 +31,7 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
 )
+from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
 
 
 UTC = timezone.utc
@@ -56,16 +57,6 @@ PUBLICATION_FRESHNESS_SECONDS: dict[str, int] = {
     "seven_day": 7 * 24 * 60 * 60,
     "request_time": 0,
 }
-
-NBA_TEAM_MATCHUP_PUBLICATION_STREAMS = frozenset({
-    "synergy_play_types_opponent_season",
-    "synergy_play_types_opponent_l15",
-    "grouped_shot_types_opponent_season",
-    "grouped_shot_types_opponent_l15",
-    "exact_shot_zones_opponent_season",
-    "exact_shot_zones_opponent_l15",
-})
-
 
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
@@ -405,13 +396,7 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
     supported = {
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
-        "synergy_play_types_opponent_season",
-        "synergy_play_types_opponent_l15",
-        "grouped_shot_types_opponent_season",
-        "grouped_shot_types_opponent_l15",
-        "exact_shot_zones_opponent_season",
-        "exact_shot_zones_opponent_l15",
-    }
+    } | NBA_PUBLICATION_STREAM_KEYS
     if stream_key not in supported:
         raise PublicationPayloadError(f"unsupported team-window publication {stream_key}")
     rows = _payload_rows(payload, stream_key=stream_key)
@@ -477,13 +462,7 @@ def _decode_known_publication_payload(
     team_streams = {
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
-        "synergy_play_types_opponent_season",
-        "synergy_play_types_opponent_l15",
-        "grouped_shot_types_opponent_season",
-        "grouped_shot_types_opponent_l15",
-        "exact_shot_zones_opponent_season",
-        "exact_shot_zones_opponent_l15",
-    }
+    } | NBA_PUBLICATION_STREAM_KEYS
     diet_bases = {
         "synergy_play_types": "play_types",
         "grouped_shot_types": "shot_types",
@@ -844,7 +823,7 @@ class DatabaseFirstPublicationReader:
                 reason="provider_window_unsupported",
             )
         if require_active and not bool(stream.enabled):
-            if stream_key in NBA_TEAM_MATCHUP_PUBLICATION_STREAMS:
+            if stream_key in NBA_PUBLICATION_STREAM_KEYS:
                 return self._missing(
                     stream_key,
                     "unavailable",

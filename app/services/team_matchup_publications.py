@@ -5,17 +5,52 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
+from app.models.catalogs import PLAY_TYPES
+
 
 NBA_PUBLICATION_STREAMS = {
     "play_types": "synergy_play_types_opponent_{window}",
     "shot_types": "grouped_shot_types_opponent_{window}",
     "shot_zones": "exact_shot_zones_opponent_{window}",
 }
+NBA_PUBLICATION_WINDOWS = ("season", "l15")
 NBA_PUBLICATION_BASES = frozenset(NBA_PUBLICATION_STREAMS)
+NBA_PUBLICATION_STREAM_KEYS = frozenset(
+    template.format(window=window)
+    for template in NBA_PUBLICATION_STREAMS.values()
+    for window in NBA_PUBLICATION_WINDOWS
+)
 SHOT_TYPE_DISPLAY_TO_STORED = {
     "Catch and Shoot": "catch_and_shoot",
     "Pullups": "pullups",
     "Less Than 10 ft": "less_than_10_ft",
+}
+SHOT_TYPE_STATS = frozenset({"FG2M", "FG2A", "FG3M", "FG3A"})
+SHOT_ZONE_SLICES = frozenset(
+    {
+        "Restricted Area",
+        "In The Paint (Non-RA)",
+        "Mid-Range",
+        "Corner 3",
+        "Above the Break 3",
+    }
+)
+NBA_PUBLICATION_TAXONOMY = {
+    "play_types": frozenset(
+        f"{slice_key}_{stat_key}"
+        for slice_key in PLAY_TYPES
+        for stat_key in ("PTS", "POSS")
+    ),
+    "shot_types": frozenset(
+        f"{slice_key}_{stat_key}"
+        for slice_key in SHOT_TYPE_DISPLAY_TO_STORED.values()
+        for stat_key in SHOT_TYPE_STATS
+    ),
+    "shot_zones": frozenset(
+        f"{slice_key}_{stat_key}"
+        for slice_key in SHOT_ZONE_SLICES
+        for stat_key in ("FGM", "FGA")
+    ),
 }
 
 
@@ -77,12 +112,25 @@ def publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
     return slice_key, stat_key
 
 
+def publication_stream(base: str, window: str) -> str:
+    return NBA_PUBLICATION_STREAMS[base].format(window=window)
+
+
+def publication_metric_keys(base: str) -> frozenset[str]:
+    return NBA_PUBLICATION_TAXONOMY[base]
+
+
 __all__ = [
     "NBA_PUBLICATION_BASES",
     "NBA_PUBLICATION_STREAMS",
+    "NBA_PUBLICATION_STREAM_KEYS",
+    "NBA_PUBLICATION_TAXONOMY",
+    "NBA_PUBLICATION_WINDOWS",
     "PublicationLineage",
     "publication_cutoff",
     "publication_cutoff_reason",
     "publication_lineage",
     "publication_metric_identity",
+    "publication_metric_keys",
+    "publication_stream",
 ]

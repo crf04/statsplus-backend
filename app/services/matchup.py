@@ -46,6 +46,7 @@ from app.services.team_matchup_query import (
     TeamMatchupWindow,
 )
 from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -175,12 +176,7 @@ _PUBLICATION_STREAM_KEYS = (
     "exact_shot_zones",
     "player_assist_locations",
     "synergy:l15",
-    "synergy_play_types_opponent_season",
-    "synergy_play_types_opponent_l15",
-    "grouped_shot_types_opponent_season",
-    "grouped_shot_types_opponent_l15",
-    "exact_shot_zones_opponent_season",
-    "exact_shot_zones_opponent_l15",
+    *sorted(NBA_PUBLICATION_STREAM_KEYS),
 )
 
 

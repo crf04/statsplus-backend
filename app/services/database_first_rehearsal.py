@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import PublicationPointer, PublicationVersion
+from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
 
 
 UTC = timezone.utc
@@ -434,13 +435,7 @@ class HistoricalRehearsalRunner:
         decoder_streams = {
             "traditional_opponent_season", "traditional_opponent_l15",
             "assist_locations_season", "assist_locations_l15",
-            "synergy_play_types_opponent_season",
-            "synergy_play_types_opponent_l15",
-            "grouped_shot_types_opponent_season",
-            "grouped_shot_types_opponent_l15",
-            "exact_shot_zones_opponent_season",
-            "exact_shot_zones_opponent_l15",
-        }
+        } | NBA_PUBLICATION_STREAM_KEYS
         diet_bases = {
             "synergy_play_types": "play_types",
             "grouped_shot_types": "shot_types",

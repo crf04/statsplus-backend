@@ -18,14 +18,15 @@ from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
-from app.services.team_matchup_publications import PublicationLineage
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_BASES,
+    PublicationLineage,
+    publication_stream,
+)
 from app.utils.db import is_demo_database_url
 
 
 EASTERN = ZoneInfo("America/New_York")
-NBA_PUBLICATION_SURFACES = frozenset({"play_types", "shot_types", "shot_zones"})
-
-
 @dataclass(frozen=True, slots=True)
 class TeamMatchupSnapshotScope:
     season: str
@@ -202,22 +203,16 @@ class TeamMatchupRepository:
                             if scope.window_games is not None
                             else "assist_locations_season",
                         ),
-                        "play_types": (
-                            "synergy_play_types_opponent_l15"
-                            if scope.window_games is not None
-                            else "synergy_play_types_opponent_season",
-                        ),
-                        "shot_types": (
-                            "grouped_shot_types_opponent_l15"
-                            if scope.window_games is not None
-                            else "grouped_shot_types_opponent_season",
-                        ),
-                        "shot_zones": (
-                            "exact_shot_zones_opponent_l15"
-                            if scope.window_games is not None
-                            else "exact_shot_zones_opponent_season",
-                        ),
                     }
+                    stream_by_surface.update({
+                        surface: (
+                            publication_stream(
+                                surface,
+                                "l15" if scope.window_games is not None else "season",
+                            ),
+                        )
+                        for surface in NBA_PUBLICATION_BASES
+                    })
                     # Lock/check only the stream(s) represented by this
                     # snapshot.  A season write must not fence L15, and a
                     # traditional-only write must not fence assist locations.
@@ -229,7 +224,7 @@ class TeamMatchupRepository:
                         # protects only legacy provider writes; publication
                         # lineage is already the authorized immutable source.
                         if (
-                            observation.surface in NBA_PUBLICATION_SURFACES
+                            observation.surface in NBA_PUBLICATION_BASES
                             and observation.publication is not None
                         ):
                             continue

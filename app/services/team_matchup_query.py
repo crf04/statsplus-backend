@@ -24,6 +24,7 @@ from app.services.database_first_activation import (
 )
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
+    NBA_PUBLICATION_STREAMS,
     PublicationLineage,
     publication_cutoff_reason,
     publication_lineage,
@@ -174,10 +175,11 @@ class TeamMatchupQueryService:
         stream_by_base = {
             "traditional": f"traditional_opponent_{window}",
             "assist_locations": f"assist_locations_{window}",
-            "play_types": f"synergy_play_types_opponent_{window}",
-            "shot_types": f"grouped_shot_types_opponent_{window}",
-            "shot_zones": f"exact_shot_zones_opponent_{window}",
         }
+        stream_by_base.update({
+            base: NBA_PUBLICATION_STREAMS[base].format(window=window)
+            for base in NBA_PUBLICATION_STREAMS
+        })
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key)
