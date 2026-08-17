@@ -123,7 +123,7 @@ class NBADateParser:
                 month_name = match.group(1)
                 # Use dateparser to get the date
                 date_str = f"{month_name} 1, {self.current_year}"
-                parsed = dateparser.parse(date_str)
+                parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
                     return parsed.strftime("%Y-%m-%d")
         
@@ -154,7 +154,7 @@ class NBADateParser:
             match = re.search(pattern, query.lower())
             if match:
                 date_str = match.group(1)
-                parsed = dateparser.parse(date_str)
+                parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
                     return parsed.strftime("%Y-%m-%d")
         
@@ -169,6 +169,7 @@ class NBADateParser:
             try:
                 parsed = dateparser.parse(
                     phrase,
+                    languages=["en"],
                     settings={
                         'PREFER_DAY_OF_MONTH': 'first',
                         'PREFER_DATES_FROM': 'past',

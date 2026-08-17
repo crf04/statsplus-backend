@@ -56,6 +56,13 @@ falls back to a wildcard origin. Local development uses the explicit
 `http://localhost:3000` default, while production requires
 `CORS_ALLOWED_ORIGINS`.
 
+Protected requests verify their Firebase bearer token on every request. The
+verified profile is still resolved against the durable user row each time, but
+an unchanged row writes `last_login` at most once per 15-minute interval;
+profile changes and new users persist immediately. This bounds authentication
+write amplification without caching authorization, claims, or revocation
+decisions.
+
 ## Provider telemetry and correlation IDs
 
 Every request is correlated with one safe ID. `app.utils.request_id` accepts an
