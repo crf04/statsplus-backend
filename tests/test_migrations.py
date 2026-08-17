@@ -2063,3 +2063,43 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
 
     assert tuple(fact) == (None, None, None, None)
     assert tuple(observation) == (None, None, None, None)
+
+
+def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_path):
+    """Former branch history is relocated before current 040 is selected."""
+    from app.migrations import Migration, _add_team_matchup_provider_provenance
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'former-provider-040.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            (
+                *MIGRATIONS[:39],
+                Migration(
+                    40,
+                    "040_team_matchup_provider_provenance",
+                    _add_team_matchup_provider_provenance,
+                ),
+            ),
+        )
+        first = run_migrations(engine)
+    assert first.current_version == 40
+
+    upgraded = run_migrations(engine)
+    repeated = run_migrations(engine)
+
+    assert upgraded.applied == (
+        "040_projection_archive",
+        "041_projection_archive_transitions",
+    )
+    assert repeated.applied == ()
+    with engine.connect() as connection:
+        history = connection.execute(
+            text("SELECT version, name FROM schema_migrations ORDER BY version")
+        ).all()
+    assert history[-3:] == [
+        (40, "040_projection_archive"),
+        (41, "041_projection_archive_transitions"),
+        (42, "042_team_matchup_provider_provenance"),
+    ]
+    assert inspect(engine).has_table("projection_provider_snapshots")

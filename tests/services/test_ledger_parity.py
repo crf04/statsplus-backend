@@ -3,11 +3,12 @@
 from dataclasses import asdict
 from datetime import datetime, timezone
 
+import pytest
 from sqlalchemy import create_engine
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from app.migrations import run_migrations
-from app.models.collection_control import AuditEvent, PublicationVersion
+from app.models.collection_control import PublicationVersion
 
 from app.services.ledger_derivations import (
     derive_player_per36_facts,
@@ -15,6 +16,8 @@ from app.services.ledger_derivations import (
 from app.services.ledger_parity import (
     LedgerParityArtifactRepository,
     LegacyParityDiagnosticReader,
+    PER36_DIAGNOSTIC_CAPTURE_STREAM,
+    Per36DiagnosticCaptureRepository,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
 )
@@ -189,18 +192,93 @@ def test_parity_artifact_is_required_durable_activation_evidence(tmp_path):
     assert artifact.status == "pending_adjudication"
     assert repository.latest("player_per36", game.season).artifact_id == artifact.artifact_id
 
-    approved = repository.adjudicate(
-        artifact.artifact_id,
-        decision="approved",
+    with pytest.raises(ValueError, match="cannot be approved"):
+        repository.adjudicate(
+            artifact.artifact_id,
+            decision="approved",
+            actor="operator@example.com",
+            reason="parent-approved: no identity parity",
+        )
+
+
+def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'per36-capture.sqlite3'}")
+    run_migrations(engine)
+    game = _game()
+    fact = derive_player_per36_facts((game,), season=game.season)[0]
+    raw_fields = {
+        field: sum(getattr(player, field) for player in game.player_facts if player.player_id == fact.player_id)
+        for field in (
+            "points", "rebounds", "assists", "field_goals_made",
+            "field_goals_attempted", "three_pointers_made",
+            "three_pointers_attempted", "free_throws_made",
+            "free_throws_attempted", "turnovers", "steals", "blocks",
+            "personal_fouls",
+        )
+    }
+    row = {
+        **raw_fields,
+        **{
+            field: getattr(fact, field)
+            for field in fact.__dataclass_fields__
+            if field.endswith("_per36")
+        },
+        "player_id": fact.player_id,
+        "minutes": fact.minutes,
+        "game_count": fact.game_count,
+        "team_ids_at_game": list(fact.team_ids_at_game),
+    }
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    publication_id, payload_checksum = _candidate(engine)
+    repository = Per36DiagnosticCaptureRepository(engine)
+    capture = repository.record(
+        capture_id="capture-per36",
+        publication_id=publication_id,
+        payload_checksum=payload_checksum,
+        season=game.season,
+        cutoff=cutoff,
+        manifest_id="manifest-1",
+        event_catalog_publication_id="catalog-1",
+        event_catalog_checksum="b" * 64,
+        game_set_checksum="c" * 64,
+        request_checksum="d" * 64,
+        provider_window_identity={
+            "season": game.season,
+            "window": "season",
+            "cutoff": cutoff.isoformat(),
+            "game_ids": [game.game_id],
+            "request_checksum": "d" * 64,
+        },
+        rows=(row,),
         actor="operator@example.com",
-        reason="semantic differences reviewed",
     )
+    assert capture.capture_id == "capture-per36"
+    assert repository.read(capture.capture_id).rows == (row,)
     with engine.connect() as connection:
-        audit = connection.execute(select(AuditEvent).where(
-            AuditEvent.resource == artifact.artifact_id,
-        )).first()
-    assert approved.decision == "approved"
-    assert audit is not None
+        assert connection.execute(
+            text("SELECT stream_key FROM canonical_game_ledger_parity_artifacts WHERE artifact_id = 'capture-per36'")
+        ).scalar_one() == PER36_DIAGNOSTIC_CAPTURE_STREAM
+    with pytest.raises(ValueError, match="window identity"):
+        repository.record(
+            publication_id=publication_id,
+            payload_checksum="a" * 64,
+            season=game.season,
+            cutoff=cutoff,
+            manifest_id="manifest-1",
+            event_catalog_publication_id="catalog-1",
+            event_catalog_checksum="b" * 64,
+            game_set_checksum="c" * 64,
+            request_checksum="d" * 64,
+            provider_window_identity={
+                "season": game.season,
+                "window": "l15",
+                "cutoff": cutoff.isoformat(),
+                "game_ids": [game.game_id],
+                "request_checksum": "d" * 64,
+            },
+            rows=(row,),
+            actor="operator@example.com",
+        )
 
 
 def test_traditional_parity_reads_general_opponent_stats_semantics(tmp_path):

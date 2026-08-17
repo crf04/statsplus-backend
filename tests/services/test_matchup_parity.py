@@ -155,7 +155,8 @@ def _materialization(*, window="season", cutoff=CUTOFF, offset=0, game_ids=None,
 
 
 def _compare(*, surface="traditional", legacy=None, ledger=None,
-             expected_game_ids=None, tolerance=MATCHUP_PARITY_TOLERANCE):
+             expected_game_ids=None, tolerance=MATCHUP_PARITY_TOLERANCE,
+             semantic_rule=None, semantic_rule_reason=None):
     return compare_matchup_materializations(
         legacy or _materialization(),
         ledger or _materialization(),
@@ -163,6 +164,8 @@ def _compare(*, surface="traditional", legacy=None, ledger=None,
         expected_team_ids=TEAM_IDS,
         expected_game_ids_by_team=expected_game_ids or _game_ids_by_team(TEAM_IDS),
         tolerance=tolerance,
+        semantic_rule=semantic_rule,
+        semantic_rule_reason=semantic_rule_reason,
     )
 
 
@@ -267,17 +270,36 @@ def test_integer_count_difference_is_a_hard_failure():
     )
 
 
-def test_floating_denominator_difference_is_adjudicable_not_hard():
+def test_unexplained_floating_denominator_difference_is_hard():
     legacy = _replace_fact(_materialization(), surface="traditional", team_id=TEAM_A, stat="OPP_REB", denominator_value=100.0)
 
     report = _compare(legacy=legacy)
 
-    assert not report.hard_failure
-    assert report.adjudication_required
+    assert report.hard_failure
+    assert not report.adjudication_required
     assert not report.exact
     assert {d.classification for d in report.differences} <= SOFT_CLASSIFICATIONS | {
         CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
     }
+
+
+def test_provider_rounding_rule_makes_only_soft_difference_adjudicable():
+    legacy = _replace_fact(
+        _materialization(),
+        surface="traditional",
+        team_id=TEAM_A,
+        stat="OPP_REB",
+        denominator_value=100.0,
+    )
+
+    report = _compare(
+        legacy=legacy,
+        semantic_rule="provider_rounding",
+        semantic_rule_reason="provider rounding in the legacy denominator",
+    )
+
+    assert not report.hard_failure
+    assert report.adjudication_required
 
 
 def test_matchup_tolerance_is_exactly_one_nanounit():
@@ -288,7 +310,7 @@ def test_matchup_tolerance_is_exactly_one_nanounit():
         surface="traditional",
         team_id=TEAM_A,
         stat="OPP_REB",
-        denominator_value=100.0 * (1.0 + 0.9e-9),
+        denominator_value=48.0 * (1.0 + 0.9e-9),
     )
     assert not _compare(legacy=within).hard_failure
 
@@ -297,9 +319,9 @@ def test_matchup_tolerance_is_exactly_one_nanounit():
         surface="traditional",
         team_id=TEAM_A,
         stat="OPP_REB",
-        denominator_value=100.0 * (1.0 + 1.1e-9),
+        denominator_value=48.0 * (1.0 + 1.1e-9),
     )
-    assert _compare(legacy=outside).hard_failure is False
+    assert _compare(legacy=outside).hard_failure
     assert any(
         difference.classification == "denominator_tolerance_exceeded"
         for difference in _compare(legacy=outside).differences
@@ -1375,6 +1397,7 @@ def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
         "--output", str(summary),
         "--target", "isolated",
         "--publications-json", str(publications),
+        "--per36-capture-id", "capture-id",
     ])
 
     assert matchup_parity_script.main() == 0
@@ -1401,3 +1424,21 @@ def test_sanitized_summary_omits_row_values():
     assert summary["difference_classifications"]
     assert "ledger_value" not in encoded
     assert "legacy_value" not in encoded
+
+
+def test_invalid_summary_keeps_nonmutation_proof_when_prestate_was_captured():
+    import scripts.matchup_parity as matchup_parity_script
+
+    before = {"pointers": {"traditional_opponent_season": None}, "streams": {}}
+    args = SimpleNamespace(
+        target="candidate",
+        season="2025-26",
+        _control_state_before=before,
+        _control_state_after=before.copy(),
+    )
+
+    summary = matchup_parity_script._invalid_summary(args, "candidate_provenance_invalid")
+
+    assert summary["artifact_writes_rolled_back"] is True
+    assert summary["pointer_nonmutation"]["unchanged"] is True
+    assert summary["stream_nonmutation"]["unchanged"] is True

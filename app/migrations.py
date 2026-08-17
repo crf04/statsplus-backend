@@ -1764,6 +1764,47 @@ def _acquire_migration_lock(connection: Connection) -> None:
         )
 
 
+def _repair_legacy_matchup_provider_migration(connection: Connection) -> None:
+    """Move the pre-linearized provider migration history to version 042.
+
+    One short-lived branch recorded the provider-provenance upgrade as
+    ``(40, 040_team_matchup_provider_provenance)``.  Version 040 is now owned
+    by the projection archive, so leaving that row in place causes a current
+    database to skip the archive and fail when migration 041 runs.  Repair
+    only that exact historical name; a legitimate projection-archive row at
+    version 040 must remain untouched.
+    """
+
+    legacy = connection.execute(
+        select(
+            _schema_migrations.c.version,
+            _schema_migrations.c.name,
+            _schema_migrations.c.applied_at,
+        ).where(_schema_migrations.c.version == 40)
+    ).mappings().one_or_none()
+    if legacy is None or legacy["name"] != "040_team_matchup_provider_provenance":
+        return
+
+    canonical_name = "042_team_matchup_provider_provenance"
+    existing_042 = connection.execute(
+        select(_schema_migrations.c.name).where(_schema_migrations.c.version == 42)
+    ).scalar_one_or_none()
+    if existing_042 is not None and existing_042 != canonical_name:
+        raise ValueError("migration version 042 has an unexpected name")
+
+    connection.execute(
+        _schema_migrations.delete().where(_schema_migrations.c.version == 40)
+    )
+    if existing_042 is None:
+        connection.execute(
+            insert(_schema_migrations).values(
+                version=42,
+                name=canonical_name,
+                applied_at=legacy["applied_at"],
+            )
+        )
+
+
 def run_migrations(engine: Engine) -> MigrationResult:
     """Apply pending application-schema migrations to ``engine``.
 
@@ -1784,6 +1825,7 @@ def run_migrations(engine: Engine) -> MigrationResult:
     with engine.begin() as connection:
         _acquire_migration_lock(connection)
         _migration_metadata.create_all(connection)
+        _repair_legacy_matchup_provider_migration(connection)
         applied_versions = {
             row.version
             for row in connection.execute(

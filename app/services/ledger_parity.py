@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import json
+import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, make_dataclass
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from app.domain.matchup_parity_contract import (
     HARD_CLASSIFICATIONS,
     MATCHUP_REQUIRED_STREAMS,
     SOFT_CLASSIFICATIONS,
+    semantic_rule_is_approved,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import matchup_stream_key
@@ -47,6 +49,278 @@ _MATCHUP_STREAMS = MATCHUP_REQUIRED_STREAMS
 _MATCHUP_HARD_CLASSIFICATIONS = HARD_CLASSIFICATIONS
 _MATCHUP_SOFT_CLASSIFICATIONS = SOFT_CLASSIFICATIONS
 
+PER36_DIAGNOSTIC_CAPTURE_STREAM = "player_per36_diagnostic_capture"
+PER36_RAW_FIELDS = (
+    "points",
+    "rebounds",
+    "assists",
+    "field_goals_made",
+    "field_goals_attempted",
+    "three_pointers_made",
+    "three_pointers_attempted",
+    "free_throws_made",
+    "free_throws_attempted",
+    "turnovers",
+    "steals",
+    "blocks",
+    "personal_fouls",
+)
+PER36_RATE_FIELDS = tuple(f"{field}_per36" for field in PER36_RAW_FIELDS)
+
+
+@dataclass(frozen=True, slots=True)
+class Per36DiagnosticCapture:
+    """Immutable, authority-bound provider evidence for Season per-36."""
+
+    capture_id: str
+    publication_id: str
+    payload_checksum: str
+    season: str
+    cutoff: datetime
+    manifest_id: str
+    event_catalog_publication_id: str
+    event_catalog_checksum: str
+    game_set_checksum: str
+    request_checksum: str
+    provider_window_identity: Mapping[str, object]
+    rows: tuple[Mapping[str, object], ...]
+    actor: str
+    capture_checksum: str
+
+
+def _is_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _canonical_capture_payload(document: Mapping[str, object]) -> str:
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+class Per36DiagnosticCaptureRepository:
+    """Persist and read the exact scoped per-36 diagnostic capture.
+
+    This deliberately uses the append-only parity-artifact table rather than
+    the legacy ``player_per36_stats`` table.  The latter has no durable
+    manifest, request, or game-window authority and can never authorize a
+    comparison by itself.
+    """
+
+    def __init__(self, engine: Engine, *, clock=None) -> None:
+        self.engine = engine
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @staticmethod
+    def _validate_rows(rows: Iterable[Mapping[str, object]]) -> tuple[Mapping[str, object], ...]:
+        validated: list[dict[str, object]] = []
+        identities: set[int] = set()
+        for source in rows:
+            if not isinstance(source, Mapping):
+                raise ValueError("per36 capture rows must be objects")
+            row = dict(source)
+            player_id = row.get("player_id")
+            if isinstance(player_id, bool) or not isinstance(player_id, int) or player_id <= 0:
+                raise ValueError("per36 capture player identity is invalid")
+            if player_id in identities:
+                raise ValueError("per36 capture contains duplicate players")
+            identities.add(player_id)
+            minutes = row.get("minutes")
+            if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+                raise ValueError("per36 capture minutes are invalid")
+            if not math.isfinite(float(minutes)) or float(minutes) <= 0:
+                raise ValueError("per36 capture minutes are invalid")
+            game_count = row.get("game_count")
+            if isinstance(game_count, bool) or not isinstance(game_count, int) or game_count <= 0:
+                raise ValueError("per36 capture game count is invalid")
+            team_ids = row.get("team_ids_at_game")
+            if not isinstance(team_ids, (list, tuple)) or not team_ids:
+                raise ValueError("per36 capture team identity is invalid")
+            if any(
+                isinstance(team_id, bool) or not isinstance(team_id, int) or team_id <= 0
+                for team_id in team_ids
+            ) or tuple(sorted(set(team_ids))) != tuple(team_ids):
+                raise ValueError("per36 capture team identity is invalid")
+            for field in PER36_RAW_FIELDS:
+                value = row.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"per36 capture raw field {field} is invalid")
+            for field in PER36_RATE_FIELDS:
+                value = row.get(field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError(f"per36 capture rate field {field} is invalid")
+                if not math.isfinite(float(value)) or float(value) < 0:
+                    raise ValueError(f"per36 capture rate field {field} is invalid")
+            validated.append(row)
+        if not validated:
+            raise ValueError("per36 capture rows are empty")
+        return tuple(validated)
+
+    @classmethod
+    def _validate_document(cls, document: Mapping[str, object]) -> Per36DiagnosticCapture:
+        required = (
+            "kind", "capture_id", "publication_id", "payload_checksum", "season", "cutoff",
+            "manifest_id", "event_catalog_publication_id", "event_catalog_checksum",
+            "game_set_checksum", "request_checksum", "provider_window_identity",
+            "rows", "actor", "capture_checksum",
+        )
+        if any(key not in document for key in required):
+            raise ValueError("per36 capture evidence is incomplete")
+        if document["kind"] != PER36_DIAGNOSTIC_CAPTURE_STREAM:
+            raise ValueError("per36 capture kind is invalid")
+        if any(
+            not isinstance(document[key], str) or not document[key].strip()
+            for key in (
+                "capture_id", "publication_id", "season", "manifest_id",
+                "event_catalog_publication_id", "actor",
+            )
+        ):
+            raise ValueError("per36 capture identity is invalid")
+        if not all(
+            _is_sha256(document[key])
+            for key in (
+                "payload_checksum", "event_catalog_checksum", "game_set_checksum",
+                "request_checksum", "capture_checksum",
+            )
+        ):
+            raise ValueError("per36 capture checksum is invalid")
+        try:
+            cutoff = assume_utc(datetime.fromisoformat(str(document["cutoff"])))
+        except (TypeError, ValueError) as error:
+            raise ValueError("per36 capture cutoff is invalid") from error
+        identity = document["provider_window_identity"]
+        if not isinstance(identity, Mapping):
+            raise ValueError("per36 provider window identity is invalid")
+        game_ids = identity.get("game_ids")
+        if (
+            identity.get("season") != document["season"]
+            or identity.get("window") != "season"
+            or identity.get("cutoff") != cutoff.isoformat()
+            or not isinstance(game_ids, list)
+            or not game_ids
+            or any(not isinstance(game_id, str) or not game_id for game_id in game_ids)
+            or game_ids != sorted(set(game_ids))
+            or identity.get("request_checksum") != document["request_checksum"]
+        ):
+            raise ValueError("per36 provider window identity is invalid")
+        rows = cls._validate_rows(document["rows"])
+        unsigned = dict(document)
+        unsigned.pop("capture_checksum", None)
+        expected_checksum = hashlib.sha256(
+            _canonical_capture_payload(unsigned).encode("utf-8")
+        ).hexdigest()
+        if document["capture_checksum"] != expected_checksum:
+            raise ValueError("per36 capture checksum does not match evidence")
+        return Per36DiagnosticCapture(
+            capture_id=str(document["capture_id"]),
+            publication_id=str(document["publication_id"]),
+            payload_checksum=str(document["payload_checksum"]),
+            season=str(document["season"]),
+            cutoff=cutoff,
+            manifest_id=str(document["manifest_id"]),
+            event_catalog_publication_id=str(document["event_catalog_publication_id"]),
+            event_catalog_checksum=str(document["event_catalog_checksum"]),
+            game_set_checksum=str(document["game_set_checksum"]),
+            request_checksum=str(document["request_checksum"]),
+            provider_window_identity=dict(identity),
+            rows=rows,
+            actor=str(document["actor"]),
+            capture_checksum=str(document["capture_checksum"]),
+        )
+
+    def record(
+        self,
+        *,
+        publication_id: str,
+        payload_checksum: str,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str,
+        event_catalog_publication_id: str,
+        event_catalog_checksum: str,
+        game_set_checksum: str,
+        request_checksum: str,
+        provider_window_identity: Mapping[str, object],
+        rows: Iterable[Mapping[str, object]],
+        actor: str,
+        capture_id: str | None = None,
+        session: Session | None = None,
+    ) -> Per36DiagnosticCapture:
+        if cutoff is None or cutoff.tzinfo is None:
+            raise ValueError("per36 capture cutoff must be aware")
+        capture_id = capture_id or str(uuid4())
+        rows_tuple = self._validate_rows(rows)
+        document: dict[str, object] = {
+            "kind": PER36_DIAGNOSTIC_CAPTURE_STREAM,
+            "capture_id": capture_id,
+            "publication_id": publication_id,
+            "payload_checksum": payload_checksum,
+            "season": season,
+            "cutoff": assume_utc(cutoff).isoformat(),
+            "manifest_id": manifest_id,
+            "event_catalog_publication_id": event_catalog_publication_id,
+            "event_catalog_checksum": event_catalog_checksum,
+            "game_set_checksum": game_set_checksum,
+            "request_checksum": request_checksum,
+            "provider_window_identity": dict(provider_window_identity),
+            "rows": [dict(row) for row in rows_tuple],
+            "actor": actor,
+        }
+        capture_checksum = hashlib.sha256(
+            _canonical_capture_payload(document).encode("utf-8")
+        ).hexdigest()
+        document["capture_checksum"] = capture_checksum
+        capture = self._validate_document(document)
+        row = LedgerParityArtifact(
+            artifact_id=capture.capture_id,
+            publication_id=capture.publication_id,
+            payload_checksum=capture.payload_checksum,
+            stream_key=PER36_DIAGNOSTIC_CAPTURE_STREAM,
+            season=capture.season,
+            cutoff=capture.cutoff,
+            status="exact",
+            report=json.dumps(document, sort_keys=True, separators=(",", ":")),
+            created_at=self.clock(),
+        )
+        values = {
+            column.name: getattr(row, column.name)
+            for column in LedgerParityArtifact.__table__.columns
+        }
+        if session is not None:
+            session.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        else:
+            with self.engine.begin() as owned:
+                owned.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        return capture
+
+    def read(self, capture_id: str, *, session: Session | None = None) -> Per36DiagnosticCapture:
+        if session is not None:
+            row = session.get(LedgerParityArtifact, capture_id)
+        else:
+            with Session(self.engine) as owned:
+                row = owned.get(LedgerParityArtifact, capture_id)
+        if row is None or row.stream_key != PER36_DIAGNOSTIC_CAPTURE_STREAM:
+            raise ValueError("per36 diagnostic capture not found")
+        try:
+            document = json.loads(row.report)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("per36 diagnostic capture is invalid") from error
+        if not isinstance(document, Mapping):
+            raise ValueError("per36 diagnostic capture is invalid")
+        capture = self._validate_document(document)
+        if (
+            capture.capture_id != row.artifact_id
+            or capture.publication_id != row.publication_id
+            or capture.payload_checksum != row.payload_checksum
+            or assume_utc(row.cutoff) != capture.cutoff
+        ):
+            raise ValueError("per36 diagnostic capture binding is invalid")
+        return capture
+
 
 def matchup_parity_artifact_is_activatable(
     artifact: LedgerParityArtifact,
@@ -56,8 +330,6 @@ def matchup_parity_artifact_is_activatable(
 ) -> bool:
     """Return whether an artifact contains only exact/soft matchup evidence."""
 
-    if artifact.stream_key not in _MATCHUP_STREAMS:
-        return True
     if stream_key is not None and artifact.stream_key != stream_key:
         return False
     try:
@@ -66,11 +338,27 @@ def matchup_parity_artifact_is_activatable(
         return False
     if not isinstance(document, Mapping):
         return False
+    if getattr(artifact, "decision", None) == "rejected":
+        return False
+    if artifact.stream_key not in _MATCHUP_STREAMS:
+        differences = document.get("differences", ())
+        if not isinstance(differences, list):
+            return False
+        if not differences:
+            return document.get("status") == "exact"
+        if any(
+            not isinstance(difference, Mapping)
+            or difference.get("classification") != "semantic_difference"
+            for difference in differences
+        ):
+            return False
+        return semantic_rule_is_approved(
+            document.get("semantic_rule"),
+            document.get("semantic_rule_reason"),
+        )
     # Rejected evidence is permanently ineligible, even if an operator left
     # the original status as exact.  This keeps a historical decision from
     # silently becoming activation authority on a later rerun.
-    if getattr(artifact, "decision", None) == "rejected":
-        return False
     if document.get("status") not in {"exact", "adjudication_required"}:
         return False
     required_evidence = (
@@ -177,9 +465,14 @@ def matchup_parity_artifact_is_activatable(
         classifications.append(classification)
     if document["status"] == "exact":
         return not classifications
-    return bool(classifications) and not any(
+    if not classifications or any(
         classification in _MATCHUP_HARD_CLASSIFICATIONS
         for classification in classifications
+    ):
+        return False
+    return semantic_rule_is_approved(
+        document.get("semantic_rule"),
+        document.get("semantic_rule_reason"),
     )
 
 
@@ -419,6 +712,8 @@ class LedgerParityReport:
     compared_count: int
     differences: tuple[SemanticDifference, ...]
     adjudication_required: bool
+    semantic_rule: str | None = None
+    semantic_rule_reason: str | None = None
 
     @property
     def exact(self) -> bool:
@@ -465,6 +760,9 @@ class LedgerParityArtifactRepository:
                 {
                     "game_count": report.game_count,
                     "compared_count": report.compared_count,
+                    "status": report.status,
+                    "semantic_rule": report.semantic_rule,
+                    "semantic_rule_reason": report.semantic_rule_reason,
                     "differences": [asdict(difference) for difference in report.differences],
                 },
                 sort_keys=True,
@@ -681,7 +979,10 @@ class LedgerParityArtifactRepository:
             row = session.get(LedgerParityArtifact, artifact_id)
             if row is None:
                 raise ValueError("parity artifact not found")
-            if decision == "approved" and not matchup_parity_artifact_is_activatable(row):
+            if decision == "approved" and (
+                len(reason.strip()) < 20
+                or not matchup_parity_artifact_is_activatable(row)
+            ):
                 raise ValueError("hard matchup parity failures cannot be approved")
             row.decision = decision
             row.adjudicated_by = actor
@@ -938,6 +1239,8 @@ def compare_ledger_to_legacy(
     tolerance: float = 1e-9,
     legacy_traditional_rows: Iterable[Mapping[str, object]] | None = None,
     legacy_per36_rows: Iterable[Mapping[str, object]] | None = None,
+    semantic_rule: str | None = None,
+    semantic_rule_reason: str | None = None,
 ) -> LedgerParityReport:
     """Compare governed ledger semantics.
 
@@ -1019,6 +1322,8 @@ def compare_ledger_to_legacy(
         compared_count=compared,
         differences=tuple(differences),
         adjudication_required=bool(differences),
+        semantic_rule=semantic_rule,
+        semantic_rule_reason=semantic_rule_reason,
     )
     return report
 
@@ -1031,6 +1336,8 @@ def generate_semantic_difference_report(
     tolerance: float = 1e-9,
     legacy_traditional_rows: Iterable[Mapping[str, object]] | None = None,
     legacy_per36_rows: Iterable[Mapping[str, object]] | None = None,
+    semantic_rule: str | None = None,
+    semantic_rule_reason: str | None = None,
     artifact_repository: LedgerParityArtifactRepository,
     stream_key: str,
     cutoff: datetime,
@@ -1046,6 +1353,8 @@ def generate_semantic_difference_report(
         tolerance=tolerance,
         legacy_traditional_rows=legacy_traditional_rows,
         legacy_per36_rows=legacy_per36_rows,
+        semantic_rule=semantic_rule,
+        semantic_rule_reason=semantic_rule_reason,
     )
     artifact_repository.record(
         stream_key,

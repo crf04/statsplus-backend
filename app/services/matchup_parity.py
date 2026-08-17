@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -63,6 +64,7 @@ from app.domain.matchup_parity_contract import (
     CLASSIFICATION_SERVED_RANK_MISMATCH,
     CLASSIFICATION_SERVED_RATE_MISMATCH,
     HARD_CLASSIFICATIONS,
+    semantic_rule_is_approved,
     SOFT_CLASSIFICATIONS,
 )
 from app.domain.slate_time import slate_date_for_instant
@@ -224,6 +226,8 @@ class MatchupParityReport:
     ledger_manifest_id: str | None = None
     ledger_event_catalog_publication_id: str | None = None
     ledger_event_catalog_checksum: str | None = None
+    semantic_rule: str | None = None
+    semantic_rule_reason: str | None = None
 
     @property
     def hard_failures(self) -> tuple[MatchupParityDifference, ...]:
@@ -241,7 +245,12 @@ class MatchupParityReport:
 
     @property
     def hard_failure(self) -> bool:
-        return bool(self.hard_failures)
+        return bool(self.hard_failures) or (
+            bool(self.semantic_differences)
+            and not semantic_rule_is_approved(
+                self.semantic_rule, self.semantic_rule_reason
+            )
+        )
 
     @property
     def adjudication_required(self) -> bool:
@@ -301,6 +310,8 @@ class MatchupParityReport:
             "ledger_event_catalog_publication_id": self.ledger_event_catalog_publication_id,
             "ledger_event_catalog_checksum": self.ledger_event_catalog_checksum,
             "status": self.status,
+            "semantic_rule": self.semantic_rule,
+            "semantic_rule_reason": self.semantic_rule_reason,
             "differences": [difference.to_dict() for difference in self.differences],
         }
 
@@ -818,6 +829,8 @@ def compare_matchup_materializations(
     expected_team_ids: Iterable[int],
     expected_game_ids_by_team: Mapping[int, Iterable[str]],
     tolerance: float = MATCHUP_PARITY_TOLERANCE,
+    semantic_rule: str | None = None,
+    semantic_rule_reason: str | None = None,
 ) -> MatchupParityReport:
     """Compare two independently produced materializations for one surface.
 
@@ -1217,6 +1230,8 @@ def compare_matchup_materializations(
         ledger_manifest_id=ledger.manifest_id,
         ledger_event_catalog_publication_id=ledger.event_catalog_publication_id,
         ledger_event_catalog_checksum=ledger.event_catalog_checksum,
+        semantic_rule=semantic_rule,
+        semantic_rule_reason=semantic_rule_reason,
     )
 
 
@@ -1258,6 +1273,9 @@ class MatchupParityRunner:
         cutoff: datetime,
         legacy: MatchupMaterialization | None = None,
         publications: Mapping[str, str] | None = None,
+        session: Session | None = None,
+        semantic_rule: str | None = None,
+        semantic_rule_reason: str | None = None,
     ) -> tuple[MatchupParityReport, ...]:
         """Compare every ledger-owned surface and optionally record artifacts.
 
@@ -1296,14 +1314,21 @@ class MatchupParityRunner:
                 "both traditional and assist matchup publications are required"
             )
         reports: list[MatchupParityReport] = []
-        with self._session_factory() as session, session.begin():
+        if session is None:
+            owned_session = self._session_factory()
+            session_scope = owned_session
+            transaction_scope = owned_session.begin()
+        else:
+            session_scope = nullcontext(session)
+            transaction_scope = nullcontext()
+        with session_scope as active_session, transaction_scope:
             for surface in LEDGER_OWNED_SURFACES:
                 stream_key = matchup_stream_key(surface, window)
                 publication_id = (publications or {}).get(stream_key)
                 if publication_id is None:
                     continue
                 publication = resolve_matchup_publication(
-                    session,
+                    active_session,
                     publication_id=publication_id,
                     stream_key=stream_key,
                     season=season,
@@ -1321,6 +1346,8 @@ class MatchupParityRunner:
                     surface=surface,
                     expected_team_ids=expected_team_ids,
                     expected_game_ids_by_team=expected_game_ids_by_team,
+                    semantic_rule=semantic_rule,
+                    semantic_rule_reason=semantic_rule_reason,
                 )
                 reports.append(report)
                 if not report.hard_failure:
@@ -1330,7 +1357,7 @@ class MatchupParityRunner:
                         report=report,
                         publication_id=publication.publication_id,
                         payload_checksum=publication.payload_checksum,
-                        session=session,
+                        session=active_session,
                     )
         return tuple(reports)
 
