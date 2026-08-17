@@ -13,8 +13,8 @@ The model is intentionally grouped by responsibility:
 | `DatabaseSettings` | `url` | `DATABASE_URL` |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
-| `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its selected provider | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
-| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
+| `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
+| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -52,8 +52,9 @@ The internal DFS collector receives an explicit injected provider registry. In
 development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS
 adapters. Tests and local experiments may explicitly configure the recorded
 provider adapters (`dabble`, `prizepicks`, and `underdog`). Production must
-provide a non-empty, comma-separated `DFS_ENABLED_PROVIDERS` list, whether or
-not the board is published.
+explicitly provide `DFS_ENABLED_PROVIDERS`; a comma-separated list enables
+those providers, while an explicit empty value disables all of them. Publishing
+the board still requires at least one enabled provider.
 
 The RotoWire injury adapter has two independent, false-by-default gates.
 `INJURY_REPORT_ENABLED=true` opts the deployment into the surface;
@@ -73,18 +74,34 @@ materialization-generation, and Latest tables. Dependency assembly verifies
 those authoritative tables at startup when the reader is enabled. With the
 reader gate off, schema-36 deployments may boot; the recording service performs
 the same validation when called and fails before persistence. Either error
-directs operators to run migration `037_projection_archive`. Setting
+directs operators to run migrations `037_projection_archive` and
+`038_projection_archive_transitions`. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
-`false`; `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` and selects
-exactly one provider plus the configured current-season canonical query. When
-enabled on an application database, one database-only reader is
-used by Slate, Matchup, and Matchup Selection. Dependency assembly also exposes
-the named projection recording service on application databases so an
-operator-owned collector can submit an already retrieved Complete normalized
-snapshot. The recorder and reader share the same provider/current-season
-canonical query scope, and the recorder rejects a different provider or query
-before writing. Provider polling and scheduling belong to later slices.
+`false`; `DFS_ENABLED_PROVIDERS` is the sole enablement authority for the
+configured current-season canonical query. An empty list means every provider
+is disabled and the application recording service authorizes no snapshot or
+failure writes. `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` only as
+a deprecated compatibility/default recorder identity; it does not authorize
+recording, make that provider required, enable its read contribution, or grant
+six-hour failure fallback. When enabled on an application database, one
+database-only reader is used by Slate, Matchup, and Matchup Selection.
+Dependency assembly also exposes the named projection recording service on
+application databases so an operator-owned collector can submit an already
+retrieved Complete or Partial
+normalized snapshot or bounded failure. The recorder authorizes exactly the
+providers in `DFS_ENABLED_PROVIDERS` for the reader's current-season canonical
+query; it rejects every provider when that set is empty and rejects a disabled
+provider or different query before writing. Provider polling and scheduling
+belong to later slices.
+The reader retains scopes for every supported archive provider (`dabble`,
+`prizepicks`, and `underdog`) independently of the enabled registry. A provider
+removed from `DFS_ENABLED_PROVIDERS` therefore ages out through the 15-minute
+eligibility window rather than disappearing when dependencies are rebuilt;
+disabled providers are not counted as required coverage and immutable evidence
+is not deleted. Removing the last enabled provider follows the same rule: its
+contribution expires after 15 minutes and never receives the six-hour
+enabled-provider fallback.
 
 Publishing the board needs both halves of that configuration.
 `DFS_BOARD_ENABLED=true` says the route may be exposed and
@@ -158,6 +175,10 @@ board but enter no group. `DFS_COMPARISON_MAX_MARKETS` is the post-filter compar
 ceiling and defaults to 10000. A read that observes more markets than the
 ceiling is refused with `board_too_large`, the observed count, and the
 supported narrowing filters; it is never truncated.
+`PROJECTION_ARCHIVE_MAX_MARKETS` is a separate pre-persistence ceiling for one
+normalized provider evidence snapshot and also defaults to 10000. Raising or
+lowering either limit does not change the other; an archive rejection writes no
+poll, snapshot, observation, generation, or Latest state.
 
 ## Defaults and validation
 
@@ -180,7 +201,7 @@ Local and test startup is credential-free by default:
 Production startup raises `ConfigurationError` with the invalid field names
 when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase
 credentials are absent/invalid, `CORS_ALLOWED_ORIGINS` is not explicitly set,
-`DFS_ENABLED_PROVIDERS` names no provider, or the local bypass is enabled. This prevents the process from starting with a
+`DFS_ENABLED_PROVIDERS` is omitted, or the local bypass is enabled. This prevents the process from starting with a
 configuration that cannot enforce its security contract.
 Firebase may use a service-account file, hosted JSON, or the complete
 three-field credential set. A configured file path must exist when it is the

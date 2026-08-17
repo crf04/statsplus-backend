@@ -431,19 +431,47 @@ def build_dependencies(
         snapshot_repository=player_pool_snapshot_repository,
     )
     projection_archive = (
-        None if demo_database else ProjectionArchive(engine, statistic_catalog)
+        None
+        if demo_database
+        else ProjectionArchive(
+            engine,
+            statistic_catalog,
+            max_markets=settings.providers.projection_archive_max_markets,
+        )
     )
-    projection_read_scope = ProjectionArchiveReadScope(
-        provider=settings.features.projection_archive_read_provider,
-        query=NBAMarketQuery(season=settings.nba.current_season),
+    projection_query = NBAMarketQuery(season=settings.nba.current_season)
+    projection_read_scopes = tuple(
+        ProjectionArchiveReadScope(
+            provider=provider,
+            query=projection_query,
+        )
+        for provider in (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
     )
+    projection_read_scopes_by_provider = {
+        scope.provider: scope for scope in projection_read_scopes
+    }
+    projection_record_scopes = tuple(
+        projection_read_scopes_by_provider[provider]
+        for provider in settings.providers.dfs_enabled_providers
+    )
+    projection_record_default_scope = projection_read_scopes_by_provider[
+        settings.features.projection_archive_read_provider
+    ]
     projection_recorder = (
         None
         if projection_archive is None
-        else ProjectionRecordingService(projection_archive, projection_read_scope)
+        else ProjectionRecordingService(
+            projection_archive,
+            projection_record_scopes,
+            default_scope=projection_record_default_scope,
+        )
     )
     projection_player_pool_reader = (
-        LatestProjectionPlayerPoolReader(engine, projection_read_scope)
+        LatestProjectionPlayerPoolReader(
+            engine,
+            projection_read_scopes,
+            required_providers=settings.providers.dfs_enabled_providers,
+        )
         if settings.features.projection_archive_read_enabled
         else None
     )

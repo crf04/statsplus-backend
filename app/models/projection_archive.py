@@ -1,7 +1,10 @@
 """Immutable projection evidence and the database-first live read model."""
 
+from enum import StrEnum
+
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -13,6 +16,30 @@ from sqlalchemy import (
 )
 
 from . import Base
+
+
+class ProviderPollOutcome(StrEnum):
+    """Closed application and persistence vocabulary for provider poll outcomes."""
+
+    CHANGED = "changed"
+    PARTIAL = "partial"
+    REMATERIALIZED = "rematerialized"
+    UNCHANGED = "unchanged"
+    FAILED = "failed"
+
+
+class MaterializationOutcome(StrEnum):
+    """Closed application vocabulary for one fenced Latest-state decision."""
+
+    ADVANCED = "advanced"
+    OLDER_NOT_PROMOTED = "older_not_promoted"
+    SAME_TIME_NOT_PROMOTED = "same_time_not_promoted"
+    UNCHANGED = "unchanged"
+
+
+_POLL_OUTCOME_SQL = ", ".join(
+    f"'{outcome.value}'" for outcome in ProviderPollOutcome
+)
 
 
 class ProjectionArchiveScopeLock(Base):
@@ -36,17 +63,30 @@ class ProviderPoll(Base):
     query_key = Column(String(72), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=False)
-    retrieved_at = Column(DateTime(timezone=True), nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=True)
     outcome = Column(String(24), nullable=False)
+    promoted = Column(Boolean, nullable=False, default=False, server_default="false")
+    failure_reason = Column(String(64), nullable=True)
     snapshot_id = Column(
         String(72),
         ForeignKey("projection_provider_snapshots.snapshot_id", ondelete="RESTRICT"),
         nullable=True,
     )
-    generation_id = Column(String(72), nullable=False)
+    generation_id = Column(String(72), nullable=True)
     observation_count = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
+        CheckConstraint(
+            f"outcome IN ({_POLL_OUTCOME_SQL})",
+            name="ck_projection_provider_poll_outcome",
+        ),
+        CheckConstraint(
+            "(outcome = 'failed' AND promoted = FALSE AND snapshot_id IS NULL AND generation_id IS NULL "
+            "AND retrieved_at IS NULL AND failure_reason IS NOT NULL) OR "
+            "(outcome <> 'failed' AND snapshot_id IS NOT NULL AND generation_id IS NOT NULL "
+            "AND retrieved_at IS NOT NULL AND failure_reason IS NULL)",
+            name="ck_projection_provider_poll_payload",
+        ),
         Index(
             "ix_projection_provider_polls_scope_completed",
             "provider",
@@ -211,6 +251,7 @@ class LatestPlayerProjection(Base):
     canonical_statistic_id = Column(String(128), nullable=False)
     market_category = Column(String(32), nullable=False)
     observed_at = Column(DateTime(timezone=True), nullable=False)
+    confirmed_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         Index(

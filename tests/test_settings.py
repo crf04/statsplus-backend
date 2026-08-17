@@ -891,6 +891,27 @@ def test_projection_archive_reader_is_activation_gated(monkeypatch):
     assert load_settings().features.projection_archive_read_provider == "prizepicks"
 
 
+def test_projection_archive_market_limit_is_independent_from_board_limit():
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "DFS_COMPARISON_MAX_MARKETS": "1",
+            "PROJECTION_ARCHIVE_MAX_MARKETS": "2",
+        }
+    )
+
+    assert settings.providers.dfs_comparison_max_markets == 1
+    assert settings.providers.projection_archive_max_markets == 2
+
+    with pytest.raises(ConfigurationError, match="projection_archive_max_markets"):
+        load_settings(
+            environ={
+                "FLASK_ENV": "testing",
+                "PROJECTION_ARCHIVE_MAX_MARKETS": "0",
+            }
+        )
+
+
 def test_dfs_board_feature_flag_opts_in_explicitly(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("DFS_BOARD_ENABLED", "true")
@@ -922,3 +943,20 @@ def test_production_requires_an_explicit_provider_registry(monkeypatch):
         load_settings()
 
     assert "DFS_ENABLED_PROVIDERS" in str(error.value)
+
+
+def test_production_accepts_an_explicit_empty_provider_registry():
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "production",
+            "DATABASE_URL": "postgresql://example/db",
+            "CORS_ALLOWED_ORIGINS": "https://courtai.app",
+            "DFS_ENABLED_PROVIDERS": "",
+            "FIREBASE_SERVICE_ACCOUNT_JSON": (
+                '{"project_id":"courtai-test","private_key":"test-key",'
+                '"client_email":"firebase@example.com"}'
+            ),
+        }
+    )
+
+    assert settings.providers.dfs_enabled_providers == ()

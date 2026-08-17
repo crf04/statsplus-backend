@@ -3,7 +3,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from app.config.settings import ConfigurationError, FeatureSettings, RuntimeSettings
+from app.config.settings import (
+    ConfigurationError,
+    FeatureSettings,
+    RuntimeSettings,
+    load_settings,
+)
 from app.domain.freshness import time_window_timedelta
 
 
@@ -195,6 +200,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     from sqlalchemy import create_engine
 
     from app.dependencies import build_dependencies
+    from app.domain.utc import utc_now
     from app.migrations import run_migrations
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
@@ -212,7 +218,29 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
         auth={"firebase_admin_disabled": True},
         database={"url": "sqlite:///:memory:"},
         features=FeatureSettings(projection_archive_read_enabled=True),
+        providers={
+            "dfs_comparison_max_markets": 1,
+            "projection_archive_max_markets": 2,
+        },
     )
+
+    enabled = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///:memory:"},
+            features=FeatureSettings(
+                projection_archive_read_enabled=True,
+                projection_archive_read_provider="prizepicks",
+            ),
+            providers={"dfs_enabled_providers": ("dabble",)},
+        )
+    )
+    assert enabled.projection_player_pool_reader.required_providers == frozenset(
+        {"dabble"}
+    )
+    assert set(enabled.projection_recorder.scopes) == {"dabble"}
+    assert enabled.projection_recorder.default_scope.provider == "prizepicks"
 
     dependencies = build_dependencies(settings)
     reader = dependencies.projection_player_pool_reader
@@ -220,11 +248,21 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert isinstance(reader, LatestProjectionPlayerPoolReader)
     assert isinstance(dependencies.projection_archive, ProjectionArchive)
     assert dependencies.projection_archive.engine is dependencies.engine
+    assert dependencies.projection_archive.max_markets == 2
     assert isinstance(dependencies.projection_recorder, ProjectionRecordingService)
     assert dependencies.projection_recorder.archive is dependencies.projection_archive
+    assert dependencies.projection_recorder.scopes == {}
+    assert dependencies.projection_recorder.default_scope is reader.scope
     assert dependencies.projection_recorder.scope is reader.scope
     assert dependencies.projection_recorder.scope.query_key == reader.scope.query_key
     assert reader.scope.provider == "dabble"
+    assert reader.required_providers == frozenset()
+    assert reader.clock is utc_now
+    assert {scope.provider for scope in reader.scopes} == {
+        "dabble",
+        "prizepicks",
+        "underdog",
+    }
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
     selection_reader = dependencies.matchup_selection_service.player_pool
@@ -240,6 +278,73 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     ).freshness["state"] == "missing"
     assert not hasattr(reader, "board_service")
     assert not hasattr(reader, "provider_registry")
+
+
+def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry(
+    monkeypatch,
+):
+    from sqlalchemy import create_engine, func, select
+
+    from app import create_app
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.models.projection_archive import ProviderPoll
+    from app.providers.dfs import NBAMarketQuery
+
+    settings = load_settings(
+        environ={
+            "FLASK_ENV": "production",
+            "DATABASE_URL": "postgresql://statsplus.example/db",
+            "CORS_ALLOWED_ORIGINS": "https://statsplus.example",
+            "FIREBASE_SERVICE_ACCOUNT_JSON": (
+                '{"project_id":"p","private_key":"k","client_email":"e"}'
+            ),
+            "COLLECTOR_SIGNING_SECRET": "test-only-signing-secret",
+            "DFS_ENABLED_PROVIDERS": "",
+            "PROJECTION_ARCHIVE_READ_ENABLED": "true",
+        }
+    )
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    forbidden_constructor = Mock(side_effect=AssertionError("disabled DFS provider built"))
+    for adapter in (
+        "app.providers.dabble.DabbleAdapter",
+        "app.providers.prizepicks.PrizePicksAdapter",
+        "app.providers.underdog.UnderdogAdapter",
+    ):
+        monkeypatch.setattr(adapter, forbidden_constructor)
+
+    dependencies = build_dependencies(settings)
+    application = create_app(
+        {
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": dependencies,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+
+    assert application.extensions["dependencies"] is dependencies
+    assert dependencies.dfs_providers == {}
+    assert dependencies.dfs_board_service.provider_registry == {}
+    assert dependencies.projection_recorder.scopes == {}
+    assert dependencies.projection_player_pool_reader.required_providers == frozenset()
+    assert {
+        scope.provider for scope in dependencies.projection_player_pool_reader.scopes
+    } == {"dabble", "prizepicks", "underdog"}
+    forbidden_constructor.assert_not_called()
+    with pytest.raises(ValueError, match="outside the configured recording scope"):
+        dependencies.projection_recorder.record_failed_poll(
+            provider="dabble",
+            query=NBAMarketQuery(season=settings.nba.current_season),
+            failure_reason="access_denied",
+        )
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProviderPoll)
+        ).scalar_one() == 0
 
 
 def test_projection_archive_gate_refuses_the_read_only_demo_database(monkeypatch):
@@ -277,7 +382,7 @@ def test_projection_archive_gate_refuses_an_unmigrated_application_database(
 
     with pytest.raises(
         ConfigurationError,
-        match="require migration 037_projection_archive.*missing tables",
+        match="require migrations 037_projection_archive and 038_projection_archive_transitions.*missing",
     ):
         build_dependencies(settings)
 
@@ -306,7 +411,7 @@ def test_projection_recorder_lazily_refuses_unmigrated_database_when_gate_is_off
 
     with pytest.raises(
         ConfigurationError,
-        match="require migration 037_projection_archive.*missing tables",
+        match="require migrations 037_projection_archive and 038_projection_archive_transitions.*missing",
     ):
         dependencies.projection_recorder.record_complete_snapshot(
             Mock(),

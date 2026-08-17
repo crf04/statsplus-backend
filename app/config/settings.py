@@ -186,6 +186,8 @@ class ProviderSettings(BaseModel):
     # The post-filter comparison-board ceiling.  A larger board is refused with
     # the observed count and the supported narrowing filters, never truncated.
     dfs_comparison_max_markets: int = Field(default=10000, ge=1)
+    # The independent pre-persistence ceiling for one archived provider snapshot.
+    projection_archive_max_markets: int = Field(default=10000, ge=1)
     # A scalar applies to every enabled DFS provider.  A mapping may override
     # one or more providers when their publication cadence differs.  Both are
     # exact decimal seconds inside the shared time-window domain, so the window
@@ -708,6 +710,9 @@ def _build_settings(
         dfs_comparison_max_markets=reader.integer(
             "DFS_COMPARISON_MAX_MARKETS", 10000
         ),
+        projection_archive_max_markets=reader.integer(
+            "PROJECTION_ARCHIVE_MAX_MARKETS", 10000
+        ),
         dfs_cache_fresh_seconds=(
             {"*": dfs_cache_fresh, **fresh_overrides}
             if fresh_overrides
@@ -826,6 +831,7 @@ def _build_settings(
     _validate_environment_requirements(
         settings,
         cors_origins_configured=cors_origins is not None,
+        dfs_providers_configured=configured_dfs_providers is not None,
     )
     return settings
 
@@ -849,14 +855,16 @@ def _validate_environment_requirements(
     settings: RuntimeSettings,
     *,
     cors_origins_configured: bool | None = None,
+    dfs_providers_configured: bool | None = None,
 ) -> None:
     """Enforce settings that are required for a safe production process."""
 
     errors: list[str] = []
     if settings.environment == "production":
-        if not settings.providers.dfs_enabled_providers:
+        if dfs_providers_configured is False:
             errors.append(
-                "DFS_ENABLED_PROVIDERS must explicitly configure at least one provider"
+                "DFS_ENABLED_PROVIDERS must be explicitly configured; an empty "
+                "value disables all providers"
             )
         if cors_origins_configured is None:
             cors_origins_configured = (

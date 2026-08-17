@@ -287,7 +287,9 @@ every usable provider is stale-served, and `unavailable` when none is usable.
 For any mixed state—including fresh plus stale-served, or usable plus
 missing—aggregate `status` is omitted so the frontend derives its documented
 partial/degraded presentation from the provider entries. The union uses every
-usable observation.
+usable observation. Every configured provider required by the archive reader
+is represented; one with no eligible current row is emitted as
+`{ "status": "missing", "retrieved_at": null }` rather than omitted.
 Player Pool snapshots are persisted by season and exact Slate game set. A
 snapshot no more than 15 minutes old is reused without another board fetch and
 retains each provider's actual `retrieved_at`. This is an inclusive reuse
@@ -305,8 +307,23 @@ selects one database-only reader for Slate, Matchup, and Matchup Selection.
 Each Slate game then adds `projection_state` with `state: live | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce
-`live`; they remain current until a newer Complete provider/query snapshot or
-governed rematerialization replaces them. Changes to canonical statistic
+`live` while their per-offering confirmation is no more than 15 minutes old.
+After a failed provider poll, prior confirmed offerings may be served as
+`stale-served` only through the inclusive six-hour fallback. Partial polls
+update and confirm only included references; omissions retain their prior
+evidence and confirmation. Complete empty snapshots retire only the same
+provider/query scope and remain fresh successful provider evidence. When every
+required provider is current and Complete-empty, the database-first pool is
+`live`/`fresh` with zero players rather than unavailable, and each requested
+Slate game's `projection_state` is `live` with that accepted evidence time and
+zero targetable players. Empty evidence from a disabled/non-required provider
+is still reported at provider level but cannot make missing required coverage
+aggregate `live`; with every provider disabled it expires after the inclusive
+15-minute live window. A direct Matchup
+Selection request for a player outside that derived empty pool returns the
+existing `404 resource_not_found`; never-polled or failed-without-successful-
+evidence scopes remain missing and keep the documented `503 provider_unavailable`.
+Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
 duplicating unchanged provider evidence. The response `observed_at` comes from
 the accepted poll linked to that generation, not necessarily the older
@@ -318,9 +335,18 @@ because it contains live rows. Aggregate and per-provider observation times
 are the oldest included times, so neither understates the age of evidence in
 the union.
 An unchanged provider poll is recognized from canonical market, coverage, and
-query content even though its retrieval time is newer; the poll retains that
-new retrieval time while the existing immutable snapshot remains the content
-authority.
+query content even though its retrieval time is newer; it confirms existing
+Latest references without duplicating observations while the immutable snapshot
+remains the content authority. Enabled providers are unioned; an unpolled or
+disabled provider expires independently and cannot erase another contribution.
+Late valid polls remain archived but do not refresh eligibility or mask a newer
+failure; the failure attempt's actual start time (or its completion time when
+the start is unavailable) fences evidence retrieved earlier, even when that
+evidence arrives later or waited behind that failure's database fence after
+capturing an earlier acceptance time. Confirmation timestamps never move
+backward. A success retrieved after the failed attempt may promote and recover
+provider health,
+including when that success is accepted before the older failed attempt finishes.
 The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and
