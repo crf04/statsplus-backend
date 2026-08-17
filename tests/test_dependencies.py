@@ -382,7 +382,7 @@ def test_projection_archive_gate_refuses_an_unmigrated_application_database(
 
     with pytest.raises(
         ConfigurationError,
-        match="require migrations 037_projection_archive and 038_projection_archive_transitions.*missing",
+        match="require migrations 040_projection_archive and 041_projection_archive_transitions.*missing",
     ):
         build_dependencies(settings)
 
@@ -411,7 +411,7 @@ def test_projection_recorder_lazily_refuses_unmigrated_database_when_gate_is_off
 
     with pytest.raises(
         ConfigurationError,
-        match="require migrations 037_projection_archive and 038_projection_archive_transitions.*missing",
+        match="require migrations 040_projection_archive and 041_projection_archive_transitions.*missing",
     ):
         dependencies.projection_recorder.record_complete_snapshot(
             Mock(),

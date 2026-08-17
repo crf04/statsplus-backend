@@ -122,7 +122,7 @@ def require_projection_archive_schema(engine: Engine) -> None:
         missing = (*missing_tables, *missing_columns)
         raise ConfigurationError(
             "Projection archive dependencies require migrations "
-            "037_projection_archive and 038_projection_archive_transitions; missing: "
+            "040_projection_archive and 041_projection_archive_transitions; missing: "
             + ", ".join(missing)
         )
 

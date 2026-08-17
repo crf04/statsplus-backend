@@ -1,7 +1,7 @@
 """
 LLM Service for NBA Query Processing
 
-This service handles integration with OpenAI's GPT-4o-mini for natural language
+This service handles integration with OpenAI chat models for natural language
 query processing with proper error handling, retry logic, and configuration.
 """
 
@@ -65,7 +65,7 @@ class LLMError(Exception):
 
 class LLMService:
     """
-    Service for processing NBA queries using OpenAI's GPT-4o-mini.
+    Service for processing NBA queries using an OpenAI chat model.
     
     Handles prompt management, error handling, retry logic, and response parsing.
     """
@@ -197,9 +197,19 @@ Focus on accuracy and provide confidence scores for each extracted component."""
         except Exception as e:
             logger.error(f"Error loading prompt file: {e}")
             return self._get_default_prompt()
-    
 
-    
+    def _completion_options(self) -> Dict[str, int | float | str]:
+        """Return model-compatible Chat Completions options."""
+        if self.config.model.lower().startswith("gpt-5"):
+            return {
+                "max_completion_tokens": self.config.max_tokens,
+                "reasoning_effort": "minimal",
+            }
+        return {
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+        }
+
     def query_llm(self, user_query: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """
         Raw LLM query for testing prompts and responses.
@@ -223,9 +233,8 @@ Focus on accuracy and provide confidence scores for each extracted component."""
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_query}
                         ],
-                        temperature=self.config.temperature,
-                        max_tokens=self.config.max_tokens,
-                        timeout=self.config.timeout
+                        timeout=self.config.timeout,
+                        **self._completion_options(),
                     )
                     
                     # Extract response content
@@ -284,9 +293,8 @@ Focus on accuracy and provide confidence scores for each extracted component."""
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_query}
                         ],
-                        temperature=self.config.temperature,
-                        max_tokens=self.config.max_tokens,
-                        timeout=self.config.timeout
+                        timeout=self.config.timeout,
+                        **self._completion_options(),
                     )
                     
                     content = response.choices[0].message.content

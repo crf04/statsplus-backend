@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import json
 
+import pytest
+
 from app.services.ledger_derivations import (
     competition_ranks,
     derive_assist_location_facts,
@@ -32,7 +34,11 @@ from app.models.collection_control import (
     CollectionObservation,
     PublicationVersion,
 )
-from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
+from app.models.canonical_game_ledger import (
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+    LedgerPublication,
+)
 from tests.services.test_canonical_game_ledger import _game
 
 
@@ -348,6 +354,14 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
             }
             for game in games
         ])
+        connection.execute(LedgerObservationEvidence.__table__.insert(), [
+            {
+                "observation_id": game.source_observation_id,
+                "game_id": game.game_id,
+                "created_at": game.retrieved_at,
+            }
+            for game in games
+        ])
     expected = frozenset(game.game_id for game in games)
     expected_by_team = {
         team_id: frozenset(
@@ -357,12 +371,29 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         for team_id in range(1, 31)
     }
 
-    result = LedgerMaterializationService(
+    service = LedgerMaterializationService(
         repository,
         parity_repository=LedgerParityArtifactRepository(engine),
         parity_reader=_ParityReader(),
         publication_service=publications,
-    ).compose(
+    )
+    with pytest.raises(
+        LedgerMaterializationUnavailable,
+        match="publication cutoff must be explicit",
+    ):
+        service.compose(
+            games,
+            season="2025-26",
+            as_of=date(2025, 10, 15),
+            expected_game_ids=expected,
+            expected_l15_game_ids=expected_by_team,
+            team_ids=frozenset(range(1, 31)),
+            require_assist_locations=True,
+        )
+    with engine.connect() as connection:
+        assert connection.execute(select(LedgerPublication)).all() == []
+
+    result = service.compose(
         games,
         season="2025-26",
         as_of=date(2025, 10, 15),

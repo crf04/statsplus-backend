@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import gzip
+import hashlib
 import json
 
 import pytest
@@ -26,7 +27,11 @@ from app.models.collection_control import (
 )
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.models.athlete_catalog import AthleteCatalog, AthleteCatalogFreshness
-from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerParityArtifact
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+)
 from app.models.player_game_log import PublicationPlayerGameLog
 
 from app.migrations import run_migrations
@@ -40,9 +45,41 @@ from app.services.collection_control import (
     EmailAlertAdapter,
     NBA_TEAM_IDS,
 )
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 
 
 UTC = timezone.utc
+
+
+def _bind_current_ledger_source(
+    engine,
+    *,
+    game_id: str,
+    observation_id: str,
+    cutoff: datetime,
+) -> None:
+    with engine.begin() as connection:
+        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+            game_id=game_id,
+            season="2025-26",
+            season_type="Regular Season",
+            game_date=cutoff.date(),
+            home_team_id=1,
+            home_team_tricode="ATL",
+            away_team_id=2,
+            away_team_tricode="BOS",
+            status="final",
+            source_observation_id=observation_id,
+            checksum="f" * 64,
+            raw_checksum="e" * 64,
+            retrieved_at=cutoff,
+            updated_at=cutoff,
+        ))
+        connection.execute(LedgerObservationEvidence.__table__.insert().values(
+            observation_id=observation_id,
+            game_id=game_id,
+            created_at=cutoff,
+        ))
 
 
 def _player_log_payload(*, points=25):
@@ -138,6 +175,13 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
             }
             for observation_id in ("pbp:game-1", "pbp:game-2")
         ])
+    for game_id in ("game-1", "game-2"):
+        _bind_current_ledger_source(
+            control_db,
+            game_id=game_id,
+            observation_id=f"pbp:{game_id}",
+            cutoff=now,
+        )
 
     version = publications.compose_inactive_ledger(
         "traditional_opponent",
@@ -151,6 +195,14 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     assert publications.get_historical_payload(version.publication_id) == [
         {"opponent_points": 99, "team_id": 1}
     ]
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == version.publication_id
+            ).values(payload='[{"opponent_points":100,"team_id":1}]')
+        )
+    with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
+        publications.get_historical_payload(version.publication_id)
     with control_db.connect() as connection:
         evidence = connection.execute(select(PublicationObservation).where(
             PublicationObservation.publication_id == version.publication_id,
@@ -198,6 +250,12 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
             retrieved_at=now,
             accepted_at=now,
         ))
+    _bind_current_ledger_source(
+        control_db,
+        game_id="game-1",
+        observation_id="pbp:game-1",
+        cutoff=now,
+    )
 
     candidate = publications.compose_inactive_ledger(
         "player_game_logs",
@@ -296,6 +354,12 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
             (2, "ledger-manifest-b"),
             (3, "ledger-manifest-a"),
         )])
+    _bind_current_ledger_source(
+        control_db,
+        game_id="game-1",
+        observation_id="obs-1",
+        cutoff=now,
+    )
 
     with pytest.raises(ControlPlaneError, match="manifest_mismatch"):
         publications.compose_inactive_ledger(
@@ -341,18 +405,65 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             "blocks_per36": 1.0, "personal_fouls_per36": 1.0,
         }]
     })
+    valid_checksum = hashlib.sha256(valid_per36.encode()).hexdigest()
     with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="parity-manifest",
+            season="2025-26",
+            cutoff=now,
+            collect_before=now + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="parity-manifest",
+            status="active",
+            created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="parity-observation",
+            client_observation_id="parity-observation",
+            collector_id="test",
+            manifest_id="parity-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "game-1",
+                "surface": "canonical_game_ledger",
+            }),
+            season="2025-26",
+            cutoff=now,
+            schema_version=1,
+            checksum="a" * 64,
+            payload="{}",
+            payload_bytes=2,
+            retrieved_at=now,
+            accepted_at=now,
+        ))
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="parity-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=1, status="candidate",
-            checksum="a" * 64, payload=valid_per36, created_at=now, fence=0,
+            checksum=valid_checksum, payload=valid_per36,
+            manifest_id="parity-manifest", created_at=now, fence=0,
+        ))
+        connection.execute(PublicationObservation.__table__.insert().values(
+            publication_id="parity-candidate",
+            observation_id="parity-observation",
+            role="ledger_game",
+            slice_key="game-1",
+            created_at=now,
         ))
         connection.execute(LedgerParityArtifact.__table__.insert().values(
             artifact_id="pending-parity", publication_id="parity-candidate",
-            payload_checksum="a" * 64, stream_key="player_per36",
+            payload_checksum=valid_checksum, stream_key="player_per36",
             season="2025-26", cutoff=now, status="pending_adjudication",
             report="{}", created_at=now,
         ))
+    _bind_current_ledger_source(
+        control_db,
+        game_id="game-1",
+        observation_id="parity-observation",
+        cutoff=now,
+    )
 
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
@@ -376,11 +487,13 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
         candidate_publication_id="parity-candidate",
     )
     assert approved.enabled
+    corrected_payload = '{"corrected":true}'
     with control_db.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="corrected-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=2, status="candidate",
-            checksum="b" * 64, payload="{\"corrected\":true}", created_at=now, fence=0,
+            checksum=hashlib.sha256(corrected_payload.encode()).hexdigest(),
+            payload=corrected_payload, created_at=now, fence=0,
         ))
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
@@ -480,6 +593,57 @@ def test_bootstrap_requires_active_season_and_manifest_uses_exact_cutoff(control
     manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
     assert manifest.cutoff == cutoff
     assert json.loads(manifest.accepted_versions) == [1, 2]
+
+
+def test_manifest_binds_fixed_clock_event_catalog_republication(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+
+    first_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    first = control.publish_catalog(
+        first_request.request_id,
+        _catalog_payload("event"),
+        version="event-v1",
+    )
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(
+        athlete_request.request_id,
+        _catalog_payload("athlete"),
+        version="athlete-v1",
+    )
+    corrected_payload = _catalog_payload("event")
+    corrected_payload["events"][0]["status"] = "Scheduled"
+    corrected_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    corrected = control.publish_catalog(
+        corrected_request.request_id,
+        corrected_payload,
+        version="event-v2",
+    )
+    assert corrected.published_at > now
+    assert corrected.publication_id != first.publication_id
+
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["canonical_game_ledger"],
+        collect_before=now + timedelta(hours=1),
+    )
+    assert manifest.event_catalog_publication_id == corrected.publication_id
+    assert manifest.event_catalog_checksum == corrected.checksum
+
+    governance = ActiveManifestLedgerGovernanceReader(control_db).read(
+        "2025-26", cutoff
+    )
+    assert "game-0" not in governance.expected_game_ids
+    assert len(governance.expected_game_ids) == 14
 
 
 def test_manifest_cutoff_rejects_late_ingestion_and_acceptance_enqueues_job(control_db):
@@ -904,6 +1068,20 @@ def test_catalog_validation_rejects_empty_fabricated_and_incomplete_evidence(con
             "events": [{"id": "g1", "status": "Final", "phase": "Regular Season",
                         "scheduled_at": cutoff.isoformat()}],
         }, version="malformed")
+    false_completion = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    false_completion_payload = _catalog_payload("event")
+    false_completion_payload["events"][0].update(
+        status="Scheduled",
+        completed="false",
+    )
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(
+            false_completion.request_id,
+            false_completion_payload,
+            version="string-completion",
+        )
     event_request = control.create_bootstrap_request("2025-26", "event", cutoff=cutoff)
     control.publish_catalog(event_request.request_id, _catalog_payload("event"), version="event-v1")
     athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=cutoff)
@@ -1350,6 +1528,126 @@ def test_athlete_catalog_uses_last_good_event_when_newer_event_attempt_is_incomp
         athlete_request.request_id, _catalog_payload("athlete"), version="athlete-complete"
     )
     assert athlete.complete is True
+
+
+def test_identical_completion_and_postponement_republish_is_idempotent(
+    control_db,
+):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    payload = _catalog_payload("event")
+    payload["events"][0]["status"] = "Finished"
+    payload["events"][1].update(
+        status="Final",
+        postponed_status="postponed",
+        postponement_evidence={"reason": "weather"},
+    )
+    payload["events"][2].pop("status")
+    payload["events"][2]["completed"] = True
+    payload["events"][3].pop("status")
+    payload["events"][3].update(
+        completed=True,
+        postponed_status="postponed",
+        postponement_evidence={"reason": "arena"},
+    )
+    payload["events"][4].update(status="Final", is_postponed=True)
+    for index, status in enumerate(("Completed", "Closed", "Game Over"), start=5):
+        payload["events"][index]["status"] = status
+    first_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        first_request.request_id, payload, version="event-first"
+    ).complete
+    with control_db.connect() as connection:
+        stored = {
+            row.nba_game_id: row
+            for row in connection.execute(
+                select(
+                    EventCatalogEntry.nba_game_id,
+                    EventCatalogEntry.status_text,
+                    EventCatalogEntry.status_code,
+                    EventCatalogEntry.postponed_status,
+                    EventCatalogEntry.postponement_evidence,
+                ).where(
+                    EventCatalogEntry.nba_game_id.in_((
+                        "game-2", "game-3", "game-4", "game-5", "game-6", "game-7",
+                    ))
+                )
+            )
+        }
+    assert (stored["game-2"].status_text, stored["game-2"].status_code) == (
+        "Final",
+        3,
+    )
+    assert stored["game-3"].status_text == "Scheduled"
+    assert stored["game-3"].status_code is None
+    assert stored["game-4"].postponed_status == "postponed"
+    assert json.loads(stored["game-4"].postponement_evidence) == {
+        "is_postponed": True,
+    }
+    assert {
+        (stored[f"game-{index}"].status_text, stored[f"game-{index}"].status_code)
+        for index in (5, 6, 7)
+    } == {("Final", 3)}
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(
+        athlete_request.request_id,
+        _catalog_payload("athlete"),
+        version="athlete",
+    )
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=["canonical_game_ledger"],
+        collect_before=now + timedelta(hours=1),
+    )
+    cycle = control.open_cycle(manifest.manifest_id)
+    governed = ActiveManifestLedgerGovernanceReader(control_db).read(
+        "2025-26", cutoff
+    )
+    assert "game-0" in governed.expected_game_ids
+    assert {"game-5", "game-6", "game-7"} <= governed.expected_game_ids
+    assert {"game-1", "game-3", "game-4"}.isdisjoint(
+        governed.expected_game_ids
+    )
+
+    repeat_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    assert control.publish_catalog(
+        repeat_request.request_id, payload, version="event-repeat"
+    ).complete
+    with control_db.connect() as connection:
+        assert connection.execute(
+            select(CollectionManifest.status).where(
+                CollectionManifest.manifest_id == manifest.manifest_id
+            )
+        ).scalar_one() == "active"
+        assert connection.execute(
+            select(CollectionCycle.status).where(
+                CollectionCycle.cycle_id == cycle.cycle_id
+            )
+        ).scalar_one() == "collecting"
+
+
+def test_event_catalog_rejects_nonboolean_standalone_postponement_flag(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    control.activate_season("2025-26", actor="operator")
+    payload = _catalog_payload("event")
+    payload["events"][0]["is_postponed"] = "false"
+    request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+
+    with pytest.raises(ControlPlaneError, match="catalog_payload_invalid"):
+        control.publish_catalog(request.request_id, payload, version="invalid-flag")
 
 
 def test_catalog_publication_reconciles_new_correction_and_tombstone_atomically(control_db):

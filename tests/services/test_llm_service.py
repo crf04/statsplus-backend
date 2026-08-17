@@ -62,11 +62,15 @@ def test_query_llm_parses_valid_json_response():
     service = make_service('{"player_name": "LeBron James", "confidence": 0.9}')
 
     result = service.query_llm("LeBron last 10 games", system_prompt="Return JSON")
+    request = service.client.chat.completions.last_kwargs
 
     assert result["success"] is True
     assert result["content"]["player_name"] == "LeBron James"
     assert result["content"]["confidence"] == 0.9
     assert result["attempt"] == 1
+    assert request["max_tokens"] == 512
+    assert request["temperature"] == 0
+    assert "max_completion_tokens" not in request
 
 
 def test_query_llm_marks_invalid_json_response():
@@ -77,3 +81,20 @@ def test_query_llm_marks_invalid_json_response():
     assert result["success"] is True
     assert result["content"]["parsing_error"] is True
     assert result["content"]["raw_response"] == "not-json"
+
+
+def test_query_llm_uses_gpt5_completion_token_parameter():
+    service = make_service('{"player_name": "Giannis Antetokounmpo"}')
+    service.config.model = "gpt-5-nano"
+
+    result = service.query_llm(
+        "Giannis against stingy perimeter defenses",
+        system_prompt="Return JSON",
+    )
+
+    request = service.client.chat.completions.last_kwargs
+    assert result["success"] is True
+    assert request["max_completion_tokens"] == 512
+    assert request["reasoning_effort"] == "minimal"
+    assert "max_tokens" not in request
+    assert "temperature" not in request

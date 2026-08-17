@@ -8,6 +8,8 @@ application, starting with the ``users`` table.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime as PythonDateTime, timezone
+import json
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -260,6 +262,217 @@ def _add_team_matchup_ledger_lineage(connection: Connection) -> None:
         if "ledger_checksum" not in existing:
             connection.execute(
                 text(f"ALTER TABLE {table} ADD COLUMN ledger_checksum VARCHAR(64)")
+            )
+        if "source_observation_ids" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN source_observation_ids TEXT")
+            )
+        if "game_set_checksum" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN game_set_checksum VARCHAR(64)")
+            )
+        if "cutoff" not in existing:
+            cutoff_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if connection.dialect.name == "postgresql"
+                else "DATETIME"
+            )
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN cutoff {cutoff_type}")
+            )
+        if "recomposition_reason" not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN recomposition_reason VARCHAR(128)")
+            )
+
+
+def _upgrade_correction_propagation(connection: Connection) -> None:
+    """Add durable correction metadata without changing the migration head.
+
+    The correction seam was added after migration 034 had already shipped in
+    some environments.  Keeping this additive upgrade in migration 036 makes
+    both fresh and upgraded temporary databases expose the same contract while
+    preserving the repository's linear migration history.
+    """
+    preparer = connection.dialect.identifier_preparer
+    timestamp_type = (
+        "TIMESTAMP WITH TIME ZONE"
+        if connection.dialect.name == "postgresql"
+        else "DATETIME"
+    )
+    additions = {
+        "composition_jobs": {
+            "trigger_game_id": "VARCHAR(64)",
+            "trigger_game_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "affected_team_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "source_observation_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "recomposition_reason": "VARCHAR(128)",
+            "ledger_checksum": "VARCHAR(64)",
+            "game_set_checksum": "VARCHAR(64)",
+            "ledger_evidence": "TEXT NOT NULL DEFAULT '{}'",
+            "generation": "INTEGER NOT NULL DEFAULT 1",
+            "claimed_generation": "INTEGER",
+        },
+        "team_matchup_facts": {
+            "source_observation_ids": "TEXT",
+            "game_set_checksum": "VARCHAR(64)",
+            "cutoff": timestamp_type,
+            "recomposition_reason": "VARCHAR(128)",
+        },
+        "team_matchup_surface_observations": {
+            "source_observation_ids": "TEXT",
+            "game_set_checksum": "VARCHAR(64)",
+            "cutoff": timestamp_type,
+            "recomposition_reason": "VARCHAR(128)",
+        },
+    }
+    correction_columns_added = False
+    for table_name, table_additions in additions.items():
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        table = preparer.quote(table_name)
+        for name, type_sql in table_additions.items():
+            if name in existing:
+                continue
+            connection.execute(text(
+                f"ALTER TABLE {table} ADD COLUMN {preparer.quote(name)} {type_sql}"
+            ))
+            correction_columns_added |= table_name == "composition_jobs"
+
+    # The compatibility backfill is only safe while the correction columns are
+    # being introduced.  Re-running migrations is a normal startup operation;
+    # once the schema is current, rewriting a live row could clear a worker's
+    # claim while it is composing.
+    if correction_columns_added:
+        _backfill_correction_lineage(connection)
+
+
+def _backfill_correction_lineage(connection: Connection) -> None:
+    """Upgrade legacy singular/scalar queue lineage into keyed evidence.
+
+    The additive columns intentionally had harmless defaults so old writes
+    could continue during a rolling deploy.  A default ``[]``/``{}`` is not
+    evidence, though: once the writer is upgraded, old queued rows must retain
+    their singular trigger and checksum rather than silently becoming an
+    unrelated empty job.
+    """
+
+    import hashlib
+    import json
+
+    table = Table("composition_jobs", MetaData(), autoload_with=connection)
+
+    def parsed_list(value) -> list[str]:
+        if value is None or value == "":
+            return []
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if isinstance(parsed, list):
+            return [
+                str(item) for item in parsed
+                if isinstance(item, (str, int)) and str(item)
+            ]
+        if isinstance(parsed, (str, int)) and not isinstance(parsed, bool):
+            return [str(parsed)]
+        return []
+
+    def parsed_mapping(value) -> dict[str, str]:
+        if value is None or value == "":
+            return {}
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(game_id): str(checksum)
+            for game_id, checksum in parsed.items()
+            if isinstance(game_id, (str, int))
+            and isinstance(checksum, (str, int))
+            and str(game_id)
+            and str(checksum)
+        }
+
+    rows = connection.execute(select(table)).mappings().all()
+    for row in rows:
+        trigger_ids = parsed_list(row.get("trigger_game_ids"))
+        legacy_trigger = row.get("trigger_game_id")
+        if not trigger_ids and legacy_trigger:
+            trigger_ids = [str(legacy_trigger)]
+        evidence = parsed_mapping(row.get("ledger_evidence"))
+        if not evidence and trigger_ids and row.get("ledger_checksum"):
+            # Legacy rows had only one checksum, so it can safely be bound to
+            # the singular trigger.  For malformed multi-trigger legacy rows,
+            # retain the evidence as one deterministic fallback rather than
+            # inventing a checksum for an unknown game.
+            if len(trigger_ids) == 1:
+                evidence = {trigger_ids[0]: str(row["ledger_checksum"])}
+        if not trigger_ids and evidence:
+            trigger_ids = sorted(evidence)
+        if not trigger_ids and not evidence and not row.get("trigger_game_id"):
+            # There is no legacy evidence to recover; normalize only the
+            # generation so future claims are still versioned.  A live claim
+            # is not compatibility data and must survive this upgrade.
+            values = {"generation": max(int(row.get("generation") or 0), 1)}
+            connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
+            continue
+        trigger_ids = sorted(set(trigger_ids) | set(evidence))
+        if evidence:
+            encoded_evidence = json.dumps(dict(sorted(evidence.items())), sort_keys=True, separators=(",", ":"))
+            if len(evidence) == 1:
+                checksum = next(iter(evidence.values()))
+            else:
+                checksum = hashlib.sha256(encoded_evidence.encode()).hexdigest()
+        else:
+            encoded_evidence = "{}"
+            checksum = row.get("ledger_checksum")
+        encoded_ids = json.dumps(trigger_ids, separators=(",", ":"))
+        values = {
+            "trigger_game_ids": encoded_ids,
+            "trigger_game_id": trigger_ids[0] if len(trigger_ids) == 1 else None,
+            "ledger_evidence": encoded_evidence,
+            "ledger_checksum": checksum,
+            "game_set_checksum": hashlib.sha256(
+                json.dumps(trigger_ids, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "generation": max(int(row.get("generation") or 0), 1),
+        }
+        connection.execute(table.update().where(table.c.job_id == row["job_id"]).values(**values))
+
+
+def _add_team_matchup_publication_lineage(connection: Connection) -> None:
+    """Add immutable NBA publication lineage to matchup read models.
+
+    Publication-backed facts and observations retain the source publication,
+    coverage cutoff, freshness classification, and version that were used at
+    composition time.  Legacy and ledger-owned rows remain nullable.
+    """
+    preparer = connection.dialect.identifier_preparer
+    additions = {
+        "publication_id": "VARCHAR(128)",
+        "publication_cutoff": "VARCHAR(64)",
+        "publication_freshness": "VARCHAR(32)",
+        "publication_version": "INTEGER",
+    }
+    for table_name in ("team_matchup_facts", "team_matchup_surface_observations"):
+        table = preparer.quote(table_name)
+        existing = {
+            column["name"]
+            for column in inspect(connection).get_columns(table_name)
+        }
+        for name, type_sql in additions.items():
+            if name in existing:
+                continue
+            connection.execute(
+                text(
+                    f"ALTER TABLE {table} ADD COLUMN "
+                    f"{preparer.quote(name)} {type_sql}"
+                )
             )
 
 
@@ -923,6 +1136,8 @@ def _create_publication_player_game_log_projection(
 ) -> None:
     """Create and backfill immutable player-log rows keyed by publication."""
 
+    _upgrade_correction_propagation(connection)
+
     from app.models.collection_control import PublicationVersion
     from app.models.player_game_log import PublicationPlayerGameLog
     from app.services.database_first_activation import PublicationPayloadError
@@ -985,14 +1200,14 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     LatestPlayerProjection.__table__.create(connection, checkfirst=True)
 
 
-def _v37_projection_poll_promoted_predicate(
+def _v40_projection_poll_promoted_predicate(
     *,
     poll_ref: str,
     generation_ref: str,
     poll_table: str,
     generation_table: str,
 ) -> str:
-    """Reconstruct whether one v37 poll crossed its temporal promotion fence."""
+    """Reconstruct whether one v40 poll crossed its temporal promotion fence."""
 
     return (
         f"({generation_ref}.source_poll_id = {poll_ref}.poll_id OR ("
@@ -1012,7 +1227,7 @@ def _v37_projection_poll_promoted_predicate(
 
 
 def _upgrade_projection_archive_transitions(connection: Connection) -> None:
-    """Upgrade migration-37 projection tables for truthful poll transitions."""
+    """Upgrade migration-40 projection tables for truthful poll transitions."""
 
     from app.models.projection_archive import (
         LatestPlayerProjection,
@@ -1061,7 +1276,7 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
     latest_name = connection.dialect.identifier_preparer.quote(
         "latest_player_projections"
     )
-    promotion_predicate = _v37_projection_poll_promoted_predicate(
+    promotion_predicate = _v40_projection_poll_promoted_predicate(
         poll_ref="poll",
         generation_ref="generation",
         poll_table=poll_name,
@@ -1130,9 +1345,9 @@ def _rebuild_projection_transition_tables_sqlite(
     connection: Connection,
     tables: tuple[Table, ...],
 ) -> None:
-    """Rebuild the v37 FK-connected projection cluster on SQLite."""
+    """Rebuild the v40 FK-connected projection cluster on SQLite."""
 
-    suffix = "__038"
+    suffix = "__041"
     names = {table.name: f"{table.name}{suffix}" for table in tables}
     for table in tables:
         ddl = str(CreateTable(table).compile(dialect=connection.dialect))
@@ -1154,7 +1369,7 @@ def _rebuild_projection_transition_tables_sqlite(
             if column in source_columns:
                 expressions.append(column)
             elif column == "confirmed_at":
-                promotion_predicate = _v37_projection_poll_promoted_predicate(
+                promotion_predicate = _v40_projection_poll_promoted_predicate(
                     poll_ref="poll",
                     generation_ref="generation",
                     poll_table="projection_provider_polls",
@@ -1171,7 +1386,7 @@ def _rebuild_projection_transition_tables_sqlite(
                     "observed_at) AS confirmed_at"
                 )
             elif column == "promoted":
-                promotion_predicate = _v37_projection_poll_promoted_predicate(
+                promotion_predicate = _v40_projection_poll_promoted_predicate(
                     poll_ref=table.name,
                     generation_ref="generation",
                     poll_table="projection_provider_polls",
@@ -1189,7 +1404,7 @@ def _rebuild_projection_transition_tables_sqlite(
                 expressions.append("NULL AS failure_reason")
             else:
                 raise RuntimeError(
-                    f"migration 038 cannot backfill projection column {column}"
+                    f"migration 041 cannot backfill projection column {column}"
                 )
         connection.exec_driver_sql(
             f"INSERT INTO {names[table.name]} ({', '.join(destinations)}) "
@@ -1209,7 +1424,226 @@ def _rebuild_projection_transition_tables_sqlite(
             )
     violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     if violations:
-        raise RuntimeError("migration 038 left invalid projection foreign keys")
+        raise RuntimeError("migration 041 left invalid projection foreign keys")
+def _bind_manifests_to_event_catalog_publications(
+    connection: Connection,
+) -> None:
+    """Bind each manifest to the exact immutable Event Catalog it validated."""
+
+    from app.models.collection_control import CatalogPublication, CollectionManifest
+
+    preparer = connection.dialect.identifier_preparer
+    table_name = preparer.quote(CollectionManifest.__tablename__)
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            CollectionManifest.__tablename__
+        )
+    }
+    if "event_catalog_publication_id" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {table_name} ADD COLUMN "
+            "event_catalog_publication_id VARCHAR(36) REFERENCES "
+            "collection_catalog_publications(publication_id) ON DELETE RESTRICT"
+        ))
+    if "event_catalog_checksum" not in columns:
+        connection.execute(text(
+            f"ALTER TABLE {table_name} ADD COLUMN "
+            "event_catalog_checksum VARCHAR(64)"
+        ))
+
+    manifest_table = CollectionManifest.__table__
+    catalog_table = CatalogPublication.__table__
+    manifests = connection.execute(select(
+        manifest_table.c.manifest_id,
+        manifest_table.c.season,
+        manifest_table.c.cutoff,
+        manifest_table.c.created_at,
+        manifest_table.c.event_catalog_publication_id,
+    )).mappings()
+    for manifest in manifests:
+        if manifest["event_catalog_publication_id"]:
+            continue
+        catalogs = list(connection.execute(
+            select(
+                catalog_table.c.publication_id,
+                catalog_table.c.checksum,
+                catalog_table.c.published_at,
+            ).where(
+                catalog_table.c.season == manifest["season"],
+                catalog_table.c.catalog_type == "event",
+                catalog_table.c.cutoff == manifest["cutoff"],
+                catalog_table.c.complete.is_(True),
+            ).order_by(catalog_table.c.published_at.desc())
+        ).mappings())
+        eligible = [
+            catalog
+            for catalog in catalogs
+            if catalog["published_at"] <= manifest["created_at"]
+        ]
+        if len(eligible) != 1:
+            # Ambiguous legacy rows stay explicitly unbound and therefore
+            # fail closed in governance reads.
+            continue
+        catalog = eligible[0]
+        connection.execute(
+            manifest_table.update().where(
+                manifest_table.c.manifest_id == manifest["manifest_id"]
+            ).values(
+                event_catalog_publication_id=catalog["publication_id"],
+                event_catalog_checksum=catalog["checksum"],
+            )
+        )
+
+
+def _bind_publication_versions_to_manifest_authority(
+    connection: Connection,
+) -> None:
+    """Bind governed versions to one unambiguous manifest/catalog authority."""
+
+    from app.models.collection_control import (
+        CatalogPublication,
+        CollectionManifest,
+        CollectionObservation,
+        PublicationObservation,
+        PublicationVersion,
+    )
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_STREAM_KEYS
+
+    preparer = connection.dialect.identifier_preparer
+    table_name = preparer.quote(PublicationVersion.__tablename__)
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            PublicationVersion.__tablename__
+        )
+    }
+    additions = (
+        (
+            "manifest_id",
+            "VARCHAR(36) REFERENCES collection_manifests(manifest_id) "
+            "ON DELETE RESTRICT",
+        ),
+        (
+            "event_catalog_publication_id",
+            "VARCHAR(36) REFERENCES "
+            "collection_catalog_publications(publication_id) ON DELETE RESTRICT",
+        ),
+        ("event_catalog_checksum", "VARCHAR(64)"),
+    )
+    for column_name, definition in additions:
+        if column_name not in columns:
+            connection.execute(text(
+                f"ALTER TABLE {table_name} ADD COLUMN "
+                f"{column_name} {definition}"
+            ))
+
+    version_table = PublicationVersion.__table__
+    manifest_table = CollectionManifest.__table__
+    catalog_table = CatalogPublication.__table__
+
+    def normalized_cutoff(value):
+        if isinstance(value, str):
+            value = PythonDateTime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    versions = connection.execute(select(
+        version_table.c.publication_id,
+        version_table.c.season,
+        version_table.c.cutoff,
+        version_table.c.manifest_id,
+        version_table.c.stream_key,
+    )).mappings()
+    for version in versions:
+        if (
+            version["manifest_id"]
+            or version["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+        ):
+            continue
+        manifests = list(connection.execute(
+            select(
+                manifest_table.c.manifest_id,
+                manifest_table.c.cutoff,
+                manifest_table.c.scopes,
+                manifest_table.c.accepted_versions,
+                manifest_table.c.event_catalog_publication_id,
+                manifest_table.c.event_catalog_checksum,
+            ).where(
+                manifest_table.c.season == version["season"],
+            )
+        ).mappings())
+        try:
+            manifests = [
+                manifest
+                for manifest in manifests
+                if (
+                    normalized_cutoff(manifest["cutoff"])
+                    == normalized_cutoff(version["cutoff"])
+                    and "canonical_game_ledger"
+                    in set(json.loads(manifest["scopes"]))
+                    and 1 in set(json.loads(manifest["accepted_versions"]))
+                )
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if len(manifests) != 1:
+            continue
+        manifest = manifests[0]
+        if (
+            not manifest["event_catalog_publication_id"]
+            or not manifest["event_catalog_checksum"]
+        ):
+            continue
+        catalogs = list(connection.execute(select(
+            catalog_table.c.publication_id,
+            catalog_table.c.cutoff,
+            catalog_table.c.checksum,
+        ).where(
+            catalog_table.c.season == version["season"],
+            catalog_table.c.catalog_type == "event",
+            catalog_table.c.complete.is_(True),
+        )).mappings())
+        catalogs = [
+            catalog
+            for catalog in catalogs
+            if normalized_cutoff(catalog["cutoff"])
+            == normalized_cutoff(version["cutoff"])
+        ]
+        if (
+            len(catalogs) != 1
+            or catalogs[0]["publication_id"]
+            != manifest["event_catalog_publication_id"]
+            or catalogs[0]["checksum"] != manifest["event_catalog_checksum"]
+        ):
+            continue
+        catalog = catalogs[0]
+        provenance_manifest_ids = set(connection.scalars(
+            select(CollectionObservation.manifest_id)
+            .select_from(
+                PublicationObservation.__table__.join(
+                    CollectionObservation.__table__,
+                    PublicationObservation.observation_id
+                    == CollectionObservation.observation_id,
+                )
+            )
+            .where(
+                PublicationObservation.publication_id
+                == version["publication_id"]
+            )
+        ))
+        if provenance_manifest_ids and provenance_manifest_ids != {
+            manifest["manifest_id"]
+        }:
+            continue
+        connection.execute(version_table.update().where(
+            version_table.c.publication_id == version["publication_id"]
+        ).values(
+            manifest_id=manifest["manifest_id"],
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+        ))
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -1264,10 +1698,25 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "036_publication_player_game_log_projection",
         _create_publication_player_game_log_projection,
     ),
-    Migration(37, "037_projection_archive", _create_projection_archive_tables),
+    Migration(
+        37,
+        "037_team_matchup_publication_lineage",
+        _add_team_matchup_publication_lineage,
+    ),
     Migration(
         38,
-        "038_projection_archive_transitions",
+        "038_bind_manifests_to_event_catalog_publications",
+        _bind_manifests_to_event_catalog_publications,
+    ),
+    Migration(
+        39,
+        "039_bind_publication_versions_to_manifest_authority",
+        _bind_publication_versions_to_manifest_authority,
+    ),
+    Migration(40, "040_projection_archive", _create_projection_archive_tables),
+    Migration(
+        41,
+        "041_projection_archive_transitions",
         _upgrade_projection_archive_transitions,
     ),
 )
@@ -1323,6 +1772,13 @@ def run_migrations(engine: Engine) -> MigrationResult:
             )
             applied_versions.add(migration.version)
             applied_names.append(migration.name)
+
+        # Issue #116 extends the already-published migration-036 head.  Run
+        # this additive, idempotent compatibility upgrade for databases that
+        # recorded 036 before the correction metadata existed; fresh databases
+        # have already executed it from the 036 upgrade function above.
+        if max(applied_versions, default=0) >= 36:
+            _upgrade_correction_propagation(connection)
 
     return MigrationResult(
         applied=tuple(applied_names),

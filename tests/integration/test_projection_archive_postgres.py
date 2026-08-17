@@ -1148,7 +1148,7 @@ def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fen
     ] == final_recovery_at.isoformat()
 
 
-def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
+def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
     projection_pg_engine,
 ):
     run_migrations(projection_pg_engine)
@@ -1199,7 +1199,7 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
         query=query,
         accepted_at=OBSERVED_AT + timedelta(minutes=5),
     )
-    historical_poll_id = "v37_historical_postgres_poll"
+    historical_poll_id = "v40_historical_postgres_poll"
     with projection_pg_engine.begin() as connection:
         winner_poll_id = connection.execute(
             select(ProjectionMaterializationGeneration.source_poll_id).where(
@@ -1249,12 +1249,12 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
         connection.execute(text(
             "ALTER TABLE latest_player_projections DROP COLUMN confirmed_at"
         ))
-        connection.execute(text("DELETE FROM schema_migrations WHERE version = 38"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 41"))
 
     upgraded = run_migrations(projection_pg_engine)
     repeated = run_migrations(projection_pg_engine)
 
-    assert upgraded.applied == ("038_projection_archive_transitions",)
+    assert upgraded.applied == ("041_projection_archive_transitions",)
     assert repeated.applied == ()
     inspector = inspect(projection_pg_engine)
     polls = {

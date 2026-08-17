@@ -92,6 +92,11 @@ The default fallback budget is one eight-second attempt. Natural-language
 parsing is optional enrichment, so retrying inside a public request must not
 hold the deterministic result for tens of seconds.
 
+GPT-5 models use `max_completion_tokens` and minimal reasoning for this
+structured extraction task. Earlier chat models use `max_tokens` and the
+configured temperature. `LLM_MAX_TOKENS` controls the combined reasoning and
+visible-output allowance for GPT-5 models.
+
 ## Supported concepts
 
 The rule parser is designed around:

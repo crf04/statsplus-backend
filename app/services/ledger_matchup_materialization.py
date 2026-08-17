@@ -1,29 +1,32 @@
 """High-level ledger-owned Season and exact L15 matchup materialization (#114).
 
-This module owns the seam that turns stored Canonical Game Ledger evidence into
-the disposable ``team_matchup_facts`` read model without any provider call.
-One interface accepts a season, a shared cutoff, and the runtime's
-authoritative governed window -- the expected game IDs, expected L15 game IDs,
-and team IDs resolved from the active manifest and Event Catalog.  It records
-the exact governed game IDs and the deterministic ledger checksum, and
-aggregates every contracted PBP-owned non-shot opponent fact (the traditional
-opponent counts and assist locations) exclusively from typed ledger counts and
-denominators.  NBA-owned shot and play surfaces are deliberately outside this
-service: their independent refresh writes the same disposable read model and
-can fail without preventing ledger-owned surfaces from materializing.
+This module owns the seam that turns stored Canonical Game Ledger evidence and
+governed NBA Publications into the disposable ``team_matchup_facts`` read
+model without any provider call.  One interface accepts a season, a shared
+cutoff, and the runtime's authoritative governed window -- the expected game
+IDs, expected L15 game IDs, and team IDs resolved from the active manifest and
+Event Catalog.  It records the exact governed game IDs and deterministic
+ledger checksum, aggregates every contracted PBP-owned non-shot opponent fact
+(the traditional opponent counts and assist locations) exclusively from typed
+ledger counts and denominators, and composes NBA-owned shot and play surfaces
+independently from their immutable publication lineage.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
+from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Session
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE
-from app.domain.utc import assume_utc
+from app.domain.slate_time import slate_date_for_instant
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     CanonicalGameLedgerRepository,
@@ -39,7 +42,26 @@ from app.services.ledger_derivations import (
     materialize_team_window,
     window_ledger_checksum,
 )
+from app.services.ledger_lineage import LedgerLineage
+from app.services.database_first_activation import (
+    PublicationPayloadError,
+    PublicationRead,
+    decode_team_window,
+)
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAMS,
+    NBA_PUBLICATION_WINDOWS,
+    PublicationGovernanceUnavailable,
+    publication_cutoff_reason,
+    publication_lineage,
+    publication_metric_identity,
+    publication_stream,
+    resolve_governed_team_game_ids,
+    validate_publication_rows,
+)
 from app.services.team_matchup_repository import (
+    _LEDGER_SURFACE_BY_STREAM,
+    _LedgerRecompositionAuthority,
     TeamMatchupFact,
     TeamMatchupObservation,
     TeamMatchupRepository,
@@ -54,6 +76,8 @@ LEDGER_SOURCE = "ledger"
 ROSTER_INCOMPLETE_REASON = "governed_team_roster_incomplete"
 INSUFFICIENT_GAMES_REASON = "insufficient_governed_games"
 ASSIST_INCOMPLETE_REASON = "assist_location_evidence_incomplete"
+
+NBA_PUBLICATION_SOURCE = "nba_publication"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +108,9 @@ class LedgerMatchupMaterializationService:
 
     The service has no provider dependency: every contracted non-shot opponent
     fact is aggregated from typed ledger counts and denominators supplied by
-    :class:`CanonicalGameLedgerRepository`, and it publishes only the
-    ``traditional`` and ``assist_locations`` surfaces to the disposable
-    ``team_matchup_facts`` read model.
+    :class:`CanonicalGameLedgerRepository`, while NBA-owned surfaces are read
+    from governed Publications and published independently into the same
+    disposable read model.
     """
 
     def __init__(
@@ -94,6 +118,8 @@ class LedgerMatchupMaterializationService:
         repository: CanonicalGameLedgerRepository,
         matchup_repository: TeamMatchupRepository,
         *,
+        publication_reader=None,
+        l15_expectation_resolver=None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(repository, CanonicalGameLedgerRepository):
@@ -102,6 +128,8 @@ class LedgerMatchupMaterializationService:
             raise TypeError("matchup_repository must be a TeamMatchupRepository")
         self.repository = repository
         self.matchup_repository = matchup_repository
+        self.publication_reader = publication_reader
+        self.l15_expectation_resolver = l15_expectation_resolver
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def materialize(
@@ -112,6 +140,14 @@ class LedgerMatchupMaterializationService:
         expected_game_ids: frozenset[str],
         expected_l15_game_ids: Mapping[int, frozenset[str]],
         team_ids: frozenset[int],
+        cutoff: datetime | None = None,
+        recomposition_reason: str | None = None,
+        affected_team_ids: frozenset[int] | None = None,
+        trigger_game_id: str | None = None,
+        trigger_game_ids: frozenset[str] | None = None,
+        write_authority: _LedgerRecompositionAuthority | None = None,
+        claimed_streams: frozenset[str] | None = None,
+        session: Session | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
 
@@ -128,10 +164,18 @@ class LedgerMatchupMaterializationService:
 
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(self._clock())
+        if cutoff is not None:
+            cutoff = assume_utc(cutoff)
+            if cutoff.date() != as_of and slate_date_for_instant(cutoff) != as_of:
+                raise ValueError("cutoff must match the materialization date")
         current_date = retrieved_at.astimezone(EASTERN).date()
         if as_of > current_date:
             raise ValueError("future as_of dates cannot be published")
-        games, checksums = self._load_games(canonical_season, as_of)
+        games, checksums = self._load_games(
+            canonical_season,
+            as_of,
+            connection=session.connection() if session is not None else None,
+        )
         self._reject_governance_mismatch(
             games,
             expected_game_ids=expected_game_ids,
@@ -181,6 +225,8 @@ class LedgerMatchupMaterializationService:
             checksums=checksums,
             games_by_id=games_by_id,
             roster_incomplete=roster_incomplete,
+            cutoff=cutoff,
+            recomposition_reason=recomposition_reason,
         )
         l15_facts, l15_observations = self._window_read_model(
             l15_window,
@@ -188,14 +234,214 @@ class LedgerMatchupMaterializationService:
             checksums=checksums,
             games_by_id=games_by_id,
             roster_incomplete=roster_incomplete,
+            cutoff=cutoff,
+            recomposition_reason=recomposition_reason,
         )
-        self.matchup_repository.replace_snapshots(
-            (
-                (season_scope, season_facts, season_observations),
-                (l15_scope, l15_facts, l15_observations),
-            ),
-            retrieved_at=retrieved_at,
+        if self.publication_reader is not None:
+            season_game_ids_by_team = {
+                team_id: frozenset(
+                    game.game_id
+                    for game in games
+                    if team_id in {game.home_team_id, game.away_team_id}
+                )
+                for team_id in team_ids
+            }
+            publication_reads = self._publication_reads(
+                tuple(
+                    publication_stream(base, window)
+                    for window in NBA_PUBLICATION_WINDOWS
+                    for base in NBA_PUBLICATION_STREAMS
+                ),
+                canonical_season,
+                session=session,
+            )
+            if (
+                hasattr(self.publication_reader, "engine")
+                and recomposition_reason is not None
+                and not any(
+                    getattr(read, "publication_id", None)
+                    for read in publication_reads.values()
+                )
+            ):
+                # A legacy ledger-only manifest has no governed NBA
+                # generation to project. Keep correction metadata scoped to
+                # ledger-owned surfaces; immutable NBA reads remain available
+                # once a publication lineage exists.
+                publication_reads = {}
+            if publication_reads:
+                season_publication_facts, season_publication_observations = (
+                    self._publication_read_model(
+                        canonical_season,
+                        as_of=as_of,
+                        window="season",
+                        reads=publication_reads,
+                        expected_game_ids_by_team=season_game_ids_by_team,
+                        expected_team_ids=set(team_ids),
+                    )
+                )
+                l15_publication_facts, l15_publication_observations = (
+                    self._publication_read_model(
+                        canonical_season,
+                        as_of=as_of,
+                        window="l15",
+                        reads=publication_reads,
+                        expected_game_ids_by_team=expected_l15_game_ids,
+                        expected_team_ids=set(team_ids),
+                    )
+                )
+                season_facts = (*season_facts, *season_publication_facts)
+                season_observations = (
+                    *season_observations,
+                    *season_publication_observations,
+                )
+                l15_facts = (*l15_facts, *l15_publication_facts)
+                l15_observations = (
+                    *l15_observations,
+                    *l15_publication_observations,
+                )
+        snapshots = [
+            (season_scope, season_facts, season_observations),
+            (l15_scope, l15_facts, l15_observations),
+        ]
+        snapshot_kwargs = {"retrieved_at": retrieved_at}
+        if affected_team_ids is not None:
+            selected_trigger_game_ids = trigger_game_ids
+            if selected_trigger_game_ids is None and trigger_game_id is not None:
+                selected_trigger_game_ids = frozenset({trigger_game_id})
+            l15_affected_team_ids = frozenset(
+                team.team_id
+                for team in l15_window.teams
+                if team.team_id in affected_team_ids
+                and (
+                    selected_trigger_game_ids is None
+                    or bool(set(team.game_ids) & selected_trigger_game_ids)
+                )
+            )
+            # Season is one publication over the complete governed game set,
+            # so a correction always rebuilds its complete fact envelope. An
+            # exact-L15 correction outside every selected team is a no-op
+            # for an existing scope; the repository also uses the empty target
+            # to build a missing scope completely.
+            snapshot_kwargs["affected_team_ids_by_scope"] = {season_scope: None}
+            snapshot_kwargs["affected_team_ids_by_scope"][l15_scope] = (
+                l15_affected_team_ids
+            )
+        publication_backed = any(
+            (item.base if hasattr(item, "base") else item.surface)
+            in NBA_PUBLICATION_STREAMS
+            for _, facts, observations in snapshots
+            for item in (*facts, *observations)
         )
+        if write_authority is not None:
+            if session is None or claimed_streams is None:
+                raise PermissionError("ledger_recomposition_session_required")
+            requested_surfaces = frozenset(
+                _LEDGER_SURFACE_BY_STREAM[stream]
+                for stream in claimed_streams
+                if stream in _LEDGER_SURFACE_BY_STREAM
+            )
+            ledger_snapshots = [
+                (
+                    scope,
+                    tuple(
+                        fact
+                        for fact in facts
+                        if (scope.stored_window_games, fact.base)
+                        in requested_surfaces
+                    ),
+                    tuple(
+                        observation
+                        for observation in observations
+                        if (scope.stored_window_games, observation.surface)
+                        in requested_surfaces
+                    ),
+                )
+                for scope, facts, observations in snapshots
+                if any(
+                    window == scope.stored_window_games
+                    for window, _ in requested_surfaces
+                )
+            ]
+            self.matchup_repository.replace_ledger_snapshots(
+                ledger_snapshots,
+                **snapshot_kwargs,
+                session=session,
+                authority=write_authority,
+            )
+            publication_snapshots = [
+                (
+                    scope,
+                    tuple(fact for fact in facts if fact.base in NBA_PUBLICATION_STREAMS),
+                    tuple(
+                        observation
+                        for observation in observations
+                        if observation.surface in NBA_PUBLICATION_STREAMS
+                    ),
+                )
+                for scope, facts, observations in snapshots
+                if any(
+                    (item.base if hasattr(item, "base") else item.surface)
+                    in NBA_PUBLICATION_STREAMS
+                    for item in (*facts, *observations)
+                )
+            ]
+            if publication_snapshots:
+                self.matchup_repository.replace_governed_publication_snapshots(
+                    publication_snapshots,
+                    **snapshot_kwargs,
+                    connection=session.connection(),
+                )
+        elif publication_backed:
+            publication_snapshots = []
+            ledger_snapshots = []
+            for scope, facts, observations in snapshots:
+                publication_facts = tuple(
+                    fact for fact in facts if fact.base in NBA_PUBLICATION_STREAMS
+                )
+                publication_observations = tuple(
+                    observation
+                    for observation in observations
+                    if observation.surface in NBA_PUBLICATION_STREAMS
+                )
+                ledger_facts = tuple(
+                    fact for fact in facts if fact.base not in NBA_PUBLICATION_STREAMS
+                )
+                ledger_observations = tuple(
+                    observation
+                    for observation in observations
+                    if observation.surface not in NBA_PUBLICATION_STREAMS
+                )
+                if publication_observations:
+                    publication_snapshots.append((
+                        scope, publication_facts, publication_observations
+                    ))
+                if ledger_observations:
+                    ledger_snapshots.append((
+                        scope, ledger_facts, ledger_observations
+                    ))
+            bound_connection = (
+                session.connection() if session is not None else None
+            )
+            if ledger_snapshots:
+                self.matchup_repository.replace_snapshots(
+                    ledger_snapshots,
+                    **snapshot_kwargs,
+                    connection=bound_connection,
+                )
+            if publication_snapshots:
+                self.matchup_repository.replace_governed_publication_snapshots(
+                    publication_snapshots,
+                    **snapshot_kwargs,
+                    connection=bound_connection,
+                )
+        elif session is None:
+            self.matchup_repository.replace_snapshots(snapshots, **snapshot_kwargs)
+        else:
+            self.matchup_repository.replace_snapshots(
+                snapshots,
+                **snapshot_kwargs,
+                session=session,
+            )
         return LedgerMatchupMaterialization(
             season=canonical_season,
             as_of=as_of,
@@ -203,16 +449,340 @@ class LedgerMatchupMaterializationService:
             l15_selection=self._selection(l15_window, l15_scope, checksums),
         )
 
+    @contextmanager
+    def _runtime_write_authority(
+        self,
+        session: Session,
+        *,
+        claimed_job_generations: Mapping[str, int],
+        season: str,
+        cutoff: datetime,
+        manifest_id: str | None,
+    ):
+        with self.matchup_repository._ledger_recomposition_authority(
+            session,
+            claimed_job_generations=claimed_job_generations,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=manifest_id,
+        ) as issued:
+            yield issued
+
+    def refresh_publication_surfaces(
+        self,
+        season: str,
+        *,
+        as_of: date,
+        expected_game_ids_by_team: Mapping[int, frozenset[str]],
+        expected_l15_game_ids: Mapping[int, frozenset[str]],
+        team_ids: frozenset[int],
+        session: Session | None = None,
+    ) -> None:
+        """Persist newly composed NBA surfaces without rebuilding ledger facts.
+
+        NBA composition jobs can arrive after the ledger-owned slice has
+        already succeeded.  Replacing only the NBA observations/facts keeps
+        that existing ledger snapshot intact and avoids revalidating the
+        immutable ledger merely because a provider publication completed.
+        """
+
+        if self.publication_reader is None:
+            raise ValueError("publication reader is required")
+        canonical_season = validate_canonical_season(season)
+        expected_teams = set(team_ids)
+        if (
+            set(expected_game_ids_by_team) != expected_teams
+            or set(expected_l15_game_ids) != expected_teams
+        ):
+            raise ValueError("publication governance team set mismatch")
+        reads = self._publication_reads(
+            tuple(
+                publication_stream(base, window)
+                for window in NBA_PUBLICATION_WINDOWS
+                for base in NBA_PUBLICATION_STREAMS
+            ),
+            canonical_season,
+            session=session,
+        )
+        snapshots = []
+        for window, game_ids_by_team in (
+            ("season", expected_game_ids_by_team),
+            ("l15", expected_l15_game_ids),
+        ):
+            facts, observations = self._publication_read_model(
+                canonical_season,
+                as_of=as_of,
+                window=window,
+                reads=reads,
+                expected_game_ids_by_team=game_ids_by_team,
+                expected_team_ids=expected_teams,
+            )
+            snapshots.append((
+                TeamMatchupSnapshotScope(
+                    canonical_season, as_of, 15 if window == "l15" else None
+                ),
+                facts,
+                observations,
+            ))
+        self.matchup_repository.replace_governed_publication_snapshots(
+            snapshots,
+            retrieved_at=assume_utc(self._clock()),
+            connection=session.connection() if session is not None else None,
+        )
+
+    def _publication_read_model(
+        self,
+        season: str,
+        *,
+        as_of: date,
+        window: str,
+        reads: Mapping[str, object],
+        expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
+        expected_team_ids: set[int],
+    ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
+        """Project governed NBA team-window publications into raw facts.
+
+        NBA-owned surfaces are read independently.  A missing, stale-invalid,
+        or unsupported publication creates only its own unavailable/missing
+        observation and never contributes facts from a ledger or legacy PBP
+        surface.  The publication payload already contains per-48 values, so
+        each fact stores an equivalent 48-minute numerator/denominator pair
+        while retaining the immutable publication lineage beside it.
+        """
+
+        stream_by_base = {
+            base: publication_stream(base, window)
+            for base in NBA_PUBLICATION_STREAMS
+        }
+        facts: list[TeamMatchupFact] = []
+        observations: list[TeamMatchupObservation] = []
+        for base, stream_key in stream_by_base.items():
+            read = reads.get(stream_key)
+            if read is None:
+                read = PublicationRead(
+                    stream_key=stream_key,
+                    publication_id=None,
+                    season=season,
+                    cutoff=None,
+                    version=None,
+                    status="missing",
+                    freshness="missing",
+                    age_seconds=None,
+                    payload=None,
+                )
+            surface_facts, observation = self._publication_surface(
+                base,
+                stream_key,
+                read,
+                season=season,
+                as_of=as_of,
+                expected_game_ids_by_team=expected_game_ids_by_team,
+                expected_team_ids=expected_team_ids,
+            )
+            facts.extend(surface_facts)
+            observations.append(observation)
+        return tuple(facts), tuple(observations)
+
+    def _publication_reads(
+        self,
+        stream_keys: tuple[str, ...],
+        season: str,
+        *,
+        session: Session | None = None,
+    ) -> dict[str, object]:
+        """Capture one publication generation when the reader supports it."""
+
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if callable(snapshot):
+            options = {} if session is None else {"session": session}
+            captured = snapshot(stream_keys, season=season, **options)
+            reads = getattr(captured, "reads", None)
+            if isinstance(reads, Mapping):
+                return dict(reads)
+            return {
+                stream_key: captured.read(stream_key)
+                for stream_key in stream_keys
+            }
+        read_many = getattr(self.publication_reader, "read_many", None)
+        if callable(read_many):
+            return dict(read_many(stream_keys, season=season))
+        return {
+            stream_key: self.publication_reader.read(stream_key, season=season)
+            for stream_key in stream_keys
+        }
+
+    def _publication_surface(
+        self,
+        base: str,
+        stream_key: str,
+        read,
+        *,
+        season: str,
+        as_of: date,
+        expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
+        expected_team_ids: set[int] | None,
+    ) -> tuple[tuple[TeamMatchupFact, ...], TeamMatchupObservation]:
+        """Decode one NBA publication without borrowing another surface."""
+
+        lineage = publication_lineage(read)
+        status = getattr(read, "status", "missing")
+        available = bool(getattr(read, "available", False))
+        if not available:
+            observation_status = "missing" if status == "missing" else "unavailable"
+            return (), TeamMatchupObservation(
+                surface=base,
+                status=observation_status,
+                unavailable_reason=(
+                    getattr(read, "unavailable_reason", None)
+                    or f"publication_{status}"
+                ),
+                publication=lineage,
+            )
+        cutoff_reason = publication_cutoff_reason(read, as_of)
+        if cutoff_reason is not None:
+            return (), TeamMatchupObservation(
+                surface=base,
+                status="unavailable",
+                unavailable_reason=cutoff_reason,
+                publication=lineage,
+            )
+        if expected_game_ids_by_team is not None:
+            try:
+                publication_cutoff = (
+                    assume_utc(read.cutoff)
+                    if isinstance(read.cutoff, datetime)
+                    else parse_utc_iso(str(read.cutoff))
+                )
+            except (TypeError, ValueError):
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_governance_unavailable",
+                    publication=lineage,
+                )
+            if read.season != season:
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_governance_unavailable",
+                    publication=lineage,
+                )
+            try:
+                if self.l15_expectation_resolver is not None:
+                    window = "l15" if stream_key.endswith("_l15") else "season"
+                    expected_game_ids_by_team = resolve_governed_team_game_ids(
+                        self.l15_expectation_resolver,
+                        read.season,
+                        publication_cutoff,
+                        window=window,
+                        manifest_id=getattr(read, "manifest_id", None),
+                        event_catalog_publication_id=getattr(
+                            read, "event_catalog_publication_id", None
+                        ),
+                        event_catalog_checksum=getattr(
+                            read, "event_catalog_checksum", None
+                        ),
+                    )
+            except PublicationGovernanceUnavailable:
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_governance_unavailable",
+                    publication=lineage,
+                )
+        try:
+            rows = tuple(getattr(read, "decoded", None) or decode_team_window(
+                read.payload,
+                stream_key=stream_key,
+            ))
+        except (PublicationPayloadError, AttributeError):
+            return (), TeamMatchupObservation(
+                surface=base,
+                status="unavailable",
+                unavailable_reason="publication_payload_invalid",
+                publication=lineage,
+            )
+        if len(rows) != 30:
+            return (), TeamMatchupObservation(
+                surface=base,
+                status="unavailable",
+                unavailable_reason="publication_surface_incomplete",
+                publication=lineage,
+            )
+        try:
+            metric_keys = validate_publication_rows(
+                base,
+                rows,
+                expected_game_ids_by_team=expected_game_ids_by_team,
+                window=("l15" if stream_key.endswith("_l15") else "season"),
+                expected_team_ids=expected_team_ids,
+            )
+        except ValueError as exc:
+            return (), TeamMatchupObservation(
+                surface=base,
+                status="unavailable",
+                unavailable_reason=str(exc),
+                publication=lineage,
+            )
+        game_ids = tuple(sorted({game_id for row in rows for game_id in row.game_ids}))
+        facts = tuple(
+            TeamMatchupFact(
+                team_id=row.team_id,
+                base=base,
+                slice_key=metric_identity[0],
+                stat_key=metric_identity[1],
+                raw_value=float(row.per48[metric_key]),
+                denominator_value=48.0,
+                denominator_unit="minutes",
+                provider=NBA_PUBLICATION_SOURCE,
+                game_ids=tuple(row.game_ids),
+                publication=lineage,
+            )
+            for row in rows
+            for metric_key in metric_keys
+            for metric_identity in (
+                publication_metric_identity(base, metric_key),
+            )
+        )
+        return facts, TeamMatchupObservation(
+            surface=base,
+            status="available",
+            game_ids=game_ids,
+            publication=lineage,
+        )
+
     def _load_games(
-        self, season: str, as_of: date
+        self,
+        season: str,
+        as_of: date,
+        *,
+        connection: Connection | None = None,
     ) -> tuple[tuple[CanonicalGame, ...], dict[str, str]]:
         """Load the governed Regular Season ledger games through ``as_of``."""
 
-        summaries = self.repository.list_games(season, through=as_of)
+        try:
+            summaries = self.repository.list_games(
+                season,
+                through=as_of,
+                connection=connection,
+            )
+        except TypeError as error:
+            if "connection" not in str(error):
+                raise
+            summaries = self.repository.list_games(season, through=as_of)
+
+        def read_game(game_id):
+            try:
+                return self.repository.get_game(game_id, connection=connection)
+            except TypeError as error:
+                if "connection" not in str(error):
+                    raise
+                return self.repository.get_game(game_id)
+
         games = tuple(
             game
             for summary in summaries
-            if (game := self.repository.get_game(summary.game_id)) is not None
+            if (game := read_game(summary.game_id)) is not None
             and game.season_type == REGULAR_SEASON_TYPE
         )
         checksums = {
@@ -318,6 +888,8 @@ class LedgerMatchupMaterializationService:
         checksums: Mapping[str, str],
         games_by_id: Mapping[str, CanonicalGame],
         roster_incomplete: bool,
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Build disposable facts and observations for one window.
 
@@ -329,17 +901,29 @@ class LedgerMatchupMaterializationService:
 
         governed_game_ids = window.governed_game_ids
         ledger_checksum = window_ledger_checksum(governed_game_ids, checksums)
+        game_set_checksum = _game_set_checksum(governed_game_ids)
+        source_observation_ids = _source_observation_ids(
+            governed_game_ids, games_by_id
+        )
         if roster_incomplete:
             return (), self._missing_observations(
                 ROSTER_INCOMPLETE_REASON,
                 game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         if not window.complete:
             return (), self._missing_observations(
                 window.reason,
                 game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         start_dates = {
             team.team_id: min(
@@ -354,11 +938,20 @@ class LedgerMatchupMaterializationService:
                 status="available",
                 game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         ]
         facts = list(
             self._traditional_facts(
-                window, ledger_checksum=ledger_checksum, start_dates=start_dates
+                window,
+                ledger_checksum=ledger_checksum,
+                start_dates=start_dates,
+                games_by_id=games_by_id,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         )
         if assist_window is not None and assist_window.complete:
@@ -367,6 +960,9 @@ class LedgerMatchupMaterializationService:
                     assist_window,
                     ledger_checksum=ledger_checksum,
                     start_dates=start_dates,
+                    games_by_id=games_by_id,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
                 )
             )
             observations.append(
@@ -375,6 +971,10 @@ class LedgerMatchupMaterializationService:
                     status="available",
                     game_ids=governed_game_ids,
                     ledger_checksum=ledger_checksum,
+                    source_observation_ids=source_observation_ids,
+                    game_set_checksum=game_set_checksum,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
                 )
             )
         else:
@@ -385,6 +985,10 @@ class LedgerMatchupMaterializationService:
                     unavailable_reason=ASSIST_INCOMPLETE_REASON,
                     game_ids=governed_game_ids,
                     ledger_checksum=ledger_checksum,
+                    source_observation_ids=source_observation_ids,
+                    game_set_checksum=game_set_checksum,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
                 )
             )
         return tuple(facts), tuple(observations)
@@ -395,6 +999,10 @@ class LedgerMatchupMaterializationService:
         *,
         game_ids: tuple[str, ...],
         ledger_checksum: str,
+        source_observation_ids: tuple[str, ...],
+        game_set_checksum: str,
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[TeamMatchupObservation, ...]:
         status, mapped_reason = (
             ("missing", INSUFFICIENT_GAMES_REASON)
@@ -410,6 +1018,10 @@ class LedgerMatchupMaterializationService:
                 mapped_reason,
                 game_ids=game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             ),
             TeamMatchupObservation(
                 "assist_locations",
@@ -417,6 +1029,10 @@ class LedgerMatchupMaterializationService:
                 mapped_reason,
                 game_ids=game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             ),
         )
 
@@ -426,6 +1042,9 @@ class LedgerMatchupMaterializationService:
         *,
         ledger_checksum: str,
         start_dates: Mapping[int, date | None],
+        games_by_id: Mapping[str, CanonicalGame],
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[TeamMatchupFact, ...]:
         facts = []
         for team in window.teams:
@@ -443,6 +1062,12 @@ class LedgerMatchupMaterializationService:
                         window_start_date=start_dates.get(team.team_id),
                         game_ids=team.game_ids,
                         ledger_checksum=ledger_checksum,
+                        source_observation_ids=_source_observation_ids(
+                            team.game_ids, games_by_id
+                        ),
+                        game_set_checksum=_game_set_checksum(team.game_ids),
+                        cutoff=cutoff,
+                        recomposition_reason=recomposition_reason,
                     )
                 )
         return tuple(facts)
@@ -453,6 +1078,9 @@ class LedgerMatchupMaterializationService:
         *,
         ledger_checksum: str,
         start_dates: Mapping[int, date | None],
+        games_by_id: Mapping[str, CanonicalGame],
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[TeamMatchupFact, ...]:
         facts = []
         for team in window.teams:
@@ -470,6 +1098,12 @@ class LedgerMatchupMaterializationService:
                         window_start_date=start_dates.get(team.team_id),
                         game_ids=team.game_ids,
                         ledger_checksum=ledger_checksum,
+                        source_observation_ids=_source_observation_ids(
+                            team.game_ids, games_by_id
+                        ),
+                        game_set_checksum=_game_set_checksum(team.game_ids),
+                        cutoff=cutoff,
+                        recomposition_reason=recomposition_reason,
                     )
                 )
         return tuple(facts)
@@ -496,6 +1130,25 @@ class LedgerMatchupMaterializationService:
             complete=window.complete,
             reason=window.reason,
         )
+
+
+def _source_observation_ids(
+    game_ids: tuple[str, ...],
+    games_by_id: Mapping[str, CanonicalGame],
+) -> tuple[str, ...]:
+    """Return the accepted source observations for an exact game selection."""
+
+    return tuple(sorted({
+        games_by_id[game_id].source_observation_id
+        for game_id in game_ids
+        if game_id in games_by_id
+    }))
+
+
+def _game_set_checksum(game_ids: tuple[str, ...]) -> str:
+    """Hash only the exact selected IDs, independently of their facts."""
+
+    return LedgerLineage.for_game_ids(game_ids)
 
 
 __all__ = [

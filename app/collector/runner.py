@@ -141,6 +141,7 @@ class ResidentialCollector:
         "event_catalog", "athlete_catalog", "synergy", "synergy_play_types",
         "grouped_shot_types", "shot_types", "player_shot_types", "exact_shot_zones",
         "shot_zones", "player_shot_zones", "synergy:l15", "synergy_l15",
+        "synergy_opponent", "shot_types_opponent", "shot_zones_opponent",
     })
 
     def __init__(

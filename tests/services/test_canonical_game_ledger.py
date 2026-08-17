@@ -1337,6 +1337,170 @@ def test_idempotent_replay_with_bound_observation_persists_no_new_observation(tm
         assert len(connection.execute(select(LedgerGameRowEvidence)).all()) == 5
 
 
+def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'stale-correction.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(
+        engine,
+        correction_sink=LedgerCorrectionQueue(
+            clock=lambda: datetime(2024, 11, 18, tzinfo=timezone.utc),
+        ),
+    )
+    payload = _clean_observation()
+    first = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id="obs-stale-first",
+        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+    )
+    first_values = _observation_values(
+        payload,
+        observation_id=first.source_observation_id,
+        game_id=first.game_id,
+        accepted_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        retrieved_at=first.retrieved_at,
+    )
+    assert repository.replace_games_atomic(
+        (first,), accepted_observations={first.source_observation_id: first_values}
+    )[0].inserted
+
+    corrected_payload = json.loads(json.dumps(payload))
+    corrected_payload["stats"]["Home"]["FullGame"][1]["Points"] = 26
+    corrected_payload["team_results"]["Home"]["FullGame"]["Points"] = 41
+    second = canonical_game_from_pbp(
+        corrected_payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id="obs-stale-second",
+        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+    )
+    second_values = _observation_values(
+        corrected_payload,
+        observation_id=second.source_observation_id,
+        game_id=second.game_id,
+        accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=second.retrieved_at,
+    )
+    assert repository.replace_games_atomic(
+        (second,), accepted_observations={second.source_observation_id: second_values}
+    )[0].replaced
+
+    stale_payload = json.loads(json.dumps(corrected_payload))
+    stale_payload["stats"]["Home"]["FullGame"][1]["Points"] = 27
+    stale_payload["team_results"]["Home"]["FullGame"]["Points"] = 42
+    stale = canonical_game_from_pbp(
+        stale_payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id="obs-stale-third",
+        retrieved_at=datetime(2024, 11, 18, tzinfo=timezone.utc),
+    )
+    stale_values = _observation_values(
+        stale_payload,
+        observation_id=stale.source_observation_id,
+        game_id=stale.game_id,
+        accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+        retrieved_at=stale.retrieved_at,
+    )
+    result = repository.replace_games_atomic(
+        (stale,), accepted_observations={stale.source_observation_id: stale_values}
+    )[0]
+    assert not result.inserted and not result.replaced
+    assert result.checksum == second.checksum
+    stored = repository.get_game(first.game_id)
+    assert stored is not None
+    assert stored.source_observation_id == second.source_observation_id
+    with engine.connect() as connection:
+        assert {
+            row[0]
+            for row in connection.execute(select(CollectionObservation.observation_id))
+        } == {first.source_observation_id, second.source_observation_id}
+        assert len(connection.execute(select(CompositionJob)).all()) == 6
+
+
+def test_bound_correction_failure_rolls_back_observation_raw_typed_and_jobs(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'correction-rollback.sqlite3'}")
+    run_migrations(engine)
+    _install_ledger_manifest(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    payload = _clean_observation()
+    first = canonical_game_from_pbp(
+        payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id="obs-rollback-first",
+        retrieved_at=datetime(2024, 11, 16, tzinfo=timezone.utc),
+    )
+    first_values = _observation_values(
+        payload,
+        observation_id=first.source_observation_id,
+        game_id=first.game_id,
+        accepted_at=first.retrieved_at,
+        retrieved_at=first.retrieved_at,
+    )
+    assert repository.replace_games_atomic(
+        (first,), accepted_observations={first.source_observation_id: first_values}
+    )[0].inserted
+
+    corrected_payload = json.loads(json.dumps(payload))
+    corrected_payload["stats"]["Home"]["FullGame"][1]["Points"] = 26
+    corrected_payload["team_results"]["Home"]["FullGame"]["Points"] = 41
+    corrected = canonical_game_from_pbp(
+        corrected_payload,
+        event={**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"},
+        participant_ids_by_team={
+            1610612747: (2544, 203507),
+            1610612759: (201935,),
+        },
+        source_observation_id="obs-rollback-correction",
+        retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+    )
+    corrected_values = _observation_values(
+        corrected_payload,
+        observation_id=corrected.source_observation_id,
+        game_id=corrected.game_id,
+        accepted_at=corrected.retrieved_at,
+        retrieved_at=corrected.retrieved_at,
+    )
+
+    def fail_after_ledger_write(connection, game):
+        assert connection.execute(select(CanonicalGameLedgerGame)).first() is not None
+        raise RuntimeError("injected correction sink failure")
+
+    repository.correction_sink = fail_after_ledger_write
+    with pytest.raises(RuntimeError, match="injected correction sink failure"):
+        repository.replace_games_atomic(
+            (corrected,),
+            accepted_observations={corrected.source_observation_id: corrected_values},
+        )
+
+    stored = repository.get_game(first.game_id)
+    assert stored is not None
+    assert stored.checksum == first.checksum
+    assert stored.raw_checksum == first.raw_checksum
+    with engine.connect() as connection:
+        assert {
+            row[0]
+            for row in connection.execute(select(CollectionObservation.observation_id))
+        } == {first.source_observation_id}
+        assert connection.execute(select(CompositionJob)).all() == []
+        assert connection.execute(select(LedgerGameRowEvidence)).all()
+
+
 def test_observation_with_mismatched_retrieval_time_is_rejected_without_any_write(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'binding-time.sqlite3'}")
     run_migrations(engine)
@@ -1420,6 +1584,7 @@ def test_ledger_observations_survive_gc_including_superseded_corrections(tmp_pat
             second_id: _observation_values(
                 corrected_payload, observation_id=second_id, game_id=game.game_id,
                 retrieved_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
+                accepted_at=datetime(2024, 11, 17, tzinfo=timezone.utc),
             ),
         },
     )[0].replaced

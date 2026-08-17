@@ -23,11 +23,16 @@ from app.config.settings import (
 )
 from app.migrations import run_migrations
 from app.models.collection_control import (
+    CollectionManifest,
     CollectionObservation,
     PublicationObservation,
     PublicationVersion,
 )
-from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerObservationEvidence,
+    LedgerParityArtifact,
+)
 from app.models.projection_archive import (
     LatestPlayerProjection,
     ProjectionMaterializationGeneration,
@@ -1047,7 +1052,88 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         engine, publication_service=publication_service, clock=lambda: NOW
     )
 
-    def candidate(stream_key, payload, *, publication_id, observation_id, provider="nba"):
+    ledger_manifest_id = "journey-ledger-manifest"
+    ledger_cutoff = NOW - timedelta(days=1)
+    ledger_observations = (
+        "journey-ledger-observation-first",
+        "journey-ledger-observation-second",
+    )
+    ledger_observation_checksum = hashlib.sha256(b"{}").hexdigest()
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=ledger_manifest_id,
+            season=SEASON,
+            cutoff=ledger_cutoff,
+            collect_before=NOW + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="a" * 64,
+            status="active",
+            created_at=NOW - timedelta(days=2),
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": observation_id,
+                "client_observation_id": observation_id,
+                "collector_id": "journey-collector",
+                "manifest_id": ledger_manifest_id,
+                "environment": "server",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": GAME_ID,
+                    "surface": "canonical_game_ledger",
+                }, sort_keys=True),
+                "season": SEASON,
+                "cutoff": ledger_cutoff,
+                "schema_version": 1,
+                "checksum": ledger_observation_checksum,
+                "payload": "{}",
+                "payload_bytes": 2,
+                "retrieved_at": NOW,
+                "accepted_at": NOW,
+            }
+            for observation_id in ledger_observations
+        ])
+        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+            game_id=GAME_ID,
+            season=SEASON,
+            season_type="Regular Season",
+            game_date=date(2026, 1, 14),
+            home_team_id=BOS,
+            home_team_tricode="BOS",
+            away_team_id=LAL,
+            away_team_tricode="LAL",
+            status="final",
+            source_observation_id=ledger_observations[0],
+            checksum="b" * 64,
+            raw_checksum="c" * 64,
+            retrieved_at=NOW,
+            updated_at=NOW,
+        ))
+        connection.execute(LedgerObservationEvidence.__table__.insert(), [
+            {
+                "observation_id": observation_id,
+                "game_id": GAME_ID,
+                "created_at": NOW,
+            }
+            for observation_id in ledger_observations
+        ])
+
+    def candidate(
+        stream_key,
+        payload,
+        *,
+        publication_id,
+        observation_id,
+        provider="nba",
+        manifest_id=None,
+        observation_type=None,
+        scope=None,
+        role="accepted_candidate",
+        slice_key=None,
+        insert_observation=True,
+    ):
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         checksum = hashlib.sha256(encoded.encode()).hexdigest()
         with engine.begin() as connection:
@@ -1060,33 +1146,35 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
                 status="candidate",
                 checksum=checksum,
                 payload=encoded,
+                manifest_id=manifest_id,
                 created_at=NOW,
                 reason="authenticated journey candidate",
                 fence=0,
             ))
-            connection.execute(CollectionObservation.__table__.insert().values(
-                observation_id=observation_id,
-                client_observation_id=observation_id,
-                collector_id="journey-collector",
-                manifest_id=None,
-                environment="testing",
-                provider=provider,
-                observation_type=stream_key,
-                scope=json.dumps({"stream": stream_key}),
-                season=SEASON,
-                cutoff=NOW - timedelta(days=1),
-                schema_version=1,
-                checksum=checksum,
-                payload=encoded,
-                payload_bytes=len(encoded.encode()),
-                retrieved_at=NOW,
-                accepted_at=NOW,
-            ))
+            if insert_observation:
+                connection.execute(CollectionObservation.__table__.insert().values(
+                    observation_id=observation_id,
+                    client_observation_id=observation_id,
+                    collector_id="journey-collector",
+                    manifest_id=manifest_id,
+                    environment="testing",
+                    provider=provider,
+                    observation_type=observation_type or stream_key,
+                    scope=json.dumps(scope or {"stream": stream_key}),
+                    season=SEASON,
+                    cutoff=ledger_cutoff,
+                    schema_version=1,
+                    checksum=checksum,
+                    payload=encoded,
+                    payload_bytes=len(encoded.encode()),
+                    retrieved_at=NOW,
+                    accepted_at=NOW,
+                ))
             connection.execute(PublicationObservation.__table__.insert().values(
                 publication_id=publication_id,
                 observation_id=observation_id,
-                role="accepted_candidate",
-                slice_key=None,
+                role=role,
+                slice_key=slice_key,
                 created_at=NOW,
             ))
         return checksum
@@ -1103,11 +1191,25 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     second_log_payload = log_payload(26)
     first_log_checksum = candidate(
         "player_game_logs", first_log_payload, publication_id=first_log,
-        observation_id="journey-observation-first",
+        observation_id=ledger_observations[0],
+        provider="pbp",
+        manifest_id=ledger_manifest_id,
+        observation_type="canonical_game_ledger",
+        scope={"game_id": GAME_ID, "surface": "canonical_game_ledger"},
+        role="ledger_game",
+        slice_key=GAME_ID,
+        insert_observation=False,
     )
     second_log_checksum = candidate(
         "player_game_logs", second_log_payload, publication_id=second_log,
-        observation_id="journey-observation-second",
+        observation_id=ledger_observations[1],
+        provider="pbp",
+        manifest_id=ledger_manifest_id,
+        observation_type="canonical_game_ledger",
+        scope={"game_id": GAME_ID, "surface": "canonical_game_ledger"},
+        role="ledger_game",
+        slice_key=GAME_ID,
+        insert_observation=False,
     )
     first_parity = "journey-parity-first"
     second_parity = "journey-parity-second"
@@ -1155,6 +1257,13 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         season=SEASON, cutoff=NOW - timedelta(days=1),
         parity_artifact_id=first_parity, candidate_publication_id=first_log,
     )
+    with engine.begin() as connection:
+        connection.execute(CanonicalGameLedgerGame.__table__.update().where(
+            CanonicalGameLedgerGame.game_id == GAME_ID,
+        ).values(
+            source_observation_id=ledger_observations[1],
+            updated_at=NOW,
+        ))
     operations.activate_stream(
         "player_game_logs", actor="journey-operator", reason="advance logs",
         season=SEASON, cutoff=NOW - timedelta(days=1),

@@ -23,7 +23,18 @@ from app.domain.nba_events import (
 )
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
-from app.models.catalogs import PLAY_TYPES
+from app.domain.team_matchup_taxonomy import (
+    PLAY_TYPES,
+    SHOT_TYPE_DISPLAY_TO_STORED,
+    SHOT_TYPE_SLICES,
+    SHOT_TYPE_STORED_TO_DISPLAY,
+    SHOT_ZONE_SLICES,
+    THREE_POINT_SHOT_ZONES,
+    TWO_POINT_SHOT_ZONES,
+)
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+)
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PlayerDietResult,
@@ -61,28 +72,12 @@ _REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
     (key, key) for key in DEFENSIVE_COLUMNS
 )
 _WIRE_PRECISION = 6
-_TWO_POINT_SHOT_ZONES = frozenset(
-    {"Restricted Area", "Paint", "In The Paint (Non-RA)", "Mid-Range"}
-)
-_THREE_POINT_SHOT_ZONES = frozenset({"Corner 3", "Above the Break 3"})
-_GOVERNED_SHOT_ZONES = frozenset(
-    {
-        "Restricted Area",
-        "In The Paint (Non-RA)",
-        "Mid-Range",
-        "Corner 3",
-        "Above the Break 3",
-    }
-)
-_SHOT_TYPE_DISPLAY_SLICES = {
-    "catch_and_shoot": "Catch and Shoot",
-    "pullups": "Pullups",
-    "less_than_10_ft": "Less Than 10 ft",
-}
-_SHOT_TYPE_STORED_SLICES = {
-    display: stored for stored, display in _SHOT_TYPE_DISPLAY_SLICES.items()
-}
-_GOVERNED_SHOT_TYPES = frozenset(_SHOT_TYPE_DISPLAY_SLICES)
+_TWO_POINT_SHOT_ZONES = TWO_POINT_SHOT_ZONES
+_THREE_POINT_SHOT_ZONES = THREE_POINT_SHOT_ZONES
+_GOVERNED_SHOT_ZONES = frozenset(SHOT_ZONE_SLICES)
+_SHOT_TYPE_DISPLAY_SLICES = dict(SHOT_TYPE_STORED_TO_DISPLAY)
+_SHOT_TYPE_STORED_SLICES = dict(SHOT_TYPE_DISPLAY_TO_STORED)
+_GOVERNED_SHOT_TYPES = frozenset(SHOT_TYPE_SLICES)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
@@ -175,12 +170,7 @@ _PUBLICATION_STREAM_KEYS = (
     "exact_shot_zones",
     "player_assist_locations",
     "synergy:l15",
-    "synergy_play_types_opponent_season",
-    "synergy_play_types_opponent_l15",
-    "grouped_shot_types_opponent_season",
-    "grouped_shot_types_opponent_l15",
-    "exact_shot_zones_opponent_season",
-    "exact_shot_zones_opponent_l15",
+    *sorted(NBA_PUBLICATION_STREAM_KEYS),
 )
 
 

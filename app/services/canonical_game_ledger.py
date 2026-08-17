@@ -15,6 +15,7 @@ import json
 import math
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable
@@ -1925,38 +1926,65 @@ class CanonicalGameLedgerRepository:
                     candidates,
                     accepted_observations,
                 )
-                candidate_by_observation = {
-                    candidate.source_observation_id: candidate
-                    for candidate in candidates
-                }
-                existing_rows = {
-                    row["game_id"]: row
-                    for row in connection.execute(select(
-                        tables["game"].c.game_id,
-                        tables["game"].c.checksum,
-                        tables["game"].c.raw_checksum,
-                    ).where(tables["game"].c.game_id.in_(
-                        [candidate.game_id for candidate in candidates]
-                    ))).mappings()
-                }
-                # An identical replay is an idempotent no-op: persist no new
-                # observation evidence for it.  Inserting the observation before
-                # the checksum no-op would otherwise append evidence on every
-                # replay, and reusing one observation identity would collide.
-                pending_observations = {
-                    observation_id: accepted_observations[observation_id]
-                    for observation_id in expected_observations
-                    if not self._is_idempotent_replay(
-                        existing_rows.get(candidate_by_observation[observation_id].game_id),
-                        candidate_by_observation[observation_id],
-                    )
-                }
-                if pending_observations:
-                    connection.execute(
-                        CollectionObservation.__table__.insert(),
-                        [dict(pending_observations[observation_id]) for observation_id in sorted(pending_observations)],
-                    )
             for candidate in candidates:
+                # An accepted candidate is ordered while its canonical game
+                # row is locked.  The lock must cover the ordering decision,
+                # observation insert, complete replacement, and correction
+                # queue write; otherwise a late correction can insert an
+                # observation and then be overwritten by an older arrival.
+                if accepted_observations is not None:
+                    existing = connection.execute(select(tables["game"]).where(
+                        tables["game"].c.game_id == candidate.game_id,
+                    ).with_for_update()).mappings().one_or_none()
+                    if existing is not None:
+                        if self._is_idempotent_replay(existing, candidate):
+                            results.append(LedgerWriteResult(
+                                candidate.game_id,
+                                candidate.checksum or "",
+                                False,
+                                False,
+                                0,
+                            ))
+                            continue
+                        incoming_at = assume_utc(
+                            accepted_observations[candidate.source_observation_id]["accepted_at"]
+                        )
+                        existing_at = connection.scalar(select(CollectionObservation.accepted_at).where(
+                            CollectionObservation.observation_id == existing["source_observation_id"],
+                        ))
+                        if (
+                            existing_at is not None
+                            and incoming_at <= assume_utc(existing_at)
+                        ):
+                            # A stale or equal non-identical candidate is a
+                            # durable no-op.  In particular, do not persist
+                            # its accepted observation or enqueue a correction.
+                            results.append(LedgerWriteResult(
+                                candidate.game_id,
+                                str(existing["checksum"] or ""),
+                                False,
+                                False,
+                                0,
+                            ))
+                            continue
+                if accepted_observations is not None:
+                    observation = accepted_observations[candidate.source_observation_id]
+                    stored_observation = connection.execute(select(
+                        CollectionObservation.__table__,
+                    ).where(
+                        CollectionObservation.observation_id
+                        == candidate.source_observation_id,
+                    )).mappings().one_or_none()
+                    if stored_observation is None:
+                        connection.execute(
+                            CollectionObservation.__table__.insert().values(
+                                **dict(observation)
+                            )
+                        )
+                    elif stored_observation["checksum"] != observation["checksum"]:
+                        raise LedgerValidationError(
+                            "accepted observation identity conflicts with stored evidence"
+                        )
                 results.append(self._replace_candidate(connection, candidate, tables))
         return tuple(results)
 
@@ -2164,6 +2192,11 @@ class CanonicalGameLedgerRepository:
                 ],
             )
         if self.correction_sink is not None:
+            # A sink keeps the public two-argument callback seam, while the
+            # transaction-local flag lets correction propagation distinguish a
+            # replacement from first acceptance without exposing old rows to a
+            # second reader or widening the callback API.
+            connection.info["canonical_game_ledger_replacement"] = existing is not None
             self.correction_sink(connection, candidate)
         # Durable reference for indefinite retention (#25): every observation
         # that supplies an accepted game, including superseded corrections, is
@@ -2197,9 +2230,15 @@ class CanonicalGameLedgerRepository:
             len(candidate.player_facts),
         )
 
-    def get_game(self, game_id: str) -> CanonicalGame | None:
+    def get_game(
+        self,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> CanonicalGame | None:
         tables = self._tables()
-        with self.engine.connect() as connection:
+        scope = self.engine.connect() if connection is None else nullcontext(connection)
+        with scope as connection:
             game_row = connection.execute(select(tables["game"]).where(tables["game"].c.game_id == game_id)).mappings().one_or_none()
             if game_row is None:
                 return None
@@ -2211,13 +2250,20 @@ class CanonicalGameLedgerRepository:
             )).mappings().all()
         return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
 
-    def list_games(self, season: str, *, through: date | datetime | None = None) -> tuple[LedgerGameSummary, ...]:
+    def list_games(
+        self,
+        season: str,
+        *,
+        through: date | datetime | None = None,
+        connection: Connection | None = None,
+    ) -> tuple[LedgerGameSummary, ...]:
         canonical_season = validate_canonical_season(season)
         table = CanonicalGameLedgerGame.__table__
         statement = select(table).where(table.c.season == canonical_season).order_by(table.c.game_date.desc(), table.c.game_id.desc())
         if through is not None:
             statement = statement.where(table.c.game_date <= _canonical_date(through))
-        with self.engine.connect() as connection:
+        scope = self.engine.connect() if connection is None else nullcontext(connection)
+        with scope as connection:
             rows = connection.execute(statement).mappings().all()
             summaries = []
             player_table = CanonicalGameLedgerPlayerFact.__table__
@@ -2233,13 +2279,15 @@ class CanonicalGameLedgerRepository:
         season: str,
         *,
         through: date | datetime | None = None,
+        connection: Connection | None = None,
     ) -> dict[str, str]:
         canonical_season = validate_canonical_season(season)
         table = CanonicalGameLedgerGame.__table__
         statement = select(table.c.game_id, table.c.checksum).where(table.c.season == canonical_season)
         if through is not None:
             statement = statement.where(table.c.game_date <= _canonical_date(through))
-        with self.engine.connect() as connection:
+        scope = self.engine.connect() if connection is None else nullcontext(connection)
+        with scope as connection:
             rows = connection.execute(statement).all()
         return {str(game_id): str(checksum) for game_id, checksum in rows}
 
@@ -2307,17 +2355,31 @@ class CanonicalGameLedgerRepository:
             last_error=row["last_error"],
         )
 
-    def publish_metadata(self, publication: LedgerPublicationRecord) -> None:
-        self.publish_metadata_batch((publication,))
+    def publish_metadata(
+        self,
+        publication: LedgerPublicationRecord,
+        *,
+        connection: Connection | None = None,
+    ) -> None:
+        self.publish_metadata_batch((publication,), connection=connection)
 
-    def publish_metadata_batch(self, publications: Iterable[LedgerPublicationRecord]) -> None:
+    def publish_metadata_batch(
+        self,
+        publications: Iterable[LedgerPublicationRecord],
+        *,
+        connection: Connection | None = None,
+    ) -> None:
         """Replace one materialization's metadata rows in one transaction."""
 
         records = tuple(publications)
         if not records:
             return
         table = LedgerPublication.__table__
-        with self.engine.begin() as connection:
+        with (
+            nullcontext(connection)
+            if connection is not None
+            else self.engine.begin()
+        ) as connection:
             for publication in records:
                 values = asdict(publication)
                 values["retrieved_at"] = assume_utc(publication.retrieved_at)
@@ -2329,6 +2391,7 @@ class CanonicalGameLedgerRepository:
                     table.c.as_of == publication.as_of,
                 ))
                 connection.execute(insert(table).values(values))
+            return
 
     def get_publication(
         self,

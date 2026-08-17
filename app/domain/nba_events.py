@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 import re
@@ -62,20 +62,53 @@ def is_ordinary_classification(value: str) -> bool:
 def is_postponed_event(event: Mapping[str, object]) -> bool:
     """Whether normalized status or non-empty structured evidence says postponed."""
 
+    status = event.get("status_text", event.get("status", ""))
     return bool(
-        event.get("is_postponed")
+        event.get("is_postponed") is True
         or event.get("postponed_status")
         or event.get("postponement_evidence")
+        or str(status).strip().casefold() == "postponed"
     )
 
 
 def is_final_event(event: Mapping[str, object]) -> bool:
     """Whether governed code or normalized terminal text says a game is final."""
 
+    status = event.get("status_text", event.get("status", ""))
+    status_text = str(status).strip().casefold()
     return bool(
-        event.get("status_code") == NBAGameStatus.FINAL
-        or str(event.get("status_text", "")).casefold().startswith("final")
+        event.get("status_code") in {NBAGameStatus.FINAL, "3"}
+        or status_text == "3"
+        or status_text.startswith("final")
+        or status_text in {
+            "finished", "completed", "closed", "game over", "game finished",
+        }
     )
+
+
+def l15_game_ids_by_team(
+    chronological_events: Iterable[Mapping[str, object]],
+) -> dict[int, frozenset[str]]:
+    """Select each team's latest 15 game IDs from governed chronological events."""
+
+    selected: dict[int, list[str]] = {}
+    for event in reversed(tuple(chronological_events)):
+        game_id = str(event["nba_game_id"])
+        for team_id in (int(event["home_team_id"]), int(event["away_team_id"])):
+            game_ids = selected.setdefault(team_id, [])
+            if len(game_ids) < 15:
+                game_ids.append(game_id)
+    return {
+        team_id: frozenset(game_ids)
+        for team_id, game_ids in selected.items()
+    }
+
+
+def is_completed_non_postponed_event(event: Mapping[str, object]) -> bool:
+    """Whether strict completion evidence names an eligible final game."""
+
+    completed = event.get("completed") is True or is_final_event(event)
+    return completed and not is_postponed_event(event)
 
 
 def player_game_log_season_type(event: Mapping[str, object]) -> str | None:
@@ -184,7 +217,9 @@ __all__ = [
     "canonical_event_kind",
     "display_event_classification",
     "is_all_star_kind",
+    "is_completed_non_postponed_event",
     "is_final_event",
+    "l15_game_ids_by_team",
     "is_ordinary_classification",
     "is_postponed_event",
     "is_preseason_kind",

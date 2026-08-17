@@ -72,10 +72,10 @@ The projection archive reader also requires an application database whose
 migrations include its scope-lock, source-snapshot, poll, observation,
 materialization-generation, and Latest tables. Dependency assembly verifies
 those authoritative tables at startup when the reader is enabled. With the
-reader gate off, schema-36 deployments may boot; the recording service performs
+reader gate off, schema-39 deployments may boot; the recording service performs
 the same validation when called and fails before persistence. Either error
-directs operators to run migrations `037_projection_archive` and
-`038_projection_archive_transitions`. Setting
+directs operators to run migrations `040_projection_archive` and
+`041_projection_archive_transitions`. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
 `false`; `DFS_ENABLED_PROVIDERS` is the sole enablement authority for the
