@@ -309,9 +309,10 @@ class ProjectionArchive:
         materialization_checksum = _materialization_checksum(observation_rows)
         poll_id = _digest(
             "poll",
-            evidence_snapshot_id,
-            "" if poll_started is None else poll_started.isoformat(),
-            accepted.isoformat(),
+            snapshot.provider,
+            query_key,
+            assume_utc(snapshot.retrieved_at).isoformat(),
+            checksum,
         )
         if accepted < assume_utc(snapshot.retrieved_at):
             raise ValueError("projection snapshot cannot be accepted before retrieval")
@@ -1194,16 +1195,21 @@ class LatestProjectionPlayerPoolReader:
                 )
 
         latest_health: dict[str, Any] = {}
+        latest_promoted: dict[str, Any] = {}
         latest_empty_success: dict[str, Any] = {}
         for poll in polls:
+            provider = str(poll["provider"])
             if poll["outcome"] == "failed" or poll["promoted"]:
-                latest_health.setdefault(str(poll["provider"]), poll)
+                latest_health.setdefault(provider, poll)
+            if poll["promoted"]:
+                latest_promoted.setdefault(provider, poll)
             if (
                 poll["promoted"]
+                and latest_promoted[provider]["poll_id"] == poll["poll_id"]
                 and poll["observation_count"] == 0
                 and poll["snapshot_status"] == SnapshotStatus.COMPLETE.value
             ):
-                latest_empty_success.setdefault(str(poll["provider"]), poll)
+                latest_empty_success.setdefault(provider, poll)
         now = (
             assume_utc(self.clock())
             if self.clock is not None
@@ -1261,6 +1267,16 @@ class LatestProjectionPlayerPoolReader:
             )
             for game_id in requested_games
         }
+        if (
+            not rows
+            and empty_provider_observed_at
+            and self.required_providers <= set(empty_provider_observed_at)
+        ):
+            empty_observed_at = min(empty_provider_observed_at.values()).isoformat()
+            game_states = {
+                game_id: {"state": "live", "observed_at": empty_observed_at}
+                for game_id in requested_games
+            }
         if not rows and not empty_provider_observed_at:
             missing_freshness = PlayerPool.missing_projection_freshness()
             missing_freshness["providers"] = {

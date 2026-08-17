@@ -348,8 +348,8 @@ rejected before persistence instead of creating invisible evidence. The
 lower-level archive retains multi-scope capability for internal use. It then
 applies the independent `PROJECTION_ARCHIVE_MAX_MARKETS` pre-persistence bound;
 the Comparison Board's `DFS_COMPARISON_MAX_MARKETS` never governs archival
-evidence. It writes one Provider Poll for every accepted attempt. A changed
-attempt writes
+evidence. It writes one Provider Poll for every distinct accepted provider
+observation. A changed observation writes
 one checksummed source-evidence document, immutable market observations, and
 one materialization generation atomically. The evidence checksum covers the
 entire canonical document, including `retrieved_at`, for later verification. A
@@ -377,10 +377,13 @@ existing immutable snapshot and generation.
 Each poll also records whether it promoted materialized state. Valid late polls
 remain immutable health evidence, but they cannot lower an offering's
 confirmation time or mask an intervening provider failure.
-The attempt identity is the exact evidence document, optional start, and
-completion time: replaying that recorded attempt returns its persisted result
-without adding a poll, while a different start, retrieval, or completion time
-is a distinct accepted poll. Query status filters are sorted exactly as the
+Accepted snapshot identity is provider, governed query, provider retrieval
+instant, and exact evidence checksum. Delayed delivery of that same evidence
+returns its persisted result without adding a poll, generation, observation,
+or Latest mutation, regardless of a different start or acceptance time. A
+newer provider retrieval instant with unchanged content is a distinct health
+confirmation. Failed-attempt identity remains separately tied to its actual
+attempt timing. Query status filters are sorted exactly as the
 Provider Snapshot codec sorts them, so caller order cannot split one archive
 scope. `observation_count` always means the number of normalized observations
 present in that accepted snapshot, including unchanged attempts; it is not the
@@ -398,9 +401,10 @@ documents at the same provider/query observation time use one auditable fence:
 the first snapshot accepted while holding the durable scope lock is the sole
 promoted generation for that instant. Every later equal-time conflict is
 retained as `same_time_not_promoted` evidence and cannot replace Latest, even
-when its content is identical but governed statistic/category materialization
-differs. Mapping replay and advancement is a separate workflow, not an
-equal-time ingestion exception.
+when its provider content checksum matches another conflicting evidence
+document. An exact-evidence retry cannot rematerialize under changed governed
+statistic/category inputs; mapping replay and advancement is a separate
+workflow, not an ingestion-idempotency exception.
 `older_not_promoted` records the corresponding older-snapshot decision.
 Every write first enters a provider/season/query scope transaction. PostgreSQL
 serializes both the initial unique scope-lock row insertion race and subsequent
@@ -460,7 +464,10 @@ document. If it has no eligible row, its entry is `missing` with a null
 retrieval time, except that a promoted Complete-empty poll is fresh successful
 evidence with its actual retrieval time. A pool backed only by current
 Complete-empty evidence is therefore live/fresh with zero players; its
-game-specific state remains missing because it has no targetable row. Mixed
+game-specific state is also live with the successful evidence time when every
+required provider is currently Complete-empty, so Slate and Matchup describe
+the same empty board. Mixed or incomplete provider coverage remains missing.
+Mixed
 provider states omit aggregate `status`; `partial` remains
 reserved for a multi-game archive read containing both live and missing game
 states.

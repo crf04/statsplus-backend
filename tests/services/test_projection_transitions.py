@@ -354,7 +354,8 @@ def test_unchanged_poll_refreshes_health_without_duplicate_evidence(tmp_path):
     archive.ingest_snapshot(
         replace(snapshot, retrieved_at=repeated_at),
         query=QUERY,
-        accepted_at=repeated_at,
+        accepted_at=repeated_at + timedelta(seconds=2),
+        poll_started_at=repeated_at + timedelta(seconds=1),
     )
 
     pool = _reader(engine, ("dabble",), repeated_at).get_pool_for_game(
@@ -369,6 +370,56 @@ def test_unchanged_poll_refreshes_health_without_duplicate_evidence(tmp_path):
         assert connection.execute(select(func.count()).select_from(ProjectionProviderSnapshot)).scalar_one() == 1
         assert connection.execute(select(func.count()).select_from(ProjectionObservation)).scalar_one() == 1
         assert connection.execute(select(func.count()).select_from(ProjectionMaterializationGeneration)).scalar_one() == 1
+
+
+def test_delayed_retry_of_exact_evidence_is_one_idempotent_poll(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    snapshot = _snapshot(
+        "dabble",
+        SnapshotStatus.COMPLETE,
+        (_market(catalog, player_id=7),),
+        OBSERVED_AT,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    first = archive.ingest_snapshot(
+        snapshot,
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    with engine.connect() as connection:
+        first_poll_id = connection.execute(select(ProviderPoll.poll_id)).scalar_one()
+
+    remapped_retry = ProjectionArchive(engine, catalog)
+    remapped_retry.market_categories["points"] = "PRA"
+    retry = remapped_retry.ingest_snapshot(
+        snapshot,
+        query=QUERY,
+        accepted_at=OBSERVED_AT + timedelta(minutes=10),
+        poll_started_at=OBSERVED_AT + timedelta(minutes=9),
+    )
+
+    assert retry == first
+    with engine.connect() as connection:
+        assert connection.execute(select(ProviderPoll.poll_id)).scalars().all() == [
+            first_poll_id
+        ]
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionProviderSnapshot)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one() == 1
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.market_category,
+            )
+        ).one()
+    assert latest == (first.generation_id, "PTS")
 
 
 def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
@@ -486,7 +537,7 @@ def test_first_fenced_equal_time_snapshot_is_the_only_promoted_winner(tmp_path):
     ]
 
 
-def test_first_fenced_same_time_materialization_is_the_only_promoted_winner(tmp_path):
+def test_same_evidence_mapping_change_replays_the_first_materialization(tmp_path):
     catalog = StatisticCatalog.load_default()
     snapshot = _snapshot(
         "dabble",
@@ -519,7 +570,7 @@ def test_first_fenced_same_time_materialization_is_the_only_promoted_winner(tmp_
         )
 
         assert first_result.materialization_outcome == "advanced"
-        assert second_result.materialization_outcome == "same_time_not_promoted"
+        assert second_result == first_result
         with engine.connect() as connection:
             polls = connection.execute(
                 select(ProviderPoll.outcome, ProviderPoll.promoted).order_by(
@@ -536,8 +587,8 @@ def test_first_fenced_same_time_materialization_is_the_only_promoted_winner(tmp_
                     select(LatestPlayerProjection.market_category)
                 ).scalar_one()
             )
-        assert polls == [("changed", True), ("rematerialized", False)]
-        assert generations == ["advanced", "same_time_not_promoted"]
+        assert polls == [("changed", True)]
+        assert generations == ["advanced"]
 
     assert latest_categories == ["PTS", "PRA"]
 
@@ -770,6 +821,12 @@ def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
 
     assert pool.players == ()
     assert pool.team_counts == {}
+    assert pool.game_states == {
+        GAME_ID: {
+            "state": "live",
+            "observed_at": OBSERVED_AT.isoformat(),
+        }
+    }
     assert pool.freshness == {
         "status": "fresh",
         "state": "live",
@@ -786,6 +843,48 @@ def test_complete_empty_is_fresh_live_evidence_not_a_missing_pool(tmp_path):
         season=SEASON,
         game_id=GAME_ID,
     ) is not None
+
+
+def test_older_complete_empty_does_not_cover_a_newer_nonempty_generation(tmp_path):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot("dabble", SnapshotStatus.COMPLETE, (), OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    nonempty_at = OBSERVED_AT + timedelta(minutes=1)
+    other_game_market = replace(
+        _market(catalog, player_id=7),
+        event=EventEvidence(canonical_id="other-game"),
+    )
+    archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (other_game_market,),
+            nonempty_at,
+        ),
+        query=QUERY,
+        accepted_at=nonempty_at,
+    )
+    archive.record_failed_poll(
+        provider="dabble",
+        query=QUERY,
+        completed_at=nonempty_at + timedelta(minutes=1),
+        failure_reason="access_denied",
+    )
+
+    pool = _reader(
+        engine,
+        ("dabble",),
+        nonempty_at + timedelta(minutes=2),
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.players == ()
+    assert pool.freshness["state"] == "missing"
+    assert pool.game_states[GAME_ID] == {"state": "missing", "observed_at": None}
 
 
 def test_failed_poll_without_successful_evidence_remains_missing(tmp_path):

@@ -7,7 +7,7 @@ import os
 from threading import Barrier, Event
 
 import pytest
-from sqlalchemy import create_engine, event, inspect, insert, select, text
+from sqlalchemy import create_engine, event, func, inspect, insert, select, text
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.models import Base
@@ -16,6 +16,7 @@ from app.models.projection_archive import (
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
+    ProjectionObservation,
     ProjectionProviderSnapshot,
     ProviderPoll,
 )
@@ -275,7 +276,7 @@ def test_first_fenced_equal_time_postgres_writer_is_the_only_promoted_generation
 
 
 @pytest.mark.parametrize("winner_category", ("PTS", "PRA"))
-def test_first_fenced_same_time_postgres_materialization_is_the_only_winner(
+def test_same_evidence_postgres_mapping_change_replays_the_first_winner(
     projection_pg_engine,
     winner_category,
 ):
@@ -354,12 +355,9 @@ def test_first_fenced_same_time_postgres_materialization_is_the_only_winner(
     assert len(latest) == 2
     assert len({row.generation_id for row in latest}) == 1
     assert {row.market_category for row in latest} == {winner_category}
-    assert tuple(result.materialization_outcome for result in results) == (
-        "advanced",
-        "same_time_not_promoted",
-    )
-    assert polls == [("changed", True), ("rematerialized", False)]
-    assert sorted(generation_outcomes) == ["advanced", "same_time_not_promoted"]
+    assert results[1] == results[0]
+    assert polls == [("changed", True)]
+    assert generation_outcomes == ["advanced"]
     event.remove(winner_engine, "after_cursor_execute", hold_winner_lock)
     event.remove(loser_engine, "before_cursor_execute", observe_loser_attempt)
     winner_engine.dispose()
@@ -399,6 +397,56 @@ def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_eng
                 select(ProjectionMaterializationGeneration.generation_id)
             ).all()
         ) == 1
+
+
+def test_delayed_retry_postgres_worker_reuses_the_exact_evidence_poll(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    snapshot = _snapshot(catalog, OBSERVED_AT, "20.5")
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    first_engine = create_engine(database_url)
+    retry_engine = create_engine(database_url)
+    try:
+        first = ProjectionArchive(first_engine, catalog).ingest_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=OBSERVED_AT,
+        )
+        retry_archive = ProjectionArchive(retry_engine, catalog)
+        retry_archive.market_categories["points"] = "PRA"
+        retry = retry_archive.ingest_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=OBSERVED_AT + timedelta(minutes=10),
+            poll_started_at=OBSERVED_AT + timedelta(minutes=9),
+        )
+    finally:
+        first_engine.dispose()
+        retry_engine.dispose()
+
+    assert retry == first
+    with projection_pg_engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProviderPoll)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionProviderSnapshot)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one() == 1
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.market_category,
+            )
+        ).one()
+    assert latest == (first.generation_id, "PTS")
 
 
 def test_postgres_migration_upgrades_an_existing_v37_projection_schema(

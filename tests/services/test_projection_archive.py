@@ -244,9 +244,8 @@ def test_complete_snapshot_becomes_a_database_first_live_player_pool(tmp_path):
     assert [poll["outcome"] for poll in polls] == [
         "changed",
         "unchanged",
-        "unchanged",
     ]
-    assert [poll["observation_count"] for poll in polls] == [1, 1, 1]
+    assert [poll["observation_count"] for poll in polls] == [1, 1]
     assert polls[0]["started_at"] is None
     assert polls[1]["started_at"] == OBSERVED_AT.replace(minute=29, tzinfo=None)
     assert polls[1]["completed_at"] == OBSERVED_AT.replace(minute=32, tzinfo=None)

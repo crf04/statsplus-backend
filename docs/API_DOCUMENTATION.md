@@ -314,7 +314,9 @@ update and confirm only included references; omissions retain their prior
 evidence and confirmation. Complete empty snapshots retire only the same
 provider/query scope and remain fresh successful provider evidence. When every
 required provider is current and Complete-empty, the database-first pool is
-`live`/`fresh` with zero players rather than unavailable. A direct Matchup
+`live`/`fresh` with zero players rather than unavailable, and each requested
+Slate game's `projection_state` is `live` with that accepted evidence time and
+zero targetable players. A direct Matchup
 Selection request for a player outside that derived empty pool returns the
 existing `404 resource_not_found`; never-polled or failed-without-successful-
 evidence scopes remain missing and keep the documented `503 provider_unavailable`.

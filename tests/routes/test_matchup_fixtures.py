@@ -1548,8 +1548,17 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             accepted_at=empty_at,
         )
     pool.clock = lambda: empty_at
+    empty_slate = client.get("/api/games/slate?date=2026-01-15")
     empty_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert empty_slate.status_code == 200
     assert empty_matchup.status_code == 200
+    empty_game = empty_slate.get_json()["games"][0]
+    assert empty_game["projection_state"] == {
+        "state": "live",
+        "observed_at": empty_at.isoformat(),
+    }
+    assert empty_game["away_team"]["targetable_player_count"] == 0
+    assert empty_game["home_team"]["targetable_player_count"] == 0
     assert empty_matchup.get_json()["players"] == []
     assert empty_matchup.get_json()["freshness"]["pool"] == {
         "status": "fresh",
