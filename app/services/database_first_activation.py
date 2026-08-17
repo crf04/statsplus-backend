@@ -34,6 +34,7 @@ from app.services.collection_control import (
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     publication_base_for_stream,
+    resolve_governed_l15_game_ids,
     validate_publication_rows,
 )
 
@@ -1100,15 +1101,41 @@ class LegacyWriteFence:
 class DatabaseFirstActivationService:
     """Convenience facade used by rehearsal and operator tooling."""
 
-    def __init__(self, engine: Engine, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        l15_expectation_resolver=None,
+    ) -> None:
         publication_options = {} if clock is None else {"clock": clock}
+        publication_options["l15_expectation_resolver"] = l15_expectation_resolver
         self.publications = PublicationService(engine, **publication_options)
         self.reader = DatabaseFirstPublicationReader(engine, clock=clock)
         self.fence = LegacyWriteFence(engine)
+        self.l15_expectation_resolver = l15_expectation_resolver
 
     def activate(self, stream_key: str, *, actor: str, reason: str, **kwargs: Any) -> Any:
         if not kwargs.get("candidate_publication_id"):
             raise ControlPlaneError("publication_candidate_required")
+        if stream_key in NBA_PUBLICATION_STREAM_KEYS and stream_key.endswith("_l15"):
+            season = kwargs.get("season")
+            cutoff = kwargs.get("cutoff")
+            if season is None or cutoff is None:
+                raise ControlPlaneError("publication_governance_unavailable")
+            try:
+                # Do not trust a caller-supplied expectation.  The operator
+                # facade owns the season/cutoff governance lookup and always
+                # replaces the value passed to the lower publication seam.
+                kwargs["expected_l15_game_ids"] = resolve_governed_l15_game_ids(
+                    self.l15_expectation_resolver,
+                    season,
+                    cutoff,
+                )
+            except Exception as error:
+                raise ControlPlaneError(
+                    "publication_governance_unavailable"
+                ) from error
         return self.publications.activate_stream(
             stream_key,
             actor=actor,

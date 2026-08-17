@@ -13,11 +13,12 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.engine import Engine
 
-from app.domain.utc import assume_utc
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
+from app.models.collection_control import PublicationPointer, PublicationVersion
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
     PublicationLineage,
@@ -27,6 +28,80 @@ from app.utils.db import is_demo_database_url
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+
+_PUBLICATION_CAPABILITY_TOKEN = object()
+
+
+class PublicationWriteCapability:
+    """Opaque authorization for one transactionally checked publication write."""
+
+    __slots__ = ("engine", "_token")
+
+    def __init__(self, engine, token) -> None:
+        if token is not _PUBLICATION_CAPABILITY_TOKEN:
+            raise TypeError("publication write capability is not constructible")
+        self.engine = engine
+        self._token = token
+
+    def verify(self, connection, snapshots) -> None:
+        """Verify every attached NBA lineage against active/candidate state."""
+
+        for scope, facts, observations in snapshots:
+            items = (*facts, *observations)
+            window = "l15" if scope.window_games is not None else "season"
+            for item in items:
+                publication = item.publication
+                surface = item.base if hasattr(item, "base") else item.surface
+                if surface not in NBA_PUBLICATION_BASES:
+                    continue
+                if publication is None or not publication.publication_id:
+                    raise ValueError("publication_write_capability_required")
+                stream_key = publication_stream(surface, window)
+                version = connection.execute(
+                    select(PublicationVersion.__table__).where(
+                        PublicationVersion.publication_id == publication.publication_id,
+                        PublicationVersion.stream_key == stream_key,
+                    ).with_for_update()
+                ).mappings().one_or_none()
+                if version is None:
+                    raise ValueError("publication_write_context_invalid")
+                if version["season"] != scope.season:
+                    raise ValueError("publication_write_context_invalid")
+                if publication.version is not None and int(publication.version) != int(version["version"]):
+                    raise ValueError("publication_write_context_invalid")
+                if publication.cutoff is None:
+                    raise ValueError("publication_write_context_invalid")
+                try:
+                    version_cutoff = assume_utc(version["cutoff"])
+                    lineage_cutoff = parse_utc_iso(publication.cutoff)
+                except (TypeError, ValueError, AttributeError, OverflowError):
+                    raise ValueError("publication_write_context_invalid") from None
+                if lineage_cutoff != version_cutoff:
+                    raise ValueError("publication_write_context_invalid")
+                if version_cutoff.date() > scope.as_of:
+                    raise ValueError("publication_write_context_invalid")
+                pointer = connection.execute(
+                    select(PublicationPointer.__table__).where(
+                        PublicationPointer.stream_key == stream_key,
+                    ).with_for_update()
+                ).mappings().one_or_none()
+                status = version["status"]
+                active = (
+                    pointer is not None
+                    and pointer["active_publication_id"] == publication.publication_id
+                    and status in {"active", "rollback"}
+                )
+                if status != "candidate" and not active:
+                    raise ValueError("publication_write_context_invalid")
+
+
+def create_publication_write_capability(engine) -> PublicationWriteCapability:
+    """Create the only capability accepted by governed publication writes."""
+
+    return PublicationWriteCapability(engine, _PUBLICATION_CAPABILITY_TOKEN)
+
+
 @dataclass(frozen=True, slots=True)
 class TeamMatchupSnapshotScope:
     season: str
@@ -100,11 +175,18 @@ class StoredTeamMatchupSnapshot:
 class TeamMatchupRepository:
     """Replace or read one season/as-of/window snapshot transactionally."""
 
-    def __init__(self, engine: Engine, *, write_fence=None) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        write_fence=None,
+        publication_write_capability: PublicationWriteCapability | None = None,
+    ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
         self._write_fence = write_fence
+        self._publication_write_capability = publication_write_capability
 
     @staticmethod
     def _scope(table, scope: TeamMatchupSnapshotScope):
@@ -127,6 +209,46 @@ class TeamMatchupRepository:
         *,
         retrieved_at: datetime,
     ) -> None:
+        """Replace legacy/provider snapshots behind the normal write fence."""
+
+        return self._replace_snapshots(snapshots, retrieved_at=retrieved_at)
+
+    def replace_governed_publication_snapshots(
+        self,
+        snapshots: Iterable[
+            tuple[
+                TeamMatchupSnapshotScope,
+                Iterable[TeamMatchupFact],
+                Iterable[TeamMatchupObservation],
+            ]
+        ],
+        *,
+        retrieved_at: datetime,
+        capability: PublicationWriteCapability | None = None,
+    ) -> None:
+        """Replace snapshots after checking active/candidate publication state."""
+
+        return self._replace_snapshots(
+            snapshots,
+            retrieved_at=retrieved_at,
+            governed_publication=True,
+            capability=capability,
+        )
+
+    def _replace_snapshots(
+        self,
+        snapshots: Iterable[
+            tuple[
+                TeamMatchupSnapshotScope,
+                Iterable[TeamMatchupFact],
+                Iterable[TeamMatchupObservation],
+            ]
+        ],
+        *,
+        retrieved_at: datetime,
+        governed_publication: bool = False,
+        capability: PublicationWriteCapability | None = None,
+    ) -> None:
         """Replace related windows in one transaction after collection."""
 
         received = tuple(
@@ -148,6 +270,15 @@ class TeamMatchupRepository:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
         with self.engine.begin() as connection:
+            if governed_publication:
+                capability = capability or self._publication_write_capability
+                if capability is None:
+                    if self._write_fence is not None:
+                        raise ValueError("publication_write_capability_required")
+                else:
+                    if capability.engine is not self.engine:
+                        raise ValueError("publication_write_capability_required")
+                    capability.verify(connection, received)
             scoped_changes = []
             for scope, fact_rows, observation_rows, replace_surfaces in prepared:
                 existing_observations = {
@@ -219,12 +350,12 @@ class TeamMatchupRepository:
                     for observation in observation_rows:
                         if observation.surface not in changed_surfaces:
                             continue
-                        # This repository is shared by legacy writers and the
-                        # governed publication materializer. The write fence
-                        # protects only legacy provider writes; publication
-                        # lineage is already the authorized immutable source.
+                        # Only the distinct governed publication method may
+                        # bypass the legacy fence, and it has already checked
+                        # the active/candidate publication context above.
                         if (
-                            observation.surface in NBA_PUBLICATION_BASES
+                            governed_publication
+                            and observation.surface in NBA_PUBLICATION_BASES
                             and observation.publication is not None
                         ):
                             continue
@@ -627,6 +758,7 @@ def _publication_from_row(row) -> PublicationLineage | None:
 
 
 __all__ = [
+    "PublicationWriteCapability",
     "StoredTeamMatchupFact",
     "StoredTeamMatchupObservation",
     "StoredTeamMatchupSnapshot",
@@ -634,4 +766,5 @@ __all__ = [
     "TeamMatchupObservation",
     "TeamMatchupRepository",
     "TeamMatchupSnapshotScope",
+    "create_publication_write_capability",
 ]

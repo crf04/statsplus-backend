@@ -245,13 +245,25 @@ class LedgerMatchupMaterializationService:
                 *l15_observations,
                 *l15_publication_observations,
             )
-        self.matchup_repository.replace_snapshots(
-            (
-                (season_scope, season_facts, season_observations),
-                (l15_scope, l15_facts, l15_observations),
-            ),
-            retrieved_at=retrieved_at,
+        snapshots = (
+            (season_scope, season_facts, season_observations),
+            (l15_scope, l15_facts, l15_observations),
         )
+        publication_backed = any(
+            item.publication is not None
+            for _, facts, observations in snapshots
+            for item in (*facts, *observations)
+        )
+        if publication_backed:
+            self.matchup_repository.replace_governed_publication_snapshots(
+                snapshots,
+                retrieved_at=retrieved_at,
+            )
+        else:
+            self.matchup_repository.replace_snapshots(
+                snapshots,
+                retrieved_at=retrieved_at,
+            )
         return LedgerMatchupMaterialization(
             season=canonical_season,
             as_of=as_of,

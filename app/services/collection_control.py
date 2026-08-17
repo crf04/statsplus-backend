@@ -35,7 +35,12 @@ from app.domain.nba_teams import (
     canonical_nba_team_abbreviation,
 )
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
-from app.services.team_matchup_publications import publication_stream
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+    publication_base_for_stream,
+    publication_stream,
+    resolve_governed_l15_game_ids,
+)
 
 from app.models.collection_control import (
     ActiveSeason,
@@ -338,6 +343,14 @@ def _validate_activation_candidate_payload(
                 )
     except Exception as error:
         raise ControlPlaneError("publication_candidate_invalid") from error
+
+
+def _requires_l15_expectation(stream_key: str) -> bool:
+    return (
+        stream_key in NBA_PUBLICATION_STREAM_KEYS
+        and stream_key.endswith("_l15")
+        and publication_base_for_stream(stream_key) is not None
+    )
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
@@ -2328,6 +2341,20 @@ class ObservationIngestionService(_SessionService):
 class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
+    def __init__(self, engine: Engine, *, clock: Callable[[], datetime] = utcnow,
+                 l15_expectation_resolver=None) -> None:
+        super().__init__(engine, clock=clock)
+        self.l15_expectation_resolver = l15_expectation_resolver
+
+    def governed_publication_write_capability(self):
+        """Issue the capability used by the governed matchup writer."""
+
+        from app.services.team_matchup_repository import (
+            create_publication_write_capability,
+        )
+
+        return create_publication_write_capability(self.engine)
+
     def register_stream(self, stream_key: str, *, provider: str, owner: str,
                         required_observations: Iterable[str], publication_strategy: str,
                         supported_windows: Iterable[str] = (), enabled: bool | None = None,
@@ -2406,6 +2433,29 @@ class PublicationService(_SessionService):
             } else None
             if require_candidate and not candidate_publication_id:
                 raise ControlPlaneError("publication_candidate_required")
+            if (
+                candidate_publication_id is not None
+                and _requires_l15_expectation(stream_key)
+            ):
+                if season is None or cutoff is None:
+                    raise ControlPlaneError("publication_governance_unavailable")
+                if self.l15_expectation_resolver is not None:
+                    try:
+                        # The lower publication seam rechecks the same
+                        # season/cutoff authority when production wiring is
+                        # present; a caller-supplied map is never trusted in
+                        # place of that dependency.
+                        expected_l15_game_ids = resolve_governed_l15_game_ids(
+                            self.l15_expectation_resolver,
+                            season,
+                            cutoff,
+                        )
+                    except Exception as error:
+                        raise ControlPlaneError(
+                            "publication_governance_unavailable"
+                        ) from error
+                elif expected_l15_game_ids is None:
+                    raise ControlPlaneError("publication_governance_unavailable")
             candidate = None
             if candidate_publication_id is not None:
                 # A parity artifact may be the evidence for a candidate that
@@ -2964,12 +3014,14 @@ class CollectionOperationsService(_SessionService):
                  collection_control: "CollectionControlService | None" = None,
                  collector_tokens: "CollectorTokenService | None" = None,
                  alert_adapter: "EmailAlertAdapter | None" = None,
+                 l15_expectation_resolver=None,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
         self.collection_control = collection_control
         self.collector_tokens = collector_tokens
         self.alert_adapter = alert_adapter or EmailAlertAdapter()
+        self.l15_expectation_resolver = l15_expectation_resolver
 
     @staticmethod
     def _validate_reason(actor: str, action: str, resource: str, reason: str) -> tuple[str, str, str, str]:
@@ -3039,6 +3091,20 @@ class CollectionOperationsService(_SessionService):
     ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
+        expected_l15_game_ids = None
+        if _requires_l15_expectation(stream_key) and candidate_publication_id is not None:
+            if season is None or cutoff is None:
+                raise ControlPlaneError("publication_governance_unavailable")
+            try:
+                expected_l15_game_ids = resolve_governed_l15_game_ids(
+                    self.l15_expectation_resolver,
+                    season,
+                    cutoff,
+                )
+            except Exception as error:
+                raise ControlPlaneError(
+                    "publication_governance_unavailable"
+                ) from error
         return self._run_operator(
             actor=actor, action="stream.activate", resource=stream_key, reason=reason,
             mutation=lambda session: self.publication_service.activate_stream(
@@ -3046,6 +3112,7 @@ class CollectionOperationsService(_SessionService):
                 reason=reason,
                 season=season,
                 cutoff=cutoff,
+                expected_l15_game_ids=expected_l15_game_ids,
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
                 actor=actor,

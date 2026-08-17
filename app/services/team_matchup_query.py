@@ -31,6 +31,7 @@ from app.services.team_matchup_publications import (
     publication_metric_identity,
     publication_metric_keys,
     validate_publication_rows,
+    resolve_governed_l15_game_ids,
 )
 
 
@@ -76,11 +77,15 @@ class TeamMatchupQueryService:
         *,
         clock: Callable[[], datetime] | None = None,
         publication_reader=None,
+        l15_expectation_resolver=None,
+        # Kept as a compatibility alias for focused callers that already
+        # inject a resolver under the earlier name.
         expected_l15_game_ids=None,
     ) -> None:
         self.repository = repository
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._publication_reader = publication_reader
+        self._l15_expectation_resolver = l15_expectation_resolver
         self._expected_l15_game_ids_source = expected_l15_game_ids
 
     def get_latest_window(
@@ -136,7 +141,9 @@ class TeamMatchupQueryService:
             facts=facts,
             observations=observations,
         )
-        expected_l15_game_ids = self._governed_l15_ids(facts)
+        expected_l15_game_ids = self._governed_l15_ids(
+            season, cutoff, facts, required=window_games is not None
+        )
         return self._database_first_window(
             season,
             cutoff=cutoff,
@@ -144,7 +151,7 @@ class TeamMatchupQueryService:
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
             expected_l15_game_ids=expected_l15_game_ids,
-            expected_team_ids=set(legacy_window.team_metrics),
+            expected_team_ids=(set(expected_l15_game_ids) if expected_l15_game_ids else None),
         )
 
     def get_window(
@@ -157,7 +164,12 @@ class TeamMatchupQueryService:
             facts=snapshot.facts,
             observations=snapshot.observations,
         )
-        expected_l15_game_ids = self._governed_l15_ids(snapshot.facts)
+        expected_l15_game_ids = self._governed_l15_ids(
+            scope.season,
+            scope.as_of,
+            snapshot.facts,
+            required=scope.window_games is not None,
+        )
         return self._database_first_window(
             scope.season,
             cutoff=scope.as_of,
@@ -165,7 +177,7 @@ class TeamMatchupQueryService:
             legacy=legacy_window,
             publication_snapshot=publication_snapshot,
             expected_l15_game_ids=expected_l15_game_ids,
-            expected_team_ids=set(legacy_window.team_metrics),
+            expected_team_ids=(set(expected_l15_game_ids) if expected_l15_game_ids else None),
         )
 
     def _database_first_window(
@@ -238,6 +250,7 @@ class TeamMatchupQueryService:
         if not active:
             return legacy
         base_windows: dict[str, TeamMatchupWindow | None] = {}
+        validation_failures: dict[str, str] = {}
         for base, read in active.items():
             cutoff_reason = publication_cutoff_reason(read, cutoff)
             if cutoff_reason is not None:
@@ -249,6 +262,11 @@ class TeamMatchupQueryService:
             if not read.available:
                 base_windows[base] = None
                 continue
+            if window_games is not None and base in NBA_PUBLICATION_BASES:
+                if expected_l15_game_ids is None:
+                    base_windows[base] = None
+                    validation_failures[base] = "publication_governance_unavailable"
+                    continue
             try:
                 rows = (
                     tuple(read.decoded)
@@ -262,16 +280,22 @@ class TeamMatchupQueryService:
                     validate_publication_rows(
                         base,
                         rows,
-            expected_team_ids=(expected_team_ids or set(range(1, 31))),
+                        expected_team_ids=expected_team_ids,
                         expected_l15_game_ids=(
                             expected_l15_game_ids if window_games is not None else None
                         ),
                     )
-            except PublicationPayloadError:
+            except PublicationPayloadError as error:
                 base_windows[base] = None
+                validation_failures[base] = (
+                    getattr(error, "reason", None) or str(error) or "publication_payload_invalid"
+                )
                 continue
-            except ValueError:
+            except ValueError as error:
                 base_windows[base] = None
+                validation_failures[base] = (
+                    getattr(error, "reason", None) or str(error) or "publication_payload_invalid"
+                )
                 continue
             base_windows[base] = self._publication_base_window(
                 season,
@@ -313,11 +337,18 @@ class TeamMatchupQueryService:
         for base, read in active.items():
             window = base_windows[base]
             if window is None:
+                validation_reason = validation_failures.get(base)
                 observations.append(StoredTeamMatchupObservation(
                     surface=base,
-                    status="unavailable" if read.status == "unavailable" else "missing",
+                    status=(
+                        "unavailable"
+                        if validation_reason is not None or read.status == "unavailable"
+                        else "missing"
+                    ),
                     unavailable_reason=(
-                        read.unavailable_reason or f"publication_{read.status}"
+                        validation_reason
+                        or read.unavailable_reason
+                        or f"publication_{read.status}"
                     ),
                     retrieved_at=read.retrieved_at or self._clock(),
                     publication=publication_lineage(read),
@@ -454,15 +485,32 @@ class TeamMatchupQueryService:
                 expected[fact.team_id] = frozenset(fact.game_ids)
         return expected
 
-    def _governed_l15_ids(self, facts):
-        source = self._expected_l15_game_ids_source
-        if callable(source):
-            return source()
+    def _governed_l15_ids(self, season, cutoff, facts, *, required: bool):
+        """Resolve L15 identity from independent governance when requested."""
+
+        source = self._l15_expectation_resolver
         if source is not None:
-            return source
-        # Backward-compatible callers without an injected governance source
-        # retain the persisted expectation; production wiring supplies the
-        # independent governed selector.
+            try:
+                return resolve_governed_l15_game_ids(source, season, cutoff)
+            except Exception:
+                return None
+        source = self._expected_l15_game_ids_source
+        if source is not None:
+            try:
+                if callable(source):
+                    try:
+                        source = source(season, cutoff)
+                    except TypeError:
+                        source = source()
+                return resolve_governed_l15_game_ids(lambda *_: source, season, cutoff)
+            except Exception:
+                return None
+        if required and self._publication_reader is not None:
+            # A public L15 publication read must never infer its game set from
+            # the same disposable facts it is meant to govern.
+            return None
+        # Legacy-only callers retain their pre-publication behavior.  The
+        # production graph always injects ``l15_expectation_resolver`` above.
         return self._expected_l15_game_ids(facts)
 
     def _build_window(

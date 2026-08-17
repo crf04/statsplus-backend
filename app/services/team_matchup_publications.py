@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from collections.abc import Mapping
 
 from app.models.catalogs import PLAY_TYPES
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -73,14 +74,30 @@ def validate_publication_rows(
     expected_l15_game_ids=None,
     expected_team_ids=None,
 ) -> tuple[str, ...]:
-    """Apply the governed league, taxonomy, and optional L15 game-set rules."""
-    expected_keys = tuple(_PUBLICATION_TAXONOMY[base])
-    required_team_ids = set(expected_team_ids or NBA_TEAM_ID_TO_TRICODE)
-    if len(rows) != 30 or {row.team_id for row in rows} != required_team_ids:
+    """Apply canonical league, taxonomy, and optional governed-window rules.
+
+    ``expected_team_ids`` is evidence from a caller's governed roster.  It is
+    deliberately an additional equality constraint: a caller can narrow the
+    accepted publication only after the payload has already proved the exact
+    canonical NBA identity set.
+    """
+    expected_keys = tuple(sorted(_PUBLICATION_TAXONOMY[base]))
+    canonical_team_ids = set(NBA_TEAM_ID_TO_TRICODE)
+    row_team_ids = [row.team_id for row in rows]
+    if len(rows) != len(canonical_team_ids) or len(row_team_ids) != len(set(row_team_ids)):
         raise PublicationValidationError("publication_surface_incomplete")
+    if set(row_team_ids) != canonical_team_ids:
+        raise PublicationValidationError("publication_surface_incomplete")
+    if expected_team_ids is not None:
+        try:
+            governed_team_ids = {int(team_id) for team_id in expected_team_ids}
+        except (TypeError, ValueError, OverflowError) as error:
+            raise PublicationValidationError("publication_surface_incomplete") from error
+        if governed_team_ids != canonical_team_ids:
+            raise PublicationValidationError("publication_surface_incomplete")
     expected = set(expected_keys)
     for row in rows:
-        if row.team_id in NBA_TEAM_ID_TO_TRICODE and row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]:
+        if row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]:
             raise PublicationValidationError("publication_team_identity_mismatch")
         for values in (row.per48, row.league_average, row.population_sigma, row.competition_rank):
             raw_keys = tuple(values)
@@ -95,6 +112,48 @@ def validate_publication_rows(
         ):
             raise PublicationValidationError("publication_game_set_mismatch")
     return expected_keys
+
+
+def resolve_governed_l15_game_ids(
+    resolver,
+    season: str,
+    cutoff,
+) -> Mapping[int, frozenset[str]]:
+    """Resolve one independent, season-and-cutoff L15 expectation.
+
+    The production resolver is intentionally injected.  Supporting the small
+    ``resolve_l15_game_ids``/``resolve``/callable vocabulary keeps test and
+    offline orchestration adapters at the same public seam without allowing a
+    missing or malformed resolver result to become an implicit empty window.
+    """
+
+    if resolver is None:
+        raise ValueError("publication_governance_unavailable")
+    result = None
+    for name in ("resolve_l15_game_ids", "resolve", "read_for_composition"):
+        operation = getattr(resolver, name, None)
+        if callable(operation):
+            result = operation(season, cutoff)
+            break
+    else:
+        if callable(resolver):
+            result = resolver(season, cutoff)
+        else:
+            raise ValueError("publication_governance_unavailable")
+    result = getattr(result, "expected_l15_game_ids", result)
+    if not isinstance(result, Mapping):
+        raise ValueError("publication_governance_unavailable")
+    normalized: dict[int, frozenset[str]] = {}
+    try:
+        for team_id, game_ids in result.items():
+            normalized[int(team_id)] = frozenset(str(game_id) for game_id in game_ids)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        raise ValueError("publication_governance_unavailable") from None
+    if set(normalized) != set(NBA_TEAM_ID_TO_TRICODE):
+        raise ValueError("publication_governance_unavailable")
+    if any(not game_ids for game_ids in normalized.values()):
+        raise ValueError("publication_governance_unavailable")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,5 +243,6 @@ __all__ = [
     "publication_metric_identity",
     "publication_metric_keys",
     "publication_stream",
+    "resolve_governed_l15_game_ids",
     "validate_publication_rows",
 ]

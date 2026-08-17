@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from typing import Mapping, Protocol
 
@@ -64,6 +64,40 @@ class ActiveManifestLedgerGovernanceReader:
             require_collection_authorization=False,
             manifest_id=manifest_id,
         )
+
+    def resolve_l15_game_ids(self, season: str, cutoff: date | datetime):
+        """Return the exact governed L15 IDs for one season and cutoff.
+
+        Query surfaces carry a calendar-date cutoff while operator activation
+        carries the manifest's full timestamp.  Resolve the manifest timestamp
+        for a date before reading the same active-manifest governance used by
+        ledger composition; never derive an expectation from stored matchup
+        facts.
+        """
+
+        if isinstance(cutoff, datetime):
+            governed_cutoff = cutoff
+        elif isinstance(cutoff, date):
+            start = datetime.combine(cutoff, datetime.min.time(), tzinfo=timezone.utc)
+            end = start + timedelta(days=1)
+            with self.engine.connect() as connection:
+                governed_cutoff = connection.scalar(
+                    select(CollectionManifest.cutoff)
+                    .where(
+                        CollectionManifest.season == season,
+                        CollectionManifest.cutoff >= start,
+                        CollectionManifest.cutoff < end,
+                    )
+                    .order_by(CollectionManifest.cutoff.desc())
+                    .limit(1)
+                )
+            if governed_cutoff is None:
+                raise ValueError("active manifest and completed Event Catalog governance are required")
+            if governed_cutoff.tzinfo is None:
+                governed_cutoff = governed_cutoff.replace(tzinfo=timezone.utc)
+        else:
+            raise ValueError("active manifest and completed Event Catalog governance are required")
+        return self.read_for_composition(season, governed_cutoff).expected_l15_game_ids
 
     def _read(
         self,
