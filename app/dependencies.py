@@ -25,6 +25,19 @@ PROJECTION_ARCHIVE_REQUIRED_TABLES = (
 )
 
 
+def _require_projection_archive_schema(engine: Any) -> None:
+    missing_tables = tuple(
+        table_name
+        for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
+        if not inspect(engine).has_table(table_name)
+    )
+    if missing_tables:
+        raise ConfigurationError(
+            "Projection archive dependencies require migration "
+            "037_projection_archive; missing tables: " + ", ".join(missing_tables)
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ApplicationDependencies:
     """Runtime objects constructed once for one Flask application."""
@@ -159,17 +172,8 @@ def build_dependencies(
         raise ConfigurationError(
             "PROJECTION_ARCHIVE_READ_ENABLED cannot use the read-only demo database"
         )
-    if settings.features.projection_archive_read_enabled:
-        missing_archive_tables = tuple(
-            table_name
-            for table_name in PROJECTION_ARCHIVE_REQUIRED_TABLES
-            if not inspect(engine).has_table(table_name)
-        )
-        if missing_archive_tables:
-            raise ConfigurationError(
-                "PROJECTION_ARCHIVE_READ_ENABLED requires migrated archive tables: "
-                + ", ".join(missing_archive_tables)
-            )
+    if not demo_database:
+        _require_projection_archive_schema(engine)
     collector_tokens = collection_control = observation_ingestion = publication_service = collection_operations = None
     publication_reader = None
     write_fence = None

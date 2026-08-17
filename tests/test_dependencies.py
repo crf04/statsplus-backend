@@ -273,7 +273,33 @@ def test_projection_archive_gate_refuses_an_unmigrated_application_database(
         features=FeatureSettings(projection_archive_read_enabled=True),
     )
 
-    with pytest.raises(ConfigurationError, match="requires migrated archive tables"):
+    with pytest.raises(
+        ConfigurationError,
+        match="require migration 037_projection_archive.*missing tables",
+    ):
+        build_dependencies(settings)
+
+
+def test_projection_recorder_refuses_an_unmigrated_database_when_read_gate_is_off(
+    monkeypatch,
+):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    settings = RuntimeSettings(
+        environment="testing",
+        auth={"firebase_admin_disabled": True},
+        database={"url": "sqlite:///:memory:"},
+        features=FeatureSettings(projection_archive_read_enabled=False),
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match="require migration 037_projection_archive.*missing tables",
+    ):
         build_dependencies(settings)
 
 

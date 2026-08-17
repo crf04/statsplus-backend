@@ -18,7 +18,7 @@ from app.services.player_game_log_values import (
     selected_player_game_log_market_values,
     validate_player_game_log_components,
 )
-from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.player_pool import PoolPlayer, SingleGamePlayerPoolReader
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -33,10 +33,6 @@ class EventCatalogReader(Protocol):
 
 class ArchetypeReader(Protocol):
     def list_peer_ids(self, player_id: int) -> tuple[int, ...]: ...
-
-
-class StoredPlayerPoolReader(Protocol):
-    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +50,7 @@ class MatchupSelectionService:
         self,
         *,
         event_catalog: EventCatalogReader | None,
-        player_pool: StoredPlayerPoolReader | None,
+        player_pool: SingleGamePlayerPoolReader | None,
         player_logs: PlayerGameLogRepository,
         archetypes: ArchetypeReader,
         statistic_catalog: StatisticCatalog,
@@ -356,5 +352,4 @@ class MatchupSelectionService:
 __all__ = [
     "ArchetypeReader",
     "MatchupSelectionService",
-    "StoredPlayerPoolReader",
 ]

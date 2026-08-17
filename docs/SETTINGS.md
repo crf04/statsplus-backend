@@ -70,7 +70,9 @@ applicable closed reason, `unavailable/fetch_failed`.
 The projection archive reader also requires an application database whose
 migrations include its scope-lock, source-snapshot, poll, observation,
 materialization-generation, and Latest tables. Dependency assembly verifies
-those authoritative tables at startup. Setting
+those authoritative tables at startup before exposing the recording service or
+enabled reader. A missing table error directs operators to run migration
+`037_projection_archive`. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
 `false`; `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` and selects

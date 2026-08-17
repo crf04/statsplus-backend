@@ -164,6 +164,12 @@ class PlayerPoolReader(Protocol):
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool: ...
 
 
+class SingleGamePlayerPoolReader(Protocol):
+    """Read one game's governed Player Pool without prescribing storage."""
+
+    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None: ...
+
+
 class StoredPlayerPoolSnapshotReader(Protocol):
     def get(self, scope: PlayerPoolSnapshotScope) -> StoredPlayerPoolSnapshot | None: ...
 
@@ -711,6 +717,7 @@ __all__ = [
     "DFSBoardReader",
     "PlayerPool",
     "PlayerPoolReader",
+    "SingleGamePlayerPoolReader",
     "PlayerPoolService",
     "PoolPlayer",
     "StoredPlayerPoolReader",

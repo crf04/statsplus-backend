@@ -33,7 +33,7 @@ from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
     PlayerSeasonLogSummary,
 )
-from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.player_pool import PlayerPool, PoolPlayer, SingleGamePlayerPoolReader
 from app.services.matchup_injuries import (
     MatchupInjuryResult,
     unavailable_injury_result,
@@ -192,10 +192,6 @@ class EventCatalogReader(Protocol):
     def get_freshness(self, season: str, *, now: datetime) -> Mapping[str, Any]: ...
 
 
-class StoredPlayerPoolReader(Protocol):
-    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None: ...
-
-
 class PlayerLogReader(Protocol):
     def get_player_summaries(
         self,
@@ -277,7 +273,7 @@ class MatchupService:
         self,
         *,
         event_catalog: EventCatalogReader | None,
-        player_pool: StoredPlayerPoolReader | None,
+        player_pool: SingleGamePlayerPoolReader | None,
         player_logs: PlayerLogReader,
         player_diets: PlayerDietReader | None,
         team_matchups: TeamMatchupReader | None,
