@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import OperationalError
 
 from app.migrations import run_migrations
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -56,6 +57,7 @@ from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_TAXONOMY,
     PublicationLineage,
+    PublicationGovernanceUnavailable,
     PublicationValidationError,
     publication_metric_identity,
     publication_cutoff_reason,
@@ -1127,7 +1129,7 @@ def _reader(
     class Reader:
         def resolve_team_game_ids(self, season, cutoff, *, window):
             if not governance_available:
-                raise ValueError("publication_governance_unavailable")
+                raise PublicationGovernanceUnavailable()
             cutoff_text = cutoff.isoformat()
             for stream_key, read in reads.items():
                 if (
@@ -1140,7 +1142,7 @@ def _reader(
                         row.team_id: frozenset(row.game_ids)
                         for row in read.decoded
                     }
-            raise ValueError("publication_governance_unavailable")
+            raise PublicationGovernanceUnavailable()
 
         def snapshot(self, stream_keys, *, season=None, require_active=True):
             selected = {key: reads[key] for key in stream_keys}
@@ -2720,6 +2722,31 @@ def test_l15_query_without_governance_fails_closed(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "error",
+    (
+        TypeError("resolver implementation defect"),
+        RuntimeError("resolver runtime failure"),
+        OperationalError("governance query", {}, RuntimeError("database down")),
+    ),
+)
+def test_query_propagates_unexpected_governance_failures(tmp_path, error):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(engine)
+
+    class BrokenResolver:
+        def resolve_team_game_ids(self, *args, **kwargs):
+            raise error
+
+    query = TeamMatchupQueryService(
+        repository,
+        publication_reader=_reader(),
+        l15_expectation_resolver=BrokenResolver(),
+    )
+    with pytest.raises(type(error)):
+        query.get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+
+
 def test_l15_query_preserves_publication_game_set_failure_and_lineage(tmp_path):
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(
@@ -2844,7 +2871,7 @@ def test_materialization_propagates_unexpected_governance_failure_but_degrades_e
 
     class ExpectedUnavailable:
         def resolve_team_game_ids(self, *args, **kwargs):
-            raise ValueError("publication_governance_unavailable")
+            raise PublicationGovernanceUnavailable()
 
     degraded = LedgerMatchupMaterializationService(
         ledger,

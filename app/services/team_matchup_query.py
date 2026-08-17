@@ -25,6 +25,7 @@ from app.services.database_first_activation import (
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
     NBA_PUBLICATION_STREAMS,
+    PublicationGovernanceUnavailable,
     PublicationLineage,
     publication_cutoff_reason,
     publication_lineage,
@@ -499,15 +500,18 @@ class TeamMatchupQueryService:
                 if isinstance(read.cutoff, datetime)
                 else parse_utc_iso(str(read.cutoff))
             )
-            source = (
-                self._l15_expectation_resolver
-                if self._l15_expectation_resolver is not None
-                else (
-                    self._expected_l15_game_ids_source
-                    if self._expected_l15_game_ids_source is not None
-                    else self._publication_reader
-                )
+        except (TypeError, ValueError):
+            return None
+        source = (
+            self._l15_expectation_resolver
+            if self._l15_expectation_resolver is not None
+            else (
+                self._expected_l15_game_ids_source
+                if self._expected_l15_game_ids_source is not None
+                else self._publication_reader
             )
+        )
+        try:
             return resolve_governed_team_game_ids(
                 source,
                 read.season,
@@ -521,7 +525,7 @@ class TeamMatchupQueryService:
                     read, "event_catalog_checksum", None
                 ),
             )
-        except Exception:
+        except PublicationGovernanceUnavailable:
             return None
 
     def _build_window(

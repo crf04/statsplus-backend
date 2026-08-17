@@ -22,7 +22,10 @@ from app.services.collection_control import ControlPlaneError, PublicationServic
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
 from app.services.ledger_backfill import BackfillResult, LedgerBackfillService
 from app.services.ledger_materialization import LedgerMaterialization, LedgerMaterializationService
-from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+    PublicationGovernanceUnavailable,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,14 +127,16 @@ class ActiveManifestLedgerGovernanceReader:
             event_catalog_checksum is not None
             and governance.event_catalog_checksum != event_catalog_checksum
         ):
-            raise ValueError(
+            raise PublicationGovernanceUnavailable(
                 "active manifest and completed Event Catalog governance are required"
             )
         if window == "season":
             return governance.expected_season_game_ids
         if window == "l15":
             return governance.expected_l15_game_ids
-        raise ValueError("active manifest and completed Event Catalog governance are required")
+        raise PublicationGovernanceUnavailable(
+            "active manifest and completed Event Catalog governance are required"
+        )
 
     def resolve_season_game_ids(self, season: str, cutoff: date | datetime):
         return self.resolve_team_game_ids(season, cutoff, window="season")
@@ -163,11 +168,15 @@ class ActiveManifestLedgerGovernanceReader:
                     statement.order_by(CollectionManifest.cutoff.desc()).limit(1)
                 )
             if governed_cutoff is None:
-                raise ValueError("active manifest and completed Event Catalog governance are required")
+                raise PublicationGovernanceUnavailable(
+                    "active manifest and completed Event Catalog governance are required"
+                )
             if governed_cutoff.tzinfo is None:
                 governed_cutoff = governed_cutoff.replace(tzinfo=timezone.utc)
         else:
-            raise ValueError("active manifest and completed Event Catalog governance are required")
+            raise PublicationGovernanceUnavailable(
+                "active manifest and completed Event Catalog governance are required"
+            )
         return self.read_for_composition(
             season,
             governed_cutoff,
@@ -210,10 +219,14 @@ class ActiveManifestLedgerGovernanceReader:
             or "canonical_game_ledger" not in set(json.loads(manifest["scopes"]))
             or 1 not in set(json.loads(manifest["accepted_versions"]))
         ):
-            raise ValueError("active manifest and completed Event Catalog governance are required")
+            raise PublicationGovernanceUnavailable(
+                "active manifest and completed Event Catalog governance are required"
+            )
         events = self._immutable_catalog_events(manifest)
         if not events:
-            raise ValueError("completed Regular Season Event Catalog governance is required")
+            raise PublicationGovernanceUnavailable(
+                "completed Regular Season Event Catalog governance is required"
+            )
         team_ids = frozenset(
             int(team_id)
             for event in events
@@ -266,7 +279,7 @@ class ActiveManifestLedgerGovernanceReader:
                 else None
             )
         if catalog is None:
-            raise ValueError(
+            raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"
             )
         payload = catalog["payload"]
@@ -281,14 +294,20 @@ class ActiveManifestLedgerGovernanceReader:
             or not catalog["complete"]
             or not publication_payload_matches_checksum(payload, catalog["checksum"])
         ):
-            raise ValueError("immutable Event Catalog governance is inconsistent")
+            raise PublicationGovernanceUnavailable(
+                "immutable Event Catalog governance is inconsistent"
+            )
         try:
             document = json.loads(payload)
             rows = document.get("events", document.get("games"))
         except (AttributeError, TypeError, json.JSONDecodeError):
-            raise ValueError("immutable Event Catalog governance is inconsistent") from None
+            raise PublicationGovernanceUnavailable(
+                "immutable Event Catalog governance is inconsistent"
+            ) from None
         if not isinstance(rows, list) or not rows:
-            raise ValueError("immutable Event Catalog governance is inconsistent")
+            raise PublicationGovernanceUnavailable(
+                "immutable Event Catalog governance is inconsistent"
+            )
         manifest_cutoff = manifest["cutoff"]
         if manifest_cutoff.tzinfo is None:
             manifest_cutoff = manifest_cutoff.replace(tzinfo=timezone.utc)
@@ -300,7 +319,7 @@ class ActiveManifestLedgerGovernanceReader:
                     "nba_game_id", row.get("game_id", row.get("id"))
                 )
                 if raw_game_id in (None, ""):
-                    raise ValueError("event identity required")
+                    raise PublicationGovernanceUnavailable("event identity required")
                 game_id = str(raw_game_id).strip()
                 home_team_id = int(row["home_team_id"])
                 away_team_id = int(row["away_team_id"])
@@ -314,7 +333,7 @@ class ActiveManifestLedgerGovernanceReader:
                     str(scheduled_text).replace("Z", "+00:00")
                 )
             except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-                raise ValueError(
+                raise PublicationGovernanceUnavailable(
                     "immutable Event Catalog governance is inconsistent"
                 ) from None
             if (
@@ -326,7 +345,9 @@ class ActiveManifestLedgerGovernanceReader:
                 or phase not in {"regular season", "regular"}
                 or scheduled_at.tzinfo is None
             ):
-                raise ValueError("immutable Event Catalog governance is inconsistent")
+                raise PublicationGovernanceUnavailable(
+                    "immutable Event Catalog governance is inconsistent"
+                )
             seen.add(game_id)
             if (
                 is_completed_non_postponed_event(row)
@@ -354,7 +375,9 @@ class ActiveManifestLedgerGovernanceReader:
                 CollectionManifest.collect_before > now,
             ).order_by(CollectionManifest.cutoff.desc()).limit(1))
         if cutoff is None:
-            raise ValueError("active manifest and completed Event Catalog governance are required")
+            raise PublicationGovernanceUnavailable(
+                "active manifest and completed Event Catalog governance are required"
+            )
         return self._read(
             season,
             cutoff,
@@ -532,7 +555,7 @@ class LedgerRuntime:
                                         cutoff=cutoff, manifest_id=manifest_id,
                                         session=session,
                                     )
-                            except (ControlPlaneError, ValueError) as error:
+                            except ControlPlaneError as error:
                                 failed_jobs[job["job_id"]] = str(error)[:255]
                             else:
                                 succeeded_jobs.append(job)
@@ -654,7 +677,7 @@ class LedgerRuntime:
                         job["stream_key"], season=season, cutoff=cutoff,
                         manifest_id=manifest_id,
                     )
-                except (ControlPlaneError, ValueError) as error:
+                except ControlPlaneError as error:
                     status, last_error = "failed", str(error)[:255]
                 else:
                     status, last_error = "succeeded", None

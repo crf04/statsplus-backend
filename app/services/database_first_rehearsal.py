@@ -18,7 +18,10 @@ from app.domain.slate_time import slate_date_for_instant
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import PublicationPointer, PublicationVersion
 from app.services.publication_authority import verify_publication_authority
-from app.services.team_matchup_publications import NBA_PUBLICATION_STREAM_KEYS
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_STREAM_KEYS,
+    PublicationGovernanceUnavailable,
+)
 
 
 UTC = timezone.utc
@@ -330,7 +333,7 @@ class HistoricalRehearsalRunner:
             if stream_key in NBA_PUBLICATION_STREAM_KEYS:
                 try:
                     verify_publication_authority(session, row)
-                except ValueError as error:
+                except PublicationGovernanceUnavailable as error:
                     raise ValueError(
                         "rehearsal publication authority mismatch"
                     ) from error

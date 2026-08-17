@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from collections.abc import Mapping
+from inspect import Parameter, signature
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.slate_time import publication_cutoff_is_after_slate_day
@@ -30,6 +31,13 @@ class PublicationValidationError(ValueError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class PublicationGovernanceUnavailable(ValueError):
+    """Expected missing or malformed immutable publication authority."""
+
+    def __init__(self, detail: str = "publication_governance_unavailable"):
+        super().__init__(detail)
 
 
 def publication_base_for_stream(stream_key: str) -> str | None:
@@ -131,7 +139,7 @@ def resolve_governed_team_game_ids(
     """Resolve exact governed per-team IDs for one immutable window."""
 
     if window not in NBA_PUBLICATION_WINDOWS or resolver is None:
-        raise ValueError("publication_governance_unavailable")
+        raise PublicationGovernanceUnavailable()
     authority_requested = any((
         manifest_id,
         event_catalog_publication_id,
@@ -148,38 +156,45 @@ def resolve_governed_team_game_ids(
         operation = getattr(resolver, name, None)
         if callable(operation):
             if authority_requested and name != "resolve_team_game_ids":
-                raise ValueError("publication_governance_unavailable")
+                raise PublicationGovernanceUnavailable()
             if name == "resolve_team_game_ids":
                 try:
-                    result = operation(
-                        season,
-                        cutoff,
-                        window=window,
-                        manifest_id=manifest_id,
-                        event_catalog_publication_id=(
+                    parameters = signature(operation).parameters.values()
+                except (TypeError, ValueError):
+                    raise PublicationGovernanceUnavailable() from None
+                accepts_keywords = any(
+                    parameter.kind == Parameter.VAR_KEYWORD
+                    for parameter in parameters
+                )
+                names = {parameter.name for parameter in parameters}
+                authority_names = {
+                    "manifest_id", "event_catalog_publication_id",
+                    "event_catalog_checksum",
+                }
+                if authority_requested and not (
+                    accepts_keywords or authority_names <= names
+                ):
+                    raise PublicationGovernanceUnavailable()
+                options = {"window": window}
+                if authority_requested:
+                    options.update({
+                        "manifest_id": manifest_id,
+                        "event_catalog_publication_id": (
                             event_catalog_publication_id
                         ),
-                        event_catalog_checksum=event_catalog_checksum,
-                    )
-                except TypeError:
-                    if authority_requested:
-                        raise ValueError(
-                            "publication_governance_unavailable"
-                        ) from None
-                    # Small offline/test adapters may implement the earlier
-                    # season/cutoff vocabulary only when no immutable
-                    # authority was requested.
-                    result = operation(season, cutoff, window=window)
+                        "event_catalog_checksum": event_catalog_checksum,
+                    })
+                result = operation(season, cutoff, **options)
             else:
                 result = operation(season, cutoff)
             break
     else:
         if callable(resolver):
             if authority_requested:
-                raise ValueError("publication_governance_unavailable")
+                raise PublicationGovernanceUnavailable()
             result = resolver(season, cutoff)
         else:
-            raise ValueError("publication_governance_unavailable")
+            raise PublicationGovernanceUnavailable()
     attribute = (
         "expected_l15_game_ids"
         if window == "l15"
@@ -187,17 +202,17 @@ def resolve_governed_team_game_ids(
     )
     result = getattr(result, attribute, result)
     if not isinstance(result, Mapping):
-        raise ValueError("publication_governance_unavailable")
+        raise PublicationGovernanceUnavailable()
     normalized: dict[int, frozenset[str]] = {}
     try:
         for team_id, game_ids in result.items():
             normalized[int(team_id)] = frozenset(str(game_id) for game_id in game_ids)
     except (AttributeError, TypeError, ValueError, OverflowError):
-        raise ValueError("publication_governance_unavailable") from None
+        raise PublicationGovernanceUnavailable() from None
     if set(normalized) != set(NBA_TEAM_ID_TO_TRICODE):
-        raise ValueError("publication_governance_unavailable")
+        raise PublicationGovernanceUnavailable()
     if any(not game_ids for game_ids in normalized.values()):
-        raise ValueError("publication_governance_unavailable")
+        raise PublicationGovernanceUnavailable()
     return normalized
 
 
@@ -278,6 +293,7 @@ __all__ = [
     "NBA_PUBLICATION_WINDOWS",
     "PLAY_TYPE_STATS",
     "PublicationLineage",
+    "PublicationGovernanceUnavailable",
     "PublicationValidationError",
     "SHOT_TYPE_SLICES",
     "SHOT_TYPE_STATS",

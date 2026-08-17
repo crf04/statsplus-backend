@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import pandas as pd
 from sqlalchemy import create_engine, delete, select, update
+from sqlalchemy.exc import OperationalError
 
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
@@ -425,6 +426,10 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
         ("complete", 5), ("partial", 4), ("tampered", 4), ("gp14", 4),
         ("permuted", 1), ("projection_failure", 5),
         ("mixed_projection_failure", 2),
+        ("mixed_governance_type_error", 2),
+        ("mixed_governance_runtime_error", 2),
+        ("mixed_governance_db_error", 2),
+        ("backdated_synergy", 4),
     ),
 )
 def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows(
@@ -433,7 +438,11 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     control_db = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
     run_migrations(control_db)
     team_ids = sorted(NBA_TEAM_IDS)
-    cutoff = NOW - timedelta(days=1)
+    cutoff = (
+        NOW - timedelta(days=1)
+        if evidence_mode == "backdated_synergy"
+        else NOW
+    )
     control = CollectionControlService(control_db, clock=lambda: NOW)
     control.activate_season("2025-26", actor="operator")
     event_payload = {"complete_snapshot": True, "events": [{
@@ -500,7 +509,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
 
         def fetch_opponent_shot_chart(self, category, _date_from, **kwargs):
             assert kwargs["per_mode_simple"] == "Totals"
-            assert kwargs["date_to"] == "08/12/2026"
+            assert kwargs["date_to"] == cutoff.strftime("%m/%d/%Y")
             return [{
                 "team_id": kwargs["team_id"], "category": category,
                 "GP": 14 if evidence_mode == "gp14" and kwargs["last_n_games"] == 15 else 15,
@@ -616,7 +625,10 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         ).encode()
         ingestion.ingest(claims, document, payload)
     queued_streams = set(publication_streams)
-    if evidence_mode == "mixed_projection_failure":
+    if evidence_mode in {
+        "mixed_projection_failure", "mixed_governance_type_error",
+        "mixed_governance_runtime_error", "mixed_governance_db_error",
+    }:
         nba_stream = "grouped_shot_types_opponent_season"
         with control_db.begin() as connection:
             connection.execute(delete(CompositionJob).where(
@@ -666,7 +678,14 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             for row in connection.execute(select(CompositionJob))
         } == queued_streams
 
-    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+    with pytest.raises(
+        ControlPlaneError,
+        match=(
+            "provider_unbounded_as_of"
+            if evidence_mode == "backdated_synergy"
+            else "publication_candidate_invalid"
+        ),
+    ):
         publications.compose(
             "synergy_play_types_opponent_season", season="2025-26",
             cutoff=cutoff, payload={"rows": []},
@@ -706,7 +725,10 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             return super().refresh_publication_surfaces(*args, **kwargs)
 
         def materialize(self, season, *, as_of, **kwargs):
-            if evidence_mode != "mixed_projection_failure":
+            if evidence_mode not in {
+                "mixed_projection_failure", "mixed_governance_type_error",
+                "mixed_governance_runtime_error", "mixed_governance_db_error",
+            }:
                 return super().materialize(season, as_of=as_of, **kwargs)
             if self.fail_once:
                 self.fail_once = False
@@ -754,7 +776,10 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         repository=runtime_repository,
         materialization=(
             ledger_materialization
-            if evidence_mode == "mixed_projection_failure"
+            if evidence_mode in {
+                "mixed_projection_failure", "mixed_governance_type_error",
+                "mixed_governance_runtime_error", "mixed_governance_db_error",
+            }
             else None
         ),
         governance=governance,
@@ -762,7 +787,22 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         publication_service=publications,
         clock=lambda: NOW,
     )
-    if evidence_mode in {"projection_failure", "mixed_projection_failure"}:
+    original_resolver = publications.l15_expectation_resolver
+    if evidence_mode.startswith("mixed_governance_"):
+        class BrokenResolver:
+            def resolve_team_game_ids(self, *args, **kwargs):
+                if evidence_mode == "mixed_governance_type_error":
+                    raise TypeError("resolver implementation defect")
+                if evidence_mode == "mixed_governance_runtime_error":
+                    raise RuntimeError("resolver runtime defect")
+                raise OperationalError("SELECT governed", {}, RuntimeError("db down"))
+
+        publications.l15_expectation_resolver = BrokenResolver()
+    if evidence_mode in {
+        "projection_failure", "mixed_projection_failure",
+        "mixed_governance_type_error",
+        "mixed_governance_runtime_error", "mixed_governance_db_error",
+    }:
         assert runtime.compose_queued("2025-26") == 0
         with control_db.connect() as connection:
             assert {
@@ -774,6 +814,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             ).mappings().all() == []
         failed_snapshot = matchup_repository.get_snapshot(preserved_scope)
         assert {fact.base for fact in failed_snapshot.facts} == {"traditional"}
+        publications.l15_expectation_resolver = original_resolver
     composed = runtime.compose_queued("2025-26")
     with control_db.connect() as connection:
         composition_diagnostics = [
@@ -791,6 +832,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             "failed"
             if (
                 evidence_mode == "partial"
+                and stream_key == "synergy_play_types_opponent_season"
+            ) or (
+                evidence_mode == "backdated_synergy"
                 and stream_key == "synergy_play_types_opponent_season"
             ) or (
                 evidence_mode == "tampered"
@@ -822,6 +866,34 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         assert not reader.read(
             "synergy_play_types_opponent_season", season="2025-26"
         ).available
+    if evidence_mode == "backdated_synergy":
+        expected_values.pop("synergy_play_types_opponent_season")
+        assert not reader.read(
+            "synergy_play_types_opponent_season", season="2025-26"
+        ).available
+        with control_db.connect() as connection:
+            synergy_job = connection.execute(select(CompositionJob).where(
+                CompositionJob.stream_key
+                == "synergy_play_types_opponent_season"
+            )).one()
+        assert synergy_job.status == "failed"
+        assert synergy_job.last_error == "provider_unbounded_as_of"
+        with control_db.begin() as connection:
+            connection.execute(update(CompositionJob).where(
+                CompositionJob.job_id == synergy_job.job_id
+            ).values(status="queued", last_error=None))
+        assert runtime.compose_queued("2025-26") == 0
+        with control_db.connect() as connection:
+            retried_job = connection.execute(select(CompositionJob).where(
+                CompositionJob.job_id == synergy_job.job_id
+            )).one()
+            synergy_pointer = connection.execute(select(PublicationPointer).where(
+                PublicationPointer.stream_key
+                == "synergy_play_types_opponent_season"
+            )).first()
+        assert retried_job.status == "failed"
+        assert retried_job.last_error == "provider_unbounded_as_of"
+        assert synergy_pointer is None
     if evidence_mode == "tampered":
         expected_values.pop("grouped_shot_types_opponent_season")
         assert not reader.read(
@@ -838,7 +910,10 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 "Transition_PTS", 12 * 48 / 750,
             )
         }
-    if evidence_mode == "mixed_projection_failure":
+    if evidence_mode in {
+        "mixed_projection_failure", "mixed_governance_type_error",
+        "mixed_governance_runtime_error", "mixed_governance_db_error",
+    }:
         expected_values = {
             "grouped_shot_types_opponent_season": (
                 "catch_and_shoot_FG2M", 40 * 48 / 725,

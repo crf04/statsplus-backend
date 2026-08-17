@@ -48,6 +48,7 @@ from app.services.database_first_activation import (
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_WINDOWS,
+    PublicationGovernanceUnavailable,
     publication_cutoff_reason,
     publication_lineage,
     publication_metric_identity,
@@ -480,8 +481,21 @@ class LedgerMatchupMaterializationService:
                     if isinstance(read.cutoff, datetime)
                     else parse_utc_iso(str(read.cutoff))
                 )
-                if read.season != season:
-                    raise ValueError("publication_governance_unavailable")
+            except (TypeError, ValueError):
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_governance_unavailable",
+                    publication=lineage,
+                )
+            if read.season != season:
+                return (), TeamMatchupObservation(
+                    surface=base,
+                    status="unavailable",
+                    unavailable_reason="publication_governance_unavailable",
+                    publication=lineage,
+                )
+            try:
                 if self.l15_expectation_resolver is not None:
                     window = "l15" if stream_key.endswith("_l15") else "season"
                     expected_game_ids_by_team = resolve_governed_team_game_ids(
@@ -497,7 +511,7 @@ class LedgerMatchupMaterializationService:
                             read, "event_catalog_checksum", None
                         ),
                     )
-            except (TypeError, ValueError):
+            except PublicationGovernanceUnavailable:
                 return (), TeamMatchupObservation(
                     surface=base,
                     status="unavailable",

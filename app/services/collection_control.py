@@ -50,6 +50,7 @@ from app.domain.publication_integrity import (
 from app.models.catalogs import SHOOTING_TYPES
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
+    PublicationGovernanceUnavailable,
     publication_base_for_stream,
     publication_stream,
     resolve_governed_team_game_ids,
@@ -414,6 +415,10 @@ def _requires_team_window_expectation(stream_key: str) -> bool:
     )
 
 
+class _ProviderWindowUnavailable(ValueError):
+    """Expected provider limitation that must not authorize a publication."""
+
+
 def _compose_nba_observation_payload(
     session: Session,
     *,
@@ -479,7 +484,18 @@ def _compose_nba_observation_payload(
         )
         if scope.get("value_mode") != expected_value_mode:
             raise ValueError("publication value mode unverified")
-        if base != "play_types":
+        if base == "play_types":
+            # Synergy's Season endpoint has no DateTo/as-of input.  Its totals
+            # can therefore authorize only the manifest slate on which the
+            # observation was accepted by the governed collection service.
+            # A later collection may not retrospectively label those mutable
+            # full-season totals with an older immutable cutoff.
+            if (
+                slate_date_for_instant(_aware(observation.accepted_at))
+                != slate_date_for_instant(cutoff)
+            ):
+                raise _ProviderWindowUnavailable("provider_unbounded_as_of")
+        else:
             endpoint_window = scope.get("endpoint_window")
             if (
                 not isinstance(endpoint_window, Mapping)
@@ -2802,7 +2818,7 @@ class PublicationService(_SessionService):
                             session, candidate
                         )
                         if self.l15_expectation_resolver is None:
-                            raise ValueError("publication governance unavailable")
+                            raise PublicationGovernanceUnavailable()
                         expected_game_ids_by_team = (
                             resolve_governed_team_game_ids(
                                 self.l15_expectation_resolver,
@@ -2822,7 +2838,7 @@ class PublicationService(_SessionService):
                                 ),
                             )
                         )
-                    except Exception as error:
+                    except PublicationGovernanceUnavailable as error:
                         raise ControlPlaneError(
                             "publication_governance_unavailable"
                         ) from error
@@ -3023,7 +3039,7 @@ class PublicationService(_SessionService):
                         cutoff=_aware(cutoff),
                         manifest_id=manifest_id,
                     )
-                except ValueError as error:
+                except PublicationGovernanceUnavailable as error:
                     raise ControlPlaneError(
                         "publication_governance_unavailable"
                     ) from error
@@ -3044,7 +3060,7 @@ class PublicationService(_SessionService):
                                 authority.event_catalog_checksum
                             ),
                         )
-                    except Exception as error:
+                    except PublicationGovernanceUnavailable as error:
                         raise ControlPlaneError(
                             "publication_governance_unavailable"
                         ) from error
@@ -3059,7 +3075,9 @@ class PublicationService(_SessionService):
                         provenance_ids=provenance_ids,
                         expected_game_ids_by_team=expected_game_ids_by_team or {},
                     )
-                except (TypeError, ValueError) as error:
+                except _ProviderWindowUnavailable as error:
+                    raise ControlPlaneError(str(error)) from error
+                except ValueError as error:
                     raise ControlPlaneError("publication_candidate_invalid") from error
                 if payload is not None and not hmac.compare_digest(
                     canonical_publication_json(payload),
@@ -3397,7 +3415,7 @@ class PublicationService(_SessionService):
             if stream_key in NBA_PUBLICATION_STREAM_KEYS:
                 try:
                     verify_publication_authority(session, prior)
-                except ValueError as error:
+                except PublicationGovernanceUnavailable as error:
                     raise ControlPlaneError(
                         "publication_governance_unavailable"
                     ) from error

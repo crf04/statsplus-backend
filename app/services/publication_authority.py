@@ -11,6 +11,9 @@ from sqlalchemy import select
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.utc import assume_utc
 from app.models.collection_control import CatalogPublication, CollectionManifest
+from app.services.team_matchup_publications import (
+    PublicationGovernanceUnavailable,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,14 +30,14 @@ def _manifest_authority(session, manifest: CollectionManifest) -> PublicationAut
             int(value) for value in json.loads(manifest.accepted_versions)
         }
     except (TypeError, ValueError, json.JSONDecodeError):
-        raise ValueError("publication authority is unavailable") from None
+        raise PublicationGovernanceUnavailable() from None
     if (
         not manifest.event_catalog_publication_id
         or not manifest.event_catalog_checksum
         or "canonical_game_ledger" not in scopes
         or 1 not in accepted_versions
     ):
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     catalog = session.get(
         CatalogPublication,
         manifest.event_catalog_publication_id,
@@ -50,7 +53,7 @@ def _manifest_authority(session, manifest: CollectionManifest) -> PublicationAut
             catalog.payload, catalog.checksum
         )
     ):
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     return PublicationAuthority(
         manifest_id=manifest.manifest_id,
         event_catalog_publication_id=catalog.publication_id,
@@ -76,13 +79,13 @@ def resolve_publication_authority(
             CollectionManifest.cutoff == assume_utc(cutoff),
         )))
     if len(manifests) != 1:
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     manifest = manifests[0]
     if (
         manifest.season != season
         or assume_utc(manifest.cutoff) != assume_utc(cutoff)
     ):
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     return _manifest_authority(session, manifest)
 
 
@@ -94,10 +97,10 @@ def verify_publication_authority(session, publication) -> PublicationAuthority:
         or not publication.event_catalog_publication_id
         or not publication.event_catalog_checksum
     ):
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     manifest = session.get(CollectionManifest, publication.manifest_id)
     if manifest is None:
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     authority = _manifest_authority(session, manifest)
     if (
         publication.season != manifest.season
@@ -106,7 +109,7 @@ def verify_publication_authority(session, publication) -> PublicationAuthority:
         != authority.event_catalog_publication_id
         or publication.event_catalog_checksum != authority.event_catalog_checksum
     ):
-        raise ValueError("publication authority is unavailable")
+        raise PublicationGovernanceUnavailable()
     return authority
 
 

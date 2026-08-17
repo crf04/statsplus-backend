@@ -40,6 +40,7 @@ from app.services.collection_control import (
 )
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
+    PublicationGovernanceUnavailable,
     publication_base_for_stream,
     validate_publication_rows,
 )
@@ -928,7 +929,7 @@ class DatabaseFirstPublicationReader:
         if stream_key in NBA_PUBLICATION_STREAM_KEYS:
             try:
                 verify_publication_authority(session, publication)
-            except ValueError:
+            except PublicationGovernanceUnavailable:
                 return self._missing(
                     stream_key,
                     "unavailable",
