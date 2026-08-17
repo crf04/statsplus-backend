@@ -436,6 +436,11 @@ polls confirm only included references. Confirmation is live through the
 inclusive 15-minute window. After a failed poll it may be stale-served only
 through the inclusive six-hour fallback. A disabled provider receives no new
 confirmations and expires without deleting Latest or immutable history.
+Both the 15-minute live maximum and six-hour failure-fallback maximum enter
+through `app.domain.freshness`, including direct reader-constructor overrides.
+Populated Latest rows and successful Complete-empty evidence share one
+`within_max_age` classification, so both inclusive endpoints are identical and
+out-of-domain windows are rejected during construction.
 `DFS_ENABLED_PROVIDERS` is the sole enablement authority. Dependency assembly
 always retains read scopes for every supported archive provider (`dabble`,
 `prizepicks`, and `underdog`), independently of the enabled set, so rebuilding

@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine, func, select
 
-from app.config.settings import ProviderSettings
+from app.config.settings import ConfigurationError, ProviderSettings
+from app.domain.freshness import MAX_TIME_WINDOW_SECONDS
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
@@ -116,6 +117,117 @@ def _reader(engine, providers, now, *, required_providers=None):
         clock=lambda: now,
         required_providers=required_providers,
     )
+
+
+@pytest.mark.parametrize(
+    ("override", "field"),
+    (
+        ({"live_max_age": timedelta(seconds=-1)}, "PROJECTION_LIVE_MAX_AGE"),
+        (
+            {"failure_fallback_max_age": timedelta(seconds=-1)},
+            "PROJECTION_FAILURE_FALLBACK_MAX_AGE",
+        ),
+        (
+            {"live_max_age": timedelta(seconds=1_000_000_001)},
+            "PROJECTION_LIVE_MAX_AGE",
+        ),
+        (
+            {"failure_fallback_max_age": timedelta(seconds=1_000_000_001)},
+            "PROJECTION_FAILURE_FALLBACK_MAX_AGE",
+        ),
+    ),
+)
+def test_projection_reader_refuses_out_of_domain_direct_freshness_overrides(
+    tmp_path,
+    override,
+    field,
+):
+    engine = _engine(tmp_path)
+
+    with pytest.raises(ConfigurationError, match=field):
+        LatestProjectionPlayerPoolReader(
+            engine,
+            ProjectionArchiveReadScope(provider="dabble", query=QUERY),
+            **override,
+        )
+
+
+def test_projection_reader_accepts_the_shared_maximum_direct_window(tmp_path):
+    engine = _engine(tmp_path)
+    maximum = timedelta(seconds=int(MAX_TIME_WINDOW_SECONDS))
+
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=QUERY),
+        live_max_age=maximum,
+        failure_fallback_max_age=maximum,
+    )
+
+    assert reader.live_max_age == maximum
+    assert reader.failure_fallback_max_age == maximum
+
+
+@pytest.mark.parametrize(
+    ("required_providers", "cutoff"),
+    (
+        (("dabble", "prizepicks"), timedelta(hours=6)),
+        ((), timedelta(minutes=15)),
+    ),
+)
+def test_populated_and_complete_empty_evidence_share_inclusive_provider_cutoffs(
+    tmp_path,
+    required_providers,
+    cutoff,
+):
+    engine = _engine(tmp_path)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot(
+            "dabble",
+            SnapshotStatus.COMPLETE,
+            (_market(catalog, player_id=7),),
+            OBSERVED_AT,
+        ),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    archive.ingest_snapshot(
+        _snapshot("prizepicks", SnapshotStatus.COMPLETE, (), OBSERVED_AT),
+        query=QUERY,
+        accepted_at=OBSERVED_AT,
+    )
+    for provider in ("dabble", "prizepicks"):
+        archive.record_failed_poll(
+            provider=provider,
+            query=QUERY,
+            completed_at=OBSERVED_AT + timedelta(seconds=1),
+            failure_reason="access_denied",
+        )
+
+    at_cutoff = _reader(
+        engine,
+        ("dabble", "prizepicks"),
+        OBSERVED_AT + cutoff,
+        required_providers=required_providers,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert [player.canonical_player_id for player in at_cutoff.players] == [7]
+    assert at_cutoff.freshness["providers"] == {
+        provider: {
+            "status": "stale-served",
+            "retrieved_at": OBSERVED_AT.isoformat(),
+        }
+        for provider in ("dabble", "prizepicks")
+    }
+
+    after_cutoff = _reader(
+        engine,
+        ("dabble", "prizepicks"),
+        OBSERVED_AT + cutoff + timedelta(microseconds=1),
+        required_providers=required_providers,
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert after_cutoff.players == ()
+    assert after_cutoff.freshness["state"] == "missing"
 
 
 def test_partial_updates_present_offerings_without_retiring_omissions(tmp_path):

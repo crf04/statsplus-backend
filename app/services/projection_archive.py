@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -18,6 +19,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config.settings import ConfigurationError
 from app.domain.comparisons import market_reference
+from app.domain.freshness import (
+    exact_age_seconds,
+    exact_seconds,
+    exact_timedelta,
+    within_max_age,
+)
 from app.domain.statistics import MatchState, ScoringPeriod
 from app.domain.utc import assume_utc
 from app.models.projection_archive import (
@@ -61,6 +68,34 @@ DEFAULT_PROJECTION_ARCHIVE_MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 PROJECTION_LIVE_MAX_AGE = timedelta(minutes=15)
 PROJECTION_FAILURE_FALLBACK_MAX_AGE = timedelta(hours=6)
 _FAILURE_REASON = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
+def _projection_provider_status(
+    *,
+    now: datetime,
+    observed_at: datetime,
+    health_outcome: str | None,
+    success_is_current: bool,
+    required: bool,
+    live_max_age_seconds: Decimal,
+    failure_fallback_max_age_seconds: Decimal,
+) -> str | None:
+    """Classify row-bearing and Complete-empty evidence at one age boundary."""
+
+    elapsed = exact_seconds(now - assume_utc(observed_at))
+    if elapsed < 0:
+        return None
+    age = exact_age_seconds(elapsed, field="projection evidence age")
+    if health_outcome == "failed":
+        maximum_age = (
+            failure_fallback_max_age_seconds
+            if required
+            else live_max_age_seconds
+        )
+        return "stale-served" if within_max_age(age, maximum_age) else None
+    if success_is_current and within_max_age(age, live_max_age_seconds):
+        return "fresh"
+    return None
 
 
 def require_projection_archive_schema(engine: Engine) -> None:
@@ -1056,8 +1091,22 @@ class LatestProjectionPlayerPoolReader:
             raise ValueError("projection archive reader scopes must share one query")
         if len({item.provider for item in scopes}) != len(scopes):
             raise ValueError("projection archive reader provider scopes must be unique")
-        if live_max_age <= timedelta(0) or failure_fallback_max_age < live_max_age:
-            raise ValueError("projection archive freshness windows are invalid")
+        try:
+            live_max_age = exact_timedelta(
+                exact_seconds(live_max_age),
+                field="PROJECTION_LIVE_MAX_AGE",
+            )
+            failure_fallback_max_age = exact_timedelta(
+                exact_seconds(failure_fallback_max_age),
+                field="PROJECTION_FAILURE_FALLBACK_MAX_AGE",
+            )
+        except ValueError as error:
+            raise ConfigurationError(str(error)) from error
+        if failure_fallback_max_age < live_max_age:
+            raise ConfigurationError(
+                "PROJECTION_LIVE_MAX_AGE can never exceed "
+                "PROJECTION_FAILURE_FALLBACK_MAX_AGE"
+            )
         self.engine = engine
         self.scopes = tuple(sorted(scopes, key=lambda item: item.provider))
         self.scope = self.scopes[0]
@@ -1072,6 +1121,10 @@ class LatestProjectionPlayerPoolReader:
         self.clock = clock
         self.live_max_age = live_max_age
         self.failure_fallback_max_age = failure_fallback_max_age
+        self._live_max_age_seconds = exact_seconds(live_max_age)
+        self._failure_fallback_max_age_seconds = exact_seconds(
+            failure_fallback_max_age
+        )
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
         return self.get_pool(season=season, game_ids=(game_id,))
@@ -1165,18 +1218,17 @@ class LatestProjectionPlayerPoolReader:
             provider = str(row["provider"])
             health = latest_health.get(provider)
             outcome = None if health is None else str(health["outcome"])
-            age = now - assume_utc(row["confirmed_at"])
-            status = None
-            if outcome == "failed":
-                failure_age = (
-                    self.failure_fallback_max_age
-                    if provider in self.required_providers
-                    else self.live_max_age
-                )
-                if timedelta(0) <= age <= failure_age:
-                    status = "stale-served"
-            elif outcome != "failed" and timedelta(0) <= age <= self.live_max_age:
-                status = "fresh"
+            status = _projection_provider_status(
+                now=now,
+                observed_at=row["confirmed_at"],
+                health_outcome=outcome,
+                success_is_current=outcome != "failed",
+                required=provider in self.required_providers,
+                live_max_age_seconds=self._live_max_age_seconds,
+                failure_fallback_max_age_seconds=(
+                    self._failure_fallback_max_age_seconds
+                ),
+            )
             if status is not None:
                 provider_statuses[provider] = status
                 eligible_rows.append(row)
@@ -1188,19 +1240,17 @@ class LatestProjectionPlayerPoolReader:
             if health is None:
                 continue
             empty_retrieved_at = assume_utc(empty_poll["retrieved_at"])
-            age = now - empty_retrieved_at
-            status = None
-            if health["outcome"] == "failed":
-                failure_age = (
-                    self.failure_fallback_max_age
-                    if provider in self.required_providers
-                    else self.live_max_age
-                )
-                if timedelta(0) <= age <= failure_age:
-                    status = "stale-served"
-            elif health["poll_id"] == empty_poll["poll_id"]:
-                if timedelta(0) <= age <= self.live_max_age:
-                    status = "fresh"
+            status = _projection_provider_status(
+                now=now,
+                observed_at=empty_retrieved_at,
+                health_outcome=str(health["outcome"]),
+                success_is_current=health["poll_id"] == empty_poll["poll_id"],
+                required=provider in self.required_providers,
+                live_max_age_seconds=self._live_max_age_seconds,
+                failure_fallback_max_age_seconds=(
+                    self._failure_fallback_max_age_seconds
+                ),
+            )
             if status is not None:
                 provider_statuses[provider] = status
                 empty_provider_observed_at[provider] = empty_retrieved_at
