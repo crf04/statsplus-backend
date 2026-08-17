@@ -28,7 +28,11 @@ from app.models.collection_control import (
     ReconciliationItem,
 )
 from app.models.event_catalog import EventCatalogEntry
-from app.models.canonical_game_ledger import LedgerParityArtifact, LedgerPublication
+from app.models.canonical_game_ledger import (
+    CanonicalGameLedgerGame,
+    LedgerParityArtifact,
+    LedgerPublication,
+)
 from app.models.canonical_game_ledger import LedgerObservationEvidence
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.collection_control import LedgerPublicationComposition
@@ -226,6 +230,51 @@ def _boundary_observation_values(game, *, cutoff, manifest_id):
         "retrieved_at": game.retrieved_at,
         "accepted_at": game.retrieved_at,
     }
+
+
+def _bind_current_ledger_source(
+    engine,
+    *,
+    game_id: str,
+    observation_id: str,
+    cutoff: datetime,
+    season: str = "2025-26",
+) -> None:
+    """Bind a publication fixture to the exact accepted ledger source."""
+    with engine.begin() as connection:
+        existing = connection.execute(select(CanonicalGameLedgerGame).where(
+            CanonicalGameLedgerGame.game_id == game_id,
+        )).mappings().one_or_none()
+        if existing is None:
+            connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+                game_id=game_id,
+                season=season,
+                season_type="Regular Season",
+                game_date=slate_date_for_instant(cutoff),
+                home_team_id=1,
+                home_team_tricode="ATL",
+                away_team_id=2,
+                away_team_tricode="BOS",
+                status="final",
+                source_observation_id=observation_id,
+                checksum="f" * 64,
+                raw_checksum="e" * 64,
+                retrieved_at=cutoff,
+                updated_at=cutoff,
+            ))
+        else:
+            connection.execute(CanonicalGameLedgerGame.__table__.update().where(
+                CanonicalGameLedgerGame.game_id == game_id,
+            ).values(source_observation_id=observation_id, updated_at=cutoff))
+        attached = connection.execute(select(LedgerObservationEvidence).where(
+            LedgerObservationEvidence.observation_id == observation_id,
+        )).first()
+        if attached is None:
+            connection.execute(LedgerObservationEvidence.__table__.insert().values(
+                observation_id=observation_id,
+                game_id=game_id,
+                created_at=cutoff,
+            ))
 
 
 def test_replay_successful_correction_is_idempotent(tmp_path):
@@ -2201,6 +2250,12 @@ def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_pa
              "created_at": AS_OF, "updated_at": AS_OF}
             for index, stream in enumerate(streams)
         ])
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-one",
+        observation_id="obs:one",
+        cutoff=AS_OF,
+    )
     provenance = {"obs:one": "game-one"}
     import app.services.collection_control as collection_control
     monkeypatch.setattr(collection_control, "_write_publication_projection", lambda *args: None)
@@ -2420,32 +2475,17 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
         corrected_game,
         raw_rows=raw_rows_from_facts(corrected_game),
     ).with_checksum()
-    correction_observation = {
-        "observation_id": corrected_game.source_observation_id,
-        "client_observation_id": corrected_game.source_observation_id,
-        "collector_id": "test",
-        "manifest_id": manifest_id,
-        "environment": "server",
-        "provider": "pbp",
-        "observation_type": "canonical_game_ledger",
-        "scope": json.dumps({
-            "surface": "canonical_game_ledger",
-            "game_id": corrected_game.game_id,
-        }),
-        "season": corrected_game.season,
-        "cutoff": AS_OF,
-        "schema_version": 1,
-        "checksum": corrected_game.checksum,
-        "payload": "{}",
-        "payload_bytes": 2,
-        "retrieved_at": corrected_game.retrieved_at,
-        "accepted_at": corrected_game.retrieved_at,
-    }
-    with engine.begin() as connection:
-        connection.execute(CollectionObservation.__table__.insert().values(
-            **correction_observation
-        ))
-    ledger.replace_game(corrected_game)
+    correction_observation = _boundary_observation_values(
+        corrected_game,
+        cutoff=AS_OF,
+        manifest_id=manifest_id,
+    )
+    ledger.replace_games_atomic(
+        (corrected_game,),
+        accepted_observations={
+            corrected_game.source_observation_id: correction_observation,
+        },
+    )
 
     calls = {"count": 0}
     original_compose = publications._compose_active_in_session
@@ -2759,6 +2799,9 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
                 game_id=game.game_id,
                 created_at=cutoff + timedelta(days=20),
             ))
+            connection.execute(CanonicalGameLedgerGame.__table__.update().where(
+                CanonicalGameLedgerGame.game_id == game.game_id,
+            ).values(source_observation_id=raw_only_source))
     publications = PublicationService(engine, clock=lambda: AS_OF)
     publications.register_default_streams()
     with engine.begin() as connection:
@@ -2817,6 +2860,15 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
         assert job["generation"] == 1
         assert json.loads(job["source_observation_ids"]) == []
         assert json.loads(job["ledger_evidence"]) == {}
+        with pytest.raises(ControlPlaneError, match="ledger_provenance_not_accepted"):
+            publications.recompose_ledger_batch((LedgerPublicationComposition(
+                stream_key="traditional_opponent_season",
+                season=game.season,
+                cutoff=cutoff,
+                payload={"unattached": True},
+                provenance={raw_only_source: game.game_id},
+                reason="correction",
+            ),))
         return
     assert reconciled == len(LedgerCorrectionQueue.STREAMS)
     assert job["status"] == "queued"
@@ -2888,6 +2940,14 @@ def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_pa
         connection.execute(PublicationStream.__table__.update().where(
             PublicationStream.stream_key == "traditional_opponent_season",
         ).values(enabled=True))
+    for game in games:
+        _bind_current_ledger_source(
+            engine,
+            game_id=game.game_id,
+            observation_id=game.source_observation_id,
+            cutoff=AS_OF,
+            season=game.season,
+        )
 
     materialization = LedgerMaterializationService(
         ledger,
@@ -2995,6 +3055,12 @@ def test_ledger_batch_refreshes_cached_pointer_before_advancing_fence(tmp_path):
             retrieved_at=AS_OF,
             accepted_at=AS_OF,
         ))
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id="cached-pointer-observation",
+        cutoff=AS_OF,
+    )
     provenance = {"cached-pointer-observation": "game-1"}
 
     first = publications.recompose_ledger_batch((LedgerPublicationComposition(
@@ -3109,6 +3175,12 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
             )
         ])
 
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id="inactive-old",
+        cutoff=AS_OF,
+    )
     stale = publications.compose_inactive_ledger(
         stream_key,
         season="2025-26",
@@ -3116,6 +3188,12 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
         payload={"value": 1},
         provenance={"inactive-old": "game-1"},
         reason="initial acceptance",
+    )
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id="inactive-correction",
+        cutoff=AS_OF,
     )
     corrected = publications.compose_inactive_ledger(
         stream_key,
@@ -3193,6 +3271,12 @@ def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_p
                 ),
             )
         ])
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id="activation-old",
+        cutoff=AS_OF,
+    )
     stale = publications.compose_inactive_ledger(
         stream_key,
         season="2025-26",
@@ -3210,6 +3294,12 @@ def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_p
             stream_key,
             reason="activate prior candidate",
             candidate_publication_id=stale.publication_id,
+        )
+        _bind_current_ledger_source(
+            engine,
+            game_id="game-1",
+            observation_id="activation-corrected",
+            cutoff=AS_OF,
         )
 
         with cached_session.begin():
@@ -3294,12 +3384,24 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
                 retrieved_at=cutoff,
                 accepted_at=cutoff,
             ))
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id=sources[0],
+        cutoff=cutoffs[0],
+    )
     stale_one = publications.compose_inactive_ledger(
         stream_key,
         season="2025-26",
         cutoff=cutoffs[0],
         payload={"value": 1},
         provenance={sources[0]: "game-1"},
+    )
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id=sources[1],
+        cutoff=cutoffs[1],
     )
     stale_two = publications.compose_inactive_ledger(
         stream_key,
@@ -3312,6 +3414,12 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
         stream_key,
         reason="activate newest prior cutoff",
         candidate_publication_id=stale_two.publication_id,
+    )
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id=sources[2],
+        cutoff=cutoffs[2],
     )
     if enabled:
         corrected = publications.recompose_ledger_batch((

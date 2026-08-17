@@ -3320,12 +3320,10 @@ class PublicationService(_SessionService):
                         )
                     )
                     and canonical_checksums.get(game_id)
-                    and (
-                        str(observation.observation_id)
-                        == canonical_source_ids.get(game_id)
-                        or (game_id, str(observation.observation_id))
-                        in attached_observation_ids
-                    )
+                    and str(observation.observation_id)
+                    == canonical_source_ids.get(game_id)
+                    and (game_id, str(observation.observation_id))
+                    in attached_observation_ids
                 )
                 # One game can retain many immutable accepted observations.
                 # Reconciliation compares the pending job with the latest
@@ -4105,6 +4103,31 @@ class PublicationService(_SessionService):
                 != str(provenance[row.observation_id] or "")
             ):
                 raise ControlPlaneError("ledger_provenance_scope_mismatch")
+        expected_pairs = {
+            (str(game_id), str(observation_id))
+            for observation_id, game_id in provenance.items()
+        }
+        game_ids = tuple(sorted({game_id for game_id, _ in expected_pairs}))
+        observation_ids = tuple(sorted({observation_id for _, observation_id in expected_pairs}))
+        current_pairs = {
+            (str(game_id), str(source_observation_id))
+            for game_id, source_observation_id in session.execute(select(
+                CanonicalGameLedgerGame.game_id,
+                CanonicalGameLedgerGame.source_observation_id,
+            ).where(CanonicalGameLedgerGame.game_id.in_(game_ids)))
+        }
+        evidence_pairs = {
+            (str(game_id), str(observation_id))
+            for game_id, observation_id in session.execute(select(
+                LedgerObservationEvidence.game_id,
+                LedgerObservationEvidence.observation_id,
+            ).where(
+                LedgerObservationEvidence.game_id.in_(game_ids),
+                LedgerObservationEvidence.observation_id.in_(observation_ids),
+            ))
+        }
+        if current_pairs != expected_pairs or not expected_pairs <= evidence_pairs:
+            raise ControlPlaneError("ledger_provenance_not_accepted")
         return {row.observation_id for row in rows}
 
     @staticmethod
