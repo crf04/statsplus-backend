@@ -1790,7 +1790,7 @@ surface still publishes. Migration 034
 (`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
 `ledger_checksum` columns to `team_matchup_facts` and
 `team_matchup_surface_observations`; provider-collected legacy rows keep their
-ledger-only checksum columns NULL. Migration 040 adds immutable legacy
+ledger-only checksum columns NULL. Migration 042 adds immutable legacy
 `manifest_id`, Event Catalog publication ID/checksum, and
 `provider_window_identity` evidence. A fresh parity-bearing provider write
 must verify each aggregate's returned window/game count against that exact
@@ -1886,7 +1886,7 @@ Every team's exact Season/L15 game set must match the governed authority and
 each other, proven by byte-identical game-set checksums; a missing surface or
 a single missing metric fails. Integer counts — the four traditional opponent
 counts and the six assist surfaces — compare exactly; the single documented
-tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-6`) applies only to floating
+tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-9`) applies only to floating
 denominators (effective team minutes, with seconds normalized to minutes) and
 to the per-48 rates recomputed from counts and denominators. The ledger
 publication's served per-48 and competition-rank fields are also bound to
@@ -1909,12 +1909,18 @@ cannot be manually approved; only the documented floating semantic
 differences may be `adjudication_required`; ranking differences are hard and
 never manually adjudicable.
 
-`scripts/matchup_parity.py compare` reads the actual stored legacy facts and
-the candidate publication IDs plus the exact aware cutoff, runs the
-`MatchupParityRunner` against the immutable authority, and records the
-per-stream artifacts; `scripts/matchup_parity.py adjudicate` records the
-operator decision. The reports are the evidence backend #87 consumes for
-database-first activation. See
+`scripts/matchup_parity.py compare` requires an explicit database URL, Season,
+manifest ID, actor, sanitized output path, and `isolated|candidate` target. It
+resolves the exact manifest cutoff before work, preflights migrations, Active
+Season/phase, candidate provenance, and stream/pointer state, then reads the
+actual stored legacy facts and candidate publication IDs. A Season operation
+also compares the player per-36 Season candidate through the same executable
+dual-run; an L15 operation includes only the two matchup windows. The command
+prints a bounded human table, persists only sanitized summary fields, records
+the per-stream artifacts, and exits distinctly for exact, pending
+adjudication, and invalid evidence. `scripts/matchup_parity.py adjudicate`
+records the operator decision. The reports are the evidence backend #87
+consumes for database-first activation. See
 [MATCHUP_PARITY_OPERATIONS.md](MATCHUP_PARITY_OPERATIONS.md) for the operator
 runbook.
 

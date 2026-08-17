@@ -762,6 +762,11 @@ _TRADITIONAL_FIELDS = {
     "opponent_personal_fouls": ("opponent_personal_fouls", "OPP_PF", "PF"),
 }
 _PER36_FIELDS = {
+    # The denominator and participation count are part of the Season parity
+    # contract; rates alone cannot prove that a provider used the governed
+    # player window.
+    "minutes": ("minutes", "MIN"),
+    "game_count": ("game_count", "GP", "G"),
     "points_per36": ("points_per36", "PTS_PER36", "PTS"),
     "rebounds_per36": ("rebounds_per36", "REB_PER36", "REB"),
     "assists_per36": ("assists_per36", "AST_PER36", "AST"),
@@ -852,6 +857,7 @@ def _compare_semantic(
     identity_text: Callable[[tuple[object, ...]], str],
     fields: Mapping[str, Sequence[str]],
     tolerance: float,
+    exact_fields: frozenset[str] = frozenset(),
 ) -> tuple[int, list[SemanticDifference]]:
     legacy, differences = _index_legacy(
         legacy_rows,
@@ -890,7 +896,12 @@ def _compare_semantic(
             if legacy_value is None:
                 continue
             current_value = getattr(current, field_name)
-            if not _values_equal(current_value, legacy_value, tolerance):
+            equal = (
+                current_value == legacy_value
+                if field_name in exact_fields
+                else _values_equal(current_value, legacy_value, tolerance)
+            )
+            if not equal:
                 differences.append(
                     SemanticDifference(
                         identity_text(identity),
@@ -988,6 +999,7 @@ def compare_ledger_to_legacy(
             identity_text=lambda identity: f"per36:{identity[0]}",
             fields=_PER36_FIELDS,
             tolerance=tolerance,
+            exact_fields=frozenset({"game_count"}),
         )
         compared += count
         differences.extend(found)

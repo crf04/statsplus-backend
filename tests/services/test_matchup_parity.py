@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -277,6 +278,35 @@ def test_floating_denominator_difference_is_adjudicable_not_hard():
     assert {d.classification for d in report.differences} <= SOFT_CLASSIFICATIONS | {
         CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
     }
+
+
+def test_matchup_tolerance_is_exactly_one_nanounit():
+    assert MATCHUP_PARITY_TOLERANCE == 1e-9
+
+    within = _replace_fact(
+        _materialization(),
+        surface="traditional",
+        team_id=TEAM_A,
+        stat="OPP_REB",
+        denominator_value=100.0 * (1.0 + 0.9e-9),
+    )
+    assert not _compare(legacy=within).hard_failure
+
+    outside = _replace_fact(
+        _materialization(),
+        surface="traditional",
+        team_id=TEAM_A,
+        stat="OPP_REB",
+        denominator_value=100.0 * (1.0 + 1.1e-9),
+    )
+    assert _compare(legacy=outside).hard_failure is False
+    assert any(
+        difference.classification == "denominator_tolerance_exceeded"
+        for difference in _compare(legacy=outside).differences
+    )
+
+    with pytest.raises(ValueError, match="rel_tol=abs_tol=1e-9"):
+        _compare(tolerance=1e-6)
 
 
 def test_game_set_mismatch_is_a_hard_failure():
@@ -1300,3 +1330,74 @@ def test_matchup_stream_key_maps_surfaces_and_windows():
     assert matchup_stream_key("assist_locations", "l15") == "assist_locations_l15"
     with pytest.raises(ValueError):
         matchup_stream_key("shot_zones", "season")
+
+
+def test_bounded_compare_requires_player_per36_for_season():
+    import scripts.matchup_parity as matchup_parity_script
+
+    assert matchup_parity_script._required_streams("season") == frozenset({
+        "traditional_opponent_season",
+        "assist_locations_season",
+        "player_per36",
+    })
+    assert matchup_parity_script._required_streams("l15") == frozenset({
+        "traditional_opponent_l15",
+        "assist_locations_l15",
+    })
+
+
+def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
+    import scripts.matchup_parity as matchup_parity_script
+
+    received = {}
+
+    def fake_compare(args, engine):
+        received.update(vars(args))
+        assert engine == "sqlite:///:memory:"
+        return 0
+
+    monkeypatch.setattr(matchup_parity_script, "_compare", fake_compare)
+    monkeypatch.setattr(
+        matchup_parity_script,
+        "create_engine",
+        lambda database_url: database_url,
+    )
+    publications = tmp_path / "publications.json"
+    publications.write_text("{}", encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    monkeypatch.setattr(sys, "argv", [
+        "matchup_parity.py",
+        "compare",
+        "--database-url", "sqlite:///:memory:",
+        "--season", "2025-26",
+        "--manifest-id", "manifest",
+        "--actor", "operator@example.com",
+        "--output", str(summary),
+        "--target", "isolated",
+        "--publications-json", str(publications),
+    ])
+
+    assert matchup_parity_script.main() == 0
+    assert received["target"] == "isolated"
+    assert received["actor"] == "operator@example.com"
+    assert received["output"] == str(summary)
+
+
+def test_sanitized_summary_omits_row_values():
+    import scripts.matchup_parity as matchup_parity_script
+
+    report = _compare(
+        legacy=_replace_fact(
+            _materialization(),
+            surface="traditional",
+            team_id=TEAM_A,
+            stat="OPP_REB",
+            denominator_value=100.0,
+        )
+    )
+    summary = matchup_parity_script._sanitize_matchup_report(report)
+    encoded = json.dumps(summary)
+
+    assert summary["difference_classifications"]
+    assert "ledger_value" not in encoded
+    assert "legacy_value" not in encoded

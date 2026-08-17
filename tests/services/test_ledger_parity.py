@@ -122,6 +122,26 @@ def test_traditional_opponent_and_per36_compare_derived_semantics():
         "points_per36",
     }
 
+    changed_minutes = list(per36)
+    changed_minutes[0] = {**changed_minutes[0], "minutes": 999.0}
+    minutes_report = compare_ledger_to_legacy(
+        (game,),
+        _legacy_player_rows(game),
+        season=game.season,
+        legacy_per36_rows=changed_minutes,
+    )
+    assert any(item.field == "minutes" for item in minutes_report.differences)
+
+    changed_game_count = list(per36)
+    changed_game_count[0] = {**changed_game_count[0], "game_count": 1.0 + 0.5e-9}
+    game_count_report = compare_ledger_to_legacy(
+        (game,),
+        _legacy_player_rows(game),
+        season=game.season,
+        legacy_per36_rows=changed_game_count,
+    )
+    assert any(item.field == "game_count" for item in game_count_report.differences)
+
 
 def test_generated_report_persists_required_artifact(tmp_path):
     game = _game()

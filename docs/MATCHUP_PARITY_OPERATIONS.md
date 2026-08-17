@@ -47,9 +47,13 @@ authority, status, cutoff, or pointer drift fails the window closed.
 ## Bounded dual-run
 
 ```sh
-./scripts/matchup_parity.py compare 2025-26 season \
+./scripts/matchup_parity.py compare \
   --database-url "$DATABASE_URL" \
-  --cutoff 2025-11-01T00:00:00+00:00 \
+  --season 2025-26 \
+  --manifest-id "<exact manifest id>" \
+  --actor "operator@example.com" \
+  --output parity-summary.json \
+  --target candidate \
   --publications-json publications.json
 ```
 
@@ -60,13 +64,16 @@ mutable stored event table — and compares the stored legacy facts with those
 candidate publications. It reads no provider and never reads or advances a
 `PublicationPointer`.
 
-`publications.json` maps both required ledger-owned streams for the selected
-window to their inactive candidate publication IDs:
+`publications.json` maps both required ledger-owned matchup streams for the
+selected window to their inactive candidate publication IDs. A Season run also
+requires the inactive `player_per36` candidate so the executable dual-run
+covers the player Season publication:
 
 ```json
 {
   "traditional_opponent_season": "<publication id>",
-  "assist_locations_season": "<publication id>"
+  "assist_locations_season": "<publication id>",
+  "player_per36": "<publication id>"
 }
 ```
 
@@ -80,7 +87,7 @@ checksums), whether the two cutoffs align, whether deterministic rankings
 Integer counts compare exactly. Only floating denominators (effective team
 minutes, with seconds normalized to minutes) and the per-48 rates recomputed
 from counts and denominators use the single documented tolerance
-(`MATCHUP_PARITY_TOLERANCE`, `1e-6`). The ledger payload's served per-48 and
+(`MATCHUP_PARITY_TOLERANCE`, `1e-9`). The ledger payload's served per-48 and
 competition-rank values must also match the values recomputed from its counts
 and denominator; missing or incorrect served values are hard failures. Reports
 retain exact legacy and ledger game-ID maps/checksums and both sides' manifest/

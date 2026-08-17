@@ -90,7 +90,7 @@ from app.services.team_matchup_repository import (
 #: per-48 rates.  Integer counts compare exactly; only denominators (effective
 #: team minutes) and the per-48 values recomputed from them admit this relative
 #: tolerance.
-MATCHUP_PARITY_TOLERANCE = 1e-6
+MATCHUP_PARITY_TOLERANCE = 1e-9
 
 #: Ledger-owned surfaces that participate in the dual-run (re-exported from the
 #: canonical taxonomy so the comparator and stream keys never drift).
@@ -831,8 +831,10 @@ def compare_matchup_materializations(
 
     if surface not in _SURFACE_COUNT_KEYS:
         raise ValueError(f"unsupported matchup surface {surface}")
-    if not math.isfinite(tolerance) or tolerance < 0:
-        raise ValueError("tolerance must be finite and non-negative")
+    if tolerance != MATCHUP_PARITY_TOLERANCE:
+        raise ValueError(
+            "matchup parity requires rel_tol=abs_tol=1e-9"
+        )
 
     expected = frozenset(int(team_id) for team_id in expected_team_ids)
     if expected != frozenset(NBA_TEAM_ID_TO_TRICODE):
