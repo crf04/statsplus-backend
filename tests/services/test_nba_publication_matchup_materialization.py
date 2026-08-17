@@ -67,6 +67,8 @@ AS_OF = date(2025, 10, 15)
 RETRIEVED_AT = datetime(2025, 10, 16, 10, tzinfo=timezone.utc)
 CANONICAL_TEAM_IDS = tuple(sorted(NBA_TEAM_ID_TO_TRICODE))
 CANONICAL_BY_FIXTURE_ID = dict(zip(range(1, 31), CANONICAL_TEAM_IDS))
+DEFAULT_MANIFEST_ID = "nba-publication-manifest"
+DEFAULT_EVENT_CATALOG_ID = "nba-publication-event-catalog"
 
 
 def _canonical_league_games():
@@ -144,6 +146,46 @@ def _engine(tmp_path):
     with engine.begin() as connection:
         _, governed_l15, _ = _governance(_canonical_league_games())
         governed_season = _season_game_ids_by_team()
+        events = [{
+            "nba_game_id": game.game_id,
+            "home_team_id": game.home_team_id,
+            "away_team_id": game.away_team_id,
+            "phase": "Regular Season",
+            "status": "Final",
+            "status_code": 3,
+            "scheduled_at": datetime.combine(
+                game.game_date, datetime.min.time(), timezone.utc
+            ).isoformat(),
+        } for game in _canonical_league_games()]
+        catalog_payload = json.dumps(
+            {"events": events}, separators=(",", ":"), sort_keys=True
+        )
+        catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id=DEFAULT_EVENT_CATALOG_ID,
+            season="2025-26",
+            catalog_type="event",
+            cutoff=cutoff,
+            version="event-v1",
+            checksum=catalog_checksum,
+            payload=catalog_payload,
+            complete=True,
+            published_at=cutoff - timedelta(minutes=1),
+            expires_at=None,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=DEFAULT_MANIFEST_ID,
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="nba-publication-manifest-checksum",
+            event_catalog_publication_id=DEFAULT_EVENT_CATALOG_ID,
+            event_catalog_checksum=catalog_checksum,
+            status="active",
+            created_at=cutoff,
+        ))
         for base, template in NBA_PUBLICATION_STREAMS.items():
             for window in ("season", "l15"):
                 stream_key = template.format(window=window)
@@ -188,6 +230,9 @@ def _engine(tmp_path):
                     status="active",
                     checksum=hashlib.sha256(encoded.encode()).hexdigest(),
                     payload=encoded,
+                    manifest_id=DEFAULT_MANIFEST_ID,
+                    event_catalog_publication_id=DEFAULT_EVENT_CATALOG_ID,
+                    event_catalog_checksum=catalog_checksum,
                     created_at=cutoff,
                     fence=1,
                 ))
@@ -199,6 +244,86 @@ def _engine(tmp_path):
                     updated_at=cutoff,
                 ))
     return engine
+
+
+def _publication_authority_values(
+    *,
+    manifest_id=DEFAULT_MANIFEST_ID,
+    catalog_id=DEFAULT_EVENT_CATALOG_ID,
+):
+    events = [{
+        "nba_game_id": game.game_id,
+        "home_team_id": game.home_team_id,
+        "away_team_id": game.away_team_id,
+        "phase": "Regular Season",
+        "status": "Final",
+        "status_code": 3,
+        "scheduled_at": datetime.combine(
+            game.game_date, datetime.min.time(), timezone.utc
+        ).isoformat(),
+    } for game in _canonical_league_games()]
+    checksum = hashlib.sha256(json.dumps(
+        {"events": events}, separators=(",", ":"), sort_keys=True
+    ).encode()).hexdigest()
+    return {
+        "manifest_id": manifest_id,
+        "event_catalog_publication_id": catalog_id,
+        "event_catalog_checksum": checksum,
+    }
+
+
+def _insert_publication_authority(
+    connection,
+    *,
+    cutoff,
+    manifest_id,
+    catalog_id,
+):
+    events = [{
+        "nba_game_id": game.game_id,
+        "home_team_id": game.home_team_id,
+        "away_team_id": game.away_team_id,
+        "phase": "Regular Season",
+        "status": "Final",
+        "status_code": 3,
+        "scheduled_at": datetime.combine(
+            game.game_date, datetime.min.time(), timezone.utc
+        ).isoformat(),
+    } for game in _canonical_league_games()]
+    payload = json.dumps(
+        {"events": events}, separators=(",", ":"), sort_keys=True
+    )
+    checksum = hashlib.sha256(payload.encode()).hexdigest()
+    connection.execute(CatalogPublication.__table__.insert().values(
+        publication_id=catalog_id,
+        season="2025-26",
+        catalog_type="event",
+        cutoff=cutoff,
+        version=f"event-{catalog_id}",
+        checksum=checksum,
+        payload=payload,
+        complete=True,
+        published_at=cutoff - timedelta(minutes=1),
+        expires_at=None,
+    ))
+    connection.execute(CollectionManifest.__table__.insert().values(
+        manifest_id=manifest_id,
+        season="2025-26",
+        cutoff=cutoff,
+        collect_before=cutoff + timedelta(days=1),
+        accepted_versions="[1]",
+        scopes='["canonical_game_ledger"]',
+        checksum=f"manifest-{manifest_id}",
+        event_catalog_publication_id=catalog_id,
+        event_catalog_checksum=checksum,
+        status="superseded",
+        created_at=cutoff,
+    ))
+    return {
+        "manifest_id": manifest_id,
+        "event_catalog_publication_id": catalog_id,
+        "event_catalog_checksum": checksum,
+    }
 
 
 def _candidate_payload(expected_l15, *, mode="valid"):
@@ -292,11 +417,15 @@ def _operator_activation_fixture(tmp_path, *, mode="valid"):
         team_id: frozenset(f"governed-{team_id}-{index}" for index in range(15))
         for team_id in CANONICAL_TEAM_IDS
     }
+    publications.l15_expectation_resolver = (
+        lambda season, requested_cutoff: expected
+    )
     payload = _candidate_payload(expected, mode=mode)
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     candidate_id = f"candidate-{mode}"
     with engine.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
             publication_id=candidate_id,
             stream_key=stream_key,
             season="2025-26",
@@ -403,6 +532,7 @@ def test_season_activation_rejects_noncanonical_game_identity_and_keeps_pointer(
             )
         ).mappings().one()
         connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
             publication_id=candidate_id,
             stream_key=stream_key,
             season="2025-26",
@@ -574,6 +704,11 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
             )
         ).mappings().one()
         connection.execute(PublicationVersion.__table__.insert().values(
+            manifest_id="immutable-manifest",
+            event_catalog_publication_id="immutable-event-catalog",
+            event_catalog_checksum=hashlib.sha256(
+                encoded_catalog.encode()
+            ).hexdigest(),
             publication_id=candidate_id,
             stream_key=stream_key,
             season="2025-26",
@@ -616,6 +751,123 @@ def test_activation_and_query_use_immutable_catalog_not_retrospective_live_final
     )
     assert observation.status == "unavailable"
     assert observation.unavailable_reason == "publication_game_set_mismatch"
+
+
+def test_same_cutoff_republication_cannot_reinterpret_bound_candidate(tmp_path):
+    engine = _engine(tmp_path)
+    cutoff = datetime(2025, 10, 15, tzinfo=timezone.utc)
+    resolver = ActiveManifestLedgerGovernanceReader(engine)
+    expected_a = resolver.resolve_team_game_ids(
+        "2025-26",
+        cutoff,
+        window="season",
+        manifest_id=DEFAULT_MANIFEST_ID,
+    )
+    stream_key = "exact_shot_zones_opponent_season"
+    candidate_payload = _candidate_payload(expected_a)
+    encoded_candidate = json.dumps(
+        candidate_payload, separators=(",", ":"), sort_keys=True
+    )
+
+    with engine.begin() as connection:
+        catalog_a = connection.execute(
+            CatalogPublication.__table__.select().where(
+                CatalogPublication.publication_id == DEFAULT_EVENT_CATALOG_ID
+            )
+        ).mappings().one()
+        document_b = json.loads(catalog_a["payload"])
+        excluded_game_id = document_b["events"][0]["nba_game_id"]
+        document_b["events"][0]["status"] = "Scheduled"
+        document_b["events"][0]["status_code"] = 1
+        encoded_b = json.dumps(document_b, separators=(",", ":"), sort_keys=True)
+        checksum_b = hashlib.sha256(encoded_b.encode()).hexdigest()
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="same-cutoff-catalog-b",
+            season="2025-26",
+            catalog_type="event",
+            cutoff=cutoff,
+            version="event-v2",
+            checksum=checksum_b,
+            payload=encoded_b,
+            complete=True,
+            published_at=cutoff + timedelta(microseconds=1),
+            expires_at=None,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="same-cutoff-manifest-b",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="same-cutoff-manifest-b",
+            event_catalog_publication_id="same-cutoff-catalog-b",
+            event_catalog_checksum=checksum_b,
+            status="active",
+            created_at=cutoff + timedelta(microseconds=1),
+        ))
+        connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
+            publication_id="same-cutoff-candidate-a",
+            stream_key=stream_key,
+            season="2025-26",
+            cutoff=cutoff,
+            version=3,
+            status="candidate",
+            checksum=hashlib.sha256(encoded_candidate.encode()).hexdigest(),
+            payload=encoded_candidate,
+            created_at=cutoff + timedelta(minutes=1),
+            fence=0,
+        ))
+
+    expected_b = resolver.resolve_team_game_ids(
+        "2025-26",
+        cutoff,
+        window="season",
+        manifest_id="same-cutoff-manifest-b",
+    )
+    assert excluded_game_id in frozenset().union(*expected_a.values())
+    assert excluded_game_id not in frozenset().union(*expected_b.values())
+
+    publications = PublicationService(
+        engine, l15_expectation_resolver=resolver
+    )
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="snapshot_replace",
+        supported_windows=("season",),
+        enabled=False,
+    )
+    publications.activate_stream(
+        stream_key,
+        actor="operator",
+        reason="activate exact authority A",
+        season="2025-26",
+        cutoff=cutoff,
+        candidate_publication_id="same-cutoff-candidate-a",
+        require_candidate=True,
+    )
+    read = DatabaseFirstPublicationReader(engine).snapshot(
+        (stream_key,), season="2025-26"
+    ).reads[stream_key]
+    assert read.available
+    assert read.publication_id == "same-cutoff-candidate-a"
+    assert read.manifest_id == DEFAULT_MANIFEST_ID
+
+    query = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        publication_reader=DatabaseFirstPublicationReader(engine),
+        l15_expectation_resolver=resolver,
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+    observation = next(
+        item for item in query.observations if item.surface == "shot_zones"
+    )
+    assert observation.status == "available"
+    assert observation.publication is not None
+    assert observation.publication.publication_id == "same-cutoff-candidate-a"
 
 
 def _rows(
@@ -1024,6 +1276,12 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
         },
     )
     with engine.begin() as connection:
+        prior_authority = _insert_publication_authority(
+            connection,
+            cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            manifest_id="prior-cutoff-manifest",
+            catalog_id="prior-cutoff-catalog",
+        )
         for stream_key, cutoff in cutoffs.items():
             publication_id = f"publication-{stream_key}"
             encoded = connection.execute(
@@ -1044,6 +1302,11 @@ def test_materialization_resolves_l15_governance_per_publication_cutoff(tmp_path
                     cutoff=datetime.fromisoformat(cutoff),
                     payload=encoded,
                     checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                    **(
+                        prior_authority
+                        if cutoff.startswith("2025-10-14")
+                        else _publication_authority_values()
+                    ),
                 )
             )
     calls = []
@@ -1188,10 +1451,19 @@ def test_publication_cutoff_uses_eastern_slate_day_in_materialization_and_fence(
     )
     stream_key = "exact_shot_zones_opponent_season"
     with engine.begin() as connection:
+        authority = _insert_publication_authority(
+            connection,
+            cutoff=datetime.fromisoformat(publication_cutoff),
+            manifest_id=f"cutoff-manifest-{expected_status}",
+            catalog_id=f"cutoff-catalog-{expected_status}",
+        )
         connection.execute(
             PublicationVersion.__table__.update().where(
                 PublicationVersion.publication_id == f"publication-{stream_key}"
-            ).values(cutoff=datetime.fromisoformat(publication_cutoff))
+            ).values(
+                cutoff=datetime.fromisoformat(publication_cutoff),
+                **authority,
+            )
         )
     expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
 
@@ -1474,11 +1746,20 @@ def test_publication_surfaces_keep_independent_cutoffs_and_freshness(tmp_path):
         },
     )
     with engine.begin() as connection:
+        prior_authority = _insert_publication_authority(
+            connection,
+            cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+            manifest_id="independent-cutoff-manifest",
+            catalog_id="independent-cutoff-catalog",
+        )
         connection.execute(
             PublicationVersion.__table__.update().where(
                 PublicationVersion.publication_id
                 == "publication-grouped_shot_types_opponent_season"
-            ).values(cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc))
+            ).values(
+                cutoff=datetime(2025, 10, 14, tzinfo=timezone.utc),
+                **prior_authority,
+            )
         )
     service = LedgerMatchupMaterializationService(
         ledger, repository, publication_reader=reader, clock=lambda: RETRIEVED_AT
@@ -1799,6 +2080,11 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
         payload=_per48_only_payload(l15_ids),
         expected_fence=l15_pointer["fence"],
     )
+    assert composed.manifest_id == DEFAULT_MANIFEST_ID
+    assert composed.event_catalog_publication_id == DEFAULT_EVENT_CATALOG_ID
+    assert composed.event_catalog_checksum == _publication_authority_values()[
+        "event_catalog_checksum"
+    ]
     rehearsal_publications = HistoricalRehearsalRunner(
         engine, environment="unit"
     )._load_isolated_publications(
@@ -1825,6 +2111,7 @@ def test_per48_only_publication_composes_activates_reads_and_materializes(
     candidate_id = "per48-only-season-candidate"
     with engine.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
             publication_id=candidate_id,
             stream_key=season_stream,
             season="2025-26",
@@ -1981,6 +2268,7 @@ def test_checksum_mismatch_fails_closed_for_read_activation_rollback_and_rehears
     candidate_id = "checksum-mismatch-candidate"
     with engine.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
             publication_id=candidate_id,
             stream_key=stream_key,
             season="2025-26",
@@ -2434,6 +2722,7 @@ def test_governed_publication_write_requires_and_checks_its_capability(tmp_path)
     alternate_id = "alternate-valid-publication"
     with engine.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
+            **_publication_authority_values(),
             publication_id=alternate_id,
             stream_key=stream_key,
             season="2025-26",

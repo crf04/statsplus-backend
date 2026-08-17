@@ -364,6 +364,35 @@ def test_failure_drills_are_deterministic_and_named():
     assert report.drills[0].attempts == 2
 
 
+def test_failure_drill_rejects_tampered_historical_publication():
+    runner = FailureDrillRunner(clock=lambda: NOW)
+    original_read = runner.publications.get_historical_payload
+
+    def tamper_before_read(publication_id):
+        with runner.engine.begin() as connection:
+            connection.execute(
+                PublicationVersion.__table__.update().where(
+                    PublicationVersion.publication_id == publication_id
+                ).values(payload='{"value":8}')
+            )
+        return original_read(publication_id)
+
+    runner.publications.get_historical_payload = tamper_before_read
+    hooks = {
+        name: (lambda: {"verified": True})
+        for name in FailureDrillRunner.NAMES
+        if name != "provider_failure_last_good_retention"
+    }
+    report = runner.run(hooks=hooks)
+    result = next(
+        item
+        for item in report.drills
+        if item.name == "provider_failure_last_good_retention"
+    )
+    assert result.status == "failed"
+    assert result.details["error"] == "ControlPlaneError"
+
+
 def test_failure_drill_report_serializes_database_timestamps():
     report = FailureDrillRunner(clock=lambda: NOW).run(
         hooks={

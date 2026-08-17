@@ -40,9 +40,9 @@ from app.services.collection_control import (
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     publication_base_for_stream,
-    resolve_governed_team_game_ids,
     validate_publication_rows,
 )
+from app.services.publication_authority import verify_publication_authority
 
 
 UTC = timezone.utc
@@ -549,6 +549,9 @@ class PublicationRead:
     checksum: str | None = None
     fence: int | None = None
     unavailable_reason: str | None = None
+    manifest_id: str | None = None
+    event_catalog_publication_id: str | None = None
+    event_catalog_checksum: str | None = None
     # Decoded immutable facts are captured with the pointer/version query.
     # Keeping them on the read object lets a request reuse the exact values
     # whose provenance it reports instead of decoding (or re-reading) a later
@@ -587,6 +590,9 @@ class PublicationRead:
             ),
             "fence": self.fence,
             "unavailable_reason": self.unavailable_reason,
+            "manifest_id": self.manifest_id,
+            "event_catalog_publication_id": self.event_catalog_publication_id,
+            "event_catalog_checksum": self.event_catalog_checksum,
         }
 
 
@@ -807,6 +813,7 @@ class DatabaseFirstPublicationReader:
                     "season": season,
                     "require_active": require_active,
                     "now": now,
+                    "session": session,
                 })
                 for key in keys
             }
@@ -837,6 +844,7 @@ class DatabaseFirstPublicationReader:
         season: str | None,
         require_active: bool,
         now: datetime,
+        session,
         projection_ready: bool = False,
         hydrate_payload: bool = True,
     ) -> PublicationRead:
@@ -908,6 +916,29 @@ class DatabaseFirstPublicationReader:
             )
         threshold = self.freshness_seconds.get(str(stream.freshness_rule))
         freshness = "fresh" if threshold is not None and age <= threshold else "stale"
+        if stream_key in NBA_PUBLICATION_STREAM_KEYS:
+            try:
+                verify_publication_authority(session, publication)
+            except ValueError:
+                return self._missing(
+                    stream_key,
+                    "unavailable",
+                    reason="publication_authority_invalid",
+                    fence=pointer.fence,
+                    publication_id=publication.publication_id,
+                    season=publication.season,
+                    cutoff=_utc(publication.cutoff).isoformat(),
+                    version=int(publication.version),
+                    retrieved_at=retrieved_at,
+                    checksum=publication.checksum,
+                    freshness=freshness,
+                    age_seconds=age,
+                    manifest_id=publication.manifest_id,
+                    event_catalog_publication_id=(
+                        publication.event_catalog_publication_id
+                    ),
+                    event_catalog_checksum=publication.event_catalog_checksum,
+                )
         if not publication_payload_matches_checksum(
             publication.payload,
             publication.checksum,
@@ -950,6 +981,11 @@ class DatabaseFirstPublicationReader:
                 checksum=publication.checksum,
                 fence=int(pointer.fence),
                 projection_ready=True,
+                manifest_id=publication.manifest_id,
+                event_catalog_publication_id=(
+                    publication.event_catalog_publication_id
+                ),
+                event_catalog_checksum=publication.event_catalog_checksum,
             )
         try:
             payload = json.loads(publication.payload, object_pairs_hook=_reject_duplicate_json_keys)
@@ -1006,6 +1042,11 @@ class DatabaseFirstPublicationReader:
             checksum=publication.checksum,
             fence=int(pointer.fence),
             decoded=decoded,
+            manifest_id=publication.manifest_id,
+            event_catalog_publication_id=(
+                publication.event_catalog_publication_id
+            ),
+            event_catalog_checksum=publication.event_catalog_checksum,
         )
 
     def metadata(
@@ -1031,6 +1072,9 @@ class DatabaseFirstPublicationReader:
         checksum: str | None = None,
         freshness: str | None = None,
         age_seconds: int | None = None,
+        manifest_id: str | None = None,
+        event_catalog_publication_id: str | None = None,
+        event_catalog_checksum: str | None = None,
     ) -> PublicationRead:
         return PublicationRead(
             stream_key=stream_key,
@@ -1049,6 +1093,9 @@ class DatabaseFirstPublicationReader:
             checksum=checksum,
             fence=fence,
             unavailable_reason=reason,
+            manifest_id=manifest_id,
+            event_catalog_publication_id=event_catalog_publication_id,
+            event_catalog_checksum=event_catalog_checksum,
         )
 
     @staticmethod
@@ -1161,20 +1208,6 @@ class DatabaseFirstActivationService:
             cutoff = kwargs.get("cutoff")
             if season is None or cutoff is None:
                 raise ControlPlaneError("publication_governance_unavailable")
-            try:
-                # Do not trust a caller-supplied expectation.  The operator
-                # facade owns the season/cutoff governance lookup and always
-                # replaces the value passed to the lower publication seam.
-                kwargs["expected_game_ids_by_team"] = resolve_governed_team_game_ids(
-                    self.l15_expectation_resolver,
-                    season,
-                    cutoff,
-                    window=("l15" if stream_key.endswith("_l15") else "season"),
-                )
-            except Exception as error:
-                raise ControlPlaneError(
-                    "publication_governance_unavailable"
-                ) from error
         return self.publications.activate_stream(
             stream_key,
             actor=actor,

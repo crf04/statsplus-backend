@@ -84,6 +84,10 @@ from app.models.canonical_game_ledger import LedgerObservationEvidence, LedgerPa
 from app.services.player_game_log_projection import (
     write_player_game_log_projection,
 )
+from app.services.publication_authority import (
+    resolve_publication_authority,
+    verify_publication_authority,
+)
 
 
 UTC = timezone.utc
@@ -2477,31 +2481,6 @@ class PublicationService(_SessionService):
             expected_game_ids_by_team = (
                 expected_game_ids_by_team or expected_l15_game_ids
             )
-            if (
-                candidate_publication_id is not None
-                and _requires_team_window_expectation(stream_key)
-            ):
-                if season is None or cutoff is None:
-                    raise ControlPlaneError("publication_governance_unavailable")
-                window = "l15" if stream_key.endswith("_l15") else "season"
-                if self.l15_expectation_resolver is not None:
-                    try:
-                        # The lower publication seam rechecks the same
-                        # season/cutoff authority when production wiring is
-                        # present; a caller-supplied map is never trusted in
-                        # place of that dependency.
-                        expected_game_ids_by_team = resolve_governed_team_game_ids(
-                            self.l15_expectation_resolver,
-                            season,
-                            cutoff,
-                            window=window,
-                        )
-                    except Exception as error:
-                        raise ControlPlaneError(
-                            "publication_governance_unavailable"
-                        ) from error
-                elif expected_game_ids_by_team is None:
-                    raise ControlPlaneError("publication_governance_unavailable")
             candidate = None
             if candidate_publication_id is not None:
                 # A parity artifact may be the evidence for a candidate that
@@ -2532,6 +2511,37 @@ class PublicationService(_SessionService):
                     or _aware(candidate.cutoff) != _aware(cutoff)
                 ):
                     raise ControlPlaneError("publication_candidate_invalid")
+                if _requires_team_window_expectation(stream_key):
+                    try:
+                        authority = verify_publication_authority(
+                            session, candidate
+                        )
+                        if self.l15_expectation_resolver is not None:
+                            expected_game_ids_by_team = (
+                                resolve_governed_team_game_ids(
+                                    self.l15_expectation_resolver,
+                                    candidate.season,
+                                    _aware(candidate.cutoff),
+                                    window=(
+                                        "l15"
+                                        if stream_key.endswith("_l15")
+                                        else "season"
+                                    ),
+                                    manifest_id=authority.manifest_id,
+                                    event_catalog_publication_id=(
+                                        authority.event_catalog_publication_id
+                                    ),
+                                    event_catalog_checksum=(
+                                        authority.event_catalog_checksum
+                                    ),
+                                )
+                            )
+                        elif expected_game_ids_by_team is None:
+                            raise ValueError("publication governance unavailable")
+                    except Exception as error:
+                        raise ControlPlaneError(
+                            "publication_governance_unavailable"
+                        ) from error
             if parity_stream is not None:
                 if (
                     season is None
@@ -2711,7 +2721,19 @@ class PublicationService(_SessionService):
                 manifest_id=manifest_id,
             )
             expected_game_ids_by_team = None
+            authority = None
             if stream_key in NBA_PUBLICATION_STREAM_KEYS:
+                try:
+                    authority = resolve_publication_authority(
+                        session,
+                        season=season,
+                        cutoff=_aware(cutoff),
+                        manifest_id=manifest_id,
+                    )
+                except ValueError as error:
+                    raise ControlPlaneError(
+                        "publication_governance_unavailable"
+                    ) from error
                 if _requires_team_window_expectation(stream_key):
                     try:
                         expected_game_ids_by_team = resolve_governed_team_game_ids(
@@ -2720,6 +2742,13 @@ class PublicationService(_SessionService):
                             _aware(cutoff),
                             window=(
                                 "l15" if stream_key.endswith("_l15") else "season"
+                            ),
+                            manifest_id=authority.manifest_id,
+                            event_catalog_publication_id=(
+                                authority.event_catalog_publication_id
+                            ),
+                            event_catalog_checksum=(
+                                authority.event_catalog_checksum
                             ),
                         )
                     except Exception as error:
@@ -2754,6 +2783,13 @@ class PublicationService(_SessionService):
             pointer.fence += 1
             publication = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=season,
                 cutoff=_aware(cutoff), version=int(next_version) + 1, status="active", checksum=publication_payload_checksum(encoded), payload=encoded,
+                manifest_id=authority.manifest_id if authority else None,
+                event_catalog_publication_id=(
+                    authority.event_catalog_publication_id if authority else None
+                ),
+                event_catalog_checksum=(
+                    authority.event_catalog_checksum if authority else None
+                ),
                 created_at=now, reason=reason, fence=pointer.fence)
             session.add(publication)
             session.flush()
@@ -2847,6 +2883,11 @@ class PublicationService(_SessionService):
                 status="candidate",
                 checksum=publication_payload_checksum(encoded),
                 payload=encoded,
+                manifest_id=manifest_id,
+                event_catalog_publication_id=(
+                    manifest.event_catalog_publication_id
+                ),
+                event_catalog_checksum=manifest.event_catalog_checksum,
                 created_at=now,
                 reason=reason,
                 fence=0,
@@ -2872,6 +2913,10 @@ class PublicationService(_SessionService):
             publication = session.get(PublicationVersion, publication_id)
             if publication is None:
                 raise ControlPlaneError("publication_not_found")
+            if not publication_payload_matches_checksum(
+                publication.payload, publication.checksum
+            ):
+                raise ControlPlaneError("publication_checksum_mismatch")
             return json.loads(publication.payload)
 
     @staticmethod
@@ -3023,7 +3068,10 @@ class PublicationService(_SessionService):
             pointer.fence += 1
             version = PublicationVersion(publication_id=_uuid(), stream_key=stream_key, season=prior.season,
                 cutoff=prior.cutoff, version=current.version + 1, status="rollback", checksum=prior.checksum,
-                payload=prior.payload, created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
+                payload=prior.payload, manifest_id=prior.manifest_id,
+                event_catalog_publication_id=prior.event_catalog_publication_id,
+                event_catalog_checksum=prior.event_catalog_checksum,
+                created_at=now, reason=reason.strip()[:255], fence=pointer.fence)
             session.add(version)
             session.flush()
             _write_publication_projection(session, version, prior.payload)
@@ -3166,24 +3214,12 @@ class CollectionOperationsService(_SessionService):
     ) -> OperatorActionResult:
         if self.publication_service is None:
             raise ControlPlaneError("control_plane_unavailable")
-        expected_game_ids_by_team = None
         if (
             _requires_team_window_expectation(stream_key)
             and candidate_publication_id is not None
         ):
             if season is None or cutoff is None:
                 raise ControlPlaneError("publication_governance_unavailable")
-            try:
-                expected_game_ids_by_team = resolve_governed_team_game_ids(
-                    self.l15_expectation_resolver,
-                    season,
-                    cutoff,
-                    window=("l15" if stream_key.endswith("_l15") else "season"),
-                )
-            except Exception as error:
-                raise ControlPlaneError(
-                    "publication_governance_unavailable"
-                ) from error
         return self._run_operator(
             actor=actor, action="stream.activate", resource=stream_key, reason=reason,
             mutation=lambda session: self.publication_service.activate_stream(
@@ -3191,7 +3227,6 @@ class CollectionOperationsService(_SessionService):
                 reason=reason,
                 season=season,
                 cutoff=cutoff,
-                expected_game_ids_by_team=expected_game_ids_by_team,
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
                 actor=actor,

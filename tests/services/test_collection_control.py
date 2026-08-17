@@ -152,6 +152,14 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     assert publications.get_historical_payload(version.publication_id) == [
         {"opponent_points": 99, "team_id": 1}
     ]
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == version.publication_id
+            ).values(payload='[{"opponent_points":100,"team_id":1}]')
+        )
+    with pytest.raises(ControlPlaneError, match="publication_checksum_mismatch"):
+        publications.get_historical_payload(version.publication_id)
     with control_db.connect() as connection:
         evidence = connection.execute(select(PublicationObservation).where(
             PublicationObservation.publication_id == version.publication_id,

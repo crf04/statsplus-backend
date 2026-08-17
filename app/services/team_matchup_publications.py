@@ -124,6 +124,9 @@ def resolve_governed_team_game_ids(
     cutoff,
     *,
     window: str,
+    manifest_id: str | None = None,
+    event_catalog_publication_id: str | None = None,
+    event_catalog_checksum: str | None = None,
 ) -> Mapping[int, frozenset[str]]:
     """Resolve exact governed per-team IDs for one immutable window."""
 
@@ -139,11 +142,25 @@ def resolve_governed_team_game_ids(
     for name in method_names:
         operation = getattr(resolver, name, None)
         if callable(operation):
-            result = (
-                operation(season, cutoff, window=window)
-                if name == "resolve_team_game_ids"
-                else operation(season, cutoff)
-            )
+            if name == "resolve_team_game_ids":
+                try:
+                    result = operation(
+                        season,
+                        cutoff,
+                        window=window,
+                        manifest_id=manifest_id,
+                        event_catalog_publication_id=(
+                            event_catalog_publication_id
+                        ),
+                        event_catalog_checksum=event_catalog_checksum,
+                    )
+                except TypeError:
+                    # Small offline/test adapters may implement the earlier
+                    # season/cutoff vocabulary. The exact authority is still
+                    # enforced by the persisted PublicationVersion binding.
+                    result = operation(season, cutoff, window=window)
+            else:
+                result = operation(season, cutoff)
             break
     else:
         if callable(resolver):

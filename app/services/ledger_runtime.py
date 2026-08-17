@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 import json
 from typing import Mapping, Protocol
 
 from sqlalchemy import select, update
 
 from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.slate_time import slate_day_bounds_utc
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
@@ -33,6 +34,8 @@ class LedgerGovernance:
     manifest_scope: str = "canonical_game_ledger"
     collect_before: datetime | None = None
     accepted_versions: frozenset[int] = frozenset({1})
+    event_catalog_publication_id: str | None = None
+    event_catalog_checksum: str | None = None
 
     @property
     def expected_season_game_ids(self) -> dict[int, frozenset[str]]:
@@ -96,9 +99,31 @@ class ActiveManifestLedgerGovernanceReader:
         return self.resolve_team_game_ids(season, cutoff, window="l15")
 
     def resolve_team_game_ids(
-        self, season: str, cutoff: date | datetime, *, window: str
+        self,
+        season: str,
+        cutoff: date | datetime,
+        *,
+        window: str,
+        manifest_id: str | None = None,
+        event_catalog_publication_id: str | None = None,
+        event_catalog_checksum: str | None = None,
     ):
-        governance = self._governance_at_cutoff(season, cutoff)
+        governance = self._governance_at_cutoff(
+            season,
+            cutoff,
+            manifest_id=manifest_id,
+        )
+        if (
+            event_catalog_publication_id is not None
+            and governance.event_catalog_publication_id
+            != event_catalog_publication_id
+        ) or (
+            event_catalog_checksum is not None
+            and governance.event_catalog_checksum != event_catalog_checksum
+        ):
+            raise ValueError(
+                "active manifest and completed Event Catalog governance are required"
+            )
         if window == "season":
             return governance.expected_season_game_ids
         if window == "l15":
@@ -109,25 +134,30 @@ class ActiveManifestLedgerGovernanceReader:
         return self.resolve_team_game_ids(season, cutoff, window="season")
 
     def _governance_at_cutoff(
-        self, season: str, cutoff: date | datetime
+        self,
+        season: str,
+        cutoff: date | datetime,
+        *,
+        manifest_id: str | None = None,
     ) -> LedgerGovernance:
         """Resolve date shorthand to the exact immutable manifest cutoff."""
 
         if isinstance(cutoff, datetime):
             governed_cutoff = cutoff
         elif isinstance(cutoff, date):
-            start = datetime.combine(cutoff, datetime.min.time(), tzinfo=timezone.utc)
-            end = start + timedelta(days=1)
+            start, end = slate_day_bounds_utc(cutoff)
             with self.engine.connect() as connection:
-                governed_cutoff = connection.scalar(
-                    select(CollectionManifest.cutoff)
-                    .where(
+                statement = select(CollectionManifest.cutoff).where(
                         CollectionManifest.season == season,
                         CollectionManifest.cutoff >= start,
                         CollectionManifest.cutoff < end,
                     )
-                    .order_by(CollectionManifest.cutoff.desc())
-                    .limit(1)
+                if manifest_id is not None:
+                    statement = statement.where(
+                        CollectionManifest.manifest_id == manifest_id
+                    )
+                governed_cutoff = connection.scalar(
+                    statement.order_by(CollectionManifest.cutoff.desc()).limit(1)
                 )
             if governed_cutoff is None:
                 raise ValueError("active manifest and completed Event Catalog governance are required")
@@ -135,7 +165,11 @@ class ActiveManifestLedgerGovernanceReader:
                 governed_cutoff = governed_cutoff.replace(tzinfo=timezone.utc)
         else:
             raise ValueError("active manifest and completed Event Catalog governance are required")
-        return self.read_for_composition(season, governed_cutoff)
+        return self.read_for_composition(
+            season,
+            governed_cutoff,
+            manifest_id=manifest_id,
+        )
 
     def _read(
         self,
@@ -208,6 +242,10 @@ class ActiveManifestLedgerGovernanceReader:
                 else manifest["collect_before"]
             ),
             accepted_versions=frozenset(int(value) for value in json.loads(manifest["accepted_versions"])),
+            event_catalog_publication_id=manifest[
+                "event_catalog_publication_id"
+            ],
+            event_catalog_checksum=manifest["event_catalog_checksum"],
         )
 
     def _immutable_catalog_events(self, manifest) -> tuple[Mapping[str, object], ...]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -78,6 +78,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -147,6 +148,109 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "canonical_game_ledger_observation_evidence",
         ]
     )
+
+
+def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp_path):
+    from app.migrations import MIGRATIONS
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-038.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 38),
+        )
+        assert run_migrations(engine).current_version == 38
+
+    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+    ambiguous_cutoff = cutoff + timedelta(days=1)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO publication_streams (
+                stream_key, provider, owner, required_observations,
+                publication_strategy, supported_windows, schema_versions,
+                completeness_rule, freshness_rule, enabled, created_at
+            ) VALUES (
+                'migration-stream', 'nba', 'collector', '[]',
+                'snapshot_replace', '[\"season\"]', '[1, 2]',
+                'base_complete', 'cutoff_current', 0, :cutoff
+            )
+        """), {"cutoff": cutoff})
+        for catalog_id, catalog_cutoff in (
+            ("catalog-only", cutoff),
+            ("catalog-a", ambiguous_cutoff),
+            ("catalog-b", ambiguous_cutoff),
+        ):
+            connection.execute(text("""
+                INSERT INTO collection_catalog_publications (
+                    publication_id, season, catalog_type, cutoff, version,
+                    checksum, payload, complete, published_at
+                ) VALUES (
+                    :catalog_id, '2025-26', 'event', :cutoff, 'event-v1',
+                    :checksum, '{}', 1, :published_at
+                )
+            """), {
+                "catalog_id": catalog_id,
+                "cutoff": catalog_cutoff,
+                "checksum": catalog_id,
+                "published_at": catalog_cutoff - timedelta(minutes=1),
+            })
+        for manifest_id, manifest_cutoff, catalog_id in (
+            ("manifest-only", cutoff, "catalog-only"),
+            ("manifest-a", ambiguous_cutoff, "catalog-a"),
+            ("manifest-b", ambiguous_cutoff, "catalog-b"),
+        ):
+            connection.execute(text("""
+                INSERT INTO collection_manifests (
+                    manifest_id, season, cutoff, collect_before,
+                    accepted_versions, scopes, checksum,
+                    event_catalog_publication_id, event_catalog_checksum,
+                    status, created_at
+                ) VALUES (
+                    :manifest_id, '2025-26', :cutoff, :collect_before,
+                    '[1]', '[\"canonical_game_ledger\"]', :manifest_id,
+                    :catalog_id, :catalog_id, 'superseded', :cutoff
+                )
+            """), {
+                "manifest_id": manifest_id,
+                "cutoff": manifest_cutoff,
+                "collect_before": manifest_cutoff + timedelta(hours=1),
+                "catalog_id": catalog_id,
+            })
+        for publication_id, publication_cutoff, version in (
+            ("version-only", cutoff, 1),
+            ("version-ambiguous", ambiguous_cutoff, 2),
+        ):
+            connection.execute(text("""
+                INSERT INTO publication_versions (
+                    publication_id, stream_key, season, cutoff, version,
+                    status, checksum, payload, created_at, fence
+                ) VALUES (
+                    :publication_id, 'migration-stream', '2025-26', :cutoff,
+                    :version, 'candidate', :publication_id, '{}', :cutoff, 0
+                )
+            """), {
+                "publication_id": publication_id,
+                "cutoff": publication_cutoff,
+                "version": version,
+            })
+
+    upgraded = run_migrations(engine)
+    assert upgraded.applied == (
+        "039_bind_publication_versions_to_manifest_authority",
+    )
+    with engine.connect() as connection:
+        rows = {
+            row.publication_id: row
+            for row in connection.execute(text("""
+                SELECT publication_id, manifest_id,
+                       event_catalog_publication_id, event_catalog_checksum
+                FROM publication_versions
+            """))
+        }
+    assert rows["version-only"].manifest_id == "manifest-only"
+    assert rows["version-only"].event_catalog_publication_id == "catalog-only"
+    assert rows["version-only"].event_catalog_checksum == "catalog-only"
+    assert rows["version-ambiguous"].manifest_id is None
     collector_columns = {
         column["name"] for column in inspect(engine).get_columns("collector_identities")
     }
@@ -364,6 +468,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             (36, "036_publication_player_game_log_projection"),
             (37, "037_team_matchup_publication_lineage"),
             (38, "038_bind_manifests_to_event_catalog_publications"),
+            (39, "039_bind_publication_versions_to_manifest_authority"),
         ]
 
 
@@ -414,6 +519,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -489,6 +595,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -522,7 +629,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 38
+    assert repaired.current_version == 39
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -560,8 +667,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
-    assert upgraded.current_version == 38
+    assert upgraded.current_version == 39
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -632,8 +740,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
-    assert upgraded.current_version == 38
+    assert upgraded.current_version == 39
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -705,6 +814,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -758,8 +868,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
-    assert upgraded.current_version == 38
+    assert upgraded.current_version == 39
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -769,7 +880,21 @@ def test_publication_provenance_foreign_keys_have_no_version_self_reference(tmp_
     run_migrations(engine)
     inspector = inspect(engine)
 
-    assert inspector.get_foreign_keys("publication_versions") == []
+    assert {
+        (
+            tuple(item["constrained_columns"]),
+            item["referred_table"],
+            item["options"].get("ondelete"),
+        )
+        for item in inspector.get_foreign_keys("publication_versions")
+    } == {
+        (("manifest_id",), "collection_manifests", "RESTRICT"),
+        (
+            ("event_catalog_publication_id",),
+            "collection_catalog_publications",
+            "RESTRICT",
+        ),
+    }
     assert {
         (tuple(item["constrained_columns"]), item["referred_table"], item["options"].get("ondelete"))
         for item in inspector.get_foreign_keys("publication_observations")
@@ -836,6 +961,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
 
 
@@ -878,7 +1004,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 38
+    assert result.current_version == 39
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -1154,6 +1280,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -1213,10 +1340,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
-    assert upgraded.current_version == 38
+    assert upgraded.current_version == 39
     assert repeated.applied == ()
-    assert repeated.current_version == 38
+    assert repeated.current_version == 39
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -1285,6 +1413,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "036_publication_player_game_log_projection",
         "037_team_matchup_publication_lineage",
         "038_bind_manifests_to_event_catalog_publications",
+        "039_bind_publication_versions_to_manifest_authority",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0

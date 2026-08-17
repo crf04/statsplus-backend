@@ -20,7 +20,12 @@ from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
-from app.models.collection_control import PublicationPointer, PublicationVersion
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    PublicationPointer,
+    PublicationVersion,
+)
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
     PublicationLineage,
@@ -85,6 +90,7 @@ class PublicationWriteCapability:
                 ).mappings().one_or_none()
                 if version is None:
                     raise ValueError("publication_write_context_invalid")
+                self._verify_authority_binding(connection, version)
                 if version["season"] != scope.season:
                     raise ValueError("publication_write_context_invalid")
                 if publication.version is not None and int(publication.version) != int(version["version"]):
@@ -122,6 +128,41 @@ class PublicationWriteCapability:
                     surface_facts,
                     available,
                 )
+
+    @staticmethod
+    def _verify_authority_binding(connection, version) -> None:
+        manifest_id = version.get("manifest_id")
+        catalog_id = version.get("event_catalog_publication_id")
+        catalog_checksum = version.get("event_catalog_checksum")
+        if not manifest_id or not catalog_id or not catalog_checksum:
+            raise ValueError("publication_write_context_invalid")
+        manifest = connection.execute(
+            select(CollectionManifest.__table__).where(
+                CollectionManifest.manifest_id == manifest_id
+            )
+        ).mappings().one_or_none()
+        catalog = connection.execute(
+            select(CatalogPublication.__table__).where(
+                CatalogPublication.publication_id == catalog_id
+            )
+        ).mappings().one_or_none()
+        if (
+            manifest is None
+            or catalog is None
+            or manifest["season"] != version["season"]
+            or assume_utc(manifest["cutoff"]) != assume_utc(version["cutoff"])
+            or manifest["event_catalog_publication_id"] != catalog_id
+            or manifest["event_catalog_checksum"] != catalog_checksum
+            or catalog["season"] != version["season"]
+            or catalog["catalog_type"] != "event"
+            or assume_utc(catalog["cutoff"]) != assume_utc(version["cutoff"])
+            or not catalog["complete"]
+            or catalog["checksum"] != catalog_checksum
+            or not publication_payload_matches_checksum(
+                catalog["payload"], catalog["checksum"]
+            )
+        ):
+            raise ValueError("publication_write_context_invalid")
 
     @staticmethod
     def _verify_payload_binding(

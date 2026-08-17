@@ -1,7 +1,7 @@
 """Manifest-owned ledger runtime governance contracts."""
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 
@@ -145,7 +145,9 @@ def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
             status="superseded",
             created_at=cutoff,
         ))
-        MIGRATIONS[-1].upgrade(connection)
+        next(migration for migration in MIGRATIONS if migration.version == 38).upgrade(
+            connection
+        )
         rows = {
             row["manifest_id"]: row
             for row in connection.execute(
@@ -167,6 +169,81 @@ def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
             "collection_manifests"
         )
     )
+
+
+def test_manifest_catalog_binding_migration_rejects_two_eligible_catalogs(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'ambiguous-binding.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 2, tzinfo=timezone.utc)
+    events = _catalog_events(_league_games()[:1], cutoff)
+    first = _immutable_event_catalog(events, cutoff, published_at=cutoff)
+    second = {
+        **_immutable_event_catalog(events, cutoff, published_at=cutoff),
+        "publication_id": "event-catalog-same-timestamp-b",
+        "version": "event-v2",
+    }
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert(), [first, second])
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="legacy-two-eligible",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="legacy-two-eligible",
+            status="active",
+            created_at=cutoff,
+        ))
+        next(migration for migration in MIGRATIONS if migration.version == 38).upgrade(
+            connection
+        )
+        manifest = connection.execute(
+            CollectionManifest.__table__.select().where(
+                CollectionManifest.manifest_id == "legacy-two-eligible"
+            )
+        ).mappings().one()
+    assert manifest["event_catalog_publication_id"] is None
+    assert manifest["event_catalog_checksum"] is None
+
+
+def test_date_cutoff_lookup_uses_eastern_slate_day_across_fall_back(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fall-back.sqlite3'}")
+    run_migrations(engine)
+    # 23:30 EST on November 2 is 04:30 UTC on November 3.
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    events = _catalog_events(_league_games()[:1], cutoff)
+    catalog = _immutable_event_catalog(events, cutoff)
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="fall-back-manifest",
+            season="2025-26",
+            cutoff=cutoff,
+            collect_before=cutoff + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="fall-back-manifest",
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+            status="active",
+            created_at=cutoff,
+        ))
+
+    reader = ActiveManifestLedgerGovernanceReader(engine)
+    by_date = reader.resolve_team_game_ids(
+        "2025-26",
+        date(2025, 11, 2),
+        window="season",
+        manifest_id="fall-back-manifest",
+    )
+    by_instant = reader.resolve_team_game_ids(
+        "2025-26",
+        cutoff,
+        window="season",
+        manifest_id="fall-back-manifest",
+    )
+    assert by_date == by_instant
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):

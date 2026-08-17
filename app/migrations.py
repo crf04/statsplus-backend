@@ -8,6 +8,7 @@ application, starting with the ``users`` table.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime as PythonDateTime, timezone
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -1041,14 +1042,14 @@ def _bind_manifests_to_event_catalog_publications(
                 catalog_table.c.catalog_type == "event",
                 catalog_table.c.cutoff == manifest["cutoff"],
                 catalog_table.c.complete.is_(True),
-            ).order_by(catalog_table.c.published_at.desc()).limit(1)
+            ).order_by(catalog_table.c.published_at.desc())
         ).mappings())
         eligible = [
             catalog
             for catalog in catalogs
             if catalog["published_at"] <= manifest["created_at"]
         ]
-        if not eligible or len(eligible) != len(catalogs):
+        if len(eligible) != 1:
             # Ambiguous legacy rows stay explicitly unbound and therefore
             # fail closed in governance reads.
             continue
@@ -1061,6 +1062,113 @@ def _bind_manifests_to_event_catalog_publications(
                 event_catalog_checksum=catalog["checksum"],
             )
         )
+
+
+def _bind_publication_versions_to_manifest_authority(
+    connection: Connection,
+) -> None:
+    """Bind governed versions to one unambiguous manifest/catalog authority."""
+
+    from app.models.collection_control import (
+        CatalogPublication,
+        CollectionManifest,
+        PublicationVersion,
+    )
+
+    preparer = connection.dialect.identifier_preparer
+    table_name = preparer.quote(PublicationVersion.__tablename__)
+    columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            PublicationVersion.__tablename__
+        )
+    }
+    additions = (
+        (
+            "manifest_id",
+            "VARCHAR(36) REFERENCES collection_manifests(manifest_id) "
+            "ON DELETE RESTRICT",
+        ),
+        (
+            "event_catalog_publication_id",
+            "VARCHAR(36) REFERENCES "
+            "collection_catalog_publications(publication_id) ON DELETE RESTRICT",
+        ),
+        ("event_catalog_checksum", "VARCHAR(64)"),
+    )
+    for column_name, definition in additions:
+        if column_name not in columns:
+            connection.execute(text(
+                f"ALTER TABLE {table_name} ADD COLUMN "
+                f"{column_name} {definition}"
+            ))
+
+    version_table = PublicationVersion.__table__
+    manifest_table = CollectionManifest.__table__
+    catalog_table = CatalogPublication.__table__
+
+    def normalized_cutoff(value):
+        if isinstance(value, str):
+            value = PythonDateTime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    versions = connection.execute(select(
+        version_table.c.publication_id,
+        version_table.c.season,
+        version_table.c.cutoff,
+        version_table.c.manifest_id,
+    )).mappings()
+    for version in versions:
+        if version["manifest_id"]:
+            continue
+        manifests = list(connection.execute(
+            select(
+                manifest_table.c.manifest_id,
+                manifest_table.c.cutoff,
+                manifest_table.c.event_catalog_publication_id,
+                manifest_table.c.event_catalog_checksum,
+            ).where(
+                manifest_table.c.season == version["season"],
+                manifest_table.c.event_catalog_publication_id.is_not(None),
+                manifest_table.c.event_catalog_checksum.is_not(None),
+            )
+        ).mappings())
+        manifests = [
+            manifest
+            for manifest in manifests
+            if normalized_cutoff(manifest["cutoff"])
+            == normalized_cutoff(version["cutoff"])
+        ]
+        if len(manifests) != 1:
+            continue
+        manifest = manifests[0]
+        catalog = connection.execute(select(
+            catalog_table.c.publication_id,
+            catalog_table.c.cutoff,
+            catalog_table.c.checksum,
+        ).where(
+            catalog_table.c.publication_id
+            == manifest["event_catalog_publication_id"],
+            catalog_table.c.season == version["season"],
+            catalog_table.c.catalog_type == "event",
+            catalog_table.c.complete.is_(True),
+            catalog_table.c.checksum == manifest["event_catalog_checksum"],
+        )).mappings().one_or_none()
+        if (
+            catalog is None
+            or normalized_cutoff(catalog["cutoff"])
+            != normalized_cutoff(version["cutoff"])
+        ):
+            continue
+        connection.execute(version_table.update().where(
+            version_table.c.publication_id == version["publication_id"]
+        ).values(
+            manifest_id=manifest["manifest_id"],
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
+        ))
 
 
 MIGRATIONS: Final[tuple[Migration, ...]] = (
@@ -1124,6 +1232,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         38,
         "038_bind_manifests_to_event_catalog_publications",
         _bind_manifests_to_event_catalog_publications,
+    ),
+    Migration(
+        39,
+        "039_bind_publication_versions_to_manifest_authority",
+        _bind_publication_versions_to_manifest_authority,
     ),
 )
 

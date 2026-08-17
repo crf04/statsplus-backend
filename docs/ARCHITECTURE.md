@@ -1062,6 +1062,13 @@ rest unbound, so governance fails closed instead of guessing. Season and L15
 game sets both come from that checksummed snapshot; later mutable catalog
 status changes and same-clock catalog republications cannot reinterpret an
 existing cutoff.
+Migration `039_bind_publication_versions_to_manifest_authority` also binds each
+governed NBA PublicationVersion to the exact manifest and Event Catalog
+publication/checksum that authorized it. Compose records that identity and
+activation, rehearsal, materialization, and reads verify it, so a later
+same-cutoff manifest cannot reinterpret an older candidate. Legacy versions
+are backfilled only when exactly one bound manifest is available; ambiguous
+rows remain unbound and fail closed.
 PBP responses
 remain staged until complete-game and identity validation succeeds; acceptance,
 ledger replacement, and all shared-cutoff jobs then commit atomically. Runtime

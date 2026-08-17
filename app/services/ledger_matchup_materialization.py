@@ -412,6 +412,13 @@ class LedgerMatchupMaterializationService:
                         read.season,
                         publication_cutoff,
                         window=window,
+                        manifest_id=getattr(read, "manifest_id", None),
+                        event_catalog_publication_id=getattr(
+                            read, "event_catalog_publication_id", None
+                        ),
+                        event_catalog_checksum=getattr(
+                            read, "event_catalog_checksum", None
+                        ),
                     )
             except Exception:
                 return (), TeamMatchupObservation(
