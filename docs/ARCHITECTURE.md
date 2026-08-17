@@ -1821,6 +1821,79 @@ fallback for ledger-owned traditional and assist surfaces. Publication
 provenance and mixed freshness/cutoff metadata remain additive and request
 time provider-free.
 
+### Matchup materializer parity and legacy writer fencing (#117)
+
+`app.services.matchup_parity` owns the bounded dual-run that proves the legacy
+provider-aggregate writer and the ledger materializer selected the same
+governed teams and games and produced the same contracted facts before the
+legacy writer is fenced. `compare_matchup_materializations(legacy_facts,
+legacy_observations, ledger_facts, ledger_observations, *, season, window,
+as_of, legacy_as_of, expected_team_ids, legacy_game_ids_by_team, tolerance)`
+returns an immutable `MatchupParityReport`. Both materializers populate the
+same disposable `team_matchup_facts` read model — legacy facts carry provider
+`nba_stats` or `pbp_stats` and no game-id lineage, while ledger facts carry
+provider `ledger` plus their exact per-team game IDs and ledger checksum — so
+one comparator compares the two stored generations at a shared season and
+Eastern as-of date. The comparison is bounded to the two ledger-owned non-shot
+surfaces (`traditional`, `assist_locations`); NBA-owned shot zones, grouped
+shot types, and Synergy play types are composed from governed publications and
+have no legacy-vs-ledger dual-run.
+
+The comparison rules match the parent's parity contract exactly. Team identity
+sets must be exactly equal and League Complete (the governed 30-team roster).
+Every team's exact Season/L15 game set must match between the legacy resolver
+(derived from the governed Event Catalog, as the legacy writer derives it) and
+the ledger's persisted `game_ids`. Integer counts — the four traditional
+opponent counts and the six assist surfaces — compare exactly; the single
+documented tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-6`) applies only to
+floating denominators (effective team minutes, with seconds normalized to
+minutes) and to the per-48 rates recomputed from counts and denominators.
+Deterministic competition ranks (`1, 1, 3` ties) are re-derived from each
+side's per-48 values and compared, so a sub-tolerance near-tie flip that would
+change a ranking still fails. Per-surface availability and the two cutoffs are
+also compared. Every produced difference carries exactly one classification
+from the closed vocabulary (`league_incomplete`, `missing_legacy_team`,
+`missing_ledger_team`, `game_set_mismatch`, `integer_count_difference`,
+`non_integer_count`, `denominator_tolerance_exceeded`,
+`derived_rate_difference`, `ranking_difference`, `availability_difference`,
+`cutoff_mismatch`, `missing_surface`); any difference makes the report
+`adjudication_required`, so an unexplained required difference never reads as
+exact.
+
+`LedgerParityArtifactRepository.record_matchup_parity` persists the report into
+the existing `ledger_parity_artifacts` evidence table (migration 025/027) bound
+to the exact inactive ledger Publication and payload checksum, and the same
+`adjudicate` flow the semantic player-log/per-36 reports use approves or
+rejects it with an actor and reason. `scripts/matchup_parity.py compare`
+reads both stored snapshots, re-derives the legacy game sets from the stored
+Event Catalog, runs the comparator, and optionally records the artifact;
+`scripts/matchup_parity.py adjudicate` records the operator decision. The
+report is the evidence backend #87 consumes for database-first activation.
+See [MATCHUP_PARITY_OPERATIONS.md](MATCHUP_PARITY_OPERATIONS.md) for the
+operator runbook.
+
+Fencing is per stream and per surface. The legacy
+`TeamMatchupRefreshService` writes through
+`TeamMatchupRepository.replace_snapshots`, which enforces the injected
+`LegacyWriteFence` against the exact ledger-owned stream keys
+(`traditional_opponent_season`, `traditional_opponent_l15`,
+`assist_locations_season`, `assist_locations_l15`) for only the changed
+surfaces, so activating a Season stream fences its own writer without fencing
+L15 and a traditional write never fences assist locations. Once a stream is
+activated the legacy provider-aggregate writer for that surface raises
+`legacy_write_fenced` and fails closed rather than competing with the ledger.
+NBA shot zones, grouped shot types, and Synergy play types remain governed and
+operational: their facts and observations are written through the separate
+`replace_governed_publication_snapshots` path, which verifies the active
+publication capability and deliberately bypasses the legacy fence, so the
+legacy NBA-owned writers are not fenced by ledger activation. The request-time
+read fence is symmetric: an activated ledger-owned stream serves only its
+immutable Publication, an inactive stream is the only state that permits the
+legacy repository fallback, and an NBA-owned stream never falls back to a PBP
+or ledger fact. Activation and rollback both move the fenced pointer atomically
+and preserve the last-good Publication, so no competing source of truth is ever
+silently restored.
+
 ### Canonical athlete catalog
 
 `AthleteCatalogService` owns the application tables `athlete_catalog` and
