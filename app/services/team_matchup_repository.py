@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
-from typing import Iterable
+from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, insert, select
@@ -63,6 +63,10 @@ class TeamMatchupFact:
     #: collected legacy facts leave both empty.
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
+    source_observation_ids: tuple[str, ...] = ()
+    game_set_checksum: str | None = None
+    cutoff: datetime | None = None
+    recomposition_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,10 @@ class TeamMatchupObservation:
     unavailable_reason: str | None = None
     game_ids: tuple[str, ...] = ()
     ledger_checksum: str | None = None
+    source_observation_ids: tuple[str, ...] = ()
+    game_set_checksum: str | None = None
+    cutoff: datetime | None = None
+    recomposition_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +129,8 @@ class TeamMatchupRepository:
         ],
         *,
         retrieved_at: datetime,
+        affected_team_ids_by_scope: Mapping[TeamMatchupSnapshotScope, frozenset[int] | None] | None = None,
+        affected_team_ids: frozenset[int] | None = None,
     ) -> None:
         """Replace related windows in one transaction after collection."""
 
@@ -136,6 +146,10 @@ class TeamMatchupRepository:
         current_date = observed_at.astimezone(EASTERN).date()
         if any(scope.as_of > current_date for scope, _, _ in received):
             raise ValueError("future as_of dates cannot be published")
+        if affected_team_ids_by_scope is None and affected_team_ids is not None:
+            affected_team_ids_by_scope = {
+                scope: affected_team_ids for scope, _, _ in received
+            }
         prepared = tuple(
             (scope, *self._prepare_surface_publication(facts, observations))
             for scope, facts, observations in received
@@ -167,23 +181,62 @@ class TeamMatchupRepository:
                             ).mappings()
                         )
                     )
-                changed_surfaces = {
-                    observation.surface
-                    for observation in observation_rows
-                    if self._surface_changed(
-                        observation,
-                        facts_by_surface.get(observation.surface, ()),
-                        existing_observations.get(observation.surface),
-                        existing_facts.get(observation.surface, ()),
-                        observed_at,
-                        scope.as_of,
+                if affected_team_ids_by_scope is None:
+                    target_team_ids = None
+                else:
+                    selected_targets = affected_team_ids_by_scope.get(scope, frozenset())
+                    target_team_ids = (
+                        None
+                        if selected_targets is None
+                        else frozenset(selected_targets)
                     )
-                }
+                    # A targeted correction cannot preserve a snapshot that
+                    # does not exist yet. Build the complete scope on first
+                    # materialization; subsequent corrections can narrow it.
+                    if (
+                        target_team_ids is not None
+                        and any(
+                            observation.surface not in existing_observations
+                            for observation in observation_rows
+                        )
+                    ):
+                        target_team_ids = None
+                changed_surfaces = (
+                    set()
+                    if target_team_ids == frozenset()
+                    else {
+                        observation.surface
+                        for observation in observation_rows
+                        if self._surface_changed(
+                            observation,
+                            facts_by_surface.get(observation.surface, ()),
+                            existing_observations.get(observation.surface),
+                            existing_facts.get(observation.surface, ()),
+                            observed_at,
+                            scope.as_of,
+                            target_team_ids,
+                        )
+                    }
+                )
                 scoped_changes.append(
-                    (scope, fact_rows, observation_rows, replace_surfaces, changed_surfaces)
+                    (
+                        scope,
+                        fact_rows,
+                        observation_rows,
+                        replace_surfaces,
+                        changed_surfaces,
+                        target_team_ids,
+                    )
                 )
             checker = getattr(self._write_fence, "assert_writable", None)
-            for scope, fact_rows, observation_rows, replace_surfaces, changed_surfaces in scoped_changes:
+            for (
+                scope,
+                fact_rows,
+                observation_rows,
+                replace_surfaces,
+                changed_surfaces,
+                target_team_ids,
+            ) in scoped_changes:
                 if callable(checker):
                     stream_by_surface = {
                         "traditional": (
@@ -231,12 +284,16 @@ class TeamMatchupRepository:
                 }
                 changed_replace_surfaces = set(replace_surfaces) & changed_surfaces
                 if changed_replace_surfaces:
-                    connection.execute(
-                        delete(fact_table).where(
-                            *self._scope(fact_table, scope),
-                            fact_table.c.base.in_(changed_replace_surfaces),
-                        )
-                    )
+                    conditions = [
+                        *self._scope(fact_table, scope),
+                        fact_table.c.base.in_(changed_replace_surfaces),
+                    ]
+                    if target_team_ids is not None:
+                        if target_team_ids:
+                            conditions.append(fact_table.c.team_id.in_(target_team_ids))
+                        else:
+                            conditions.append(fact_table.c.team_id.in_((-1,)))
+                    connection.execute(delete(fact_table).where(*conditions))
                 if changed_surfaces:
                     connection.execute(
                         delete(observation_table).where(
@@ -245,7 +302,12 @@ class TeamMatchupRepository:
                         )
                     )
                 changed_fact_rows = tuple(
-                    fact for fact in fact_rows if fact.base in changed_replace_surfaces
+                    fact for fact in fact_rows
+                    if fact.base in changed_replace_surfaces
+                    and (
+                        target_team_ids is None
+                        or fact.team_id in target_team_ids
+                    )
                 )
                 if changed_fact_rows:
                     connection.execute(
@@ -266,6 +328,12 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(fact.game_ids),
                                 "ledger_checksum": fact.ledger_checksum,
+                                "source_observation_ids": _source_observation_ids_json(
+                                    fact.source_observation_ids
+                                ),
+                                "game_set_checksum": fact.game_set_checksum,
+                                "cutoff": fact.cutoff,
+                                "recomposition_reason": fact.recomposition_reason,
                             }
                             for fact in changed_fact_rows
                         ],
@@ -287,6 +355,12 @@ class TeamMatchupRepository:
                                 "retrieved_at": observed_at,
                                 "game_ids": _game_ids_json(observation.game_ids),
                                 "ledger_checksum": observation.ledger_checksum,
+                                "source_observation_ids": _source_observation_ids_json(
+                                    observation.source_observation_ids
+                                ),
+                                "game_set_checksum": observation.game_set_checksum,
+                                "cutoff": observation.cutoff,
+                                "recomposition_reason": observation.recomposition_reason,
                             }
                             for observation in changed_observations
                         ],
@@ -308,6 +382,10 @@ class TeamMatchupRepository:
             assume_utc(row["retrieved_at"]),
             _parse_game_ids(row["game_ids"]),
             row["ledger_checksum"],
+            _parse_source_observation_ids(row["source_observation_ids"]),
+            row["game_set_checksum"],
+            _optional_aware(row["cutoff"]),
+            row["recomposition_reason"],
         )
 
     @classmethod
@@ -319,6 +397,7 @@ class TeamMatchupRepository:
         existing_facts: tuple[tuple, ...],
         observed_at: datetime,
         window_end_date: date,
+        affected_team_ids: frozenset[int] | None = None,
     ) -> bool:
         if existing_observation is None:
             return True
@@ -330,6 +409,11 @@ class TeamMatchupRepository:
             or _parse_game_ids(existing_observation["game_ids"])
             != observation.game_ids
             or existing_observation["ledger_checksum"] != observation.ledger_checksum
+            or _parse_source_observation_ids(existing_observation["source_observation_ids"])
+            != observation.source_observation_ids
+            or existing_observation["game_set_checksum"] != observation.game_set_checksum
+            or _optional_aware(existing_observation["cutoff"]) != _optional_aware(observation.cutoff)
+            or existing_observation["recomposition_reason"] != observation.recomposition_reason
         ):
             return True
         if observation.status != "available":
@@ -350,11 +434,23 @@ class TeamMatchupRepository:
                     observed_at,
                     fact.game_ids,
                     fact.ledger_checksum,
+                    fact.source_observation_ids,
+                    fact.game_set_checksum,
+                    _optional_aware(fact.cutoff),
+                    fact.recomposition_reason,
                 )
                 for fact in facts
+                if affected_team_ids is None or fact.team_id in affected_team_ids
             )
         )
-        return expected != existing_facts
+        existing_expected = tuple(
+            sorted(
+                signature
+                for signature in existing_facts
+                if affected_team_ids is None or signature[0] in affected_team_ids
+            )
+        )
+        return expected != existing_expected
 
     @staticmethod
     def _prepare_surface_publication(
@@ -489,6 +585,12 @@ class TeamMatchupRepository:
                     window_end_date=row["window_end_date"],
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
+                    source_observation_ids=_parse_source_observation_ids(
+                        row["source_observation_ids"]
+                    ),
+                    game_set_checksum=row["game_set_checksum"],
+                    cutoff=_optional_aware(row["cutoff"]),
+                    recomposition_reason=row["recomposition_reason"],
                 )
                 for row in fact_rows
             ),
@@ -500,6 +602,12 @@ class TeamMatchupRepository:
                     retrieved_at=assume_utc(row["retrieved_at"]),
                     game_ids=_parse_game_ids(row["game_ids"]),
                     ledger_checksum=row["ledger_checksum"],
+                    source_observation_ids=_parse_source_observation_ids(
+                        row["source_observation_ids"]
+                    ),
+                    game_set_checksum=row["game_set_checksum"],
+                    cutoff=_optional_aware(row["cutoff"]),
+                    recomposition_reason=row["recomposition_reason"],
                 )
                 for row in observation_rows
             ),
@@ -581,6 +689,36 @@ def _parse_game_ids(value: str | None) -> tuple[str, ...]:
     ):
         return ()
     return tuple(parsed)
+
+
+def _source_observation_ids_json(observation_ids: tuple[str, ...]) -> str | None:
+    """Serialize immutable source-observation lineage deterministically."""
+
+    if not observation_ids:
+        return None
+    return json.dumps(sorted(set(observation_ids)), separators=(",", ":"))
+
+
+def _parse_source_observation_ids(value: str | None) -> tuple[str, ...]:
+    """Parse source-observation lineage, failing closed for legacy rows."""
+
+    if not value:
+        return ()
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(parsed, list) or any(
+        not isinstance(observation_id, str) for observation_id in parsed
+    ):
+        return ()
+    return tuple(parsed)
+
+
+def _optional_aware(value: datetime | None) -> datetime | None:
+    """Normalize nullable database timestamps for deterministic signatures."""
+
+    return None if value is None else assume_utc(value)
 
 
 __all__ = [

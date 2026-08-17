@@ -2164,6 +2164,11 @@ class CanonicalGameLedgerRepository:
                 ],
             )
         if self.correction_sink is not None:
+            # A sink keeps the public two-argument callback seam, while the
+            # transaction-local flag lets correction propagation distinguish a
+            # replacement from first acceptance without exposing old rows to a
+            # second reader or widening the callback API.
+            connection.info["canonical_game_ledger_replacement"] = existing is not None
             self.correction_sink(connection, candidate)
         # Durable reference for indefinite retention (#25): every observation
         # that supplies an accepted game, including superseded corrections, is

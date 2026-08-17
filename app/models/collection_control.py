@@ -286,6 +286,15 @@ class CompositionJob(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=False)
     last_error = Column(String(64), nullable=True)
+    # Correction propagation keeps the exact invalidation request beside the
+    # idempotent job.  The JSON columns are intentionally bounded metadata,
+    # not a second copy of the ledger payload.
+    trigger_game_id = Column(String(64), nullable=True)
+    affected_team_ids = Column(Text, nullable=False, default="[]", server_default="[]")
+    source_observation_ids = Column(Text, nullable=False, default="[]", server_default="[]")
+    recomposition_reason = Column(String(128), nullable=True)
+    ledger_checksum = Column(String(64), nullable=True)
+    game_set_checksum = Column(String(64), nullable=True)
 
     __table_args__ = (
         CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_composition_job_status"),

@@ -47,6 +47,10 @@ class TeamMatchupFactRow(Base):
     #: provider-collected legacy facts; ledger-owned facts always carry both.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
+    source_observation_ids = Column(Text, nullable=True)
+    game_set_checksum = Column(String(64), nullable=True)
+    cutoff = Column(DateTime(timezone=True), nullable=True)
+    recomposition_reason = Column(String(128), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_facts_window"),
@@ -87,6 +91,10 @@ class TeamMatchupSurfaceObservationRow(Base):
     #: provider-collected legacy observations.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
+    source_observation_ids = Column(Text, nullable=True)
+    game_set_checksum = Column(String(64), nullable=True)
+    cutoff = Column(DateTime(timezone=True), nullable=True)
+    recomposition_reason = Column(String(128), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_observations_window"),

@@ -86,6 +86,8 @@ class LedgerMaterializationService:
         expected_l15_game_ids: Mapping[int, frozenset[str]] | None = None,
         team_ids: frozenset[int] | None = None,
         require_assist_locations: bool = False,
+        activate: bool = False,
+        recomposition_reason: str | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
         if expected_game_ids is None or set(
@@ -239,10 +241,6 @@ class LedgerMaterializationService:
                 "publication cutoff must be aware and match the materialization date"
             )
         if self.publication_service is not None:
-            provenance = {
-                game.source_observation_id: game.game_id
-                for game in eligible
-            }
             candidates = []
             if season_window.complete:
                 candidates.extend((
@@ -259,13 +257,36 @@ class LedgerMaterializationService:
                     candidates.append(("assist_locations_l15", assist_l15.teams))
             candidate_versions = {}
             for stream_key, payload in candidates:
-                candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
-                    stream_key,
-                    season=canonical_season,
-                    cutoff=publication_cutoff,
-                    payload=json.loads(_payload_json(payload)),
-                    provenance=provenance,
+                encoded_payload = json.loads(_payload_json(payload))
+                selected_game_ids = (
+                    l15_window.governed_game_ids
+                    if stream_key.endswith("_l15")
+                    else season_window.governed_game_ids
                 )
+                provenance = {
+                    game.source_observation_id: game.game_id
+                    for game in eligible
+                    if game.game_id in selected_game_ids
+                }
+                publication_reason = recomposition_reason or "historical ledger rehearsal"
+                if activate:
+                    candidate_versions[stream_key] = self.publication_service.recompose_ledger(
+                        stream_key,
+                        season=canonical_season,
+                        cutoff=publication_cutoff,
+                        payload=encoded_payload,
+                        provenance=provenance,
+                        reason=publication_reason,
+                    )
+                else:
+                    candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(
+                        stream_key,
+                        season=canonical_season,
+                        cutoff=publication_cutoff,
+                        payload=encoded_payload,
+                        provenance=provenance,
+                        reason=publication_reason,
+                    )
             parity_specs = (
                 (
                     "player_game_logs",
@@ -347,6 +368,13 @@ class LedgerCorrectionQueue:
     def __call__(self, connection: Connection, game: CanonicalGame) -> None:
         table = CompositionJob.__table__
         now = self.clock()
+        is_correction = bool(
+            connection.info.get("canonical_game_ledger_replacement", False)
+        )
+        affected_team_ids = sorted({fact.team_id for fact in game.team_facts})
+        source_observation_ids = [str(game.source_observation_id)]
+        game_set_checksum = _game_set_checksum((game.game_id,))
+        recomposition_reason = "correction" if is_correction else "initial_acceptance"
         manifest = connection.execute(select(CollectionManifest).where(
             CollectionManifest.season == game.season,
             CollectionManifest.status == "active",
@@ -363,19 +391,47 @@ class LedgerCorrectionQueue:
         else:
             cutoff = manifest["cutoff"]
         for stream_key in self.STREAMS:
-            existing = connection.execute(select(table.c.job_id).where(
+            existing = connection.execute(select(
+                table.c.job_id,
+                table.c.affected_team_ids,
+                table.c.source_observation_ids,
+            ).where(
                 table.c.stream_key == stream_key,
                 table.c.season == game.season,
                 table.c.cutoff == cutoff,
-            )).scalar_one_or_none()
+            )).mappings().one_or_none()
             if existing is not None:
+                previous_team_ids = {
+                    int(team_id)
+                    for team_id in _json_values(existing["affected_team_ids"])
+                    if str(team_id).isdigit()
+                }
+                previous_observation_ids = _json_values(
+                    existing["source_observation_ids"]
+                )
+                merged_team_ids = sorted({
+                    *previous_team_ids,
+                    *affected_team_ids,
+                })
+                merged_observation_ids = sorted({
+                    *previous_observation_ids,
+                    *source_observation_ids,
+                })
                 connection.execute(
-                    update(table).where(table.c.job_id == existing).values(
+                    update(table).where(table.c.job_id == existing["job_id"]).values(
                         status="queued",
                         attempts=0,
                         manifest_id=manifest["manifest_id"] if manifest is not None else None,
                         updated_at=now,
                         last_error=None,
+                        trigger_game_id=game.game_id,
+                        affected_team_ids=json.dumps(merged_team_ids, separators=(",", ":")),
+                        source_observation_ids=json.dumps(
+                            merged_observation_ids, separators=(",", ":")
+                        ),
+                        recomposition_reason=recomposition_reason,
+                        ledger_checksum=game.checksum,
+                        game_set_checksum=game_set_checksum,
                     )
                 )
             else:
@@ -390,6 +446,14 @@ class LedgerCorrectionQueue:
                     created_at=now,
                     updated_at=now,
                     last_error=None,
+                    trigger_game_id=game.game_id,
+                    affected_team_ids=json.dumps(affected_team_ids, separators=(",", ":")),
+                    source_observation_ids=json.dumps(
+                        source_observation_ids, separators=(",", ":")
+                    ),
+                    recomposition_reason=recomposition_reason,
+                    ledger_checksum=game.checksum,
+                    game_set_checksum=game_set_checksum,
                 ))
 
 
@@ -406,6 +470,26 @@ def _payload_json(payload: object) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _game_set_checksum(game_ids: Iterable[str]) -> str:
+    """Hash a deterministic exact game-id set for correction diagnostics."""
+
+    return hashlib.sha256(
+        json.dumps(sorted(set(str(game_id) for game_id in game_ids)), separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _json_values(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(item) for item in parsed)
 
 
 def _json_default(value: object) -> object:

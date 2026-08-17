@@ -15,6 +15,8 @@ can fail without preventing ledger-owned surfaces from materializing.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -112,6 +114,11 @@ class LedgerMatchupMaterializationService:
         expected_game_ids: frozenset[str],
         expected_l15_game_ids: Mapping[int, frozenset[str]],
         team_ids: frozenset[int],
+        cutoff: datetime | None = None,
+        recomposition_reason: str | None = None,
+        affected_team_ids: frozenset[int] | None = None,
+        trigger_game_id: str | None = None,
+        trigger_game_ids: frozenset[str] | None = None,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
 
@@ -128,6 +135,10 @@ class LedgerMatchupMaterializationService:
 
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(self._clock())
+        if cutoff is not None:
+            cutoff = assume_utc(cutoff)
+            if cutoff.date() != as_of:
+                raise ValueError("cutoff must match the materialization date")
         current_date = retrieved_at.astimezone(EASTERN).date()
         if as_of > current_date:
             raise ValueError("future as_of dates cannot be published")
@@ -181,6 +192,8 @@ class LedgerMatchupMaterializationService:
             checksums=checksums,
             games_by_id=games_by_id,
             roster_incomplete=roster_incomplete,
+            cutoff=cutoff,
+            recomposition_reason=recomposition_reason,
         )
         l15_facts, l15_observations = self._window_read_model(
             l15_window,
@@ -188,13 +201,39 @@ class LedgerMatchupMaterializationService:
             checksums=checksums,
             games_by_id=games_by_id,
             roster_incomplete=roster_incomplete,
+            cutoff=cutoff,
+            recomposition_reason=recomposition_reason,
         )
+        snapshots = [(season_scope, season_facts, season_observations)]
+        snapshot_kwargs = {"retrieved_at": retrieved_at}
+        if affected_team_ids is not None:
+            selected_trigger_game_ids = trigger_game_ids
+            if selected_trigger_game_ids is None and trigger_game_id is not None:
+                selected_trigger_game_ids = frozenset({trigger_game_id})
+            l15_affected_team_ids = frozenset(
+                team.team_id
+                for team in l15_window.teams
+                if team.team_id in affected_team_ids
+                and (
+                    selected_trigger_game_ids is None
+                    or bool(set(team.game_ids) & selected_trigger_game_ids)
+                )
+            )
+            # Season is one publication over the complete governed game set,
+            # so a correction always rebuilds its complete fact envelope. An
+            # exact-L15 correction outside every selected team is a no-op
+            # for an existing scope; the repository also uses the empty target
+            # to build a missing scope completely.
+            snapshot_kwargs["affected_team_ids_by_scope"] = {season_scope: None}
+            snapshots.append((l15_scope, l15_facts, l15_observations))
+            snapshot_kwargs["affected_team_ids_by_scope"][l15_scope] = (
+                l15_affected_team_ids
+            )
+        else:
+            snapshots.append((l15_scope, l15_facts, l15_observations))
         self.matchup_repository.replace_snapshots(
-            (
-                (season_scope, season_facts, season_observations),
-                (l15_scope, l15_facts, l15_observations),
-            ),
-            retrieved_at=retrieved_at,
+            snapshots,
+            **snapshot_kwargs,
         )
         return LedgerMatchupMaterialization(
             season=canonical_season,
@@ -318,6 +357,8 @@ class LedgerMatchupMaterializationService:
         checksums: Mapping[str, str],
         games_by_id: Mapping[str, CanonicalGame],
         roster_incomplete: bool,
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Build disposable facts and observations for one window.
 
@@ -329,17 +370,29 @@ class LedgerMatchupMaterializationService:
 
         governed_game_ids = window.governed_game_ids
         ledger_checksum = window_ledger_checksum(governed_game_ids, checksums)
+        game_set_checksum = _game_set_checksum(governed_game_ids)
+        source_observation_ids = _source_observation_ids(
+            governed_game_ids, games_by_id
+        )
         if roster_incomplete:
             return (), self._missing_observations(
                 ROSTER_INCOMPLETE_REASON,
                 game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         if not window.complete:
             return (), self._missing_observations(
                 window.reason,
                 game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         start_dates = {
             team.team_id: min(
@@ -354,11 +407,20 @@ class LedgerMatchupMaterializationService:
                 status="available",
                 game_ids=governed_game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         ]
         facts = list(
             self._traditional_facts(
-                window, ledger_checksum=ledger_checksum, start_dates=start_dates
+                window,
+                ledger_checksum=ledger_checksum,
+                start_dates=start_dates,
+                games_by_id=games_by_id,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             )
         )
         if assist_window is not None and assist_window.complete:
@@ -367,6 +429,9 @@ class LedgerMatchupMaterializationService:
                     assist_window,
                     ledger_checksum=ledger_checksum,
                     start_dates=start_dates,
+                    games_by_id=games_by_id,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
                 )
             )
             observations.append(
@@ -375,6 +440,10 @@ class LedgerMatchupMaterializationService:
                     status="available",
                     game_ids=governed_game_ids,
                     ledger_checksum=ledger_checksum,
+                    source_observation_ids=source_observation_ids,
+                    game_set_checksum=game_set_checksum,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
                 )
             )
         else:
@@ -385,6 +454,10 @@ class LedgerMatchupMaterializationService:
                     unavailable_reason=ASSIST_INCOMPLETE_REASON,
                     game_ids=governed_game_ids,
                     ledger_checksum=ledger_checksum,
+                    source_observation_ids=source_observation_ids,
+                    game_set_checksum=game_set_checksum,
+                    cutoff=cutoff,
+                    recomposition_reason=recomposition_reason,
                 )
             )
         return tuple(facts), tuple(observations)
@@ -395,6 +468,10 @@ class LedgerMatchupMaterializationService:
         *,
         game_ids: tuple[str, ...],
         ledger_checksum: str,
+        source_observation_ids: tuple[str, ...],
+        game_set_checksum: str,
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[TeamMatchupObservation, ...]:
         status, mapped_reason = (
             ("missing", INSUFFICIENT_GAMES_REASON)
@@ -410,6 +487,10 @@ class LedgerMatchupMaterializationService:
                 mapped_reason,
                 game_ids=game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             ),
             TeamMatchupObservation(
                 "assist_locations",
@@ -417,6 +498,10 @@ class LedgerMatchupMaterializationService:
                 mapped_reason,
                 game_ids=game_ids,
                 ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
             ),
         )
 
@@ -426,6 +511,9 @@ class LedgerMatchupMaterializationService:
         *,
         ledger_checksum: str,
         start_dates: Mapping[int, date | None],
+        games_by_id: Mapping[str, CanonicalGame],
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[TeamMatchupFact, ...]:
         facts = []
         for team in window.teams:
@@ -443,6 +531,12 @@ class LedgerMatchupMaterializationService:
                         window_start_date=start_dates.get(team.team_id),
                         game_ids=team.game_ids,
                         ledger_checksum=ledger_checksum,
+                        source_observation_ids=_source_observation_ids(
+                            team.game_ids, games_by_id
+                        ),
+                        game_set_checksum=_game_set_checksum(team.game_ids),
+                        cutoff=cutoff,
+                        recomposition_reason=recomposition_reason,
                     )
                 )
         return tuple(facts)
@@ -453,6 +547,9 @@ class LedgerMatchupMaterializationService:
         *,
         ledger_checksum: str,
         start_dates: Mapping[int, date | None],
+        games_by_id: Mapping[str, CanonicalGame],
+        cutoff: datetime | None,
+        recomposition_reason: str | None,
     ) -> tuple[TeamMatchupFact, ...]:
         facts = []
         for team in window.teams:
@@ -470,6 +567,12 @@ class LedgerMatchupMaterializationService:
                         window_start_date=start_dates.get(team.team_id),
                         game_ids=team.game_ids,
                         ledger_checksum=ledger_checksum,
+                        source_observation_ids=_source_observation_ids(
+                            team.game_ids, games_by_id
+                        ),
+                        game_set_checksum=_game_set_checksum(team.game_ids),
+                        cutoff=cutoff,
+                        recomposition_reason=recomposition_reason,
                     )
                 )
         return tuple(facts)
@@ -496,6 +599,27 @@ class LedgerMatchupMaterializationService:
             complete=window.complete,
             reason=window.reason,
         )
+
+
+def _source_observation_ids(
+    game_ids: tuple[str, ...],
+    games_by_id: Mapping[str, CanonicalGame],
+) -> tuple[str, ...]:
+    """Return the accepted source observations for an exact game selection."""
+
+    return tuple(sorted({
+        games_by_id[game_id].source_observation_id
+        for game_id in game_ids
+        if game_id in games_by_id
+    }))
+
+
+def _game_set_checksum(game_ids: tuple[str, ...]) -> str:
+    """Hash only the exact selected IDs, independently of their facts."""
+
+    return hashlib.sha256(
+        json.dumps(sorted(set(game_ids)), separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 __all__ = [

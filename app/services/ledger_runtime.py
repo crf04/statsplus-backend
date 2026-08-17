@@ -6,10 +6,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from typing import Mapping, Protocol
+from uuid import uuid4
 
 from sqlalchemy import select, update
 
-from app.models.collection_control import ActiveSeason, CollectionManifest, CompositionJob
+from app.models.collection_control import (
+    ActiveSeason,
+    CollectionManifest,
+    CompositionJob,
+    ReconciliationItem,
+)
 from app.models.event_catalog import EventCatalogEntry
 from app.domain.nba_events import is_final_event, is_postponed_event
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
@@ -214,6 +220,7 @@ class LedgerRuntime:
         materialization: LedgerMaterializationService,
         governance: LedgerGovernanceReader,
         matchup_materialization=None,
+        publication_service=None,
         clock=None,
     ) -> None:
         self.backfill = backfill
@@ -221,6 +228,9 @@ class LedgerRuntime:
         self.materialization = materialization
         self.governance = governance
         self.matchup_materialization = matchup_materialization
+        self.publication_service = publication_service or getattr(
+            materialization, "publication_service", None
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def refresh(
@@ -261,37 +271,97 @@ class LedgerRuntime:
                 if stored_cutoff.tzinfo is None
                 else stored_cutoff
             )
-            governance = self.governance.read_for_composition(
-                season,
-                cutoff,
-                manifest_id,
+            slice_jobs = tuple(
+                row for row in jobs
+                if row["cutoff"] == stored_cutoff
+                and row["manifest_id"] == manifest_id
             )
-            if self.matchup_materialization is not None:
-                # Publish the disposable ledger-owned matchup read model at the
-                # exact composition cutoff before composing publication streams,
-                # so an incomplete Season/L15 publishes explicit unavailable
-                # observations instead of approximating a league window.
-                self.matchup_materialization.materialize(
+            reason = next(
+                (
+                    str(row["recomposition_reason"])
+                    for row in slice_jobs
+                    if row.get("recomposition_reason")
+                ),
+                "scheduled_reconciliation",
+            )
+            affected_team_ids = frozenset(
+                int(team_id)
+                for row in slice_jobs
+                for team_id in _json_list(row.get("affected_team_ids"))
+                if str(team_id).isdigit()
+            )
+            trigger_game_id = next(
+                (
+                    str(row["trigger_game_id"])
+                    for row in slice_jobs
+                    if row.get("trigger_game_id")
+                ),
+                None,
+            )
+            try:
+                governance = self.governance.read_for_composition(
                     season,
+                    cutoff,
+                    manifest_id,
+                )
+                games = tuple(
+                    game
+                    for summary in self.repository.list_games(
+                        season, through=cutoff.date()
+                    )
+                    if (game := self.repository.get_game(summary.game_id)) is not None
+                )
+                source_observation_ids = {
+                    str(source_observation_id)
+                    for row in slice_jobs
+                    for source_observation_id in _json_list(
+                        row.get("source_observation_ids")
+                    )
+                }
+                trigger_game_ids = frozenset(
+                    game.game_id
+                    for game in games
+                    if game.source_observation_id in source_observation_ids
+                )
+                if trigger_game_id is not None:
+                    trigger_game_ids = frozenset((*trigger_game_ids, trigger_game_id))
+                if self.matchup_materialization is not None:
+                    # Publish the disposable ledger-owned matchup read model at
+                    # the exact composition cutoff before composing publication
+                    # streams.  Target metadata lets the repository retain
+                    # unaffected team facts in place.
+                    self.matchup_materialization.materialize(
+                        season,
+                        as_of=cutoff.date(),
+                        cutoff=cutoff,
+                        recomposition_reason=reason,
+                        affected_team_ids=(affected_team_ids or None),
+                        trigger_game_id=trigger_game_id,
+                        trigger_game_ids=(trigger_game_ids or None),
+                        expected_game_ids=governance.expected_game_ids,
+                        expected_l15_game_ids=governance.expected_l15_game_ids,
+                        team_ids=governance.team_ids,
+                    )
+                materialized = self.materialization.compose(
+                    games,
+                    season=season,
                     as_of=cutoff.date(),
+                    cutoff=cutoff,
                     expected_game_ids=governance.expected_game_ids,
                     expected_l15_game_ids=governance.expected_l15_game_ids,
                     team_ids=governance.team_ids,
+                    activate=self.publication_service is not None,
+                    recomposition_reason=reason,
                 )
-            games = tuple(
-                game
-                for summary in self.repository.list_games(season, through=cutoff.date())
-                if (game := self.repository.get_game(summary.game_id)) is not None
-            )
-            materialized = self.materialization.compose(
-                games,
-                season=season,
-                as_of=cutoff.date(),
-                cutoff=cutoff,
-                expected_game_ids=governance.expected_game_ids,
-                expected_l15_game_ids=governance.expected_l15_game_ids,
-                team_ids=governance.team_ids,
-            )
+            except Exception:
+                self._mark_slice_failed(
+                    season=season,
+                    cutoff=stored_cutoff,
+                    manifest_id=manifest_id,
+                    jobs=slice_jobs,
+                    reason="recomposition_failed",
+                )
+                continue
             succeeded = set()
             if materialized.season_window.complete:
                 succeeded |= {
@@ -310,11 +380,7 @@ class LedgerRuntime:
                 if materialized.l15_window.complete:
                     succeeded |= {"assist_locations_l15"}
             with self.repository.engine.begin() as connection:
-                for job in (
-                    row for row in jobs
-                    if row["cutoff"] == stored_cutoff
-                    and row["manifest_id"] == manifest_id
-                ):
+                for job in slice_jobs:
                     success = job["stream_key"] in succeeded
                     connection.execute(update(table).where(
                         table.c.job_id == job["job_id"],
@@ -328,6 +394,67 @@ class LedgerRuntime:
                     ))
                     completed += int(success)
         return completed
+
+    def _mark_slice_failed(
+        self,
+        *,
+        season: str,
+        cutoff,
+        manifest_id: str | None,
+        jobs,
+        reason: str,
+    ) -> None:
+        """Keep the last publication readable and leave a retryable marker."""
+        now = self.clock()
+        dedupe_key = f"ledger-recomposition:{season}:{cutoff}:{manifest_id or ''}"[:128]
+        table = CompositionJob.__table__
+        with self.repository.engine.begin() as connection:
+            for job in jobs:
+                connection.execute(update(table).where(
+                    table.c.job_id == job["job_id"],
+                ).values(
+                    status="failed",
+                    attempts=table.c.attempts + 1,
+                    updated_at=now,
+                    last_error=reason,
+                ))
+            existing = connection.execute(select(ReconciliationItem.__table__).where(
+                ReconciliationItem.__table__.c.dedupe_key == dedupe_key,
+            )).mappings().first()
+            details = json.dumps({
+                "cutoff": str(cutoff),
+                "manifest_id": manifest_id,
+                "job_ids": [str(job["job_id"]) for job in jobs],
+            }, sort_keys=True, separators=(",", ":"))
+            if existing is None:
+                connection.execute(ReconciliationItem.__table__.insert().values(
+                    item_id=str(uuid4()),
+                    season=season,
+                    kind="ledger_recomposition",
+                    reason=reason,
+                    details=details,
+                    dedupe_key=dedupe_key,
+                    status="open",
+                    created_at=now,
+                ))
+            else:
+                connection.execute(update(ReconciliationItem.__table__).where(
+                    ReconciliationItem.__table__.c.item_id == existing["item_id"],
+                ).values(
+                    status="open",
+                    resolved_at=None,
+                    details=details,
+                ))
+
+
+def _json_list(value) -> tuple[object, ...]:
+    if not value:
+        return ()
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return ()
+    return tuple(parsed) if isinstance(parsed, list) else ()
 
 
 __all__ = [

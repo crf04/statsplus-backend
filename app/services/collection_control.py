@@ -2565,10 +2565,13 @@ class PublicationService(_SessionService):
                 required = set(json.loads(stream.required_observations))
                 if not required:
                     continue
+                observation_provider = (
+                    "pbp" if stream.provider == "ledger" else stream.provider
+                )
                 observations = session.scalars(select(CollectionObservation).where(
                     CollectionObservation.season == season,
                     CollectionObservation.cutoff == cutoff,
-                    CollectionObservation.provider == stream.provider,
+                    CollectionObservation.provider == observation_provider,
                     CollectionObservation.manifest_id.is_not(None),
                 )).all()
                 for manifest_id in {row.manifest_id for row in observations
@@ -2578,26 +2581,73 @@ class PublicationService(_SessionService):
         for stream_key, selected_season, manifest_id in sorted(candidates):
             if count >= min(max(limit, 1), 1000):
                 break
-            self.enqueue(stream_key, season=selected_season, cutoff=cutoff, manifest_id=manifest_id)
+            job = self.enqueue(
+                stream_key,
+                season=selected_season,
+                cutoff=cutoff,
+                manifest_id=manifest_id,
+            )
+            if job.status == "failed":
+                with self.session() as session, session.begin():
+                    retryable = session.get(CompositionJob, job.job_id)
+                    if retryable is not None:
+                        retryable.status = "queued"
+                        retryable.attempts = int(retryable.attempts or 0) + 1
+                        retryable.updated_at = self.clock()
+                        retryable.last_error = None
             count += 1
         return count
 
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None,
-                manifest_id: str | None = None) -> PublicationVersion:
+                manifest_id: str | None = None,
+                ledger_provenance: Mapping[str, str | None] | None = None) -> PublicationVersion:
         encoded = _json(payload)
         now = self.clock()
         with self.session() as session, session.begin():
             stream = session.get(PublicationStream, stream_key)
             if stream is None or not stream.enabled:
                 raise ControlPlaneError("stream_unavailable")
-            provenance_ids = self._assert_completeness(
-                session, stream, season=season, cutoff=_aware(cutoff),
-                manifest_id=manifest_id,
-            )
             pointer = session.scalar(select(PublicationPointer).where(
                 PublicationPointer.stream_key == stream_key
             ).with_for_update())
+            if pointer is not None and pointer.active_publication_id:
+                current = session.get(PublicationVersion, pointer.active_publication_id)
+                if (
+                    current is not None
+                    and current.season == season
+                    and _aware(current.cutoff) == _aware(cutoff)
+                    and current.checksum == _checksum(encoded)
+                    and (
+                        ledger_provenance is not None
+                        or current.reason == reason
+                    )
+                    and (
+                        ledger_provenance is None
+                        or self._publication_provenance_matches(
+                            session,
+                            current.publication_id,
+                            ledger_provenance,
+                        )
+                    )
+                ):
+                    if expected_fence is not None and pointer.fence != expected_fence:
+                        raise ControlPlaneError("stale_composition")
+                    return current
+            provenance_ids = (
+                self._assert_ledger_provenance(
+                    session,
+                    season=season,
+                    cutoff=_aware(cutoff),
+                    provenance=ledger_provenance,
+                    manifest_id=manifest_id,
+                )
+                if ledger_provenance is not None
+                else self._assert_completeness(
+                    session, stream, season=season, cutoff=_aware(cutoff),
+                    manifest_id=manifest_id,
+                )
+            )
             if pointer is None:
                 if expected_fence not in (None, 0):
                     raise ControlPlaneError("stale_composition")
@@ -2636,6 +2686,53 @@ class PublicationService(_SessionService):
             session.flush()
         return publication
 
+    def recompose_ledger(
+        self,
+        stream_key: str,
+        *,
+        season: str,
+        cutoff: datetime,
+        payload: Any,
+        provenance: Mapping[str, str | None],
+        reason: str = "ledger correction",
+        manifest_id: str | None = None,
+    ) -> PublicationVersion:
+        """Activate an idempotent ledger composition or retain a candidate.
+
+        Ledger streams use their accepted canonical-game observations as the
+        completeness evidence.  Enabled streams advance under the existing
+        publication fence; disabled streams retain the historical candidate
+        path used during rehearsal.
+        """
+        expected_fence = None
+        with self.session() as session:
+            pointer = session.get(PublicationPointer, stream_key)
+            if pointer is not None:
+                expected_fence = pointer.fence
+        with self.session() as session:
+            stream = session.get(PublicationStream, stream_key)
+        if stream is None:
+            raise ControlPlaneError("stream_not_found")
+        if stream.enabled:
+            return self.compose(
+                stream_key,
+                season=season,
+                cutoff=cutoff,
+                payload=payload,
+                expected_fence=expected_fence,
+                reason=reason,
+                manifest_id=manifest_id,
+                ledger_provenance=provenance,
+            )
+        return self.compose_inactive_ledger(
+            stream_key,
+            season=season,
+            cutoff=cutoff,
+            payload=payload,
+            provenance=provenance,
+            reason=reason,
+        )
+
     def compose_inactive_ledger(
         self,
         stream_key: str,
@@ -2654,6 +2751,22 @@ class PublicationService(_SessionService):
             stream = session.get(PublicationStream, stream_key)
             if stream is None or stream.provider != "ledger" or stream.enabled:
                 raise ControlPlaneError("inactive_ledger_stream_required")
+            existing = session.scalar(select(PublicationVersion).where(
+                PublicationVersion.stream_key == stream_key,
+                PublicationVersion.season == season,
+                PublicationVersion.cutoff == _aware(cutoff),
+                PublicationVersion.status.in_(("candidate", "active")),
+            ).order_by(PublicationVersion.version.desc()).limit(1))
+            if (
+                existing is not None
+                and existing.checksum == _checksum(encoded)
+                and self._publication_provenance_matches(
+                    session,
+                    existing.publication_id,
+                    provenance,
+                )
+            ):
+                return existing
             if not provenance:
                 raise ControlPlaneError("ledger_provenance_required")
             accepted_rows = session.scalars(select(CollectionObservation).where(
@@ -2736,6 +2849,90 @@ class PublicationService(_SessionService):
             if publication is None:
                 raise ControlPlaneError("publication_not_found")
             return json.loads(publication.payload)
+
+    @staticmethod
+    def _publication_provenance_matches(
+        session: Session,
+        publication_id: str,
+        provenance: Mapping[str, str | None],
+    ) -> bool:
+        """Keep idempotency sensitive to source-only ledger corrections."""
+        if not provenance:
+            return False
+        observed = set(session.scalars(select(PublicationObservation.observation_id).where(
+            PublicationObservation.publication_id == publication_id,
+            PublicationObservation.role.in_(("completeness_evidence", "ledger_game")),
+        )))
+        if observed != set(provenance):
+            return False
+        rows = session.scalars(select(CollectionObservation).where(
+            CollectionObservation.observation_id.in_(tuple(observed)),
+        )).all()
+        for row in rows:
+            try:
+                scope = json.loads(row.scope)
+            except (TypeError, ValueError):
+                return False
+            if (
+                not isinstance(scope, Mapping)
+                or str(scope.get("game_id") or "")
+                != str(provenance[row.observation_id] or "")
+            ):
+                return False
+        return len(rows) == len(observed)
+
+    @staticmethod
+    def _assert_ledger_provenance(
+        session: Session,
+        *,
+        season: str,
+        cutoff: datetime,
+        provenance: Mapping[str, str | None],
+        manifest_id: str | None = None,
+    ) -> set[str]:
+        """Validate exact accepted canonical-game evidence for a ledger write."""
+        if not provenance:
+            raise ControlPlaneError("ledger_provenance_required")
+        rows = list(session.scalars(select(CollectionObservation).where(
+            CollectionObservation.observation_id.in_(tuple(provenance)),
+        )))
+        if {row.observation_id for row in rows} != set(provenance):
+            raise ControlPlaneError("ledger_provenance_not_accepted")
+        manifests = {row.manifest_id for row in rows}
+        if len(manifests) != 1 or None in manifests:
+            raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+        selected_manifest = str(next(iter(manifests)))
+        if manifest_id is not None and selected_manifest != str(manifest_id):
+            raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+        manifest = session.get(CollectionManifest, selected_manifest)
+        if (
+            manifest is None
+            or manifest.season != season
+            or _aware(manifest.cutoff) != _aware(cutoff)
+            or "canonical_game_ledger" not in set(json.loads(manifest.scopes))
+            or 1 not in set(json.loads(manifest.accepted_versions))
+        ):
+            raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+        for row in rows:
+            try:
+                scope = json.loads(row.scope)
+            except (TypeError, ValueError) as error:
+                raise ControlPlaneError("ledger_provenance_scope_mismatch") from error
+            if (
+                row.provider != "pbp"
+                or row.observation_type != "canonical_game_ledger"
+                or row.season != season
+                or _aware(row.cutoff) != _aware(cutoff)
+                or _aware(row.retrieved_at) > _aware(manifest.collect_before)
+                or _aware(row.accepted_at) > _aware(manifest.collect_before)
+                or row.schema_version not in set(json.loads(manifest.accepted_versions))
+                or not isinstance(scope, Mapping)
+                or scope.get("surface") != "canonical_game_ledger"
+                or str(scope.get("game_id") or "")
+                != str(provenance[row.observation_id] or "")
+            ):
+                raise ControlPlaneError("ledger_provenance_scope_mismatch")
+        return {row.observation_id for row in rows}
 
     @staticmethod
     def _assert_completeness(session: Session, stream: PublicationStream, *, season: str,
