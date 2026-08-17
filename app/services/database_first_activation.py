@@ -45,6 +45,7 @@ from app.services.team_matchup_publications import (
     validate_publication_rows,
 )
 from app.services.publication_authority import verify_publication_authority
+from app.services.ledger_derivations import ASSIST_DERIVED_METRICS, TEAM_METRICS
 
 
 UTC = timezone.utc
@@ -416,6 +417,13 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
     if stream_key not in supported:
         raise PublicationPayloadError(f"unsupported team-window publication {stream_key}")
     rows = _payload_rows(payload, stream_key=stream_key)
+    ledger_metrics = None
+    if publication_base is None:
+        ledger_metrics = frozenset(
+            ASSIST_DERIVED_METRICS
+            if stream_key.startswith("assist_locations_")
+            else TEAM_METRICS
+        )
     decoded = []
     for row in rows:
         for field in (
@@ -425,8 +433,18 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
         if publication_base is None:
             for field in (
                 "league_average", "population_sigma", "competition_rank",
+                "counts", "team_minutes",
             ):
                 _required(row, field, stream_key=stream_key)
+            expected_row_keys = {
+                "team_id", "team_tricode", "game_ids", "game_count", "per48",
+                "league_average", "population_sigma", "competition_rank",
+                "counts", "team_minutes",
+            }
+            if set(row) != expected_row_keys:
+                raise PublicationPayloadError(
+                    f"{stream_key} publication row fields are not canonical"
+                )
         game_ids = row["game_ids"]
         if not isinstance(game_ids, (list, tuple)) or any(
             not isinstance(value, str) or not value.strip() for value in game_ids
@@ -452,6 +470,49 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
             field="competition_rank",
             stream_key=stream_key,
         ) if "competition_rank" in row else {}
+        if ledger_metrics is not None:
+            counts = _strict_mapping(row["counts"], field="counts", stream_key=stream_key)
+            for field_name, values in (
+                ("counts", counts),
+                ("per48", per48),
+                ("league_average", average),
+                ("population_sigma", sigma),
+                ("competition_rank", ranks),
+            ):
+                if frozenset(values) != ledger_metrics:
+                    raise PublicationPayloadError(
+                        f"{stream_key} publication metric taxonomy mismatch"
+                    )
+            for key, value in counts.items():
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise PublicationPayloadError(
+                        f"{stream_key} publication counts.{key} is invalid"
+                    )
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    raise PublicationPayloadError(
+                        f"{stream_key} publication counts.{key} is invalid"
+                    ) from None
+                if not isfinite(numeric_value) or numeric_value < 0 or not numeric_value.is_integer():
+                    raise PublicationPayloadError(
+                        f"{stream_key} publication counts.{key} is invalid"
+                    )
+            for key, value in per48.items():
+                _strict_float(value, field=f"per48.{key}", stream_key=stream_key, minimum=0)
+            for key, value in average.items():
+                _strict_float(value, field=f"league_average.{key}", stream_key=stream_key, minimum=0)
+            for key, value in sigma.items():
+                _strict_float(value, field=f"population_sigma.{key}", stream_key=stream_key, minimum=0)
+            for key, value in ranks.items():
+                _strict_int(value, field=f"competition_rank.{key}", stream_key=stream_key, minimum=1)
+            team_minutes = _strict_float(
+                row["team_minutes"], field="team_minutes", stream_key=stream_key, minimum=0
+            )
+            if team_minutes <= 0:
+                raise PublicationPayloadError(
+                    f"{stream_key} publication team_minutes is invalid"
+                )
         numeric = {
             key: _strict_float(value, field=f"per48.{key}", stream_key=stream_key, minimum=0)
             for key, value in per48.items()

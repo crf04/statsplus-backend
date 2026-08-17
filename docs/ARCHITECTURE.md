@@ -1785,9 +1785,11 @@ evidence degrades only the `assist_locations` surface
 surface still publishes. Migration 034
 (`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
 `ledger_checksum` columns to `team_matchup_facts` and
-`team_matchup_surface_observations`; provider-collected legacy rows keep both
-columns NULL, and the existing authenticated Matchups and player-game-log HTTP
-contracts are unchanged and remain provider-free at request time.
+`team_matchup_surface_observations`; provider-collected legacy rows carry the
+actual Event Catalog-selected game IDs for the traditional and assist parity
+surfaces, while their ledger-only checksum columns remain NULL. The existing
+authenticated Matchups and player-game-log HTTP contracts are unchanged and
+remain provider-free at request time.
 Correction propagation adds nullable source-observation lineage, exact
 game-set checksum, cutoff, and recomposition reason to those read-model rows.
 Composition jobs retain the correction game, affected teams, source lineage,
@@ -1856,7 +1858,8 @@ streams are parity-required for activation, exactly like the traditional and
 per-36 streams.
 
 The comparison rules match the parent's parity contract exactly. Team identity
-sets must be exactly equal and League Complete (the governed 30-team roster).
+sets must be exactly equal and League Complete (the governed 30-team roster),
+with no duplicate or extra metric/game-set keys.
 Every team's exact Season/L15 game set must match the governed authority and
 each other, proven by byte-identical game-set checksums; a missing surface or
 a single missing metric fails. Integer counts — the four traditional opponent
@@ -1873,12 +1876,14 @@ vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `game_set_mismatch`, `integer_count_difference`, `non_integer_count`,
 `denominator_tolerance_exceeded`, `derived_rate_difference`,
 `ranking_difference`, `availability_difference`, `cutoff_mismatch`,
-`missing_surface`, `missing_metric`); any difference makes the report
-`adjudication_required`, so an unexplained required difference never reads as
-exact.
+`missing_surface`, `missing_metric`, `extra_metric`, `duplicate_metric`,
+`l15_game_count_mismatch`, `scope_mismatch`, `authority_mismatch`, and
+`invalid_denominator`). Hard classifications produce `failed` evidence that
+cannot be manually approved; only the documented floating semantic
+differences may be `adjudication_required`.
 
-`scripts/matchup_parity.py compare` reads two independently produced
-materialization JSON documents plus the exact aware cutoff, runs the
+`scripts/matchup_parity.py compare` reads the actual stored legacy facts and
+the candidate publication IDs plus the exact aware cutoff, runs the
 `MatchupParityRunner` against the immutable authority, and records the
 per-stream artifacts; `scripts/matchup_parity.py adjudicate` records the
 operator decision. The reports are the evidence backend #87 consumes for

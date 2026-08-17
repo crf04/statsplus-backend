@@ -286,6 +286,9 @@ class TeamMatchupRefreshService:
         boundaries = TeamWindowBoundaryResolver().last_n(
             events, as_of=snapshot_date, window_games=15
         )
+        season_game_ids_by_team = self._season_game_ids_by_team(
+            events, as_of=snapshot_date, team_ids=team_ids
+        )
 
         season_play_types_are_bounded = (
             snapshot_date == retrieved_at.astimezone(EASTERN).date()
@@ -295,6 +298,9 @@ class TeamMatchupRefreshService:
             snapshot_date=snapshot_date,
             include_play_types=season_play_types_are_bounded,
             team_ids=team_ids,
+        )
+        season_facts = self._bind_legacy_game_ids(
+            season_facts, season_game_ids_by_team
         )
         season_observations = self._surface_observations(
             overrides={
@@ -330,6 +336,10 @@ class TeamMatchupRefreshService:
                 snapshot_date=snapshot_date,
                 team_ids=team_ids,
                 boundaries=boundaries,
+            )
+            rolling_facts = self._bind_legacy_game_ids(
+                rolling_facts,
+                {team_id: boundary.game_ids for team_id, boundary in boundaries.items()},
             )
             rolling_observations = self._surface_observations(
                 overrides={
@@ -389,6 +399,54 @@ class TeamMatchupRefreshService:
                 }
             )
         )
+
+    @staticmethod
+    def _season_game_ids_by_team(
+        events: list[dict[str, Any]],
+        *,
+        as_of: date,
+        team_ids: tuple[int, ...],
+    ) -> dict[int, tuple[str, ...]]:
+        """Resolve the actual provider window identity from the event catalog."""
+
+        selected: dict[int, list[tuple[datetime, str]]] = {
+            team_id: [] for team_id in team_ids
+        }
+        for event in events:
+            if governed_season_type(event) != "Regular Season" or not TeamWindowBoundaryResolver._is_completed_by(
+                event, as_of=as_of
+            ):
+                continue
+            scheduled_at = TeamWindowBoundaryResolver._scheduled_at(event)
+            game_id = str(event["nba_game_id"])
+            for field in ("home_team_id", "away_team_id"):
+                team_id = int(event[field])
+                if team_id in selected:
+                    selected[team_id].append((scheduled_at, game_id))
+        return {
+            team_id: tuple(
+                game_id
+                for _, game_id in sorted(values, key=lambda item: (item[0], item[1]))
+            )
+            for team_id, values in selected.items()
+        }
+
+    @staticmethod
+    def _bind_legacy_game_ids(
+        facts: list[TeamMatchupFact],
+        game_ids_by_team: Mapping[int, tuple[str, ...]],
+    ) -> list[TeamMatchupFact]:
+        """Attach source-selected game IDs to the two parity surfaces only."""
+
+        return [
+            replace(
+                fact,
+                game_ids=tuple(game_ids_by_team.get(fact.team_id, ())),
+            )
+            if fact.base in {"traditional", "assist_locations"}
+            else fact
+            for fact in facts
+        ]
 
     @staticmethod
     def _require_governed_roster(

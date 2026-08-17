@@ -63,7 +63,11 @@ def validate_publication_rows(
     accepted publication only after the payload has already proved the exact
     canonical NBA identity set.
     """
-    expected_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+    expected_keys = (
+        tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+        if base in NBA_PUBLICATION_TAXONOMY
+        else None
+    )
     canonical_team_ids = set(NBA_TEAM_ID_TO_TRICODE)
     row_team_ids = [row.team_id for row in rows]
     if len(rows) != len(canonical_team_ids) or len(row_team_ids) != len(set(row_team_ids)):
@@ -77,20 +81,22 @@ def validate_publication_rows(
             raise PublicationValidationError("publication_surface_incomplete") from error
         if governed_team_ids != canonical_team_ids:
             raise PublicationValidationError("publication_surface_incomplete")
-    expected = set(expected_keys)
+    expected = set(expected_keys) if expected_keys is not None else set()
     for row in rows:
         if row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]:
             raise PublicationValidationError("publication_team_identity_mismatch")
-        for values in (row.per48,):
-            raw_keys = tuple(values)
-            if len(raw_keys) != len(set(raw_keys)) or set(raw_keys) != expected:
-                raise PublicationValidationError("publication_metric_taxonomy_mismatch")
+        if expected_keys is not None:
+            expected = set(expected_keys)
+            for values in (row.per48,):
+                raw_keys = tuple(values)
+                if len(raw_keys) != len(set(raw_keys)) or set(raw_keys) != expected:
+                    raise PublicationValidationError("publication_metric_taxonomy_mismatch")
         for values in (
             row.league_average,
             row.population_sigma,
             row.competition_rank,
         ):
-            if values and set(values) != expected:
+            if expected_keys is not None and values and set(values) != expected:
                 raise PublicationValidationError(
                     "publication_metric_taxonomy_mismatch"
                 )
@@ -107,7 +113,7 @@ def validate_publication_rows(
             for row in rows
         ):
             raise PublicationValidationError("publication_game_set_mismatch")
-    return expected_keys
+    return expected_keys or ()
 
 
 def resolve_governed_l15_game_ids(

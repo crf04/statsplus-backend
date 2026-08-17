@@ -6,90 +6,150 @@ and the legacy provider-aggregate writer
 (:class:`app.services.team_matchup_refresh.TeamMatchupRefreshService`) both
 produce the disposable ``team_matchup_facts`` read model for the same governed
 season and cutoff.  The two materializers write the same surface rows, so their
-outputs never coexist in one stored snapshot; each side must be produced into
-its own isolated store or captured in memory before it is compared.  This
-module owns the seam that accepts those two independently produced outputs,
-compares them against the exact immutable governed authority, and records
-durable activation evidence -- without ever advancing a publication pointer.
+outputs never coexist in one stored snapshot; each side is produced
+independently and handed to the comparator as a provenance-bound
+:class:`MatchupMaterialization`.
 
-The comparison is bounded to the two ledger-owned non-shot surfaces --
-traditional opponent counts and assist locations.  NBA-owned shot zones,
-grouped shot types, and Synergy play types are composed from governed
-publications, never from the ledger, so they have no legacy-vs-ledger dual-run
-and are excluded here.
+The ledger side is never accepted as hand-written JSON: it is derived from the
+actual immutable candidate :class:`app.models.collection_control.PublicationVersion`,
+re-verified against its checksum and its exact manifest and Event Catalog
+authority, and byte-bound to that payload.  The legacy side is produced by the
+injected legacy materializer seam and re-validated against the same governed
+30-team roster and exact game sets.  Hard facts (identity, integer counts,
+game sets, scope, authority, availability, completeness, and the byte contract)
+are non-adjudicable; only the documented floating denominator/rate tolerance
+may be adjudicated.
+
+NBA-owned shot zones, grouped shot types, and Synergy play types are composed
+from governed publications, never from the ledger, and have no dual-run.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.slate_time import slate_date_for_instant
+from app.domain.utc import assume_utc
 from app.domain.team_matchup_taxonomy import (
     LEDGER_OWNED_MATCHUP_SURFACES,
     matchup_stream_key,
 )
+from app.models.collection_control import PublicationVersion
 from app.services.ledger_derivations import (
     MATCHUP_ASSIST_KEYS,
     MATCHUP_TRADITIONAL_KEYS,
     competition_ranks,
 )
 from app.services.ledger_lineage import LedgerLineage
+from app.services.publication_authority import verify_publication_authority
+from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
+    TeamMatchupSnapshotScope,
 )
 
 #: The single documented tolerance for floating denominators and derived
 #: per-48 rates.  Integer counts compare exactly; only denominators (effective
 #: team minutes) and the per-48 values recomputed from them admit this relative
-#: tolerance, because the legacy provider reports total team minutes while the
-#: ledger retains effective player-minute denominators (player minutes divided
-#: by five).
+#: tolerance.
 MATCHUP_PARITY_TOLERANCE = 1e-6
 
 #: Ledger-owned surfaces that participate in the dual-run (re-exported from the
-#: canonical taxonomy so the comparator and the stream-key helper never drift).
+#: canonical taxonomy so the comparator and stream keys never drift).
 LEDGER_OWNED_SURFACES = LEDGER_OWNED_MATCHUP_SURFACES
 
-#: Per-surface contracted count metrics, keyed by the fact stat key.
-_COUNT_KEYS = {
-    "traditional": tuple(MATCHUP_TRADITIONAL_KEYS),
-    "assist_locations": tuple(MATCHUP_ASSIST_KEYS),
+#: Per-surface contracted count metrics: stat key -> canonical count metric.
+_SURFACE_COUNT_KEYS = {
+    "traditional": MATCHUP_TRADITIONAL_KEYS,
+    "assist_locations": MATCHUP_ASSIST_KEYS,
 }
+
+#: Producer identities bound to each side of the dual-run.
+PRODUCER_LEGACY = "legacy_team_matchup_refresh"
+PRODUCER_LEDGER = "ledger_publication"
 
 #: Per-48 scaling shared by both materializers.
 _PER48 = 48.0
 
-# Closed difference classifications.  Every produced difference names exactly
-# one of these reasons so adjudication can classify unexplained required
-# differences without parsing free text.
+# Non-adjudicable hard failures.  Manual approval must never authorize these.
 CLASSIFICATION_LEAGUE_INCOMPLETE = "league_incomplete"
 CLASSIFICATION_MISSING_LEGACY_TEAM = "missing_legacy_team"
 CLASSIFICATION_MISSING_LEDGER_TEAM = "missing_ledger_team"
+CLASSIFICATION_EXTRA_TEAM = "extra_team"
 CLASSIFICATION_GAME_SET_MISMATCH = "game_set_mismatch"
 CLASSIFICATION_INTEGER_COUNT_DIFFERENCE = "integer_count_difference"
 CLASSIFICATION_NON_INTEGER_COUNT = "non_integer_count"
+CLASSIFICATION_AVAILABILITY_DIFFERENCE = "availability_difference"
+CLASSIFICATION_CUTOFF_MISMATCH = "cutoff_mismatch"
+CLASSIFICATION_SCOPE_MISMATCH = "scope_mismatch"
+CLASSIFICATION_MISSING_SURFACE = "missing_surface"
+CLASSIFICATION_MISSING_METRIC = "missing_metric"
+CLASSIFICATION_EXTRA_METRIC = "extra_metric"
+CLASSIFICATION_DUPLICATE_METRIC = "duplicate_metric"
+CLASSIFICATION_L15_GAME_COUNT_MISMATCH = "l15_game_count_mismatch"
+CLASSIFICATION_AUTHORITY_MISMATCH = "authority_mismatch"
+CLASSIFICATION_INVALID_DENOMINATOR = "invalid_denominator"
+
+# Adjudicable semantic differences: documented floating tolerance only.
 CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED = "denominator_tolerance_exceeded"
 CLASSIFICATION_DERIVED_RATE_DIFFERENCE = "derived_rate_difference"
 CLASSIFICATION_RANKING_DIFFERENCE = "ranking_difference"
-CLASSIFICATION_AVAILABILITY_DIFFERENCE = "availability_difference"
-CLASSIFICATION_CUTOFF_MISMATCH = "cutoff_mismatch"
-CLASSIFICATION_MISSING_SURFACE = "missing_surface"
-CLASSIFICATION_MISSING_METRIC = "missing_metric"
+
+HARD_CLASSIFICATIONS = frozenset({
+    CLASSIFICATION_LEAGUE_INCOMPLETE,
+    CLASSIFICATION_MISSING_LEGACY_TEAM,
+    CLASSIFICATION_MISSING_LEDGER_TEAM,
+    CLASSIFICATION_EXTRA_TEAM,
+    CLASSIFICATION_GAME_SET_MISMATCH,
+    CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
+    CLASSIFICATION_NON_INTEGER_COUNT,
+    CLASSIFICATION_AVAILABILITY_DIFFERENCE,
+    CLASSIFICATION_CUTOFF_MISMATCH,
+    CLASSIFICATION_SCOPE_MISMATCH,
+    CLASSIFICATION_MISSING_SURFACE,
+    CLASSIFICATION_MISSING_METRIC,
+    CLASSIFICATION_EXTRA_METRIC,
+    CLASSIFICATION_DUPLICATE_METRIC,
+    CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
+    CLASSIFICATION_AUTHORITY_MISMATCH,
+    CLASSIFICATION_INVALID_DENOMINATOR,
+})
+
+SOFT_CLASSIFICATIONS = frozenset({
+    CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
+    CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
+    CLASSIFICATION_RANKING_DIFFERENCE,
+})
 
 
 def matchup_surface_stream_keys(window: str) -> tuple[str, ...]:
     """Return every ledger-owned stream key for one governed window."""
 
-    return tuple(matchup_stream_key(surface, window) for surface in LEDGER_OWNED_SURFACES)
+    return tuple(
+        matchup_stream_key(surface, window)
+        for surface in LEDGER_OWNED_SURFACES
+    )
+
+
+class MatchupParityError(ValueError):
+    """A dual-run input cannot be sourced from the required authority."""
 
 
 @dataclass(frozen=True, slots=True)
 class MatchupMaterialization:
-    """One independently produced materializer output at an exact cutoff."""
+    """One independently produced, provenance-bound materializer output."""
 
     season: str
     window: str
@@ -97,6 +157,38 @@ class MatchupMaterialization:
     facts: tuple[TeamMatchupFact, ...]
     observations: tuple[TeamMatchupObservation, ...]
     game_ids_by_team: Mapping[int, frozenset[str]]
+    producer: str = PRODUCER_LEGACY
+    manifest_id: str | None = None
+    event_catalog_publication_id: str | None = None
+    event_catalog_checksum: str | None = None
+    publication_id: str | None = None
+    payload_checksum: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerTeamWindowRow:
+    """One decoded team row from an immutable ledger publication payload."""
+
+    team_id: int
+    team_tricode: str
+    game_ids: tuple[str, ...]
+    counts: Mapping[str, float]
+    team_minutes: float
+
+
+@dataclass(frozen=True, slots=True)
+class MatchupPublication:
+    """One verified candidate publication and its exact immutable authority."""
+
+    publication_id: str
+    stream_key: str
+    season: str
+    cutoff: datetime
+    payload_checksum: str
+    manifest_id: str
+    event_catalog_publication_id: str
+    event_catalog_checksum: str
+    rows: tuple[LedgerTeamWindowRow, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,11 +231,31 @@ class MatchupParityReport:
     cutoffs_aligned: bool
     rankings_deterministic: bool
     compared_count: int
+    ledger_publication_id: str | None = None
+    ledger_payload_checksum: str | None = None
     differences: tuple[MatchupParityDifference, ...] = ()
 
     @property
+    def hard_failures(self) -> tuple[MatchupParityDifference, ...]:
+        return tuple(
+            difference for difference in self.differences
+            if difference.classification in HARD_CLASSIFICATIONS
+        )
+
+    @property
+    def semantic_differences(self) -> tuple[MatchupParityDifference, ...]:
+        return tuple(
+            difference for difference in self.differences
+            if difference.classification in SOFT_CLASSIFICATIONS
+        )
+
+    @property
+    def hard_failure(self) -> bool:
+        return bool(self.hard_failures)
+
+    @property
     def adjudication_required(self) -> bool:
-        return bool(self.differences)
+        return bool(self.semantic_differences) and not self.hard_failure
 
     @property
     def exact(self) -> bool:
@@ -151,7 +263,8 @@ class MatchupParityReport:
 
         return (
             self.compared_count > 0
-            and not self.adjudication_required
+            and not self.hard_failure
+            and not self.semantic_differences
             and self.league_complete
             and self.team_identities_exact
             and self.game_sets_exact
@@ -161,6 +274,8 @@ class MatchupParityReport:
 
     @property
     def status(self) -> str:
+        if self.hard_failure:
+            return "failed"
         return "adjudication_required" if self.adjudication_required else "exact"
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,6 +292,9 @@ class MatchupParityReport:
             "cutoffs_aligned": self.cutoffs_aligned,
             "rankings_deterministic": self.rankings_deterministic,
             "compared_count": self.compared_count,
+            "ledger_publication_id": self.ledger_publication_id,
+            "ledger_payload_checksum": self.ledger_payload_checksum,
+            "status": self.status,
             "differences": [difference.to_dict() for difference in self.differences],
         }
 
@@ -189,6 +307,321 @@ def _json_value(value: object) -> object:
     return value
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _window_for_stream(stream_key: str) -> str:
+    if stream_key.endswith("_l15"):
+        return "l15"
+    if stream_key.endswith("_season"):
+        return "season"
+    raise MatchupParityError(f"stream key {stream_key} is not a matchup window stream")
+
+
+def resolve_matchup_publication(
+    session: Session,
+    *,
+    publication_id: str,
+    stream_key: str,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str,
+    event_catalog_publication_id: str,
+    event_catalog_checksum: str,
+) -> MatchupPublication:
+    """Read and verify one candidate publication against its exact authority.
+
+    The publication must name the requested stream, season, and exact aware
+    cutoff, its payload must match its stored checksum byte-for-byte, and its
+    bound manifest and immutable Event Catalog authority must equal the
+    governed authority passed by the caller.  A copied, synthetic, or later
+    same-cutoff reinterpretation therefore fails before any comparison.
+    """
+
+    if cutoff is None or cutoff.tzinfo is None:
+        raise MatchupParityError("matchup parity requires an aware immutable cutoff")
+    publication = session.scalar(
+        select(PublicationVersion).where(
+            PublicationVersion.publication_id == publication_id,
+        )
+    )
+    if publication is None:
+        raise MatchupParityError("publication_candidate_invalid")
+    if (
+        publication.stream_key != stream_key
+        or publication.season != season
+        or assume_utc(publication.cutoff) != _aware(cutoff)
+        or publication.status != "candidate"
+        or not publication_payload_matches_checksum(
+            publication.payload, publication.checksum
+        )
+    ):
+        raise MatchupParityError("publication_candidate_invalid")
+    try:
+        authority = verify_publication_authority(session, publication)
+    except PublicationGovernanceUnavailable as error:
+        raise MatchupParityError("publication_authority_invalid") from error
+    if (
+        authority.manifest_id != manifest_id
+        or authority.event_catalog_publication_id != event_catalog_publication_id
+        or authority.event_catalog_checksum != event_catalog_checksum
+    ):
+        raise MatchupParityError("publication_authority_mismatch")
+    rows = _decode_ledger_rows(publication.payload, stream_key=stream_key)
+    return MatchupPublication(
+        publication_id=publication.publication_id,
+        stream_key=stream_key,
+        season=season,
+        cutoff=_aware(cutoff),
+        payload_checksum=publication.checksum,
+        manifest_id=authority.manifest_id,
+        event_catalog_publication_id=authority.event_catalog_publication_id,
+        event_catalog_checksum=authority.event_catalog_checksum,
+        rows=rows,
+    )
+
+
+def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWindowRow, ...]:
+    """Decode the exact typed ledger materializer payload.
+
+    The publication payload is the materializer's immutable typed envelope,
+    not an operator-authored comparison document.  Keep this decoder stricter
+    than the general read decoder: a parity candidate must be the canonical
+    list emitted by the ledger materializer and must carry every derived field
+    needed to prove its metric and window contract.
+    """
+
+    try:
+        document = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+        if not isinstance(document, list):
+            raise ValueError("ledger publication payload must be a row list")
+        from app.services.database_first_activation import decode_team_window
+        from app.services.ledger_derivations import (
+            ASSIST_DERIVED_METRICS,
+            TEAM_METRICS,
+        )
+
+        # Reuse the public typed row decoder for scalar and envelope checks,
+        # then retain the raw mapping below for the ledger-only primitive
+        # counts and denominator that the public decoder intentionally omits.
+        decode_team_window(document, stream_key=stream_key)
+        surface = (
+            "assist_locations"
+            if stream_key.startswith("assist_locations_")
+            else "traditional"
+        )
+        expected_metrics = frozenset(
+            ASSIST_DERIVED_METRICS if surface == "assist_locations" else TEAM_METRICS
+        )
+        expected_keys = frozenset({
+            "team_id", "team_tricode", "game_ids", "game_count", "per48",
+            "league_average", "population_sigma", "competition_rank",
+            "counts", "team_minutes",
+        })
+    except (ImportError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
+        raise MatchupParityError("publication_payload_invalid") from error
+
+    rows = []
+    seen_team_ids: set[int] = set()
+    for row in document:
+        try:
+            if frozenset(row) != expected_keys:
+                raise ValueError("ledger publication row keys are not canonical")
+            team_id = row["team_id"]
+            if isinstance(team_id, bool) or not isinstance(team_id, int) or team_id < 1:
+                raise ValueError("ledger publication team identity is invalid")
+            if team_id in seen_team_ids:
+                raise ValueError("ledger publication repeats a team")
+            seen_team_ids.add(team_id)
+            team_tricode = row["team_tricode"]
+            if (
+                not isinstance(team_tricode, str)
+                or team_tricode != NBA_TEAM_ID_TO_TRICODE.get(team_id)
+            ):
+                raise ValueError("ledger publication team identity is invalid")
+            game_ids = row["game_ids"]
+            if (
+                not isinstance(game_ids, list)
+                or any(not isinstance(game_id, str) or not game_id.strip() for game_id in game_ids)
+                or len(game_ids) != len(set(game_ids))
+                or row["game_count"] != len(game_ids)
+            ):
+                raise ValueError("ledger publication game set is invalid")
+            counts_value = row["counts"]
+            if not isinstance(counts_value, dict) or frozenset(counts_value) != expected_metrics:
+                raise ValueError("ledger publication metric taxonomy is invalid")
+            counts = {}
+            for key, value in counts_value.items():
+                if isinstance(value, bool):
+                    raise ValueError("ledger publication count is invalid")
+                number = float(value)
+                if not math.isfinite(number) or number < 0 or not number.is_integer():
+                    raise ValueError("ledger publication count is invalid")
+                counts[str(key)] = number
+            team_minutes = row["team_minutes"]
+            if isinstance(team_minutes, bool):
+                raise ValueError("ledger publication denominator is invalid")
+            team_minutes = float(team_minutes)
+            if not math.isfinite(team_minutes) or team_minutes <= 0:
+                raise ValueError("ledger publication denominator is invalid")
+            rows.append(LedgerTeamWindowRow(
+                team_id=team_id,
+                team_tricode=team_tricode,
+                game_ids=tuple(game_ids),
+                counts=counts,
+                team_minutes=team_minutes,
+            ))
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as error:
+            raise MatchupParityError("publication_payload_invalid") from error
+    if len(rows) != 30 or seen_team_ids != set(NBA_TEAM_ID_TO_TRICODE):
+        raise MatchupParityError("publication_payload_invalid")
+    return tuple(rows)
+
+
+def materialization_from_publication(
+    publication: MatchupPublication,
+    *,
+    surface: str,
+) -> MatchupMaterialization:
+    """Derive the provenance-bound ledger side from a verified publication."""
+
+    if surface not in _SURFACE_COUNT_KEYS:
+        raise MatchupParityError(f"unsupported matchup surface {surface}")
+    stat_to_metric = _SURFACE_COUNT_KEYS[surface]
+    facts = tuple(
+        TeamMatchupFact(
+            team_id=row.team_id,
+            base=surface,
+            slice_key=stat_key,
+            stat_key=stat_key,
+            raw_value=float(row.counts[metric]),
+            denominator_value=row.team_minutes,
+            denominator_unit="minutes",
+            provider="ledger",
+            game_ids=row.game_ids,
+        )
+        for row in publication.rows
+        for stat_key, metric in stat_to_metric.items()
+    )
+    return MatchupMaterialization(
+        season=publication.season,
+        window=_window_for_stream(publication.stream_key),
+        cutoff=publication.cutoff,
+        facts=facts,
+        observations=(TeamMatchupObservation(surface=surface, status="available"),),
+        game_ids_by_team={
+            row.team_id: frozenset(row.game_ids) for row in publication.rows
+        },
+        producer=PRODUCER_LEDGER,
+        manifest_id=publication.manifest_id,
+        event_catalog_publication_id=publication.event_catalog_publication_id,
+        event_catalog_checksum=publication.event_catalog_checksum,
+        publication_id=publication.publication_id,
+        payload_checksum=publication.payload_checksum,
+    )
+
+
+class LegacyMatchupSource(Protocol):
+    """Produce one legacy materializer output for a governed season/cutoff."""
+
+    def produce(
+        self,
+        *,
+        season: str,
+        window: str,
+        cutoff: datetime,
+        governance: Any,
+    ) -> MatchupMaterialization: ...
+
+
+class StoredLegacyMatchupSource:
+    """Read the legacy materializer's persisted output and bind it to authority.
+
+    The legacy provider-aggregate writer persists its facts into
+    ``team_matchup_facts`` under providers ``nba_stats``/``pbp_stats``.  This
+    source reads those actual rows and stamps the materialization with the
+    governed immutable authority and the exact governed game sets, so a later
+    synthetic document cannot stand in for the legacy materializer.
+    """
+
+    LEGACY_PROVIDERS = frozenset({"nba_stats", "pbp_stats"})
+
+    def __init__(self, repository) -> None:
+        self.repository = repository
+
+    def produce(
+        self,
+        *,
+        season: str,
+        window: str,
+        cutoff: datetime,
+        governance: Any,
+    ) -> MatchupMaterialization:
+        as_of = slate_date_for_instant(cutoff)
+        scope = TeamMatchupSnapshotScope(
+            season, as_of, 15 if window == "l15" else None
+        )
+        snapshot = self.repository.get_snapshot(scope)
+        facts = tuple(
+            fact for fact in snapshot.facts
+            if (
+                fact.provider in self.LEGACY_PROVIDERS
+                and fact.base in LEDGER_OWNED_SURFACES
+            )
+        )
+        observations = tuple(
+            observation for observation in snapshot.observations
+            if observation.surface in LEDGER_OWNED_SURFACES
+        )
+        for item in (*facts, *observations):
+            if item.cutoff is not None:
+                try:
+                    cutoff_matches = _aware(item.cutoff) == _aware(cutoff)
+                except MatchupParityError:
+                    cutoff_matches = False
+                if not cutoff_matches:
+                    raise MatchupParityError("legacy materialization scope mismatch")
+        # Provider rows are the legacy materializer's actual output.  Do not
+        # stamp the governed expectation onto them: a provider response that
+        # selected the wrong games must fail parity rather than be relabeled
+        # as the governed window.  A disagreement between rows for one team
+        # is represented as an empty set, which the comparator classifies as a
+        # hard game-set failure.
+        ids_by_team: dict[int, set[frozenset[str]]] = {}
+        for fact in facts:
+            ids_by_team.setdefault(int(fact.team_id), set()).add(
+                frozenset(str(game_id) for game_id in fact.game_ids)
+            )
+        game_ids_by_team = {
+            team_id: next(iter(game_sets)) if len(game_sets) == 1 else frozenset()
+            for team_id, game_sets in ids_by_team.items()
+        }
+        return MatchupMaterialization(
+            season=season,
+            window=window,
+            cutoff=cutoff,
+            facts=facts,
+            observations=observations,
+            game_ids_by_team=game_ids_by_team,
+            producer=PRODUCER_LEGACY,
+            manifest_id=governance.manifest_id,
+            event_catalog_publication_id=governance.event_catalog_publication_id,
+            event_catalog_checksum=governance.event_catalog_checksum,
+        )
+
+
+class LedgerGovernanceReader(Protocol):
+    """Resolve one exact immutable governed season/cutoff authority."""
+
+    def read_for_composition(self, season: str, cutoff: datetime) -> Any: ...
+
+
 def _facts_for_surface(
     facts: Iterable[TeamMatchupFact],
     *,
@@ -199,6 +632,20 @@ def _facts_for_surface(
         for fact in facts
         if fact.base == surface
     }
+
+
+def _duplicate_fact_keys(
+    facts: Iterable[TeamMatchupFact],
+    *,
+    surface: str,
+) -> frozenset[tuple[int, str]]:
+    counts: dict[tuple[int, str], int] = {}
+    for fact in facts:
+        if fact.base != surface:
+            continue
+        key = (int(fact.team_id), str(fact.stat_key))
+        counts[key] = counts.get(key, 0) + 1
+    return frozenset(key for key, count in counts.items() if count > 1)
 
 
 def _observation_for_surface(
@@ -227,13 +674,23 @@ def _integral_or_none(value: object) -> int | None:
 def _minutes(value: float | None, unit: str | None) -> float | None:
     if value is None or unit is None:
         return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
     if unit == "seconds":
-        return float(value) / 60.0
-    return float(value)
+        value /= 60.0
+    elif unit != "minutes":
+        return None
+    return value
 
 
-def _game_set_checksum(game_ids: Iterable[str]) -> str:
-    return LedgerLineage.for_game_ids(game_ids)
+def _aware(value: datetime) -> datetime:
+    if value is None or value.tzinfo is None or value.utcoffset() is None:
+        raise MatchupParityError("matchup parity requires an aware cutoff")
+    return assume_utc(value)
 
 
 def compare_matchup_materializations(
@@ -247,56 +704,105 @@ def compare_matchup_materializations(
 ) -> MatchupParityReport:
     """Compare two independently produced materializations for one surface.
 
-    Integer counts must be exactly equal; floating denominators and derived
-    per-48 rates use ``tolerance``.  Team identities and both sides' exact game
-    sets must equal the governed authority, every contracted metric must be
-    present on both sides, and both sides must report the surface available.
-    Any difference makes the report require adjudication.
+    Hard facts must be exactly equal or the report fails; only floating
+    denominators and derived per-48 rates admit ``tolerance`` and become
+    adjudicable semantic differences.  Both sides must cover exactly the
+    governed 30-team roster with every contracted metric, no extra teams or
+    metrics, exact governed game sets (L15 exactly 15 games per team), and an
+    available observation on both sides.
     """
 
-    if surface not in _COUNT_KEYS:
+    if surface not in _SURFACE_COUNT_KEYS:
         raise ValueError(f"unsupported matchup surface {surface}")
     if not math.isfinite(tolerance) or tolerance < 0:
         raise ValueError("tolerance must be finite and non-negative")
 
     expected = frozenset(int(team_id) for team_id in expected_team_ids)
-    if len(expected) != 30:
-        raise ValueError("expected_team_ids must name exactly 30 teams")
+    if expected != frozenset(NBA_TEAM_ID_TO_TRICODE):
+        raise ValueError("expected_team_ids must name exactly the canonical 30 teams")
 
     differences: list[MatchupParityDifference] = []
     window = legacy.window
 
-    # Cutoff alignment: both sides must describe the exact same aware cutoff.
-    cutoffs_aligned = (
-        legacy.cutoff is not None
-        and ledger.cutoff is not None
-        and legacy.cutoff.tzinfo is not None
-        and ledger.cutoff.tzinfo is not None
-        and legacy.cutoff == ledger.cutoff
-    )
+    # Scope: season, window, and exact aware cutoff must agree.
+    try:
+        cutoffs_aligned = (
+            legacy.cutoff is not None
+            and ledger.cutoff is not None
+            and _aware(legacy.cutoff) == _aware(ledger.cutoff)
+        )
+    except MatchupParityError:
+        cutoffs_aligned = False
     if not cutoffs_aligned:
         differences.append(MatchupParityDifference(
             window, surface, None, "cutoff", ledger.cutoff, legacy.cutoff,
             CLASSIFICATION_CUTOFF_MISMATCH,
         ))
-    if legacy.season != ledger.season:
+    if legacy.season != ledger.season or legacy.window != ledger.window:
         differences.append(MatchupParityDifference(
-            window, surface, None, "season", ledger.season, legacy.season,
-            CLASSIFICATION_CUTOFF_MISMATCH,
+            window, surface, None, "scope",
+            (ledger.season, ledger.window), (legacy.season, legacy.window),
+            CLASSIFICATION_SCOPE_MISMATCH,
         ))
-    if legacy.window != ledger.window:
+    legacy_authority = (
+        legacy.manifest_id,
+        legacy.event_catalog_publication_id,
+        legacy.event_catalog_checksum,
+    )
+    ledger_authority = (
+        ledger.manifest_id,
+        ledger.event_catalog_publication_id,
+        ledger.event_catalog_checksum,
+    )
+    if (
+        any(value is not None for value in (*legacy_authority, *ledger_authority))
+        and (
+            legacy_authority != ledger_authority
+            or any(value is None or value == "" for value in legacy_authority)
+            or any(value is None or value == "" for value in ledger_authority)
+        )
+    ):
         differences.append(MatchupParityDifference(
-            window, surface, None, "window", ledger.window, legacy.window,
-            CLASSIFICATION_CUTOFF_MISMATCH,
+            window, surface, None, "authority",
+            ledger_authority, legacy_authority,
+            CLASSIFICATION_AUTHORITY_MISMATCH,
+        ))
+    if ledger.producer == PRODUCER_LEDGER and (
+        not ledger.publication_id or not ledger.payload_checksum
+    ):
+        differences.append(MatchupParityDifference(
+            window, surface, None, "ledger_publication",
+            ledger.publication_id, ledger.payload_checksum,
+            CLASSIFICATION_AUTHORITY_MISMATCH,
         ))
 
     legacy_facts = _facts_for_surface(legacy.facts, surface=surface)
     ledger_facts = _facts_for_surface(ledger.facts, surface=surface)
+    for team_id, stat_key in sorted(
+        _duplicate_fact_keys(legacy.facts, surface=surface)
+    ):
+        differences.append(MatchupParityDifference(
+            window, surface, team_id, stat_key, "duplicate", "duplicate",
+            CLASSIFICATION_DUPLICATE_METRIC,
+        ))
+    for team_id, stat_key in sorted(
+        _duplicate_fact_keys(ledger.facts, surface=surface)
+    ):
+        differences.append(MatchupParityDifference(
+            window, surface, team_id, stat_key, "duplicate", "duplicate",
+            CLASSIFICATION_DUPLICATE_METRIC,
+        ))
+    for fact in (*legacy.facts, *ledger.facts):
+        if fact.base == surface and fact.slice_key != fact.stat_key:
+            differences.append(MatchupParityDifference(
+                window, surface, int(fact.team_id),
+                f"{fact.slice_key}.{fact.stat_key}", "present", None,
+                CLASSIFICATION_EXTRA_METRIC,
+            ))
     legacy_teams = {team_id for team_id, _ in legacy_facts}
     ledger_teams = {team_id for team_id, _ in ledger_facts}
 
-    # League-Complete team coverage: both sides must cover the exact governed
-    # 30-team roster, and the identity sets must match.
+    # League-Complete coverage: exactly the governed 30 teams, no extras.
     league_complete = legacy_teams == expected and ledger_teams == expected
     team_identities_exact = legacy_teams == ledger_teams
     if not league_complete:
@@ -316,9 +822,18 @@ def compare_matchup_materializations(
             window, surface, team_id, "identity", "present", None,
             CLASSIFICATION_MISSING_LEGACY_TEAM,
         ))
+    for team_id in sorted(legacy_teams - expected):
+        differences.append(MatchupParityDifference(
+            window, surface, team_id, "identity", None, "present",
+            CLASSIFICATION_EXTRA_TEAM,
+        ))
+    for team_id in sorted(ledger_teams - expected):
+        differences.append(MatchupParityDifference(
+            window, surface, team_id, "identity", "present", None,
+            CLASSIFICATION_EXTRA_TEAM,
+        ))
 
-    # Surface presence: both sides must carry facts for the surface.  A
-    # both-missing surface, or a surface present on only one side, cannot pass.
+    # Surface presence: both sides must carry facts for the surface.
     if not legacy_facts or not ledger_facts:
         differences.append(MatchupParityDifference(
             window, surface, None, "surface",
@@ -327,17 +842,33 @@ def compare_matchup_materializations(
             CLASSIFICATION_MISSING_SURFACE,
         ))
 
-    # Exact governed game sets: each side's per-team selection must equal the
-    # governed authority and each other, proven by byte-identical checksums.
+    # Exact governed game sets: no missing or extra teams or game keys, and L15
+    # exactly 15 games per team.  Byte-identical checksums prove equality.
     governed_game_ids = {
         int(team_id): frozenset(str(game_id) for game_id in game_ids)
         for team_id, game_ids in expected_game_ids_by_team.items()
     }
     game_sets_exact = True
+    if set(governed_game_ids) != expected:
+        game_sets_exact = False
+        differences.append(MatchupParityDifference(
+            window, surface, None, "game_set_keys",
+            sorted(governed_game_ids), sorted(expected),
+            CLASSIFICATION_GAME_SET_MISMATCH,
+        ))
     for team_id in sorted(expected):
         legacy_ids = legacy.game_ids_by_team.get(team_id, frozenset())
         ledger_ids = ledger.game_ids_by_team.get(team_id, frozenset())
         governed_ids = governed_game_ids.get(team_id, frozenset())
+        if window == "l15" and (
+            len(governed_ids) != 15 or len(legacy_ids) != 15 or len(ledger_ids) != 15
+        ):
+            game_sets_exact = False
+            differences.append(MatchupParityDifference(
+                window, surface, team_id, "l15_game_count",
+                (len(ledger_ids), len(ledger_ids)), (len(governed_ids), len(legacy_ids)),
+                CLASSIFICATION_L15_GAME_COUNT_MISMATCH,
+            ))
         if not (legacy_ids == ledger_ids == governed_ids):
             game_sets_exact = False
             differences.append(MatchupParityDifference(
@@ -345,11 +876,21 @@ def compare_matchup_materializations(
                 sorted(ledger_ids), sorted(legacy_ids),
                 CLASSIFICATION_GAME_SET_MISMATCH,
             ))
+    for team_id in sorted(set(legacy.game_ids_by_team) - expected):
+        differences.append(MatchupParityDifference(
+            window, surface, team_id, "game_ids", None, "present",
+            CLASSIFICATION_EXTRA_TEAM,
+        ))
+    for team_id in sorted(set(ledger.game_ids_by_team) - expected):
+        differences.append(MatchupParityDifference(
+            window, surface, team_id, "game_ids", "present", None,
+            CLASSIFICATION_EXTRA_TEAM,
+        ))
     if legacy.game_ids_by_team and ledger.game_ids_by_team:
-        legacy_checksum = _game_set_checksum(
+        legacy_checksum = LedgerLineage.for_game_ids(
             game_id for ids in legacy.game_ids_by_team.values() for game_id in ids
         )
-        ledger_checksum = _game_set_checksum(
+        ledger_checksum = LedgerLineage.for_game_ids(
             game_id for ids in ledger.game_ids_by_team.values() for game_id in ids
         )
         if legacy_checksum != ledger_checksum:
@@ -362,21 +903,21 @@ def compare_matchup_materializations(
 
     # Per-team metrics: every contracted metric must be present on both sides,
     # integer counts exactly equal, denominators and derived rates tolerant.
+    stat_to_metric = _SURFACE_COUNT_KEYS[surface]
     compared = 0
-    metric_keys = _COUNT_KEYS[surface]
     rates_by_side: dict[str, dict[str, dict[int, float]]] = {
         "ledger": {},
         "legacy": {},
     }
     shared_teams = sorted(ledger_teams & legacy_teams)
-    for metric in metric_keys:
+    for stat_key in stat_to_metric:
         for team_id in shared_teams:
-            key = (team_id, metric)
+            key = (team_id, stat_key)
             ledger_fact = ledger_facts.get(key)
             legacy_fact = legacy_facts.get(key)
             if ledger_fact is None or legacy_fact is None:
                 differences.append(MatchupParityDifference(
-                    window, surface, team_id, metric,
+                    window, surface, team_id, stat_key,
                     "present" if ledger_fact is not None else None,
                     "present" if legacy_fact is not None else None,
                     CLASSIFICATION_MISSING_METRIC,
@@ -387,13 +928,13 @@ def compare_matchup_materializations(
             legacy_count = _integral_or_none(legacy_fact.raw_value)
             if ledger_count is None or legacy_count is None:
                 differences.append(MatchupParityDifference(
-                    window, surface, team_id, metric,
+                    window, surface, team_id, stat_key,
                     ledger_fact.raw_value, legacy_fact.raw_value,
                     CLASSIFICATION_NON_INTEGER_COUNT,
                 ))
             elif ledger_count != legacy_count:
                 differences.append(MatchupParityDifference(
-                    window, surface, team_id, metric,
+                    window, surface, team_id, stat_key,
                     ledger_count, legacy_count,
                     CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
                 ))
@@ -403,41 +944,58 @@ def compare_matchup_materializations(
             legacy_minutes = _minutes(
                 legacy_fact.denominator_value, legacy_fact.denominator_unit
             )
-            denominator_matches = (
-                ledger_minutes is not None
-                and legacy_minutes is not None
-                and math.isclose(
-                    ledger_minutes, legacy_minutes,
-                    rel_tol=tolerance, abs_tol=tolerance,
-                )
-            )
-            if not denominator_matches:
+            if ledger_minutes is None or legacy_minutes is None:
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, "denominator_minutes",
                     ledger_minutes, legacy_minutes,
-                    CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
+                    CLASSIFICATION_INVALID_DENOMINATOR,
                 ))
-            ledger_rate = _per48(ledger_fact.raw_value, ledger_minutes)
-            legacy_rate = _per48(legacy_fact.raw_value, legacy_minutes)
+                ledger_rate = legacy_rate = None
+            else:
+                denominator_matches = math.isclose(
+                    ledger_minutes, legacy_minutes,
+                    rel_tol=tolerance, abs_tol=tolerance,
+                )
+                if not denominator_matches:
+                    differences.append(MatchupParityDifference(
+                        window, surface, team_id, "denominator_minutes",
+                        ledger_minutes, legacy_minutes,
+                        CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
+                    ))
+                ledger_rate = _per48(ledger_fact.raw_value, ledger_minutes)
+                legacy_rate = _per48(legacy_fact.raw_value, legacy_minutes)
             if ledger_rate is not None and legacy_rate is not None and not math.isclose(
                 ledger_rate, legacy_rate, rel_tol=tolerance, abs_tol=tolerance
             ):
                 differences.append(MatchupParityDifference(
-                    window, surface, team_id, f"per48.{metric}",
+                    window, surface, team_id, f"per48.{stat_key}",
                     ledger_rate, legacy_rate,
                     CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
                 ))
             if ledger_rate is not None:
-                rates_by_side["ledger"].setdefault(metric, {})[team_id] = ledger_rate
+                rates_by_side["ledger"].setdefault(stat_key, {})[team_id] = ledger_rate
             if legacy_rate is not None:
-                rates_by_side["legacy"].setdefault(metric, {})[team_id] = legacy_rate
+                rates_by_side["legacy"].setdefault(stat_key, {})[team_id] = legacy_rate
 
-    # Deterministic rankings: for each metric both sides derive the same
-    # competition ranks (ascending, ties 1, 1, 3) from their per-48 values.
+    # Extra metrics: a fact whose stat key is not a contracted metric.
+    for (team_id, stat_key) in sorted(ledger_facts):
+        if stat_key not in stat_to_metric:
+            differences.append(MatchupParityDifference(
+                window, surface, team_id, stat_key, "present", None,
+                CLASSIFICATION_EXTRA_METRIC,
+            ))
+    for (team_id, stat_key) in sorted(legacy_facts):
+        if stat_key not in stat_to_metric:
+            differences.append(MatchupParityDifference(
+                window, surface, team_id, stat_key, None, "present",
+                CLASSIFICATION_EXTRA_METRIC,
+            ))
+
+    # Deterministic rankings per metric (ascending, ties 1, 1, 3).
     rankings_deterministic = True
-    for metric in metric_keys:
-        ledger_metric = rates_by_side["ledger"].get(metric, {})
-        legacy_metric = rates_by_side["legacy"].get(metric, {})
+    for stat_key in stat_to_metric:
+        ledger_metric = rates_by_side["ledger"].get(stat_key, {})
+        legacy_metric = rates_by_side["legacy"].get(stat_key, {})
         if not ledger_metric and not legacy_metric:
             continue
         ledger_ranks = competition_ranks(ledger_metric, descending=False)
@@ -445,13 +1003,12 @@ def compare_matchup_materializations(
         if ledger_ranks != legacy_ranks:
             rankings_deterministic = False
             differences.append(MatchupParityDifference(
-                window, surface, None, f"competition_rank.{metric}",
+                window, surface, None, f"competition_rank.{stat_key}",
                 ledger_ranks, legacy_ranks,
                 CLASSIFICATION_RANKING_DIFFERENCE,
             ))
 
-    # Independent per-surface availability: both sides must report the surface
-    # available.  An unavailable or missing observation is a real difference.
+    # Independent per-surface availability: BOTH sides must be available.
     legacy_observation = _observation_for_surface(legacy.observations, surface=surface)
     ledger_observation = _observation_for_surface(ledger.observations, surface=surface)
     legacy_available = (
@@ -460,7 +1017,7 @@ def compare_matchup_materializations(
     ledger_available = (
         ledger_observation is not None and ledger_observation.status == "available"
     )
-    if legacy_available != ledger_available:
+    if not legacy_available or not ledger_available:
         differences.append(MatchupParityDifference(
             window, surface, None, "availability",
             ledger_observation.status if ledger_observation else None,
@@ -481,96 +1038,149 @@ def compare_matchup_materializations(
         cutoffs_aligned=cutoffs_aligned,
         rankings_deterministic=rankings_deterministic,
         compared_count=compared,
+        ledger_publication_id=ledger.publication_id,
+        ledger_payload_checksum=ledger.payload_checksum,
         differences=tuple(differences),
     )
-
-
-class LedgerGovernanceReader(Protocol):
-    """Resolve one exact immutable governed season/cutoff authority."""
-
-    def read_for_composition(self, season: str, cutoff: datetime) -> Any: ...
 
 
 class MatchupParityRunner:
     """Run one bounded dual-run against the immutable governed authority.
 
-    The runner resolves the exact governed team roster and game sets from the
-    injected governance reader -- the checksummed immutable Event Catalog
-    publication bound to the active manifest, never the mutable stored event
-    table -- and compares two independently produced materializations without
-    reading or advancing a ``PublicationPointer``.  Optional ``publications``
-    record per-stream parity artifacts bound to their exact publication and
-    payload checksum.
+    The runner resolves the exact governed roster and game sets from the
+    injected governance reader, produces the legacy side from the injected
+    legacy materializer seam, derives the ledger side from the verified
+    candidate publications, and records per-stream artifacts bound to their
+    exact publication and payload checksum.  It never reads or advances a
+    ``PublicationPointer`` and refuses to record a report with hard failures.
     """
 
     def __init__(
         self,
-        engine,
+        engine: Engine,
         *,
-        governance: LedgerGovernanceReader,
+        governance,
+        legacy_source: LegacyMatchupSource | None = None,
         parity_repository=None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.engine = engine
         self.governance = governance
+        self.legacy_source = legacy_source
         from app.services.ledger_parity import LedgerParityArtifactRepository
 
         self._parity_repository = parity_repository or LedgerParityArtifactRepository(
             engine, clock=clock
         )
+        self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
 
     def run(
         self,
-        legacy: MatchupMaterialization,
-        ledger: MatchupMaterialization,
+        season: str,
+        window: str,
         *,
-        publications: Mapping[str, tuple[str, str]] | None = None,
+        cutoff: datetime,
+        legacy: MatchupMaterialization | None = None,
+        publications: Mapping[str, str] | None = None,
     ) -> tuple[MatchupParityReport, ...]:
         """Compare every ledger-owned surface and optionally record artifacts.
 
-        ``publications`` maps a stream key to its ``(publication_id,
-        payload_checksum)``.  Only a stream key present in the mapping records
-        an artifact, so a caller can run one surface independently.
+        ``publications`` maps a stream key to its candidate publication ID.
+        The legacy side must be produced by the injected materializer source;
+        caller-supplied materialization documents are intentionally rejected.
         """
 
-        if legacy.season != ledger.season:
-            raise ValueError("materializations describe different seasons")
-        if legacy.window != ledger.window:
-            raise ValueError("materializations describe different windows")
-        if legacy.cutoff != ledger.cutoff:
-            raise ValueError("materializations describe different cutoffs")
-        governance = self.governance.read_for_composition(legacy.season, legacy.cutoff)
+        if cutoff is None or cutoff.tzinfo is None:
+            raise MatchupParityError("matchup parity requires an aware immutable cutoff")
+        if window not in {"season", "l15"}:
+            raise MatchupParityError("matchup parity window is invalid")
+        if legacy is not None:
+            raise MatchupParityError("legacy materializer source is required")
+        governance = self.governance.read_for_composition(season, cutoff)
+        if self.legacy_source is None:
+            raise MatchupParityError("legacy materializer source is required")
+        legacy = self.legacy_source.produce(
+            season=season, window=window, cutoff=cutoff, governance=governance,
+        )
+        self._validate_legacy_provenance(legacy, season, window, cutoff, governance)
         expected_team_ids = frozenset(int(team_id) for team_id in governance.team_ids)
+        if expected_team_ids != frozenset(NBA_TEAM_ID_TO_TRICODE):
+            raise MatchupParityError("governed team roster is not the canonical 30-team set")
         expected_game_ids_by_team = (
             governance.expected_l15_game_ids
-            if legacy.window == "l15"
+            if window == "l15"
             else governance.expected_season_game_ids
         )
-        reports = tuple(
-            compare_matchup_materializations(
-                legacy,
-                ledger,
-                surface=surface,
-                expected_team_ids=expected_team_ids,
-                expected_game_ids_by_team=expected_game_ids_by_team,
+        expected_streams = {
+            matchup_stream_key(surface, window) for surface in LEDGER_OWNED_SURFACES
+        }
+        supplied_streams = set(publications or {})
+        if supplied_streams != expected_streams:
+            raise MatchupParityError(
+                "both traditional and assist matchup publications are required"
             )
-            for surface in LEDGER_OWNED_SURFACES
-        )
-        if publications:
-            for report in reports:
-                stream_key = matchup_stream_key(report.surface, report.window)
-                publication = publications.get(stream_key)
-                if publication is None:
+        reports: list[MatchupParityReport] = []
+        with self._session_factory() as session, session.begin():
+            for surface in LEDGER_OWNED_SURFACES:
+                stream_key = matchup_stream_key(surface, window)
+                publication_id = (publications or {}).get(stream_key)
+                if publication_id is None:
                     continue
-                publication_id, payload_checksum = publication
-                self._parity_repository.record_matchup_parity(
-                    stream_key,
-                    cutoff=report.cutoff,
-                    report=report,
+                publication = resolve_matchup_publication(
+                    session,
                     publication_id=publication_id,
-                    payload_checksum=payload_checksum,
+                    stream_key=stream_key,
+                    season=season,
+                    cutoff=cutoff,
+                    manifest_id=governance.manifest_id,
+                    event_catalog_publication_id=(
+                        governance.event_catalog_publication_id
+                    ),
+                    event_catalog_checksum=governance.event_catalog_checksum,
                 )
-        return reports
+                ledger = materialization_from_publication(publication, surface=surface)
+                report = compare_matchup_materializations(
+                    legacy,
+                    ledger,
+                    surface=surface,
+                    expected_team_ids=expected_team_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team,
+                )
+                reports.append(report)
+                if not report.hard_failure:
+                    self._parity_repository.record_matchup_parity(
+                        stream_key,
+                        cutoff=cutoff,
+                        report=report,
+                        publication_id=publication.publication_id,
+                        payload_checksum=publication.payload_checksum,
+                        session=session,
+                    )
+        return tuple(reports)
+
+    @staticmethod
+    def _validate_legacy_provenance(
+        legacy: MatchupMaterialization,
+        season: str,
+        window: str,
+        cutoff: datetime,
+        governance,
+    ) -> None:
+        if legacy.producer != PRODUCER_LEGACY:
+            raise MatchupParityError("legacy materialization producer mismatch")
+        try:
+            cutoff_matches = _aware(legacy.cutoff) == _aware(cutoff)
+        except MatchupParityError:
+            cutoff_matches = False
+        if legacy.season != season or legacy.window != window or not cutoff_matches:
+            raise MatchupParityError("legacy materialization scope mismatch")
+        if (
+            legacy.manifest_id != governance.manifest_id
+            or legacy.event_catalog_publication_id
+            != governance.event_catalog_publication_id
+            or legacy.event_catalog_checksum != governance.event_catalog_checksum
+        ):
+            raise MatchupParityError("legacy materialization authority mismatch")
 
 
 def _per48(raw_value: float | None, minutes: float | None) -> float | None:
@@ -582,12 +1192,18 @@ def _per48(raw_value: float | None, minutes: float | None) -> float | None:
 
 
 __all__ = [
+    "CLASSIFICATION_AUTHORITY_MISMATCH",
     "CLASSIFICATION_AVAILABILITY_DIFFERENCE",
     "CLASSIFICATION_CUTOFF_MISMATCH",
     "CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED",
     "CLASSIFICATION_DERIVED_RATE_DIFFERENCE",
+    "CLASSIFICATION_DUPLICATE_METRIC",
+    "CLASSIFICATION_EXTRA_METRIC",
+    "CLASSIFICATION_EXTRA_TEAM",
     "CLASSIFICATION_GAME_SET_MISMATCH",
     "CLASSIFICATION_INTEGER_COUNT_DIFFERENCE",
+    "CLASSIFICATION_INVALID_DENOMINATOR",
+    "CLASSIFICATION_L15_GAME_COUNT_MISMATCH",
     "CLASSIFICATION_LEAGUE_INCOMPLETE",
     "CLASSIFICATION_MISSING_LEGACY_TEAM",
     "CLASSIFICATION_MISSING_LEDGER_TEAM",
@@ -595,14 +1211,26 @@ __all__ = [
     "CLASSIFICATION_MISSING_SURFACE",
     "CLASSIFICATION_NON_INTEGER_COUNT",
     "CLASSIFICATION_RANKING_DIFFERENCE",
+    "CLASSIFICATION_SCOPE_MISMATCH",
+    "HARD_CLASSIFICATIONS",
     "LEDGER_OWNED_SURFACES",
+    "LegacyMatchupSource",
     "LedgerGovernanceReader",
+    "LedgerTeamWindowRow",
     "MATCHUP_PARITY_TOLERANCE",
     "MatchupMaterialization",
     "MatchupParityDifference",
+    "MatchupParityError",
     "MatchupParityReport",
     "MatchupParityRunner",
+    "MatchupPublication",
+    "PRODUCER_LEDGER",
+    "PRODUCER_LEGACY",
+    "SOFT_CLASSIFICATIONS",
+    "StoredLegacyMatchupSource",
     "compare_matchup_materializations",
-    "matchup_stream_key",
+    "materialization_from_publication",
     "matchup_surface_stream_keys",
+    "matchup_stream_key",
+    "resolve_matchup_publication",
 ]

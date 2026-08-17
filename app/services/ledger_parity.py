@@ -14,9 +14,11 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.models.canonical_game_ledger import LedgerParityArtifact
-from app.models.collection_control import AuditEvent
+from app.models.collection_control import AuditEvent, PublicationVersion
 
 from app.domain.team_matchup_taxonomy import matchup_stream_key
+from app.domain.publication_integrity import publication_payload_matches_checksum
+from app.domain.utc import assume_utc
 from app.services.canonical_game_ledger import CanonicalGame, PlayerGameFact, validate_canonical_season
 from app.services.ledger_derivations import (
     PlayerPer36Fact,
@@ -24,6 +26,80 @@ from app.services.ledger_derivations import (
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
 )
+from app.services.publication_authority import verify_publication_authority
+from app.services.team_matchup_publications import PublicationGovernanceUnavailable
+
+
+_MATCHUP_STREAMS = frozenset({
+    "traditional_opponent_season",
+    "traditional_opponent_l15",
+    "assist_locations_season",
+    "assist_locations_l15",
+})
+_MATCHUP_HARD_CLASSIFICATIONS = frozenset({
+    "league_incomplete",
+    "missing_legacy_team",
+    "missing_ledger_team",
+    "extra_team",
+    "game_set_mismatch",
+    "integer_count_difference",
+    "non_integer_count",
+    "availability_difference",
+    "cutoff_mismatch",
+    "scope_mismatch",
+    "missing_surface",
+    "missing_metric",
+    "extra_metric",
+    "duplicate_metric",
+    "l15_game_count_mismatch",
+    "authority_mismatch",
+    "invalid_denominator",
+})
+_MATCHUP_SOFT_CLASSIFICATIONS = frozenset({
+    "denominator_tolerance_exceeded",
+    "derived_rate_difference",
+    "ranking_difference",
+})
+
+
+def matchup_parity_artifact_is_activatable(
+    artifact: LedgerParityArtifact,
+    *,
+    stream_key: str | None = None,
+) -> bool:
+    """Return whether an artifact contains only exact/soft matchup evidence."""
+
+    if artifact.stream_key not in _MATCHUP_STREAMS:
+        return True
+    if stream_key is not None and artifact.stream_key != stream_key:
+        return False
+    try:
+        document = json.loads(artifact.report)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    if document.get("status") not in {"exact", "adjudication_required"}:
+        return False
+    differences = document.get("differences", ())
+    if not isinstance(differences, list):
+        return False
+    classifications = []
+    for difference in differences:
+        if not isinstance(difference, Mapping):
+            return False
+        classification = difference.get("classification")
+        if classification not in (
+            _MATCHUP_HARD_CLASSIFICATIONS | _MATCHUP_SOFT_CLASSIFICATIONS
+        ):
+            return False
+        classifications.append(classification)
+    if document["status"] == "exact":
+        return not classifications
+    return bool(classifications) and not any(
+        classification in _MATCHUP_HARD_CLASSIFICATIONS
+        for classification in classifications
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +195,16 @@ class LedgerParityArtifactRepository:
 
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
+        if getattr(report, "hard_failure", False):
+            raise ValueError("matchup parity report contains non-adjudicable hard failures")
+        known_classifications = (
+            _MATCHUP_SOFT_CLASSIFICATIONS | _MATCHUP_HARD_CLASSIFICATIONS
+        )
+        if any(
+            getattr(difference, "classification", None) not in known_classifications
+            for difference in getattr(report, "differences", ())
+        ):
+            raise ValueError("matchup parity report contains an unknown classification")
         expected_stream_key = matchup_stream_key(report.surface, report.window)
         if stream_key != expected_stream_key:
             raise ValueError(
@@ -127,8 +213,24 @@ class LedgerParityArtifactRepository:
             )
         if cutoff is None or cutoff.tzinfo is None:
             raise ValueError("matchup parity requires an aware immutable cutoff")
-        if report.cutoff is None or report.cutoff != cutoff:
+        if (
+            report.cutoff is None
+            or report.cutoff.tzinfo is None
+            or assume_utc(report.cutoff) != assume_utc(cutoff)
+        ):
             raise ValueError("matchup parity cutoff does not match the report cutoff")
+        if getattr(report, "ledger_publication_id", None) not in {None, publication_id}:
+            raise ValueError("matchup parity publication does not match the report publication")
+        if getattr(report, "ledger_payload_checksum", None) not in {None, payload_checksum}:
+            raise ValueError("matchup parity checksum does not match the report publication")
+        self._verify_matchup_candidate(
+            stream_key,
+            report=report,
+            publication_id=publication_id,
+            payload_checksum=payload_checksum,
+            session=session,
+            connection=connection,
+        )
         row = LedgerParityArtifact(
             artifact_id=str(uuid4()),
             publication_id=publication_id,
@@ -142,6 +244,76 @@ class LedgerParityArtifactRepository:
         )
         self._insert_artifact(row, session=session, connection=connection)
         return row
+
+    def _verify_matchup_candidate(
+        self,
+        stream_key: str,
+        *,
+        report,
+        publication_id: str,
+        payload_checksum: str,
+        session: Session | None,
+        connection: Connection | None,
+    ) -> None:
+        """Bind matchup evidence to the actual immutable candidate row."""
+
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
+        if session is not None:
+            publication = session.get(PublicationVersion, publication_id)
+            self._check_matchup_candidate(
+                publication, stream_key, report, payload_checksum
+            )
+            self._verify_matchup_authority(session, publication)
+            return
+        if connection is not None:
+            with Session(bind=connection) as authority_session:
+                publication = authority_session.get(PublicationVersion, publication_id)
+                self._check_matchup_candidate(
+                    publication, stream_key, report, payload_checksum
+                )
+                self._verify_matchup_authority(authority_session, publication)
+            return
+        with Session(self.engine) as owned_session:
+            publication = owned_session.get(PublicationVersion, publication_id)
+            self._check_matchup_candidate(
+                publication, stream_key, report, payload_checksum
+            )
+            self._verify_matchup_authority(owned_session, publication)
+
+    @staticmethod
+    def _verify_matchup_authority(session, publication) -> None:
+        try:
+            verify_publication_authority(session, publication)
+        except PublicationGovernanceUnavailable as error:
+            raise ValueError("matchup parity candidate authority is not exact") from error
+
+    @staticmethod
+    def _check_matchup_candidate(
+        publication,
+        stream_key: str,
+        report,
+        payload_checksum: str,
+    ) -> None:
+        if publication is None:
+            raise ValueError("matchup parity candidate publication not found")
+        def get_value(name):
+            return (
+                getattr(publication, name)
+                if hasattr(publication, name)
+                else publication.get(name)
+            )
+        if (
+            get_value("stream_key") != stream_key
+            or get_value("season") != report.season
+            or get_value("status") != "candidate"
+            or assume_utc(get_value("cutoff")) != assume_utc(report.cutoff)
+            or get_value("checksum") != payload_checksum
+            or not publication_payload_matches_checksum(
+                get_value("payload"), get_value("checksum")
+            )
+        ):
+            raise ValueError("matchup parity candidate publication is not exact")
 
     def _insert_artifact(
         self,
@@ -190,6 +362,8 @@ class LedgerParityArtifactRepository:
             row = session.get(LedgerParityArtifact, artifact_id)
             if row is None:
                 raise ValueError("parity artifact not found")
+            if decision == "approved" and not matchup_parity_artifact_is_activatable(row):
+                raise ValueError("hard matchup parity failures cannot be approved")
             row.decision = decision
             row.adjudicated_by = actor
             row.adjudicated_at = now
@@ -591,6 +765,7 @@ def _season_traditional_opponent(
 
 __all__ = [
     "LedgerParityArtifactRepository",
+    "matchup_parity_artifact_is_activatable",
     "LegacyParityDiagnosticReader",
     "LedgerParityReport",
     "SemanticDifference",
