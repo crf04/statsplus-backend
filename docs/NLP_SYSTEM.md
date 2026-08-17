@@ -76,13 +76,16 @@ Common optional settings:
 LLM_MODEL=gpt-4o-mini
 LLM_TEMPERATURE=0
 LLM_MAX_TOKENS=512
-LLM_TIMEOUT=10.0
-LLM_MAX_RETRIES=3
+LLM_TIMEOUT=8.0
+LLM_MAX_RETRIES=1
 ENABLE_LLM_FALLBACK=True
 LLM_CONFIDENCE_THRESHOLD=0.7
 ```
 
 If the OpenAI client cannot initialize or a call fails, the service logs the failure and returns the NLP result when available.
+The default fallback budget is one eight-second attempt. Natural-language
+parsing is optional enrichment, so retrying inside a public request must not
+hold the deterministic result for tens of seconds.
 
 ## Supported concepts
 

@@ -416,6 +416,18 @@ def test_settings_parse_env_values(monkeypatch):
     assert settings.llm.enable_fallback is True
 
 
+def test_llm_fallback_defaults_to_one_bounded_attempt(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "development")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///nba_play_types.db")
+    monkeypatch.delenv("LLM_TIMEOUT", raising=False)
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+
+    settings = load_settings()
+
+    assert settings.llm.timeout_seconds == 8.0
+    assert settings.llm.max_retries == 1
+
+
 def test_settings_parse_athlete_catalog_freshness_window(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "testing")
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")

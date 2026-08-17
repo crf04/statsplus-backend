@@ -1252,7 +1252,8 @@ class BaseQueryParser:
         Returns:
             Tuple[Optional[str], Optional[int]]: (time_period, game_count) such as ("recent", 10) or ("season", None).
         Implementation details:
-            - Handles patterns like "last 10 games", "this season", "this month".
+            - Handles patterns like "last 10 games", "this season", "this year",
+              and "this month".
         """
         query_lower = query.lower()
         game_patterns = [
@@ -1277,7 +1278,7 @@ class BaseQueryParser:
                 except Exception:
                     pass
         season_patterns = [
-            r'(?:this|current)\s+season',
+            r'(?:this|current)\s+(?:season|year)',
             r'season',
             r'\d{4}-\d{2,4}',
             r'\d{4}/\d{2,4}'
@@ -1939,7 +1940,7 @@ class BaseQueryParser:
             
             # Track season patterns
             season_patterns = [
-                r'(?:this|current)\s+season',
+                r'(?:this|current)\s+(?:season|year)',
                 r'season',
                 r'\d{4}-\d{2,4}',
                 r'\d{4}/\d{2,4}'

@@ -289,8 +289,8 @@ class LLMSettings(BaseModel):
     model: str = "gpt-4o-mini"
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=512, ge=1)
-    timeout_seconds: float = Field(default=10.0, gt=0)
-    max_retries: int = Field(default=3, ge=0)
+    timeout_seconds: float = Field(default=8.0, gt=0)
+    max_retries: int = Field(default=1, ge=1)
     enable_fallback: bool = False
     confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
 
@@ -719,8 +719,8 @@ def _build_settings(
         model=reader.text("LLM_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
         temperature=reader.decimal("LLM_TEMPERATURE", 0.0),
         max_tokens=reader.integer("LLM_MAX_TOKENS", 512),
-        timeout_seconds=reader.decimal("LLM_TIMEOUT", 10.0),
-        max_retries=reader.integer("LLM_MAX_RETRIES", 3),
+        timeout_seconds=reader.decimal("LLM_TIMEOUT", 8.0),
+        max_retries=reader.integer("LLM_MAX_RETRIES", 1),
         # The optional fallback is safe by default: an absent key disables it
         # even when an old .env file still says ENABLE_LLM_FALLBACK=true.
         enable_fallback=requested_llm_fallback and bool(api_key),
