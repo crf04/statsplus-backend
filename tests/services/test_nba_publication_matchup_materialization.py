@@ -1355,6 +1355,37 @@ def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
     )
 
 
+def test_direct_publication_query_preserves_future_cutoff_failure_provenance(
+    tmp_path,
+):
+    engine = _engine(tmp_path)
+    repository = TeamMatchupRepository(engine)
+    stream_key = "exact_shot_zones_opponent_season"
+    future_cutoff = "2025-10-16T00:00:00+00:00"
+    window = TeamMatchupQueryService(
+        repository,
+        publication_reader=_reader(
+            cutoff_by_stream={stream_key: future_cutoff},
+            freshness_by_stream={stream_key: "fresh"},
+        ),
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+
+    observation = next(
+        item for item in window.observations if item.surface == "shot_zones"
+    )
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_cutoff_after_as_of"
+    assert observation.publication == PublicationLineage(
+        publication_id=f"publication-{stream_key}",
+        cutoff=future_cutoff,
+        freshness="fresh",
+        version=2,
+    )
+    assert not any(
+        metric.base == "shot_zones" for metric in window.league_metrics
+    )
+
+
 def test_l15_query_without_governance_fails_closed(tmp_path):
     engine = _engine(tmp_path)
     repository = TeamMatchupRepository(

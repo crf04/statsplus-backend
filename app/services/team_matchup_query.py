@@ -244,6 +244,7 @@ class TeamMatchupQueryService:
                     status="unavailable",
                     unavailable_reason=cutoff_reason,
                 )
+                active[base] = read
             if not read.available:
                 base_windows[base] = None
                 continue
