@@ -3106,6 +3106,37 @@ class PublicationService(_SessionService):
                     )
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
+            if candidate is not None and row.provider == "ledger":
+                lineage_rows = session.execute(select(
+                    PublicationObservation.observation_id,
+                    PublicationObservation.slice_key,
+                    CollectionObservation.scope,
+                ).join(
+                    CollectionObservation,
+                    CollectionObservation.observation_id
+                    == PublicationObservation.observation_id,
+                ).where(
+                    PublicationObservation.publication_id
+                    == candidate.publication_id,
+                    PublicationObservation.role.in_((
+                        "completeness_evidence",
+                        "ledger_game",
+                    )),
+                )).all()
+                provenance = {}
+                for observation_id, slice_key, scope_json in lineage_rows:
+                    scope = _safe_json_mapping(scope_json)
+                    game_id = str(slice_key or scope.get("game_id") or "")
+                    if not game_id:
+                        raise ControlPlaneError("ledger_provenance_not_accepted")
+                    provenance[str(observation_id)] = game_id
+                self._assert_ledger_provenance(
+                    session,
+                    season=candidate.season,
+                    cutoff=_aware(candidate.cutoff),
+                    provenance=provenance,
+                    manifest_id=candidate.manifest_id,
+                )
             if candidate is not None:
                 _validate_activation_candidate_payload(
                     stream_key,

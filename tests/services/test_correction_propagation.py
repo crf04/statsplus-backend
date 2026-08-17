@@ -3215,6 +3215,94 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
         )
 
 
+def test_activation_rejects_candidate_after_canonical_source_advances(tmp_path):
+    engine = _engine(tmp_path, "stale-ledger-candidate.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "stale_source_candidate"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="stale-source-manifest",
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="stale-source-manifest",
+            status="active",
+            created_at=AS_OF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": observation_id,
+                "client_observation_id": observation_id,
+                "collector_id": "test",
+                "manifest_id": "stale-source-manifest",
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": "game-1",
+                    "surface": "canonical_game_ledger",
+                }),
+                "season": "2025-26",
+                "cutoff": AS_OF,
+                "schema_version": 1,
+                "checksum": checksum,
+                "payload": payload,
+                "payload_bytes": len(payload),
+                "retrieved_at": accepted_at,
+                "accepted_at": accepted_at,
+            }
+            for observation_id, checksum, payload, accepted_at in (
+                ("source-old", "a" * 64, "{}", AS_OF),
+                (
+                    "source-corrected",
+                    "b" * 64,
+                    '{"corrected":true}',
+                    AS_OF + timedelta(hours=1),
+                ),
+            )
+        ])
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id="source-old",
+        cutoff=AS_OF,
+    )
+    candidate = publications.compose_inactive_ledger(
+        stream_key,
+        season="2025-26",
+        cutoff=AS_OF,
+        payload={"value": 1},
+        provenance={"source-old": "game-1"},
+    )
+    _bind_current_ledger_source(
+        engine,
+        game_id="game-1",
+        observation_id="source-corrected",
+        cutoff=AS_OF + timedelta(hours=1),
+    )
+
+    with pytest.raises(ControlPlaneError, match="ledger_provenance_not_accepted"):
+        publications.activate_stream(
+            stream_key,
+            reason="reject stale candidate",
+            candidate_publication_id=candidate.publication_id,
+        )
+    with publications.session() as session:
+        assert session.get(PublicationVersion, candidate.publication_id).status == (
+            "candidate"
+        )
+
+
 def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_path):
     engine = _engine(tmp_path, "activation-race.sqlite3")
     publications = PublicationService(engine, clock=lambda: AS_OF)

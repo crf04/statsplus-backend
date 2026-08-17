@@ -407,10 +407,50 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
     })
     valid_checksum = hashlib.sha256(valid_per36.encode()).hexdigest()
     with control_db.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="parity-manifest",
+            season="2025-26",
+            cutoff=now,
+            collect_before=now + timedelta(hours=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="parity-manifest",
+            status="active",
+            created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="parity-observation",
+            client_observation_id="parity-observation",
+            collector_id="test",
+            manifest_id="parity-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "game-1",
+                "surface": "canonical_game_ledger",
+            }),
+            season="2025-26",
+            cutoff=now,
+            schema_version=1,
+            checksum="a" * 64,
+            payload="{}",
+            payload_bytes=2,
+            retrieved_at=now,
+            accepted_at=now,
+        ))
         connection.execute(PublicationVersion.__table__.insert().values(
             publication_id="parity-candidate", stream_key="player_per36",
             season="2025-26", cutoff=now, version=1, status="candidate",
-            checksum=valid_checksum, payload=valid_per36, created_at=now, fence=0,
+            checksum=valid_checksum, payload=valid_per36,
+            manifest_id="parity-manifest", created_at=now, fence=0,
+        ))
+        connection.execute(PublicationObservation.__table__.insert().values(
+            publication_id="parity-candidate",
+            observation_id="parity-observation",
+            role="ledger_game",
+            slice_key="game-1",
+            created_at=now,
         ))
         connection.execute(LedgerParityArtifact.__table__.insert().values(
             artifact_id="pending-parity", publication_id="parity-candidate",
@@ -418,6 +458,12 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             season="2025-26", cutoff=now, status="pending_adjudication",
             report="{}", created_at=now,
         ))
+    _bind_current_ledger_source(
+        control_db,
+        game_id="game-1",
+        observation_id="parity-observation",
+        cutoff=now,
+    )
 
     with pytest.raises(ControlPlaneError, match="ledger_parity_pending"):
         publications.activate_stream(
