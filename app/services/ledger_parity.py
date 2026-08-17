@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.models.collection_control import AuditEvent
 
+from app.domain.team_matchup_taxonomy import matchup_stream_key
 from app.services.canonical_game_ledger import CanonicalGame, PlayerGameFact, validate_canonical_season
 from app.services.ledger_derivations import (
     PlayerPer36Fact,
@@ -94,19 +95,7 @@ class LedgerParityArtifactRepository:
             ),
             created_at=self.clock(),
         )
-        values = {
-            column.name: getattr(row, column.name)
-            for column in LedgerParityArtifact.__table__.columns
-        }
-        if session is not None and connection is not None:
-            raise ValueError("session and connection are mutually exclusive")
-        if session is not None:
-            session.execute(LedgerParityArtifact.__table__.insert().values(**values))
-        elif connection is not None:
-            connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
-        else:
-            with self.engine.begin() as connection:
-                connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
+        self._insert_artifact(row, session=session, connection=connection)
         return row
 
     def record_matchup_parity(
@@ -122,14 +111,24 @@ class LedgerParityArtifactRepository:
     ) -> LedgerParityArtifact:
         """Persist one matchup materializer dual-run report as parity evidence.
 
-        The matchup report shares the ``ledger_parity_artifacts`` sink with the
-        semantic player-log/per-36/traditional reports: both are mandatory,
-        activation-facing parity evidence bound to an exact inactive
-        Publication.  The report's own ``to_dict`` shape is retained verbatim.
+        The artifact is bound to the exact report window, surface, and aware
+        immutable cutoff: the ``stream_key`` must name the report's own surface
+        and window, and ``cutoff`` must equal the report's exact aware cutoff,
+        so an L15 artifact can never authorize a Season stream.
         """
 
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
+        expected_stream_key = matchup_stream_key(report.surface, report.window)
+        if stream_key != expected_stream_key:
+            raise ValueError(
+                f"stream_key {stream_key} does not match report surface/window "
+                f"{expected_stream_key}"
+            )
+        if cutoff is None or cutoff.tzinfo is None:
+            raise ValueError("matchup parity requires an aware immutable cutoff")
+        if report.cutoff is None or report.cutoff != cutoff:
+            raise ValueError("matchup parity cutoff does not match the report cutoff")
         row = LedgerParityArtifact(
             artifact_id=str(uuid4()),
             publication_id=publication_id,
@@ -141,12 +140,22 @@ class LedgerParityArtifactRepository:
             report=json.dumps(report.to_dict(), sort_keys=True, default=str),
             created_at=self.clock(),
         )
+        self._insert_artifact(row, session=session, connection=connection)
+        return row
+
+    def _insert_artifact(
+        self,
+        row: LedgerParityArtifact,
+        *,
+        session: Session | None,
+        connection: Connection | None,
+    ) -> None:
+        if session is not None and connection is not None:
+            raise ValueError("session and connection are mutually exclusive")
         values = {
             column.name: getattr(row, column.name)
             for column in LedgerParityArtifact.__table__.columns
         }
-        if session is not None and connection is not None:
-            raise ValueError("session and connection are mutually exclusive")
         if session is not None:
             session.execute(LedgerParityArtifact.__table__.insert().values(**values))
         elif connection is not None:
@@ -154,7 +163,6 @@ class LedgerParityArtifactRepository:
         else:
             with self.engine.begin() as connection:
                 connection.execute(LedgerParityArtifact.__table__.insert().values(**values))
-        return row
 
     def latest(self, stream_key: str, season: str) -> LedgerParityArtifact | None:
         with Session(self.engine) as session:

@@ -2999,6 +2999,8 @@ class PublicationService(_SessionService):
                 "traditional_opponent",
                 "traditional_opponent_season",
                 "traditional_opponent_l15",
+                "assist_locations_season",
+                "assist_locations_l15",
                 "player_per36",
             } else None
             if require_candidate and not candidate_publication_id:
