@@ -14,7 +14,7 @@ The model is intentionally grouped by responsibility:
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its selected provider | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
-| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
+| `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -164,6 +164,10 @@ board but enter no group. `DFS_COMPARISON_MAX_MARKETS` is the post-filter compar
 ceiling and defaults to 10000. A read that observes more markets than the
 ceiling is refused with `board_too_large`, the observed count, and the
 supported narrowing filters; it is never truncated.
+`PROJECTION_ARCHIVE_MAX_MARKETS` is a separate pre-persistence ceiling for one
+normalized provider evidence snapshot and also defaults to 10000. Raising or
+lowering either limit does not change the other; an archive rejection writes no
+poll, snapshot, observation, generation, or Latest state.
 
 ## Defaults and validation
 

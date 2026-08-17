@@ -7,13 +7,14 @@ import os
 from threading import Barrier, Event
 
 import pytest
-from sqlalchemy import create_engine, event, inspect, select, text
+from sqlalchemy import create_engine, event, inspect, insert, select, text
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.models import Base
 from app.migrations import run_migrations
 from app.models.projection_archive import (
     LatestPlayerProjection,
+    ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
     ProjectionProviderSnapshot,
     ProviderPoll,
@@ -99,14 +100,49 @@ def _snapshot(catalog, retrieved_at, threshold):
     )
 
 
+def _two_market_snapshot(catalog, retrieved_at, *, player_ids, thresholds):
+    base = _snapshot(catalog, retrieved_at, thresholds[0])
+    markets = tuple(
+        replace(
+            base.markets[0],
+            market_id=f"market-{player_id}",
+            athlete=replace(
+                base.markets[0].athlete,
+                canonical_id=player_id,
+                name=f"Player {player_id}",
+            ),
+            threshold=MarketThreshold(threshold, "count"),
+        )
+        for player_id, threshold in zip(player_ids, thresholds, strict=True)
+    )
+    return replace(
+        base,
+        markets=markets,
+        coverage=CoverageEvidence(
+            fetched_count=2,
+            eligible_count=2,
+            normalized_count=2,
+            expected_total=2,
+        ),
+    )
+
+
 def test_concurrent_postgres_ingestion_has_one_temporal_winner_and_no_mixed_generation(
     projection_pg_engine,
 ):
     catalog = StatisticCatalog.load_default()
     query = NBAMarketQuery(season=SEASON)
-    older = _snapshot(catalog, OBSERVED_AT, "20.5")
-    newer = replace(
-        _snapshot(catalog, OBSERVED_AT + timedelta(minutes=1), "21.5")
+    older = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT,
+        player_ids=(7, 8),
+        thresholds=("20.5", "10.5"),
+    )
+    newer = _two_market_snapshot(
+        catalog,
+        OBSERVED_AT + timedelta(minutes=1),
+        player_ids=(9, 10),
+        thresholds=("21.5", "11.5"),
     )
     barrier = Barrier(2)
     database_url = projection_pg_engine.url.render_as_string(hide_password=False)
@@ -145,6 +181,89 @@ def test_concurrent_postgres_ingestion_has_one_temporal_winner_and_no_mixed_gene
         1,
         2,
     }
+
+
+def test_equal_retrieval_time_postgres_writers_have_one_deterministic_latest_generation(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    snapshots = (
+        _two_market_snapshot(
+            catalog,
+            OBSERVED_AT,
+            player_ids=(7, 8),
+            thresholds=("20.5", "10.5"),
+        ),
+        _two_market_snapshot(
+            catalog,
+            OBSERVED_AT,
+            player_ids=(9, 10),
+            thresholds=("21.5", "11.5"),
+        ),
+    )
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    winner_engine = create_engine(database_url)
+    loser_engine = create_engine(database_url)
+    winner_locked = Event()
+    loser_attempting = Event()
+    scope = ProjectionArchiveReadScope(provider="dabble", query=query)
+    with projection_pg_engine.begin() as connection:
+        connection.execute(
+            insert(ProjectionArchiveScopeLock).values(
+                provider="dabble",
+                season=SEASON,
+                query_key=scope.query_key,
+            )
+        )
+
+    @event.listens_for(winner_engine, "after_cursor_execute")
+    def hold_winner_lock(_conn, _cursor, statement, _parameters, _context, _many):
+        if "projection_archive_scope_locks" in statement and "FOR UPDATE" in statement:
+            winner_locked.set()
+            assert loser_attempting.wait(timeout=10)
+
+    @event.listens_for(loser_engine, "before_cursor_execute")
+    def observe_loser_attempt(_conn, _cursor, statement, _parameters, _context, _many):
+        if "projection_archive_scope_locks" in statement and "FOR UPDATE" in statement:
+            loser_attempting.set()
+
+    def ingest(engine, snapshot):
+        return ProjectionArchive(engine, catalog).ingest_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=OBSERVED_AT,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner = executor.submit(ingest, winner_engine, snapshots[0])
+        assert winner_locked.wait(timeout=10)
+        loser = executor.submit(ingest, loser_engine, snapshots[1])
+        results = (winner.result(timeout=10), loser.result(timeout=10))
+
+    with projection_pg_engine.connect() as connection:
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.canonical_player_id,
+                LatestPlayerProjection.market_reference,
+            ).order_by(LatestPlayerProjection.canonical_player_id)
+        ).all()
+        promoted = connection.execute(
+            select(ProviderPoll.promoted).order_by(ProviderPoll.poll_id)
+        ).scalars().all()
+    assert len({row.generation_id for row in latest}) == 1
+    assert tuple(row.canonical_player_id for row in latest) == (7, 8)
+    assert len({row.market_reference for row in latest}) == 2
+    assert tuple(result.materialization_outcome for result in results) == (
+        "advanced",
+        "same_time_not_promoted",
+    )
+    assert sorted(promoted) == [False, True]
+    event.remove(winner_engine, "after_cursor_execute", hold_winner_lock)
+    event.remove(loser_engine, "before_cursor_execute", observe_loser_attempt)
+    winner_engine.dispose()
+    loser_engine.dispose()
 
 
 def test_concurrent_duplicate_postgres_ingestion_is_idempotent(projection_pg_engine):
@@ -188,7 +307,12 @@ def test_postgres_migration_upgrades_an_existing_v37_projection_schema(
     run_migrations(projection_pg_engine)
     catalog = StatisticCatalog.load_default()
     ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
-        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        _two_market_snapshot(
+            catalog,
+            OBSERVED_AT,
+            player_ids=(7, 8),
+            thresholds=("20.5", "10.5"),
+        ),
         query=NBAMarketQuery(season=SEASON),
         accepted_at=OBSERVED_AT,
     )
@@ -258,15 +382,15 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
 
     def replace_latest():
         assert latest_selected.wait(timeout=10)
-        newer = _snapshot(catalog, OBSERVED_AT + timedelta(minutes=1), "21.5")
-        newer_market = replace(
-            newer.markets[0],
-            market_id="market-2",
-            athlete=replace(newer.markets[0].athlete, canonical_id=8, name="Player 8"),
+        newer = _two_market_snapshot(
+            catalog,
+            OBSERVED_AT + timedelta(minutes=1),
+            player_ids=(9, 10),
+            thresholds=("21.5", "11.5"),
         )
         try:
             ProjectionArchive(writer_engine, catalog).ingest_snapshot(
-                replace(newer, markets=(newer_market,)),
+                newer,
                 query=query,
                 accepted_at=OBSERVED_AT + timedelta(minutes=1),
             )
@@ -283,13 +407,24 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
         concurrent_pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
         writer.result(timeout=10)
 
-    assert [player.canonical_player_id for player in concurrent_pool.players] == [7]
+    assert [player.canonical_player_id for player in concurrent_pool.players] == [7, 8]
     after = LatestProjectionPlayerPoolReader(
         reader_engine,
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: OBSERVED_AT + timedelta(minutes=2),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
-    assert [player.canonical_player_id for player in after.players] == [8]
+    assert [player.canonical_player_id for player in after.players] == [9, 10]
+    with reader_engine.connect() as connection:
+        latest = connection.execute(
+            select(
+                LatestPlayerProjection.generation_id,
+                LatestPlayerProjection.canonical_player_id,
+                LatestPlayerProjection.market_reference,
+            ).order_by(LatestPlayerProjection.canonical_player_id)
+        ).all()
+    assert len({row.generation_id for row in latest}) == 1
+    assert [row.canonical_player_id for row in latest] == [9, 10]
+    assert len({row.market_reference for row in latest}) == 2
     event.remove(reader_engine, "after_cursor_execute", pause_after_latest)
     reader_engine.dispose()
     writer_engine.dispose()

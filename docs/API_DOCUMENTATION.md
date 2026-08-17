@@ -287,7 +287,9 @@ every usable provider is stale-served, and `unavailable` when none is usable.
 For any mixed state—including fresh plus stale-served, or usable plus
 missing—aggregate `status` is omitted so the frontend derives its documented
 partial/degraded presentation from the provider entries. The union uses every
-usable observation.
+usable observation. Every configured provider required by the archive reader
+is represented; one with no eligible current row is emitted as
+`{ "status": "missing", "retrieved_at": null }` rather than omitted.
 Player Pool snapshots are persisted by season and exact Slate game set. A
 snapshot no more than 15 minutes old is reused without another board fetch and
 retains each provider's actual `retrieved_at`. This is an inclusive reuse

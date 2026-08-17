@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine, func, select
 
+from app.config.settings import ProviderSettings
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
@@ -322,6 +323,45 @@ def test_late_unchanged_and_changed_polls_do_not_mask_a_newer_failure(tmp_path):
     ]
 
 
+def test_equal_time_conflicting_snapshots_choose_the_same_winner_in_any_order(tmp_path):
+    catalog = StatisticCatalog.load_default()
+    first = _snapshot(
+        "dabble",
+        SnapshotStatus.COMPLETE,
+        (_market(catalog, market_id="first", player_id=7),),
+        OBSERVED_AT,
+    )
+    second = _snapshot(
+        "dabble",
+        SnapshotStatus.COMPLETE,
+        (_market(catalog, market_id="second", player_id=8),),
+        OBSERVED_AT,
+    )
+    winners = []
+    promoted_counts = []
+    for index, snapshots in enumerate(((first, second), (second, first))):
+        engine = create_engine(f"sqlite:///{tmp_path / f'equal-time-{index}.sqlite3'}")
+        run_migrations(engine)
+        archive = ProjectionArchive(engine, catalog)
+        for snapshot in snapshots:
+            archive.ingest_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT)
+        pool = _reader(engine, ("dabble",), OBSERVED_AT).get_pool_for_game(
+            season=SEASON, game_id=GAME_ID
+        )
+        winners.append(tuple(player.canonical_player_id for player in pool.players))
+        with engine.connect() as connection:
+            promoted_counts.append(
+                connection.execute(
+                    select(func.count()).select_from(ProviderPoll).where(
+                        ProviderPoll.promoted.is_(True)
+                    )
+                ).scalar_one()
+            )
+
+    assert winners[0] == winners[1]
+    assert sorted(promoted_counts) == [1, 2]
+
+
 def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
@@ -347,7 +387,14 @@ def test_provider_scopes_union_and_an_unpolled_provider_expires_independently(tm
         season=SEASON, game_id=GAME_ID
     )
     assert [player.canonical_player_id for player in pool.players] == [7]
-    assert set(pool.freshness["providers"]) == {"dabble"}
+    assert "status" not in pool.freshness
+    assert pool.freshness["providers"] == {
+        "dabble": {
+            "status": "fresh",
+            "retrieved_at": refreshed_at.isoformat(),
+        },
+        "prizepicks": {"status": "missing", "retrieved_at": None},
+    }
     with engine.connect() as connection:
         assert connection.execute(
             select(func.count()).select_from(LatestPlayerProjection).where(
@@ -399,23 +446,41 @@ def test_disabled_provider_does_not_receive_the_failure_fallback_window(tmp_path
     assert pool.freshness["status"] == "fresh"
 
 
-def test_oversized_snapshot_is_rejected_before_any_persistence(tmp_path):
+def test_archive_market_limit_is_independent_and_rejects_before_persistence(tmp_path):
     engine = _engine(tmp_path)
     catalog = StatisticCatalog.load_default()
-    archive = ProjectionArchive(engine, catalog, max_markets=1)
     markets = (
         _market(catalog, market_id="one", player_id=7),
         _market(catalog, market_id="two", player_id=8),
     )
+    snapshot = _snapshot("dabble", SnapshotStatus.COMPLETE, markets, OBSERVED_AT)
+
+    limits = ProviderSettings(
+        dfs_comparison_max_markets=1,
+        projection_archive_max_markets=2,
+    )
+    assert len(snapshot.markets) > limits.dfs_comparison_max_markets
+    archive = ProjectionArchive(
+        engine,
+        catalog,
+        max_markets=limits.projection_archive_max_markets,
+    )
+    archive.ingest_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT)
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one() == 2
+
+    rejected_engine = create_engine(
+        f"sqlite:///{tmp_path / 'projection-archive-limit-rejected.sqlite3'}"
+    )
+    run_migrations(rejected_engine)
+    rejected_archive = ProjectionArchive(rejected_engine, catalog, max_markets=1)
 
     with pytest.raises(ValueError, match="market limit"):
-        archive.ingest_snapshot(
-            _snapshot("dabble", SnapshotStatus.COMPLETE, markets, OBSERVED_AT),
-            query=QUERY,
-            accepted_at=OBSERVED_AT,
-        )
+        rejected_archive.ingest_snapshot(snapshot, query=QUERY, accepted_at=OBSERVED_AT)
 
-    with engine.connect() as connection:
+    with rejected_engine.connect() as connection:
         for model in (
             ProviderPoll,
             ProjectionProviderSnapshot,

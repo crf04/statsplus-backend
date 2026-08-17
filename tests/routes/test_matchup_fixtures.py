@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select
 
 from app import create_app
 from app.config.settings import (
@@ -17,6 +17,7 @@ from app.config.settings import (
     CacheSettings,
     FeatureSettings,
     NBASeasonSettings,
+    ProviderSettings,
     RuntimeSettings,
 )
 from app.migrations import run_migrations
@@ -26,6 +27,13 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.models.projection_archive import (
+    LatestPlayerProjection,
+    ProjectionMaterializationGeneration,
+    ProjectionObservation,
+    ProjectionProviderSnapshot,
+    ProviderPoll,
+)
 from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
@@ -105,7 +113,7 @@ COMMON_POSTED_MARKETS = (
 )
 
 
-def _recorded_projection_snapshot(catalog):
+def _recorded_projection_snapshot(catalog, *, provider="dabble"):
     statistic = catalog.by_id["points"]
     evidence = StatisticEvidence(
         provider_id="pts",
@@ -114,11 +122,11 @@ def _recorded_projection_snapshot(catalog):
         components=statistic.components,
     )
     return ProviderSnapshot(
-        provider="dabble",
+        provider=provider,
         status=SnapshotStatus.COMPLETE,
         markets=(
             PlayerProjectionMarket(
-                provider="dabble",
+                provider=provider,
                 market_id="fixture-market-points",
                 athlete=AthleteEvidence(
                     provider_id="fixture-lebron",
@@ -137,7 +145,7 @@ def _recorded_projection_snapshot(catalog):
                     evidence=evidence,
                     scoring_period=ScoringPeriod.FULL_GAME,
                     canonical=statistic,
-                    provider="dabble",
+                    provider=provider,
                 ),
                 status=MarketStatus.AVAILABLE,
                 variant=MarketVariant.STANDARD,
@@ -1264,6 +1272,9 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
         cache=CacheSettings(enabled=False),
         database={"url": database_url},
         features=FeatureSettings(projection_archive_read_enabled=True),
+        providers=ProviderSettings(
+            dfs_enabled_providers=("dabble", "prizepicks"),
+        ),
         nba=NBASeasonSettings(current_season=SEASON),
     )
     monkeypatch.setattr("app.utils.db.get_engine", lambda _settings=None: engine)
@@ -1331,20 +1342,54 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert missing_selection.status_code == 503
     assert missing_selection.get_json()["error"]["code"] == "provider_unavailable"
 
+    query = NBAMarketQuery(season=SEASON)
     recorded_snapshot = _recorded_projection_snapshot(catalog)
-    assembled.projection_recorder.record_complete_snapshot(
-        recorded_snapshot,
-        query=NBAMarketQuery(season=SEASON),
-        accepted_at=NOW,
+    prizepicks_snapshot = _recorded_projection_snapshot(catalog, provider="prizepicks")
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        assembled.projection_recorder.record_complete_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=NOW,
+        )
+
+    unchanged_at = NOW + timedelta(minutes=1)
+    unchanged_snapshots = tuple(
+        replace(snapshot, retrieved_at=unchanged_at)
+        for snapshot in (recorded_snapshot, prizepicks_snapshot)
     )
-    rematerialized_at = NOW + timedelta(minutes=1)
+    for snapshot in unchanged_snapshots:
+        assembled.projection_recorder.record_complete_snapshot(
+            snapshot,
+            query=query,
+            accepted_at=unchanged_at,
+        )
+    assembled.projection_recorder.record_complete_snapshot(
+        unchanged_snapshots[0],
+        query=query,
+        accepted_at=unchanged_at,
+    )
+
+    rematerialized_at = NOW + timedelta(minutes=2)
     pool.clock = lambda: rematerialized_at
     assembled.projection_recorder.archive.market_categories["points"] = "PRA"
-    assembled.projection_recorder.record_complete_snapshot(
-        replace(recorded_snapshot, retrieved_at=rematerialized_at),
-        query=NBAMarketQuery(season=SEASON),
-        accepted_at=rematerialized_at,
-    )
+    for snapshot in (recorded_snapshot, prizepicks_snapshot):
+        assembled.projection_recorder.record_complete_snapshot(
+            replace(snapshot, retrieved_at=rematerialized_at),
+            query=query,
+            accepted_at=rematerialized_at,
+        )
+
+    with engine.connect() as connection:
+        assert connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one() == 6
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionProviderSnapshot)
+        ).scalar_one() == 2
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 4
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one() == 4
 
     slate = client.get("/api/games/slate?date=2026-01-15")
     matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
@@ -1364,12 +1409,60 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             "dabble": {
                 "status": "fresh",
                 "retrieved_at": rematerialized_at.isoformat(),
-            }
+            },
+            "prizepicks": {
+                "status": "fresh",
+                "retrieved_at": rematerialized_at.isoformat(),
+            },
         },
     }
     assert [player["canonical_id"] for player in matchup.get_json()["players"]] == [
         2544
     ]
+
+    with engine.connect() as connection:
+        before_rejection = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionObservation)
+            ).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    with pytest.raises(ValueError, match="outside the configured read scope"):
+        assembled.projection_recorder.record_complete_snapshot(
+            _recorded_projection_snapshot(catalog, provider="underdog"),
+            query=query,
+            accepted_at=rematerialized_at,
+        )
+    with engine.connect() as connection:
+        after_rejection = (
+            connection.execute(select(func.count()).select_from(ProviderPoll)).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one(),
+            connection.execute(
+                select(func.count()).select_from(ProjectionObservation)
+            ).scalar_one(),
+            tuple(
+                connection.execute(
+                    select(
+                        LatestPlayerProjection.provider,
+                        LatestPlayerProjection.generation_id,
+                    ).order_by(LatestPlayerProjection.provider)
+                ).all()
+            ),
+        )
+    assert after_rejection == before_rejection
 
     partial_at = rematerialized_at + timedelta(minutes=1)
     partial = replace(
@@ -1386,7 +1479,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     )
     assembled.projection_recorder.record_snapshot(
         partial,
-        query=NBAMarketQuery(season=SEASON),
+        query=query,
         accepted_at=partial_at,
     )
     pool.clock = lambda: partial_at
@@ -1397,14 +1490,22 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     failed_at = partial_at + timedelta(minutes=16)
     assembled.projection_recorder.record_failed_poll(
         provider="dabble",
-        query=NBAMarketQuery(season=SEASON),
+        query=query,
         completed_at=failed_at,
         failure_reason="access_denied",
     )
     pool.clock = lambda: failed_at
     failed_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
     assert failed_matchup.status_code == 200
-    assert failed_matchup.get_json()["freshness"]["pool"]["status"] == "stale-served"
+    failed_freshness = failed_matchup.get_json()["freshness"]["pool"]
+    assert "status" not in failed_freshness
+    assert failed_freshness["providers"] == {
+        "dabble": {
+            "status": "stale-served",
+            "retrieved_at": partial_at.isoformat(),
+        },
+        "prizepicks": {"status": "missing", "retrieved_at": None},
+    }
     assert [
         player["canonical_id"] for player in failed_matchup.get_json()["players"]
     ] == [2544]
@@ -1418,12 +1519,12 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             ),
             retrieved_at=rematerialized_at,
         ),
-        query=NBAMarketQuery(season=SEASON),
+        query=query,
         accepted_at=late_accepted_at,
     )
     pool.clock = lambda: late_accepted_at
     late_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
-    assert late_matchup.get_json()["freshness"]["pool"]["status"] == "stale-served"
+    assert "status" not in late_matchup.get_json()["freshness"]["pool"]
     assert [player["canonical_id"] for player in late_matchup.get_json()["players"]] == [2544]
 
     empty_at = failed_at + timedelta(minutes=1)
@@ -1440,7 +1541,7 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
             ),
             retrieved_at=empty_at,
         ),
-        query=NBAMarketQuery(season=SEASON),
+        query=query,
         accepted_at=empty_at,
     )
     pool.clock = lambda: empty_at
@@ -1452,3 +1553,63 @@ def test_recorded_projection_snapshot_serves_authenticated_slate_and_matchup_wit
     assert client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     ).status_code == 503
+
+    disabled_at = empty_at + timedelta(minutes=1)
+    assembled.projection_recorder.record_complete_snapshot(
+        replace(recorded_snapshot, retrieved_at=disabled_at),
+        query=query,
+        accepted_at=disabled_at,
+    )
+    disabled_pool = LatestProjectionPlayerPoolReader(
+        engine,
+        pool.scopes,
+        clock=lambda: disabled_at,
+        required_providers=("dabble",),
+    )
+    route_dependencies = app.extensions["dependencies"]
+    route_dependencies.slate_service.player_pool = disabled_pool
+    route_dependencies.matchup_service.player_pool = disabled_pool
+    disabled_matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert disabled_matchup.status_code == 200
+    assert disabled_matchup.get_json()["freshness"]["pool"] == {
+        "status": "fresh",
+        "state": "live",
+        "observed_at": disabled_at.isoformat(),
+        "retrieved_at": disabled_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": disabled_at.isoformat(),
+            }
+        },
+    }
+    with engine.connect() as connection:
+        durable_counts = {
+            "snapshots": connection.execute(
+                select(func.count()).select_from(ProjectionProviderSnapshot)
+            ).scalar_one(),
+            "polls": connection.execute(
+                select(func.count()).select_from(ProviderPoll)
+            ).scalar_one(),
+            "generations": connection.execute(
+                select(func.count()).select_from(ProjectionMaterializationGeneration)
+            ).scalar_one(),
+            "observations": connection.execute(
+                select(func.count()).select_from(ProjectionObservation)
+            ).scalar_one(),
+            "latest": connection.execute(
+                select(func.count()).select_from(LatestPlayerProjection)
+            ).scalar_one(),
+        }
+        assert connection.execute(
+            select(func.count()).select_from(LatestPlayerProjection).where(
+                LatestPlayerProjection.provider == "prizepicks"
+            )
+        ).scalar_one() == 1
+    assert durable_counts == {
+        "snapshots": 6,
+        "polls": 11,
+        "generations": 8,
+        "observations": 7,
+        "latest": 2,
+    }

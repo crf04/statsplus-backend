@@ -212,6 +212,10 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
         auth={"firebase_admin_disabled": True},
         database={"url": "sqlite:///:memory:"},
         features=FeatureSettings(projection_archive_read_enabled=True),
+        providers={
+            "dfs_comparison_max_markets": 1,
+            "projection_archive_max_markets": 2,
+        },
     )
 
     dependencies = build_dependencies(settings)
@@ -220,6 +224,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert isinstance(reader, LatestProjectionPlayerPoolReader)
     assert isinstance(dependencies.projection_archive, ProjectionArchive)
     assert dependencies.projection_archive.engine is dependencies.engine
+    assert dependencies.projection_archive.max_markets == 2
     assert isinstance(dependencies.projection_recorder, ProjectionRecordingService)
     assert dependencies.projection_recorder.archive is dependencies.projection_archive
     assert dependencies.projection_recorder.scope is reader.scope

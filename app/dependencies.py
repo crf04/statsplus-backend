@@ -437,7 +437,7 @@ def build_dependencies(
         else ProjectionArchive(
             engine,
             statistic_catalog,
-            max_markets=settings.providers.dfs_comparison_max_markets,
+            max_markets=settings.providers.projection_archive_max_markets,
         )
     )
     projection_record_providers = (

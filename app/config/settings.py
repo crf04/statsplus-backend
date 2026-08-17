@@ -186,6 +186,8 @@ class ProviderSettings(BaseModel):
     # The post-filter comparison-board ceiling.  A larger board is refused with
     # the observed count and the supported narrowing filters, never truncated.
     dfs_comparison_max_markets: int = Field(default=10000, ge=1)
+    # The independent pre-persistence ceiling for one archived provider snapshot.
+    projection_archive_max_markets: int = Field(default=10000, ge=1)
     # A scalar applies to every enabled DFS provider.  A mapping may override
     # one or more providers when their publication cadence differs.  Both are
     # exact decimal seconds inside the shared time-window domain, so the window
@@ -707,6 +709,9 @@ def _build_settings(
         ),
         dfs_comparison_max_markets=reader.integer(
             "DFS_COMPARISON_MAX_MARKETS", 10000
+        ),
+        projection_archive_max_markets=reader.integer(
+            "PROJECTION_ARCHIVE_MAX_MARKETS", 10000
         ),
         dfs_cache_fresh_seconds=(
             {"*": dfs_cache_fresh, **fresh_overrides}

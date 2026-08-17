@@ -302,11 +302,6 @@ class ProjectionArchive:
                 season=query.season,
                 query_key=query_key,
             )
-            materialization_outcome = self._materialization_outcome(
-                current,
-                incoming_retrieved_at=snapshot.retrieved_at,
-                promoted_through=promoted_through,
-            )
             partial_transition = None
             if snapshot.status is SnapshotStatus.PARTIAL:
                 partial_transition = self._plan_partial_transition(
@@ -317,6 +312,13 @@ class ProjectionArchive:
                     query_key=query_key,
                 )
                 materialization_checksum = partial_transition.checksum
+            materialization_outcome = self._materialization_outcome(
+                current,
+                incoming_retrieved_at=snapshot.retrieved_at,
+                promoted_through=promoted_through,
+                incoming_content_checksum=content_checksum,
+                incoming_materialization_checksum=materialization_checksum,
+            )
             if (
                 current is not None
                 and current["content_checksum"] == content_checksum
@@ -709,7 +711,11 @@ class ProjectionArchive:
                     generation_table.c.query_key == query_key,
                     generation_table.c.outcome == "advanced",
                 )
-                .order_by(generation_table.c.retrieved_at.desc())
+                .order_by(
+                    generation_table.c.retrieved_at.desc(),
+                    snapshot_table.c.content_checksum.desc(),
+                    generation_table.c.materialization_checksum.desc(),
+                )
                 .limit(1)
             )
             .mappings()
@@ -722,6 +728,8 @@ class ProjectionArchive:
         *,
         incoming_retrieved_at: datetime,
         promoted_through: datetime | None = None,
+        incoming_content_checksum: str,
+        incoming_materialization_checksum: str,
     ) -> str:
         if current is None and promoted_through is None:
             return "advanced"
@@ -735,6 +743,14 @@ class ProjectionArchive:
         if incoming > current_retrieved_at:
             return "advanced"
         if incoming == current_retrieved_at:
+            if current is not None and (
+                incoming_content_checksum,
+                incoming_materialization_checksum,
+            ) > (
+                str(current["content_checksum"]),
+                str(current["materialization_checksum"]),
+            ):
+                return "advanced"
             return "same_time_not_promoted"
         return "older_not_promoted"
 
@@ -1180,10 +1196,15 @@ class LatestProjectionPlayerPoolReader:
             for game_id in requested_games
         }
         if not rows:
+            missing_freshness = PlayerPool.missing_projection_freshness()
+            missing_freshness["providers"] = {
+                provider: {"status": "missing", "retrieved_at": None}
+                for provider in sorted(self.required_providers)
+            }
             return PlayerPool(
                 (),
                 {},
-                PlayerPool.missing_projection_freshness(),
+                missing_freshness,
                 game_states,
             )
 
@@ -1241,21 +1262,24 @@ class LatestProjectionPlayerPoolReader:
             }
             for provider in sorted(provider_observed_at)
         }
-        statuses = set(provider_statuses.values())
-        missing_provider = not self.required_providers <= set(provider_statuses)
-        if any(state["state"] == "missing" for state in game_states.values()) or missing_provider or len(statuses) > 1:
-            aggregate_status = "partial"
-        elif statuses == {"stale-served"}:
-            aggregate_status = "stale-served"
-        else:
-            aggregate_status = "fresh"
+        for provider in sorted(self.required_providers - set(providers)):
+            providers[provider] = {"status": "missing", "retrieved_at": None}
+        providers = dict(sorted(providers.items()))
+        statuses = {provider["status"] for provider in providers.values()}
         freshness = {
-            "status": aggregate_status,
             "state": "live",
             "observed_at": observed_at.isoformat(),
             "retrieved_at": observed_at.isoformat(),
             "providers": providers,
         }
+        if len(requested_games) > 1 and any(
+            state["state"] == "missing" for state in game_states.values()
+        ):
+            freshness["status"] = "partial"
+        elif statuses == {"stale-served"}:
+            freshness["status"] = "stale-served"
+        elif statuses == {"fresh"}:
+            freshness["status"] = "fresh"
         return PlayerPool(players, team_counts, freshness, game_states)
 
     @staticmethod

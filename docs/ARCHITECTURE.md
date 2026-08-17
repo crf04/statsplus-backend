@@ -343,7 +343,10 @@ key match the configured `ProjectionArchiveReadScope` set shared with the
 request reader; a mismatch is
 rejected before persistence instead of creating invisible evidence. The
 lower-level archive retains multi-scope capability for internal use. It then
-writes one Provider Poll for every accepted attempt. A changed attempt writes
+applies the independent `PROJECTION_ARCHIVE_MAX_MARKETS` pre-persistence bound;
+the Comparison Board's `DFS_COMPARISON_MAX_MARKETS` never governs archival
+evidence. It writes one Provider Poll for every accepted attempt. A changed
+attempt writes
 one checksummed source-evidence document, immutable market observations, and
 one materialization generation atomically. The evidence checksum covers the
 entire canonical document, including `retrieved_at`, for later verification. A
@@ -387,11 +390,13 @@ accepted Partial snapshot replaces only explicitly observed market references;
 omitted offerings keep their prior immutable observation and are carried into
 the new atomic state generation. Failed polls change no Latest pointers. An
 older snapshot remains immutable evidence but cannot move Latest backward. An
-identical snapshot at the same observation time is idempotent. A different
-document at the same provider/query observation time is archived with a
-`same_time_not_promoted` materialization outcome and cannot replace the current
-Latest set; `older_not_promoted` records the corresponding older-snapshot
-decision.
+identical snapshot at the same observation time is idempotent. Conflicting
+documents at the same provider/query observation time use their canonical
+content and materialization checksums as a stable tie-break, so arrival order
+cannot choose different final Latest rows. Only the deterministic winner
+remains in Latest; a conflicting document evaluated after that winner is
+retained as `same_time_not_promoted` evidence.
+`older_not_promoted` records the corresponding older-snapshot decision.
 Every write first enters a provider/season/query scope transaction. PostgreSQL
 serializes both the initial unique scope-lock row insertion race and subsequent
 decisions with the durable row selected `FOR UPDATE`. SQLite ignores that
@@ -433,7 +438,11 @@ evidence reports `state: missing` and `observed_at: null`. Latest rows and their
 promotion-aware poll health are read in one database snapshot. PostgreSQL uses
 `REPEATABLE READ`; SQLite uses one explicit read transaction. A writer
 committing between those queries therefore cannot pair old Latest state with
-new poll health.
+new poll health. Every required provider is seeded into the public freshness
+document. If it has no eligible row, its entry is `missing` with a null
+retrieval time. Mixed provider states omit aggregate `status`; `partial` remains
+reserved for a multi-game archive read containing both live and missing game
+states.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
 is enabled, dependency assembly gives the same archive reader to Slate and
 Matchup. Matchup Selection uses a thin adapter over that reader which translates
