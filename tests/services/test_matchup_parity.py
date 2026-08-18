@@ -26,6 +26,7 @@ from app.domain.publication_integrity import (
 from app.domain.utc import assume_utc
 from app.migrations import run_migrations
 from app.models.collection_control import (
+    ActiveSeason,
     CatalogPublication,
     CollectionManifest,
     PublicationVersion,
@@ -1558,6 +1559,49 @@ def test_bounded_compare_requires_player_per36_for_season():
         "traditional_opponent_l15",
         "assist_locations_l15",
     })
+
+
+def test_manifest_preflight_requires_one_unique_qualifying_authority(tmp_path):
+    import scripts.matchup_parity as matchup_parity_script
+
+    engine, _, _ = _runner_world(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=CUTOFF, activated_at=CUTOFF, activated_by="test",
+        ))
+    _, manifest, _ = matchup_parity_script._manifest_preflight(
+        engine, season="2025-26", manifest_id=MANIFEST,
+    )
+    assert manifest["id"] == MANIFEST
+
+    with Session(engine) as session, session.begin():
+        authority = session.get(CollectionManifest, MANIFEST)
+        original = session.get(
+            CatalogPublication, authority.event_catalog_publication_id
+        )
+        session.add(CatalogPublication(
+            publication_id="duplicate-catalog", season=original.season,
+            catalog_type=original.catalog_type, cutoff=original.cutoff,
+            version="duplicate", checksum=original.checksum,
+            payload=original.payload, complete=True, published_at=CUTOFF,
+        ))
+        session.add(CollectionManifest(
+            manifest_id="duplicate-manifest", season="2025-26", cutoff=CUTOFF,
+            collect_before=CUTOFF + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="duplicate-manifest-checksum",
+            event_catalog_publication_id="duplicate-catalog",
+            event_catalog_checksum=original.checksum, status="active",
+            created_at=CUTOFF,
+        ))
+
+    with pytest.raises(
+        matchup_parity_script.InvalidEvidenceError,
+        match="manifest_authority_ambiguous",
+    ):
+        matchup_parity_script._manifest_preflight(
+            engine, season="2025-26", manifest_id=MANIFEST,
+        )
 
 
 def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):

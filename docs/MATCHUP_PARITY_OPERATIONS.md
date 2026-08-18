@@ -62,11 +62,17 @@ Season per-36 comparison. The command resolves the governed 30-team roster and e
 immutable Event Catalog publication bound to the active manifest — never the
 mutable stored event table — and compares the stored legacy facts with those
 candidate publications. It reads no provider and never reads or advances a
-`PublicationPointer`.
+`PublicationPointer`. The explicit manifest does not disambiguate competing
+authority: if more than one active schema-v1 canonical-ledger manifest with a
+complete bound Event Catalog qualifies for the Season and cutoff, preflight
+fails closed.
 
 The command composes all five inactive candidate publications from the exact
 governed ledger inside its bounded transaction. Operators do not supply
 candidate IDs.
+Stdout includes a clearly labeled protected-operator section with every exact
+Season/L15 game ID by team. Do not paste that section into trackers; the JSON
+summary remains bounded to team IDs, counts, checksums, and artifact IDs.
 
 `--per36-capture-id` identifies an append-only diagnostic capture. It must be
 bound to the same candidate checksum, manifest, Event Catalog, Season game
@@ -113,8 +119,10 @@ boolean status, and recomputes the report game-set and candidate payload
 checksums before activation. A missing surface, a single missing
 metric, an unavailable observation, an authority/scope/cutoff mismatch, an
 integer or game-set failure, or a byte-contract failure is `failed` and cannot
-be adjudicated. Required denominator/rate mismatches are failed evidence and
-cannot be approved; provider rounding is retained only as diagnostic context.
+be approved. It remains `pending_adjudication` until an operator records an
+audited rejection; rejection records actor, timestamp, and reason. Required
+denominator/rate mismatches likewise cannot be approved; provider rounding is
+retained only as diagnostic context.
 Ranking differences are hard failures under deterministic #117 rankings.
 
 The artifact is bound to the report's own surface, window, exact aware cutoff,
@@ -140,8 +148,10 @@ the traditional and per-36 streams.
 
 An approved soft-difference artifact is durable activation evidence; a rejected
 artifact keeps the stream unactivable until a new dual-run records an exact or
-approved report. Hard-failed evidence is never approvable, even if an operator
-attempts to change its decision directly.
+approved report. A report with no differences is recorded `exact`
+automatically. Every difference artifact starts `pending_adjudication`.
+Hard-failed evidence may be audited as rejected but is never approvable, even
+if an operator attempts to change its decision directly.
 
 ## Fencing and activation handoff
 

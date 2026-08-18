@@ -272,7 +272,11 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
         ):
             raise InvalidEvidenceError("active_regular_season_required")
         manifest = session.get(CollectionManifest, manifest_id)
-        if manifest is None or manifest.season != season:
+        if (
+            manifest is None
+            or manifest.season != season
+            or manifest.status != "active"
+        ):
             raise InvalidEvidenceError("manifest_invalid")
         try:
             scopes = set(json.loads(manifest.scopes))
@@ -296,9 +300,47 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
             )
         ):
             raise InvalidEvidenceError("event_catalog_binding_invalid")
-        cutoff = _aware_utc(manifest.cutoff)
-        if active.cutoff is not None and _aware_utc(active.cutoff) != cutoff:
+        cutoff = assume_utc(manifest.cutoff)
+        if active.cutoff is not None and assume_utc(active.cutoff) != cutoff:
             raise InvalidEvidenceError("active_season_cutoff_mismatch")
+        qualifying_authorities: list[tuple[str, str]] = []
+        candidates = session.scalars(
+            select(CollectionManifest).where(
+                CollectionManifest.season == season,
+                CollectionManifest.status == "active",
+            )
+        )
+        for candidate in candidates:
+            try:
+                candidate_scopes = set(json.loads(candidate.scopes))
+                candidate_versions = set(json.loads(candidate.accepted_versions))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                assume_utc(candidate.cutoff) != cutoff
+                or "canonical_game_ledger" not in candidate_scopes
+                or 1 not in candidate_versions
+            ):
+                continue
+            candidate_catalog = session.get(
+                CatalogPublication, candidate.event_catalog_publication_id
+            )
+            if (
+                candidate_catalog is not None
+                and candidate_catalog.catalog_type == "event"
+                and candidate_catalog.complete
+                and candidate_catalog.season == season
+                and assume_utc(candidate_catalog.cutoff) == cutoff
+                and candidate_catalog.checksum == candidate.event_catalog_checksum
+                and publication_payload_matches_checksum(
+                    candidate_catalog.payload, candidate_catalog.checksum
+                )
+            ):
+                qualifying_authorities.append((
+                    candidate.manifest_id, candidate_catalog.publication_id,
+                ))
+        if qualifying_authorities != [(manifest_id, catalog.publication_id)]:
+            raise InvalidEvidenceError("manifest_authority_ambiguous")
 
     governance_reader = ActiveManifestLedgerGovernanceReader(engine)
     try:
@@ -307,7 +349,7 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
         )
     except (PublicationGovernanceUnavailable, ValueError) as error:
         raise InvalidEvidenceError("manifest_governance_invalid") from error
-    if governance.manifest_id != manifest_id or _aware_utc(governance.cutoff) != cutoff:
+    if governance.manifest_id != manifest_id or assume_utc(governance.cutoff) != cutoff:
         raise InvalidEvidenceError("manifest_governance_invalid")
     if governance.event_catalog_publication_id != catalog.publication_id or (
         governance.event_catalog_checksum != catalog.checksum

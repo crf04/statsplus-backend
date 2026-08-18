@@ -82,8 +82,8 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -1735,8 +1735,12 @@ are outside this team-window store and remain Season-only. If the 30-team mean
 is zero, percent-versus-average is null because that ratio is undefined; a
 zero population sigma yields a conventional zero sigma deviation.
 
-One fully available run makes 17 Season provider calls (16 NBA, one PBP) and
-180 rolling calls (five NBA plus one PBP for each of 30 teams). The calls stay
+One fully available run makes 77 Season provider calls: 46 NBA calls (the 16
+aggregate/shot/Synergy calls plus 30 independent TeamGameLog membership
+calls) and 31 PBP calls (one aggregate plus 30 independent team-game-log
+membership calls). It makes 240 rolling calls: six NBA plus two PBP calls for
+each of 30 teams, including one independent membership call per provider and
+team. The calls stay
 sequential: each NBA call already uses the shared configured timeout,
 concurrency bound, and provider telemetry, while each PBP call uses the shared
 pooled session, connect/read timeouts, retry accounting, and telemetry. The
@@ -1904,8 +1908,10 @@ vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `missing_surface`, `missing_metric`, `extra_metric`, `duplicate_metric`,
 `l15_game_count_mismatch`, `scope_mismatch`, `authority_mismatch`, and
 `invalid_denominator`, `served_rate_mismatch`, and `served_rank_mismatch`).
-Hard classifications produce `failed` evidence that
-cannot be manually approved. Floating denominator/rate differences in the
+Hard classifications produce a `failed` report inside a
+`pending_adjudication` artifact. They may be audited as rejected but cannot be
+approved. Difference-free artifacts become `exact` automatically; every
+difference artifact remains pending until an audited decision. Floating denominator/rate differences in the
 required public fields are hard failures; provider rounding is diagnostic
 context only and never activation authority.
 
@@ -1917,8 +1923,10 @@ Season per-36 comparison. It resolves the exact manifest cutoff before work,
 preflights migrations, Active Season/phase, and stream/pointer state, then
 composes all five candidates from the governed
 canonical ledger before comparison. It never reads the unscoped legacy
-`player_per36_stats` table. The command prints a bounded human table, persists
-only sanitized summary fields, records the per-stream artifacts atomically,
+`player_per36_stats` table. The command prints a bounded human table followed
+by a clearly labeled protected-operator section containing the required exact
+Season/L15 game IDs. It persists only tracker-safe sanitized summary fields,
+records the per-stream artifacts atomically,
 and exits distinctly for exact, pending adjudication, and invalid evidence;
 invalid summaries include pointer/stream nonmutation proof when state capture
 succeeded. Required denominator/rate differences are never approvable.

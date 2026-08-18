@@ -1153,8 +1153,11 @@ evidence accepted before the deadline remains allowed for repair and
 rehearsal. Player game logs Season, traditional opponent Season and
 L15, assist locations Season and L15, and player per-36 each have independent
 candidate payloads. A missing assist primitive cannot suppress the other
-streams. Durable traditional/assist/per-36 parity artifacts remain
-`pending_adjudication` until reviewed and prevent activation while pending.
+streams. Difference-free traditional/assist/per-36 parity artifacts become
+`exact` automatically. Every difference artifact remains
+`pending_adjudication` until an audited operator decision and prevents
+activation while pending. Hard blockers may be audited as rejected but can
+never be approved.
 An invalid staged PBP response creates no accepted observation, ledger row, or
 composition job. Successful initial games and corrections atomically enqueue
 every governed slice at the active manifest cutoff. Traditional-opponent,

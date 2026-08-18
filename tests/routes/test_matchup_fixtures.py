@@ -110,7 +110,7 @@ from app.services.team_matchup_refresh import (
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
-    TeamMatchupRepository,
+    TeamMatchupRepository as _ProductionTeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
 from tests.services.test_ledger_derivations import _league_games
@@ -143,6 +143,19 @@ COMMON_POSTED_MARKETS = (
     "BLK",
     "STKS",
 )
+
+
+class _AllowFixtureLegacyWrites:
+    def assert_writable(self, stream_key, *, connection=None):
+        return None
+
+
+class TeamMatchupRepository(_ProductionTeamMatchupRepository):
+    """Route fixtures explicitly opt into legacy writes before activation."""
+
+    def __init__(self, engine, **kwargs):
+        kwargs.setdefault("write_fence", _AllowFixtureLegacyWrites())
+        super().__init__(engine, **kwargs)
 
 
 def _recorded_projection_snapshot(catalog, *, provider="dabble"):
