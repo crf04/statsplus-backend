@@ -115,6 +115,7 @@ from app.services.collection_control import PublicationService  # noqa: E402
 EXIT_EXACT = 0
 EXIT_PENDING_ADJUDICATION = 2
 EXIT_INVALID_EVIDENCE = 3
+MAX_CAPTURE_INPUT_BYTES = 5 * 1024 * 1024
 ALL_REQUIRED_STREAMS = frozenset({
     "traditional_opponent_season",
     "traditional_opponent_l15",
@@ -1155,6 +1156,77 @@ def _adjudicate(args, engine) -> int:
     return 0
 
 
+def _capture_per36(args, engine) -> int:
+    if not args.actor.strip() or len(args.actor) > 128:
+        raise InvalidEvidenceError("actor_required")
+    source = Path(args.input)
+    if not source.is_file():
+        raise InvalidEvidenceError("per36_capture_input_invalid")
+    try:
+        raw = source.read_bytes()
+        if len(raw) > MAX_CAPTURE_INPUT_BYTES:
+            raise InvalidEvidenceError("per36_capture_input_invalid")
+        document = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise InvalidEvidenceError("per36_capture_input_invalid") from error
+    if not isinstance(document, Mapping) or set(document) != {
+        "game_set_checksum", "provider_window_identity", "request_checksum",
+        "rows",
+    }:
+        raise InvalidEvidenceError("per36_capture_input_invalid")
+    _, manifest, _ = _manifest_preflight(
+        engine, season=args.season, manifest_id=args.manifest_id
+    )
+    cutoff = _aware_utc(manifest["cutoff"])
+    capture = Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
+        publication_id=args.publication_id,
+        season=args.season,
+        cutoff=cutoff,
+        manifest_id=args.manifest_id,
+        event_catalog_publication_id=manifest["event_catalog_publication_id"],
+        event_catalog_checksum=manifest["event_catalog_checksum"],
+        game_set_checksum=document["game_set_checksum"],
+        request_checksum=document["request_checksum"],
+        provider_window_identity=document["provider_window_identity"],
+        rows=document["rows"],
+        actor=args.actor,
+    )
+    _write_summary(args.output, {
+        "status": "captured",
+        "capture_id": capture.capture_id,
+        "capture_checksum": capture.capture_checksum,
+        "source_observation_id": capture.source_observation_id,
+        "publication_id": capture.publication_id,
+        "payload_checksum": capture.payload_checksum,
+        "request_checksum": capture.request_checksum,
+        "actor_fingerprint": hashlib.sha256(
+            args.actor.strip().encode("utf-8")
+        ).hexdigest(),
+    })
+    return 0
+
+
+def _capture_per36_command(args, engine) -> int:
+    try:
+        return _capture_per36(args, engine)
+    except (InvalidEvidenceError, OSError, SQLAlchemyError, ValueError) as error:
+        code = (
+            error.code
+            if isinstance(error, InvalidEvidenceError)
+            else "per36_capture_invalid"
+        )
+        try:
+            _write_summary(args.output, {
+                "status": "invalid_evidence",
+                "error_code": code,
+                "season": args.season,
+                "manifest_id": args.manifest_id,
+            })
+        except OSError:
+            pass
+        return EXIT_INVALID_EVIDENCE
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command")
@@ -1175,11 +1247,22 @@ def main() -> int:
     adjudicate.add_argument("--actor", required=True)
     adjudicate.add_argument("--reason", required=True)
 
+    capture = subparsers.add_parser("capture-per36")
+    capture.add_argument("--database-url", required=True)
+    capture.add_argument("--season", required=True)
+    capture.add_argument("--manifest-id", required=True)
+    capture.add_argument("--publication-id", required=True)
+    capture.add_argument("--actor", required=True)
+    capture.add_argument("--input", required=True)
+    capture.add_argument("--output", required=True)
+
     args = parser.parse_args()
     if args.command == "adjudicate":
         return _adjudicate(args, create_engine(args.database_url))
     if args.command == "compare":
         return _compare(args, create_engine(args.database_url))
+    if args.command == "capture-per36":
+        return _capture_per36_command(args, create_engine(args.database_url))
     parser.print_help()
     return 1
 

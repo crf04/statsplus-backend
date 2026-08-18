@@ -73,6 +73,26 @@ bound to the same candidate checksum, manifest, Event Catalog, Season game
 set, request checksum, and exact Season provider window. The legacy
 `player_per36_stats` table is not authority and is never read by this command.
 
+Create that capture through the audited operator command, never by inserting
+database rows manually:
+
+```sh
+./scripts/matchup_parity.py capture-per36 \
+  --database-url "$DATABASE_URL" \
+  --season 2025-26 \
+  --manifest-id "<exact manifest id>" \
+  --publication-id "<composed player_per36 candidate id>" \
+  --actor "operator@example.com" \
+  --input per36-provider-evidence.json \
+  --output per36-capture-receipt.json
+```
+
+The bounded input contains only `rows`, `provider_window_identity`,
+`request_checksum`, and `game_set_checksum`. The command validates the active
+manifest, Event Catalog, candidate publication, raw evidence schema and exact
+checksums, then creates an immutable source observation, capture artifact and
+audit event in one transaction. Its receipt contains IDs and checksums only.
+
 ## What the report proves
 
 Each report covers one surface (`traditional` or `assist_locations`) in one

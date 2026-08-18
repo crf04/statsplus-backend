@@ -10,12 +10,13 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import asdict, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import sys
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.orm import Session
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.publication_integrity import (
@@ -787,17 +788,38 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
                 CollectionManifest.event_catalog_checksum,
             ).where(CollectionManifest.manifest_id == MANIFEST)
         ).mappings().one()
-    aggregate_request = {
-        "window": window,
-        "collect_before": (CUTOFF + timedelta(hours=1)).isoformat(),
-        "team_date_boundaries": {
-            str(team_id): {
-                "start_date": "2025-10-22",
-                "end_date": "2025-11-15",
-            }
-            for team_id in TEAM_IDS
-        },
-    }
+    if window == "season":
+        aggregate_requests = {
+            "traditional:league": {
+                "provider": "nba_stats", "team_id": None,
+                "date_from": None, "date_to": "11/15/2024",
+                "last_n_games": 0,
+            },
+            "assist_locations:league": {
+                "provider": "pbp_stats", "team_id": None,
+                "date_from": None, "date_to": "2024-11-15",
+                "last_n_games": 0,
+            },
+        }
+    else:
+        aggregate_requests = {
+            **{
+                f"traditional:{team_id}": {
+                    "provider": "nba_stats", "team_id": team_id,
+                    "date_from": "10/31/2024", "date_to": "11/15/2024",
+                    "last_n_games": 15,
+                }
+                for team_id in TEAM_IDS
+            },
+            **{
+                f"assist_locations:{team_id}": {
+                    "provider": "pbp_stats", "team_id": team_id,
+                    "date_from": "2024-10-31", "date_to": "2024-11-14",
+                    "last_n_games": 15,
+                }
+                for team_id in TEAM_IDS
+            },
+        }
     provider_identity = json.dumps({
         "window": window,
         "provider_source": "nba_stats.team_game_log",
@@ -806,9 +828,9 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
             "pbp_stats.team_game_log",
         ],
         "collect_before": (CUTOFF + timedelta(hours=1)).isoformat(),
-        "aggregate_request": aggregate_request,
+        "aggregate_requests": aggregate_requests,
         "aggregate_request_checksum": hashlib.sha256(json.dumps(
-            aggregate_request, sort_keys=True, separators=(",", ":")
+            aggregate_requests, sort_keys=True, separators=(",", ":")
         ).encode()).hexdigest(),
         "provider_game_ids_by_source": {
             source: {
@@ -837,6 +859,7 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
             event_catalog_publication_id=authority["event_catalog_publication_id"],
             event_catalog_checksum=authority["event_catalog_checksum"],
             provider_window_identity=provider_identity,
+            window_start_date=(date(2024, 10, 31) if window == "l15" else None),
         )
         for fact in (
             *_surface_facts(TEAM_IDS, surface="traditional", provider="nba_stats", game_ids_by_team=game_ids_by_team),
@@ -944,6 +967,42 @@ def test_legacy_provider_aggregate_request_checksum_is_required(tmp_path):
             season="2025-26", window="season", cutoff=CUTOFF,
             governance=governance,
         )
+
+
+def test_legacy_season_and_l15_use_one_locked_caller_snapshot(tmp_path):
+    engine, governance, _ = _runner_world(tmp_path)
+    _write_legacy_facts(
+        engine, game_ids_by_team=governance.expected_season_game_ids,
+        window="season",
+    )
+    _write_legacy_facts(
+        engine, game_ids_by_team=governance.expected_l15_game_ids,
+        window="l15",
+    )
+    delegate = TeamMatchupRepository(engine)
+    calls = []
+
+    class SnapshotRepository:
+        def get_snapshot(self, scope, *, connection=None, lock=False):
+            calls.append((connection, lock, scope.window_games))
+            return delegate.get_snapshot(
+                scope, connection=connection, lock=lock
+            )
+
+    source = StoredLegacyMatchupSource(SnapshotRepository())
+    with Session(engine) as session, session.begin():
+        source.produce(
+            season="2025-26", window="season", cutoff=CUTOFF,
+            governance=governance, session=session,
+        )
+        source.produce(
+            season="2025-26", window="l15", cutoff=CUTOFF,
+            governance=governance, session=session,
+        )
+
+    assert [window for _, _, window in calls] == [None, 15]
+    assert all(lock is True for _, lock, _ in calls)
+    assert calls[0][0] is calls[1][0]
 
 
 def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path):
@@ -1444,6 +1503,61 @@ def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
     assert received["actor"] == "operator@example.com"
     assert received["output"] == str(summary)
     assert "publications_json" not in received
+
+
+def test_capture_per36_cli_uses_audited_recorder_and_sanitized_output(
+    monkeypatch, tmp_path
+):
+    import scripts.matchup_parity as matchup_parity_script
+
+    input_path = tmp_path / "capture-input.json"
+    output_path = tmp_path / "capture-output.json"
+    evidence = {
+        "game_set_checksum": "a" * 64,
+        "provider_window_identity": {"window": "season"},
+        "request_checksum": "b" * 64,
+        "rows": [{"player_id": 1, "points": 99}],
+    }
+    input_path.write_text(json.dumps(evidence), encoding="utf-8")
+    received = {}
+    capture = SimpleNamespace(
+        capture_id="capture-id", capture_checksum="c" * 64,
+        source_observation_id="observation-id",
+        publication_id="publication-id", payload_checksum="d" * 64,
+        request_checksum="b" * 64,
+    )
+
+    class Recorder:
+        def __init__(self, engine):
+            assert engine == "engine"
+
+        def record_operator_evidence(self, **kwargs):
+            received.update(kwargs)
+            return capture
+
+    monkeypatch.setattr(
+        matchup_parity_script, "Per36DiagnosticCaptureRepository", Recorder
+    )
+    monkeypatch.setattr(
+        matchup_parity_script, "_manifest_preflight",
+        lambda *args, **kwargs: (None, {
+            "cutoff": CUTOFF.isoformat(),
+            "event_catalog_publication_id": "catalog-id",
+            "event_catalog_checksum": "e" * 64,
+        }, 42),
+    )
+    args = SimpleNamespace(
+        actor="operator@example.com", input=str(input_path),
+        output=str(output_path), season="2025-26", manifest_id="manifest-id",
+        publication_id="publication-id",
+    )
+
+    assert matchup_parity_script._capture_per36(args, "engine") == 0
+    summary = json.loads(output_path.read_text())
+    assert received["rows"] == evidence["rows"]
+    assert summary["capture_id"] == "capture-id"
+    assert "rows" not in summary
+    assert "actor" not in summary
 
 
 def test_sanitized_summary_omits_row_values():

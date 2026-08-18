@@ -588,6 +588,7 @@ class LegacyMatchupSource(Protocol):
         window: str,
         cutoff: datetime,
         governance: Any,
+        session: Session | None = None,
     ) -> MatchupMaterialization: ...
 
 
@@ -613,12 +614,17 @@ class StoredLegacyMatchupSource:
         window: str,
         cutoff: datetime,
         governance: Any,
+        session: Session | None = None,
     ) -> MatchupMaterialization:
         as_of = slate_date_for_instant(cutoff)
         scope = TeamMatchupSnapshotScope(
             season, as_of, 15 if window == "l15" else None
         )
-        snapshot = self.repository.get_snapshot(scope)
+        snapshot = self.repository.get_snapshot(
+            scope,
+            connection=(session.connection() if session is not None else None),
+            lock=session is not None,
+        )
         facts = tuple(
             fact for fact in snapshot.facts
             if (
@@ -686,8 +692,68 @@ class StoredLegacyMatchupSource:
             if provider_sources is None:
                 provider_sources = (identity.get("provider_source"),)
             source_memberships = identity["provider_game_ids_by_source"]
-            aggregate_request = identity["aggregate_request"]
+            aggregate_requests = identity["aggregate_requests"]
             aggregate_request_checksum = identity["aggregate_request_checksum"]
+            if not isinstance(aggregate_requests, dict):
+                raise ValueError
+            as_of = slate_date_for_instant(cutoff)
+            if window == "season":
+                expected_aggregate_requests = {
+                    "traditional:league": {
+                        "provider": "nba_stats", "team_id": None,
+                        "date_from": None,
+                        "date_to": as_of.strftime("%m/%d/%Y"),
+                        "last_n_games": 0,
+                    },
+                    "assist_locations:league": {
+                        "provider": "pbp_stats", "team_id": None,
+                        "date_from": None, "date_to": as_of.isoformat(),
+                        "last_n_games": 0,
+                    },
+                }
+                aggregate_requests_valid = (
+                    aggregate_requests == expected_aggregate_requests
+                )
+            else:
+                boundaries_by_team = {}
+                for fact in facts:
+                    if fact.base not in LEDGER_OWNED_SURFACES:
+                        continue
+                    value = fact.window_start_date
+                    existing = boundaries_by_team.setdefault(fact.team_id, value)
+                    if existing != value or value is None:
+                        raise ValueError
+                expected_request_keys = {
+                    f"{surface}:{team_id}"
+                    for surface in LEDGER_OWNED_SURFACES
+                    for team_id in boundaries_by_team
+                }
+                aggregate_requests_valid = (
+                    isinstance(aggregate_requests, dict)
+                    and set(aggregate_requests) == expected_request_keys
+                )
+                for team_id, start in boundaries_by_team.items():
+                    traditional = aggregate_requests.get(
+                        f"traditional:{team_id}", {}
+                    )
+                    assists = aggregate_requests.get(
+                        f"assist_locations:{team_id}", {}
+                    )
+                    aggregate_requests_valid = aggregate_requests_valid and (
+                        traditional == {
+                            "provider": "nba_stats", "team_id": team_id,
+                            "date_from": start.strftime("%m/%d/%Y"),
+                            "date_to": as_of.strftime("%m/%d/%Y"),
+                            "last_n_games": 15,
+                        }
+                        and assists.get("provider") == "pbp_stats"
+                        and assists.get("team_id") == team_id
+                        and assists.get("date_from") == start.isoformat()
+                        and assists.get("last_n_games") == 15
+                        and start <= datetime.fromisoformat(
+                            assists["date_to"]
+                        ).date() <= as_of
+                    )
             if (
                 identity["window"] != window
                 or set(provider_sources) != {
@@ -698,23 +764,9 @@ class StoredLegacyMatchupSource:
                 or not isinstance(identity_teams, dict)
                 or not isinstance(source_memberships, dict)
                 or set(source_memberships) != set(provider_sources)
-                or not isinstance(aggregate_request, dict)
-                or aggregate_request.get("window") != window
-                or aggregate_request.get("collect_before")
-                != identity["collect_before"]
-                or set(aggregate_request.get("team_date_boundaries", {}))
-                != set(identity_teams)
-                or any(
-                    not isinstance(boundary, dict)
-                    or set(boundary) != {"start_date", "end_date"}
-                    or datetime.fromisoformat(boundary["start_date"]).date()
-                    > datetime.fromisoformat(boundary["end_date"]).date()
-                    for boundary in aggregate_request.get(
-                        "team_date_boundaries", {}
-                    ).values()
-                )
+                or not aggregate_requests_valid
                 or hashlib.sha256(json.dumps(
-                    aggregate_request, sort_keys=True, separators=(",", ":")
+                    aggregate_requests, sort_keys=True, separators=(",", ":")
                 ).encode()).hexdigest() != aggregate_request_checksum
             ):
                 raise ValueError
@@ -1314,9 +1366,18 @@ class MatchupParityRunner:
         governance = self.governance.read_for_composition(season, cutoff)
         if self.legacy_source is None:
             raise MatchupParityError("legacy materializer source is required")
-        legacy = self.legacy_source.produce(
-            season=season, window=window, cutoff=cutoff, governance=governance,
-        )
+        try:
+            legacy = self.legacy_source.produce(
+                season=season, window=window, cutoff=cutoff,
+                governance=governance, session=session,
+            )
+        except TypeError as error:
+            if "session" not in str(error):
+                raise
+            legacy = self.legacy_source.produce(
+                season=season, window=window, cutoff=cutoff,
+                governance=governance,
+            )
         self._validate_legacy_provenance(legacy, season, window, cutoff, governance)
         expected_team_ids = frozenset(int(team_id) for team_id in governance.team_ids)
         if expected_team_ids != frozenset(NBA_TEAM_ID_TO_TRICODE):

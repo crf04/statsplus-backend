@@ -6,12 +6,17 @@ import hashlib
 import json
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy import text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from app.migrations import run_migrations
-from app.models.collection_control import PublicationVersion
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    CollectionObservation,
+    PublicationVersion,
+)
+from app.models.collection_control import AuditEvent
 
 from app.services.ledger_derivations import (
     derive_player_per36_facts,
@@ -335,6 +340,95 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
             actor="operator@example.com",
             source_observation_id="per36-observation",
         )
+
+
+def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'operator-capture.sqlite3'}")
+    run_migrations(engine)
+    game = _game()
+    fact = derive_player_per36_facts((game,), season=game.season)[0]
+    raw_fields = (
+        "points", "rebounds", "assists", "field_goals_made",
+        "field_goals_attempted", "three_pointers_made",
+        "three_pointers_attempted", "free_throws_made",
+        "free_throws_attempted", "turnovers", "steals", "blocks",
+        "personal_fouls",
+    )
+    row = {
+        **{
+            field: sum(
+                getattr(player, field) for player in game.player_facts
+                if player.player_id == fact.player_id
+            )
+            for field in raw_fields
+        },
+        **{
+            field: getattr(fact, field)
+            for field in fact.__dataclass_fields__ if field.endswith("_per36")
+        },
+        "player_id": fact.player_id, "minutes": fact.minutes,
+        "game_count": fact.game_count,
+        "team_ids_at_game": list(fact.team_ids_at_game),
+    }
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    request_identity = {
+        "season": game.season, "window": "season",
+        "cutoff": cutoff.isoformat(), "provider_start_date": "2024-10-22",
+        "provider_end_date": "2024-11-16",
+    }
+    request_checksum = hashlib.sha256(json.dumps(
+        request_identity, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    identity = {
+        **request_identity,
+        "game_ids": [game.game_id], "request_checksum": request_checksum,
+        "returned_row_count": 1, "returned_game_count": 1,
+        "event_catalog_mapping_trace": {game.game_id: game.game_id},
+    }
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="catalog", season=game.season,
+            catalog_type="event", cutoff=cutoff, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload, complete=True,
+            published_at=cutoff,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season=game.season, cutoff=cutoff,
+            collect_before=datetime(2024, 11, 17, tzinfo=timezone.utc),
+            accepted_versions="[1]", scopes='["player_per36_diagnostic"]',
+            checksum="manifest-checksum", event_catalog_publication_id="catalog",
+            event_catalog_checksum=catalog_checksum, status="active",
+            created_at=cutoff,
+        ))
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="candidate", stream_key="player_per36",
+            season=game.season, cutoff=cutoff, version=1, status="candidate",
+            checksum=hashlib.sha256(b"{}").hexdigest(), payload="{}",
+            manifest_id="manifest",
+            event_catalog_publication_id="catalog",
+            event_catalog_checksum=catalog_checksum, created_at=cutoff, fence=0,
+        ))
+
+    capture = Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
+        publication_id="candidate", season=game.season, cutoff=cutoff,
+        manifest_id="manifest", event_catalog_publication_id="catalog",
+        event_catalog_checksum=catalog_checksum, game_set_checksum="c" * 64,
+        request_checksum=request_checksum, provider_window_identity=identity,
+        rows=(row,), actor="operator@example.com",
+    )
+
+    with Session(engine) as session:
+        observation = session.get(CollectionObservation, capture.source_observation_id)
+        audit = session.scalar(select(AuditEvent).where(
+            AuditEvent.resource == capture.capture_id
+        ))
+    assert observation.observation_type == "player_per36_diagnostic"
+    assert audit.action == "ledger.per36_capture_recorded"
+    assert Per36DiagnosticCaptureRepository(engine).read(
+        capture.capture_id
+    ).capture_checksum == capture.capture_checksum
 
 
 @pytest.mark.parametrize(

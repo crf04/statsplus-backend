@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from app.services.team_matchup_refresh import (
     TeamMatchupRefreshService,
     TeamWindowBoundary,
     TeamWindowBoundaryResolver,
+    _ProviderGameMembership,
 )
 from app.utils.telemetry import ProviderResponseError
 
@@ -390,7 +392,7 @@ def test_last_15_rejects_wrong_same_count_pbp_membership():
         pbp_stats_provider=_TeamLogPBP(team_ids, wrong_pbp_ids),
     )
 
-    _, failures, provider_game_ids = service._collect_last_15(
+    _, failures, provider_game_ids, _ = service._collect_last_15(
         "2024-25",
         snapshot_date=date(2025, 4, 15),
         team_ids=team_ids,
@@ -454,6 +456,65 @@ def test_provider_aggregate_must_prove_immutable_window_identity(provider_row):
             expected_game_ids_by_team={BOS: tuple(f"game-{index}" for index in range(15))},
             require_game_ids=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("window", "requests"),
+    (
+        ("season", {
+            "traditional:league": {
+                "provider": "nba_stats", "team_id": None,
+                "date_from": None, "date_to": "11/02/2025",
+                "last_n_games": 0,
+            },
+            "assist_locations:league": {
+                "provider": "pbp_stats", "team_id": None,
+                "date_from": None, "date_to": "2025-11-02",
+                "last_n_games": 0,
+            },
+        }),
+        ("l15", {
+            f"traditional:{BOS}": {
+                "provider": "nba_stats", "team_id": BOS,
+                "date_from": "10/18/2025", "date_to": "11/02/2025",
+                "last_n_games": 15,
+            },
+            f"assist_locations:{BOS}": {
+                "provider": "pbp_stats", "team_id": BOS,
+                "date_from": "2025-10-18", "date_to": "2025-11-02",
+                "last_n_games": 15,
+            },
+        }),
+    ),
+)
+def test_provider_window_identity_hashes_exact_evening_dst_request_params(
+    window, requests
+):
+    membership = {BOS: ("game-1",)}
+    provider_membership = _ProviderGameMembership(
+        membership,
+        by_source={
+            "nba_stats.team_game_log": membership,
+            "pbp_stats.team_game_log": membership,
+        },
+    )
+
+    identity = json.loads(TeamMatchupRefreshService._provider_window_identity(
+        window=window,
+        game_ids_by_team=membership,
+        provider_game_ids_by_team=provider_membership,
+        expected_counts={BOS: 1},
+        provider_sources=(
+            "nba_stats.team_game_log", "pbp_stats.team_game_log",
+        ),
+        collect_before=datetime(2025, 11, 3, 1, tzinfo=timezone.utc),
+        aggregate_requests=requests,
+    ))
+
+    assert identity["aggregate_requests"] == requests
+    assert identity["aggregate_request_checksum"] == hashlib.sha256(json.dumps(
+        requests, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
 
 
 @pytest.mark.parametrize(

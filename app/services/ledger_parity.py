@@ -362,6 +362,134 @@ class Per36DiagnosticCaptureRepository:
                 owned.execute(LedgerParityArtifact.__table__.insert().values(**values))
         return capture
 
+    def record_operator_evidence(
+        self,
+        *,
+        publication_id: str,
+        season: str,
+        cutoff: datetime,
+        manifest_id: str,
+        event_catalog_publication_id: str,
+        event_catalog_checksum: str,
+        game_set_checksum: str,
+        request_checksum: str,
+        provider_window_identity: Mapping[str, object],
+        rows: Iterable[Mapping[str, object]],
+        actor: str,
+    ) -> Per36DiagnosticCapture:
+        """Create one audited immutable capture from bounded operator evidence."""
+
+        rows_tuple = self._validate_rows(rows)
+        now = self.clock()
+        with Session(self.engine) as session, session.begin():
+            publication = session.scalar(
+                select(PublicationVersion)
+                .where(PublicationVersion.publication_id == publication_id)
+                .with_for_update()
+            )
+            manifest = session.scalar(
+                select(CollectionManifest)
+                .where(CollectionManifest.manifest_id == manifest_id)
+                .with_for_update()
+            )
+            catalog = session.scalar(
+                select(CatalogPublication)
+                .where(
+                    CatalogPublication.publication_id
+                    == event_catalog_publication_id
+                )
+                .with_for_update()
+            )
+            if (
+                publication is None
+                or publication.stream_key != "player_per36"
+                or publication.status != "candidate"
+                or publication.season != season
+                or assume_utc(publication.cutoff) != assume_utc(cutoff)
+                or publication.manifest_id != manifest_id
+                or publication.event_catalog_publication_id
+                != event_catalog_publication_id
+                or publication.event_catalog_checksum != event_catalog_checksum
+                or not publication_payload_matches_checksum(
+                    publication.payload, publication.checksum
+                )
+                or manifest is None
+                or manifest.status != "active"
+                or manifest.season != season
+                or assume_utc(manifest.cutoff) != assume_utc(cutoff)
+                or manifest.event_catalog_publication_id
+                != event_catalog_publication_id
+                or manifest.event_catalog_checksum != event_catalog_checksum
+                or catalog is None
+                or not catalog.complete
+                or catalog.checksum != event_catalog_checksum
+                or not publication_payload_matches_checksum(
+                    catalog.payload, catalog.checksum
+                )
+            ):
+                raise ValueError("per36 operator evidence authority is invalid")
+            observation_id = str(uuid4())
+            observation_document = {
+                "rows": [dict(row) for row in rows_tuple],
+                "provider_window_identity": dict(provider_window_identity),
+                "request_checksum": request_checksum,
+            }
+            payload = _canonical_capture_payload(observation_document)
+            session.add(CollectionObservation(
+                observation_id=observation_id,
+                client_observation_id=f"operator-per36-{observation_id}",
+                collector_id="matchup-parity-operator",
+                manifest_id=manifest_id,
+                environment="operator",
+                provider="nba_stats",
+                observation_type="player_per36_diagnostic",
+                scope=json.dumps({
+                    "season": season,
+                    "window": "season",
+                    "manifest_id": manifest_id,
+                }, sort_keys=True),
+                season=season,
+                cutoff=assume_utc(cutoff),
+                schema_version=1,
+                checksum=hashlib.sha256(payload.encode()).hexdigest(),
+                payload=payload,
+                payload_bytes=len(payload.encode()),
+                retrieved_at=now,
+                accepted_at=now,
+            ))
+            session.flush()
+            capture = self.record(
+                publication_id=publication_id,
+                payload_checksum=publication.checksum,
+                season=season,
+                cutoff=cutoff,
+                manifest_id=manifest_id,
+                event_catalog_publication_id=event_catalog_publication_id,
+                event_catalog_checksum=event_catalog_checksum,
+                game_set_checksum=game_set_checksum,
+                request_checksum=request_checksum,
+                provider_window_identity=provider_window_identity,
+                rows=rows_tuple,
+                actor=actor,
+                source_observation_id=observation_id,
+                session=session,
+            )
+            session.add(AuditEvent(
+                event_id=str(uuid4()),
+                actor=actor[:128],
+                action="ledger.per36_capture_recorded",
+                resource=capture.capture_id,
+                reason="bounded operator evidence capture",
+                details=json.dumps({
+                    "manifest_id": manifest_id,
+                    "publication_id": publication_id,
+                    "source_observation_id": observation_id,
+                    "capture_checksum": capture.capture_checksum,
+                }, sort_keys=True),
+                created_at=now,
+            ))
+            return capture
+
     def read(self, capture_id: str, *, session: Session | None = None) -> Per36DiagnosticCapture:
         if session is not None:
             row = session.get(LedgerParityArtifact, capture_id)

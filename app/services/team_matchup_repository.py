@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
@@ -1192,15 +1192,24 @@ class TeamMatchupRepository:
         )
 
     def get_snapshot(
-        self, scope: TeamMatchupSnapshotScope
+        self, scope: TeamMatchupSnapshotScope, *,
+        connection: Connection | None = None, lock: bool = False,
     ) -> StoredTeamMatchupSnapshot:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        with self.engine.connect() as connection:
+        owned = connection is None
+        scope_context = self.engine.connect() if owned else nullcontext(connection)
+        with scope_context as connection:
+            fact_query = select(fact_table).where(*self._scope(fact_table, scope))
+            observation_query = select(observation_table).where(
+                *self._scope(observation_table, scope)
+            )
+            if lock:
+                fact_query = fact_query.with_for_update()
+                observation_query = observation_query.with_for_update()
             fact_rows = (
                 connection.execute(
-                    select(fact_table)
-                    .where(*self._scope(fact_table, scope))
+                    fact_query
                     .order_by(
                         fact_table.c.team_id,
                         fact_table.c.base,
@@ -1213,8 +1222,7 @@ class TeamMatchupRepository:
             )
             observation_rows = (
                 connection.execute(
-                    select(observation_table)
-                    .where(*self._scope(observation_table, scope))
+                    observation_query
                     .order_by(observation_table.c.surface)
                 )
                 .mappings()
