@@ -737,11 +737,14 @@ unresolved-team telemetry instead of disappearing silently.
 `freshness` retains the existing `schedule`, `pool`, `stats`, and `injuries`
 surfaces and additionally reports `player_game_logs`, per-Base
 `player_diets.surfaces`, and Season/Last-15
-`team_matchups[window].surfaces`. Team-window surface timestamps are the
-stored observation or publication timestamp; a missing or unavailable source
-therefore carries null rather than a request-time timestamp. Switching between
-equivalent legacy and ledger sources keeps the matchup facts stable, while
-truthful source-specific provenance and freshness may change at cutover.
+`team_matchups[window].surfaces`. A valid stored observation carries its actual
+stored timestamp even when its routine status is `unavailable` (for example,
+unsupported Synergy L15). Missing evidence and invalid/corrupt publication
+evidence carry null; request time is never synthesized as freshness. Switching
+between equivalent legacy and ledger sources preserves the established public
+matchup freshness timestamp byte-for-byte where the compatibility contract
+requires it. Source-specific publication timestamps and lineage remain in the
+additive provenance envelope.
 Pool freshness and per-provider status are passed through from the selected
 stored snapshot.
 When the projection-archive reader is activated, this block additionally

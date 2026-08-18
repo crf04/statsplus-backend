@@ -3018,6 +3018,8 @@ class PublicationService(_SessionService):
             ).with_for_update())
             if row is None:
                 raise ControlPlaneError("stream_not_found")
+            if stream_key in {"traditional_opponent", "assist_locations"}:
+                raise ControlPlaneError("stream_unavailable")
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
@@ -3124,7 +3126,7 @@ class PublicationService(_SessionService):
                     LedgerParityArtifact.season == season,
                     LedgerParityArtifact.cutoff == _aware(cutoff),
                     LedgerParityArtifact.publication_id == candidate_publication_id,
-                ))
+                ).with_for_update().execution_options(populate_existing=True))
                 if (
                     candidate is None
                     or artifact is None

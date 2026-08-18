@@ -1200,6 +1200,31 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     assert set(materialization.game_ids_by_team) == set(TEAM_IDS)
     assert all(not ids for ids in materialization.game_ids_by_team.values())
 
+    invalid_identity = json.loads(identities["traditional"])
+    invalid_identity["aggregate_requests"][f"traditional:{TEAM_IDS[0]}"][
+        "parameters"
+    ]["DateFrom"] = "01/01/2000"
+    invalid_identity["aggregate_request_checksum"] = hashlib.sha256(json.dumps(
+        invalid_identity["aggregate_requests"],
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    invalid_observation = replace(
+        observation,
+        provider_window_identity=json.dumps(
+            invalid_identity, sort_keys=True, separators=(",", ":")
+        ),
+    )
+
+    class InvalidSnapshotRepository:
+        def get_snapshot(self, scope, **kwargs):
+            return SimpleNamespace(facts=(), observations=(invalid_observation,))
+
+    with pytest.raises(MatchupParityError, match="window identity"):
+        StoredLegacyMatchupSource(InvalidSnapshotRepository()).produce(
+            season="2025-26", window="l15", cutoff=CUTOFF,
+            governance=governance, surface="traditional",
+        )
+
     publications = {
         stream: _insert_runner_publication(
             engine, stream_key=stream,
@@ -1311,6 +1336,29 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
             candidate_publication_id=rerun_publication,
             artifact_id=latest.artifact_id,
         )
+        # The caller already has the artifact cached, then an audited reject
+        # commits in a second session. The cohort lock must refresh the row;
+        # stale approval state cannot survive the lock acquisition.
+        with Session(engine) as rejecting, rejecting.begin():
+            rejecting.execute(LedgerParityArtifact.__table__.update().where(
+                LedgerParityArtifact.artifact_id == latest.artifact_id
+            ).values(
+                decision="rejected", adjudicated_by="operator",
+                adjudicated_at=CUTOFF + timedelta(minutes=7),
+                adjudication_reason="rejected after review",
+            ))
+        assert not matchup_parity_cohort_is_activatable(
+            session, season="2025-26", cutoff=CUTOFF,
+            candidate_publication_id=rerun_publication,
+            artifact_id=latest.artifact_id,
+        )
+        with Session(engine) as restoring, restoring.begin():
+            restoring.execute(LedgerParityArtifact.__table__.update().where(
+                LedgerParityArtifact.artifact_id == latest.artifact_id
+            ).values(
+                decision=None, adjudicated_by=None, adjudicated_at=None,
+                adjudication_reason=None,
+            ))
 
         # Bind one otherwise-valid selected artifact to a second immutable
         # catalog/manifest authority.  The cohort must fail closed rather than
@@ -1550,6 +1598,11 @@ def test_assist_stream_activation_requires_parity(tmp_path):
                    "traditional_opponent_season", "traditional_opponent_l15"):
         with pytest.raises(ControlPlaneError, match="ledger_parity_evidence_required"):
             publications.activate_stream(stream, reason="unproven ledger candidate")
+    for generic_stream in ("traditional_opponent", "assist_locations"):
+        with pytest.raises(ControlPlaneError, match="stream_unavailable"):
+            publications.activate_stream(
+                generic_stream, reason="generic stream is audit-only"
+            )
 
 
 # --- CLI integration -------------------------------------------------------

@@ -14,11 +14,14 @@ from sqlalchemy import create_engine, delete, inspect, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import run_migrations
+from app.models.collection_control import PublicationStream
 from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.database_first_activation import LegacyWriteFence
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -257,6 +260,42 @@ def _publish_snapshot_batch(
     repository.replace_snapshots(
         ((scope, facts, observations),),
         retrieved_at=retrieved_at,
+    )
+
+
+def test_legacy_fence_checks_only_the_exact_surface_window_stream(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'exact-fence.sqlite3'}")
+    run_migrations(engine)
+    PublicationService(engine).register_default_streams()
+    repository = _ProductionTeamMatchupRepository(
+        engine, write_fence=LegacyWriteFence(engine)
+    )
+    season_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
+    l15_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    observation = (TeamMatchupObservation("traditional", "available"),)
+    retrieved_at = datetime(2025, 4, 15, 16, tzinfo=timezone.utc)
+
+    with engine.begin() as connection:
+        connection.execute(update(PublicationStream).where(
+            PublicationStream.stream_key == "traditional_opponent"
+        ).values(enabled=True))
+    repository.replace_snapshots(
+        ((season_scope, _complete_traditional_facts(), observation),),
+        retrieved_at=retrieved_at,
+    )
+
+    with engine.begin() as connection:
+        connection.execute(update(PublicationStream).where(
+            PublicationStream.stream_key == "traditional_opponent_season"
+        ).values(enabled=True))
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        repository.replace_snapshots(
+            ((season_scope, _complete_traditional_facts(11), observation),),
+            retrieved_at=retrieved_at + timedelta(minutes=1),
+        )
+    repository.replace_snapshots(
+        ((l15_scope, _complete_traditional_facts(12), observation),),
+        retrieved_at=retrieved_at + timedelta(minutes=1),
     )
 
 

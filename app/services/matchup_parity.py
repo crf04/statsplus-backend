@@ -766,6 +766,37 @@ class StoredLegacyMatchupSource:
                     isinstance(aggregate_requests, dict)
                     and set(selected_aggregate_requests) == expected_request_keys
                 )
+                if unavailable_candidate:
+                    governed_boundaries = getattr(
+                        governance, "expected_l15_date_from_by_team", {}
+                    )
+                    aggregate_requests_valid = (
+                        aggregate_requests_valid
+                        and set(governed_boundaries) == set(governance.team_ids)
+                    )
+                    for team_id, start_text in governed_boundaries.items():
+                        start = datetime.strptime(start_text, "%m/%d/%Y").date()
+                        if "traditional" in selected_surfaces:
+                            aggregate_requests_valid = aggregate_requests_valid and (
+                                selected_aggregate_requests.get(
+                                    f"traditional:{team_id}"
+                                ) == _nba_team_stats_request_descriptor(
+                                    season=season, season_type="Regular Season",
+                                    team_id=team_id, last_n_games=15,
+                                    date_from=start_text,
+                                    date_to=as_of.strftime("%m/%d/%Y"),
+                                )
+                            )
+                        if "assist_locations" in selected_surfaces:
+                            aggregate_requests_valid = aggregate_requests_valid and (
+                                selected_aggregate_requests.get(
+                                    f"assist_locations:{team_id}"
+                                ) == _pbp_totals_request_descriptor(
+                                    season=season, season_type="Regular Season",
+                                    team_id=team_id, from_date=start.isoformat(),
+                                    to_date=as_of.isoformat(),
+                                )
+                            )
                 for team_id, start in boundaries_by_team.items():
                     if "traditional" in selected_surfaces:
                         aggregate_requests_valid = aggregate_requests_valid and (

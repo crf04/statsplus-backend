@@ -802,13 +802,11 @@ class TeamMatchupRepository:
                 if callable(checker):
                     stream_by_surface = {
                         "traditional": (
-                            "traditional_opponent",
                             "traditional_opponent_l15"
                             if scope.window_games is not None
                             else "traditional_opponent_season",
                         ),
                         "assist_locations": (
-                            "assist_locations",
                             "assist_locations_l15"
                             if scope.window_games is not None
                             else "assist_locations_season",

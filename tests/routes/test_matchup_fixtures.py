@@ -2126,6 +2126,13 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
         "status": "unavailable",
         "unavailable_reason": "provider_window_unsupported",
     }
+    assert matchup["freshness"]["team_matchups"]["last_15"]["surfaces"][
+        "play_types"
+    ] == {
+        "status": "unavailable",
+        "unavailable_reason": "provider_window_unsupported",
+        "retrieved_at": legacy_retrieved_at.isoformat(),
+    }
     assert selection_response.get_json()["h2h"]["rows"]
     assert player_game_log_response.get_json()["game_logs"][0]["PTS"] == 25
     assert provider_calls == {"nba": 0, "pbp": 0}

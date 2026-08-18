@@ -993,19 +993,23 @@ def matchup_parity_cohort_is_activatable(
         return authority
 
     target_cutoff = assume_utc(cutoff)
-    requested_artifact = session.get(LedgerParityArtifact, artifact_id)
-    cohort_streams = (
-        _MATCHUP_PARITY_COHORT_STREAMS
-        if requested_artifact is not None
-        and requested_artifact.stream_key == "player_per36"
-        else _MATCHUP_STREAMS
-    )
     try:
         unique_authority = resolve_unique_matchup_authority(
             session, season=season, cutoff=target_cutoff, lock=True,
         )
     except ValueError:
         return False
+    requested_artifact = session.scalar(
+        select(LedgerParityArtifact).where(
+            LedgerParityArtifact.artifact_id == artifact_id
+        ).with_for_update().execution_options(populate_existing=True)
+    )
+    cohort_streams = (
+        _MATCHUP_PARITY_COHORT_STREAMS
+        if requested_artifact is not None
+        and requested_artifact.stream_key == "player_per36"
+        else _MATCHUP_STREAMS
+    )
     # Lock the complete candidate history before selecting.  The lock order is
     # deterministic so concurrent activation attempts cannot validate one
     # generation and mutate a different one between reads.
@@ -1017,7 +1021,7 @@ def matchup_parity_cohort_is_activatable(
             LedgerParityArtifact.stream_key,
             LedgerParityArtifact.created_at,
             LedgerParityArtifact.artifact_id,
-        ).with_for_update()
+        ).with_for_update().execution_options(populate_existing=True)
     ).all()
     history_publication_ids = {
         row.publication_id for row in all_rows if row.publication_id
@@ -1137,7 +1141,7 @@ def matchup_parity_cohort_is_activatable(
     # Pointers were locked before validation and remain held until the caller
     # mutates the selected stream pointer in this activation transaction.
 
-    supplied = session.get(LedgerParityArtifact, artifact_id)
+    supplied = requested_artifact
     if supplied is None or supplied.stream_key not in cohort_streams:
         return False
     selected_row, _ = selected[supplied.stream_key]

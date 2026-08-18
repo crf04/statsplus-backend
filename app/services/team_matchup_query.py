@@ -312,6 +312,10 @@ class TeamMatchupQueryService:
         legacy_league = () if legacy is None else legacy.league_metrics
         legacy_team = {} if legacy is None else legacy.team_metrics
         legacy_observations = () if legacy is None else legacy.observations
+        legacy_observation_retrieved = {
+            observation.surface: observation.retrieved_at
+            for observation in legacy_observations
+        }
         legacy_fact_scopes = {} if legacy is None else legacy.fact_scopes
         legacy_retrieved = {} if legacy is None else legacy.fact_retrieved_at
         league = [metric for metric in legacy_league if metric.base not in active]
@@ -350,7 +354,15 @@ class TeamMatchupQueryService:
                         or read.unavailable_reason
                         or f"publication_{read.status}"
                     ),
-                    retrieved_at=read.retrieved_at or self._clock(),
+                    # Routine unavailable observations retain their durable
+                    # timestamp. Validation failures are invalid evidence and
+                    # must not expose or synthesize freshness.
+                    retrieved_at=(
+                        None
+                        if validation_reason is not None
+                        else read.retrieved_at
+                        or legacy_observation_retrieved.get(base)
+                    ),
                     publication=publication_lineage(read),
                 ))
                 continue
