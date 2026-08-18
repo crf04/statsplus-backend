@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+import hashlib
 import json
 from typing import Any, Literal, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
@@ -349,6 +350,21 @@ class TeamMatchupRefreshService:
         season_game_ids_by_team = self._season_game_ids_by_team(
             events, as_of=snapshot_date, team_ids=team_ids
         )
+        event_dates = {
+            str(event["nba_game_id"]):
+            TeamWindowBoundaryResolver._scheduled_at(event).date().isoformat()
+            for event in events
+        }
+
+        def date_boundaries(game_ids_by_team):
+            return {
+                team_id: {
+                    "start_date": min(event_dates[game_id] for game_id in game_ids),
+                    "end_date": max(event_dates[game_id] for game_id in game_ids),
+                }
+                for team_id, game_ids in game_ids_by_team.items()
+                if game_ids
+            }
         season_play_types_are_bounded = (
             snapshot_date == retrieved_at.astimezone(EASTERN).date()
         )
@@ -379,6 +395,9 @@ class TeamMatchupRefreshService:
                     for team_id, game_ids in season_game_ids_by_team.items()
                 },
                 collect_before=provenance.collect_before if provenance else None,
+                provider_date_boundaries=date_boundaries(
+                    season_game_ids_by_team
+                ),
             )
         season_facts = self._bind_legacy_window_evidence(
             season_facts, season_provider_game_ids or {}, season_window_identity,
@@ -442,6 +461,9 @@ class TeamMatchupRefreshService:
                         team_id: 15 for team_id in rolling_game_ids_by_team
                     },
                     collect_before=provenance.collect_before if provenance else None,
+                    provider_date_boundaries=date_boundaries(
+                        rolling_game_ids_by_team
+                    ),
                 )
             rolling_facts = self._bind_legacy_window_evidence(
                 rolling_facts,
@@ -728,6 +750,7 @@ class TeamMatchupRefreshService:
         expected_counts: Mapping[int, int],
         provider_sources: tuple[str, ...] = ("nba_stats.team_game_log",),
         collect_before: datetime | None = None,
+        provider_date_boundaries: Mapping[int, Mapping[str, str]] | None = None,
     ) -> str:
         """Record provider request evidence only after count verification.
 
@@ -751,6 +774,18 @@ class TeamMatchupRefreshService:
             raise _ProviderWindowUnverified("provider game IDs do not match authority")
         if collect_before is None:
             raise _ProviderWindowUnverified("provider collection fence is unavailable")
+        if (
+            provider_date_boundaries is None
+            or set(provider_date_boundaries) != set(game_ids_by_team)
+            or any(
+                set(boundary) != {"start_date", "end_date"}
+                or boundary["start_date"] > boundary["end_date"]
+                for boundary in provider_date_boundaries.values()
+            )
+        ):
+            raise _ProviderWindowUnverified(
+                "provider date boundaries are incomplete"
+            )
         source_memberships = getattr(provider_game_ids_by_team, "by_source", None)
         if source_memberships is None:
             source_memberships = {
@@ -772,6 +807,17 @@ class TeamMatchupRefreshService:
                 raise _ProviderWindowUnverified(
                     "provider source membership does not match authority"
                 )
+        aggregate_request = {
+            "window": window,
+            "collect_before": assume_utc(collect_before).isoformat(),
+            "team_date_boundaries": {
+                str(team_id): dict(provider_date_boundaries[team_id])
+                for team_id in sorted(provider_date_boundaries)
+            },
+        }
+        aggregate_request_checksum = hashlib.sha256(json.dumps(
+            aggregate_request, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
         return json.dumps({
             "window": window,
             "provider_source": "nba_stats.team_game_log",
@@ -784,6 +830,8 @@ class TeamMatchupRefreshService:
                 for source, membership in sorted(source_memberships.items())
             },
             "collect_before": assume_utc(collect_before).isoformat(),
+            "aggregate_request": aggregate_request,
+            "aggregate_request_checksum": aggregate_request_checksum,
             "teams": {
                 str(team_id): {
                     "expected_games": expected_counts[team_id],

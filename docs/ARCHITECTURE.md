@@ -1905,25 +1905,23 @@ vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `l15_game_count_mismatch`, `scope_mismatch`, `authority_mismatch`, and
 `invalid_denominator`, `served_rate_mismatch`, and `served_rank_mismatch`).
 Hard classifications produce `failed` evidence that
-cannot be manually approved. Floating denominator/rate differences may be
-`adjudication_required` only with an explicit provider-rounding rule or a
-concrete parent-approved semantic rule; unexplained differences and ranking
-differences are hard and never manually adjudicable.
+cannot be manually approved. Floating denominator/rate differences in the
+required public fields are hard failures; provider rounding is diagnostic
+context only and never activation authority.
 
 `scripts/matchup_parity.py compare` requires an explicit database URL, Season,
-manifest ID, actor, sanitized output path, `isolated|candidate` target, all
-five inactive candidate IDs, and a scoped per-36 diagnostic-capture ID. One
+manifest ID, actor, sanitized output path, `isolated|candidate` target, and a
+scoped per-36 diagnostic-capture ID. One
 invocation runs both Season and exact-L15 matchup windows plus the player
 Season per-36 comparison. It resolves the exact manifest cutoff before work,
-preflights migrations, Active Season/phase, candidate provenance, and
-stream/pointer state, then composes each matchup candidate from the governed
+preflights migrations, Active Season/phase, and stream/pointer state, then
+composes all five candidates from the governed
 canonical ledger before comparison. It never reads the unscoped legacy
 `player_per36_stats` table. The command prints a bounded human table, persists
 only sanitized summary fields, records the per-stream artifacts atomically,
 and exits distinctly for exact, pending adjudication, and invalid evidence;
 invalid summaries include pointer/stream nonmutation proof when state capture
-succeeded. Only an explicit provider-rounding or concrete parent-approved
-semantic rule can make a soft denominator/rate difference approvable.
+succeeded. Required denominator/rate differences are never approvable.
 `scripts/matchup_parity.py adjudicate` records the operator decision. The
 reports are the evidence backend #87 consumes for database-first activation.
 See

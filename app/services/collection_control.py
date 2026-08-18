@@ -3113,6 +3113,7 @@ class PublicationService(_SessionService):
                     "traditional_opponent_l15",
                     "assist_locations_season",
                     "assist_locations_l15",
+                    "player_per36",
                 }:
                     from app.services.ledger_parity import (
                         matchup_parity_artifact_is_activatable,
@@ -3123,7 +3124,7 @@ class PublicationService(_SessionService):
                         artifact, stream_key=parity_stream, session=session
                     ):
                         raise ControlPlaneError("ledger_parity_hard_failure")
-                    if not matchup_parity_cohort_is_activatable(
+                    if parity_stream != "player_per36" and not matchup_parity_cohort_is_activatable(
                         session,
                         season=season,
                         cutoff=cutoff,

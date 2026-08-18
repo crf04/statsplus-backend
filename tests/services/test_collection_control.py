@@ -481,12 +481,12 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             LedgerParityArtifact.artifact_id == "pending-parity",
         ).values(decision="approved", adjudicated_by="operator", adjudicated_at=now,
                  adjudication_reason="reviewed differences"))
-    approved = publications.activate_stream(
-        "player_per36", reason="reviewed rehearsal", season="2025-26",
-        cutoff=now, parity_artifact_id="pending-parity",
-        candidate_publication_id="parity-candidate",
-    )
-    assert approved.enabled
+    with pytest.raises(ControlPlaneError, match="ledger_parity_hard_failure"):
+        publications.activate_stream(
+            "player_per36", reason="reviewed rehearsal", season="2025-26",
+            cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
+        )
     corrected_payload = '{"corrected":true}'
     with control_db.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(

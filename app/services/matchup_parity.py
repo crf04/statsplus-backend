@@ -27,6 +27,7 @@ from governed publications, never from the ledger, and have no dual-run.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
@@ -685,6 +686,8 @@ class StoredLegacyMatchupSource:
             if provider_sources is None:
                 provider_sources = (identity.get("provider_source"),)
             source_memberships = identity["provider_game_ids_by_source"]
+            aggregate_request = identity["aggregate_request"]
+            aggregate_request_checksum = identity["aggregate_request_checksum"]
             if (
                 identity["window"] != window
                 or set(provider_sources) != {
@@ -695,6 +698,24 @@ class StoredLegacyMatchupSource:
                 or not isinstance(identity_teams, dict)
                 or not isinstance(source_memberships, dict)
                 or set(source_memberships) != set(provider_sources)
+                or not isinstance(aggregate_request, dict)
+                or aggregate_request.get("window") != window
+                or aggregate_request.get("collect_before")
+                != identity["collect_before"]
+                or set(aggregate_request.get("team_date_boundaries", {}))
+                != set(identity_teams)
+                or any(
+                    not isinstance(boundary, dict)
+                    or set(boundary) != {"start_date", "end_date"}
+                    or datetime.fromisoformat(boundary["start_date"]).date()
+                    > datetime.fromisoformat(boundary["end_date"]).date()
+                    for boundary in aggregate_request.get(
+                        "team_date_boundaries", {}
+                    ).values()
+                )
+                or hashlib.sha256(json.dumps(
+                    aggregate_request, sort_keys=True, separators=(",", ":")
+                ).encode()).hexdigest() != aggregate_request_checksum
             ):
                 raise ValueError
             governed_collect_before = getattr(governance, "collect_before", None)

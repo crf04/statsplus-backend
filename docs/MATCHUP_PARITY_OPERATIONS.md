@@ -54,7 +54,6 @@ authority, status, cutoff, or pointer drift fails the window closed.
   --actor "operator@example.com" \
   --output parity-summary.json \
   --target candidate \
-  --publications-json publications.json \
   --per36-capture-id "<scoped per-36 capture id>"
 ```
 
@@ -65,17 +64,9 @@ mutable stored event table — and compares the stored legacy facts with those
 candidate publications. It reads no provider and never reads or advances a
 `PublicationPointer`.
 
-`publications.json` must contain all five inactive candidate publication IDs:
-
-```json
-{
-  "traditional_opponent_season": "<publication id>",
-  "traditional_opponent_l15": "<publication id>",
-  "assist_locations_season": "<publication id>",
-  "assist_locations_l15": "<publication id>",
-  "player_per36": "<publication id>"
-}
-```
+The command composes all five inactive candidate publications from the exact
+governed ledger inside its bounded transaction. Operators do not supply
+candidate IDs.
 
 `--per36-capture-id` identifies an append-only diagnostic capture. It must be
 bound to the same candidate checksum, manifest, Event Catalog, Season game
@@ -102,10 +93,8 @@ boolean status, and recomputes the report game-set and candidate payload
 checksums before activation. A missing surface, a single missing
 metric, an unavailable observation, an authority/scope/cutoff mismatch, an
 integer or game-set failure, or a byte-contract failure is `failed` and cannot
-be adjudicated. Only documented floating semantic differences may be
-`adjudication_required`, and only with a recorded `provider_rounding` rule or a
-concrete `parent_approved_semantic_difference` rule. Unexplained
-denominator/rate mismatches are failed evidence and cannot be approved.
+be adjudicated. Required denominator/rate mismatches are failed evidence and
+cannot be approved; provider rounding is retained only as diagnostic context.
 Ranking differences are hard failures under deterministic #117 rankings.
 
 The artifact is bound to the report's own surface, window, exact aware cutoff,

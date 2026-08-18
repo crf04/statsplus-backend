@@ -8,6 +8,7 @@ publication, never from author-written JSON.
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 import sys
@@ -301,12 +302,6 @@ def test_provider_rounding_cannot_soften_public_minutes_or_rates():
     assert report.hard_failure
     assert not report.adjudication_required
 
-    approved = _compare(
-        legacy=legacy,
-        semantic_rule="parent.matchup.denominator-rate.v1",
-    )
-    assert not approved.hard_failure
-    assert approved.adjudication_required
 
 
 def test_matchup_tolerance_is_exactly_one_nanounit():
@@ -792,6 +787,17 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
                 CollectionManifest.event_catalog_checksum,
             ).where(CollectionManifest.manifest_id == MANIFEST)
         ).mappings().one()
+    aggregate_request = {
+        "window": window,
+        "collect_before": (CUTOFF + timedelta(hours=1)).isoformat(),
+        "team_date_boundaries": {
+            str(team_id): {
+                "start_date": "2025-10-22",
+                "end_date": "2025-11-15",
+            }
+            for team_id in TEAM_IDS
+        },
+    }
     provider_identity = json.dumps({
         "window": window,
         "provider_source": "nba_stats.team_game_log",
@@ -800,6 +806,10 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
             "pbp_stats.team_game_log",
         ],
         "collect_before": (CUTOFF + timedelta(hours=1)).isoformat(),
+        "aggregate_request": aggregate_request,
+        "aggregate_request_checksum": hashlib.sha256(json.dumps(
+            aggregate_request, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest(),
         "provider_game_ids_by_source": {
             source: {
                 str(team_id): sorted(game_ids_by_team[team_id])
@@ -909,6 +919,31 @@ def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
         assert artifact is not None
         assert artifact.status == "exact"
         assert assume_utc(artifact.cutoff) == CUTOFF
+
+
+def test_legacy_provider_aggregate_request_checksum_is_required(tmp_path):
+    engine, governance, _ = _runner_world(tmp_path)
+    _write_legacy_facts(
+        engine, game_ids_by_team=governance.expected_season_game_ids
+    )
+    with engine.begin() as connection:
+        identity = json.loads(connection.execute(text(
+            "SELECT provider_window_identity FROM team_matchup_facts LIMIT 1"
+        )).scalar_one())
+        identity["aggregate_request_checksum"] = "0" * 64
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        connection.execute(text(
+            "UPDATE team_matchup_facts SET provider_window_identity = :identity"
+        ), {"identity": encoded})
+        connection.execute(text(
+            "UPDATE team_matchup_surface_observations SET provider_window_identity = :identity"
+        ), {"identity": encoded})
+
+    with pytest.raises(MatchupParityError, match="window identity"):
+        StoredLegacyMatchupSource(TeamMatchupRepository(engine)).produce(
+            season="2025-26", window="season", cutoff=CUTOFF,
+            governance=governance,
+        )
 
 
 def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path):
@@ -1408,7 +1443,7 @@ def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
     assert received["target"] == "isolated"
     assert received["actor"] == "operator@example.com"
     assert received["output"] == str(summary)
-    assert received["publications_json"] is None
+    assert "publications_json" not in received
 
 
 def test_sanitized_summary_omits_row_values():
@@ -1464,4 +1499,36 @@ def test_invalid_summary_does_not_claim_an_unproven_rollback():
 
     summary = matchup_parity_script._invalid_summary(args, "output_failed")
 
+    assert "artifact_writes_rolled_back" not in summary
+
+
+def test_summary_is_staged_without_publishing_before_commit(tmp_path):
+    import scripts.matchup_parity as matchup_parity_script
+
+    destination = tmp_path / "summary.json"
+    staged = matchup_parity_script._stage_summary(
+        str(destination), {"status": "exact"}
+    )
+
+    assert staged.exists()
+    assert not destination.exists()
+    matchup_parity_script._publish_summary(str(destination), staged)
+    assert json.loads(destination.read_text()) == {"status": "exact"}
+
+
+def test_postcommit_output_failure_is_not_reported_as_rollback():
+    import scripts.matchup_parity as matchup_parity_script
+
+    before = {"pointers": {}, "streams": {}}
+    args = SimpleNamespace(
+        target="candidate",
+        season="2025-26",
+        _control_state_before=before,
+        _control_state_after=before.copy(),
+        _database_transaction_committed=True,
+    )
+
+    summary = matchup_parity_script._invalid_summary(args, "output_failed")
+
+    assert summary["artifact_transaction_committed"] is True
     assert "artifact_writes_rolled_back" not in summary

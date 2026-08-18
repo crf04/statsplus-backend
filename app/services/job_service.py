@@ -160,6 +160,7 @@ def build_default_refresh_handlers(
     """
 
     from app.services.data_service import DataService
+    from app.services.database_first_activation import LegacyWriteFence
     from app.services.player_service import PlayerService
     from app.services.stats_freshness_repository import StatsFreshnessRepository
 
@@ -167,6 +168,7 @@ def build_default_refresh_handlers(
         engine,
         settings=settings,
         stats_freshness=StatsFreshnessRepository(engine),
+        write_fence=LegacyWriteFence(engine),
     )
     player_service = player_service or PlayerService(engine, settings=settings)
 

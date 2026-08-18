@@ -93,6 +93,7 @@ class LedgerMaterializationService:
         activate: bool = False,
         recomposition_reason: str | None = None,
         source_observation_ids_by_game: Mapping[str, str] | None = None,
+        candidate_stream_keys: frozenset[str] | None = None,
         session: Session | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
@@ -225,6 +226,11 @@ class LedgerMaterializationService:
                 ("assist_locations_season", assist_season.teams, "season", 0, season_status, season_reason),
                 ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, l15_status, l15_reason),
             ))
+        if candidate_stream_keys is not None:
+            publication_specs = [
+                spec for spec in publication_specs
+                if spec[0] in candidate_stream_keys
+            ]
         publications = tuple(
             LedgerPublicationRecord(
                 stream_key=stream_key,
@@ -282,6 +288,11 @@ class LedgerMaterializationService:
                     candidates.append(("assist_locations_season", assist_season.teams))
                 if l15_window.complete:
                     candidates.append(("assist_locations_l15", assist_l15.teams))
+            if candidate_stream_keys is not None:
+                candidates = [
+                    candidate for candidate in candidates
+                    if candidate[0] in candidate_stream_keys
+                ]
             candidate_versions = {}
             batch = []
             corrected_provenance = (

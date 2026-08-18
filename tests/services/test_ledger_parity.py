@@ -8,6 +8,7 @@ import json
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
@@ -17,11 +18,13 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_parity import (
     LedgerParityArtifactRepository,
+    LedgerParityReport,
     LegacyParityDiagnosticReader,
     PER36_DIAGNOSTIC_CAPTURE_STREAM,
     Per36DiagnosticCaptureRepository,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
+    matchup_parity_artifact_is_activatable,
 )
 from tests.services.test_canonical_game_ledger import _game
 
@@ -286,6 +289,26 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
     )
     assert capture.capture_id == "capture-per36"
     assert repository.read(capture.capture_id).rows == (row,)
+    parity_artifact = LedgerParityArtifactRepository(engine).record(
+        "player_per36",
+        cutoff=cutoff,
+        report=LedgerParityReport(
+            season=game.season, game_count=1, compared_count=1,
+            differences=(), adjudication_required=False,
+        ),
+        publication_id=publication_id,
+        payload_checksum=payload_checksum,
+        lineage={
+            "capture_id": capture.capture_id,
+            "capture_checksum": capture.capture_checksum,
+            "request_checksum": capture.request_checksum,
+            "source_observation_id": capture.source_observation_id,
+        },
+    )
+    with Session(engine) as session:
+        assert matchup_parity_artifact_is_activatable(
+            parity_artifact, stream_key="player_per36", session=session
+        )
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT stream_key FROM canonical_game_ledger_parity_artifacts WHERE artifact_id = 'capture-per36'")

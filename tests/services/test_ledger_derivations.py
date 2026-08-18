@@ -29,6 +29,7 @@ from app.services.canonical_game_ledger import (
 )
 from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 from app.models.collection_control import (
     CollectionManifest,
     CollectionObservation,
@@ -432,6 +433,32 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         row["publication_id"] and len(row["payload_checksum"]) == 64
         for row in parity
     )
+    with Session(engine) as session:
+        player_log_before = session.scalars(select(PublicationVersion).where(
+            PublicationVersion.stream_key == "player_game_logs"
+        )).all()
+    service.compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        cutoff=candidate_cutoff,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+        require_assist_locations=True,
+        candidate_stream_keys=frozenset({
+            "traditional_opponent_season", "traditional_opponent_l15",
+            "assist_locations_season", "assist_locations_l15",
+            "player_per36",
+        }),
+    )
+    with Session(engine) as session:
+        player_log_after = session.scalars(select(PublicationVersion).where(
+            PublicationVersion.stream_key == "player_game_logs"
+        )).all()
+    assert [row.publication_id for row in player_log_after] == [
+        row.publication_id for row in player_log_before
+    ]
     traditional_payload = json.loads(repository.get_publication(
         "traditional_opponent_season",
         season="2025-26",

@@ -410,7 +410,33 @@ def matchup_parity_artifact_is_activatable(
         if not isinstance(differences, list):
             return False
         if not differences:
-            return document.get("status") == "exact"
+            if document.get("status") != "exact":
+                return False
+            if artifact.stream_key != "player_per36":
+                return True
+            lineage = document.get("lineage")
+            if not isinstance(lineage, Mapping) or session is None:
+                return False
+            required = (
+                "capture_id", "capture_checksum", "request_checksum",
+                "source_observation_id",
+            )
+            if any(not isinstance(lineage.get(key), str) for key in required):
+                return False
+            try:
+                capture = Per36DiagnosticCaptureRepository(
+                    session.get_bind()
+                ).read(str(lineage["capture_id"]), session=session)
+            except ValueError:
+                return False
+            return (
+                capture.publication_id == artifact.publication_id
+                and capture.payload_checksum == artifact.payload_checksum
+                and capture.capture_checksum == lineage["capture_checksum"]
+                and capture.request_checksum == lineage["request_checksum"]
+                and capture.source_observation_id
+                == lineage["source_observation_id"]
+            )
         if any(
             not isinstance(difference, Mapping)
             or difference.get("classification") != "semantic_difference"
@@ -810,6 +836,7 @@ class LedgerParityArtifactRepository:
         payload_checksum: str,
         session: Session | None = None,
         connection: Connection | None = None,
+        lineage: Mapping[str, object] | None = None,
     ) -> LedgerParityArtifact:
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
@@ -829,6 +856,7 @@ class LedgerParityArtifactRepository:
                     "semantic_rule": report.semantic_rule,
                     "semantic_rule_reason": report.semantic_rule_reason,
                     "differences": [asdict(difference) for difference in report.differences],
+                    **({"lineage": dict(lineage)} if lineage is not None else {}),
                 },
                 sort_keys=True,
                 default=str,

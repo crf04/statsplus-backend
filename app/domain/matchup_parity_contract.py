@@ -62,9 +62,7 @@ SOFT_CLASSIFICATIONS = frozenset({
     CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
 })
 
-APPROVED_SEMANTIC_RULES = frozenset({
-    "parent.matchup.denominator-rate.v1",
-})
+APPROVED_SEMANTIC_RULES = frozenset()
 
 
 def semantic_rule_is_approved(rule: object, reason: object) -> bool:
@@ -75,7 +73,7 @@ def semantic_rule_is_approved(rule: object, reason: object) -> bool:
     excluded from this gate.
     """
 
-    return rule in APPROVED_SEMANTIC_RULES and reason is None
+    return False
 
 MATCHUP_REQUIRED_STREAMS = frozenset({
     "traditional_opponent_season",
