@@ -97,13 +97,17 @@ class LegacyMatchupDiagnosticCapture:
 
     capture_id: str
     capture_checksum: str
+    publication_id: str
     season: str
     window: str
+    surface: str
     cutoff: datetime
     manifest_id: str
     event_catalog_publication_id: str
     event_catalog_checksum: str
     provider_window_identity: str
+    game_set_checksum: str
+    evidence_checksum: str
     document: Mapping[str, object]
 
 
@@ -563,7 +567,7 @@ class LegacyMatchupDiagnosticCaptureRepository:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def record(
-        self, materialization, *, publication_id: str, session: Session
+        self, materialization, *, surface: str, publication_id: str, session: Session
     ) -> LegacyMatchupDiagnosticCapture:
         if not materialization.provider_window_identity:
             raise ValueError("legacy diagnostic capture requires provider window identity")
@@ -573,26 +577,47 @@ class LegacyMatchupDiagnosticCaptureRepository:
             # repeated in every canonical fact and observation row.
             row.pop("provider_window_identity", None)
             return json.loads(json.dumps(row, sort_keys=True, default=str))
+        facts = sorted(
+            (normalize(fact) for fact in materialization.facts if fact.base == surface),
+            key=lambda row: json.dumps(row, sort_keys=True),
+        )
+        observations = sorted(
+            (
+                normalize(observation)
+                for observation in materialization.observations
+                if observation.surface == surface
+            ),
+            key=lambda row: json.dumps(row, sort_keys=True),
+        )
+        if not facts or not observations:
+            raise ValueError("legacy diagnostic capture surface is incomplete")
+        game_ids_by_team = {
+            str(team_id): sorted(str(game_id) for game_id in game_ids)
+            for team_id, game_ids in sorted(materialization.game_ids_by_team.items())
+        }
+        game_set_checksum = LedgerLineage.for_game_ids(
+            game_id
+            for game_ids in game_ids_by_team.values()
+            for game_id in game_ids
+        )
+        evidence_checksum = hashlib.sha256(_canonical_capture_payload({
+            "facts": facts, "observations": observations,
+        }).encode("utf-8")).hexdigest()
         document: dict[str, object] = {
+            "publication_id": publication_id,
             "season": materialization.season,
             "window": materialization.window,
+            "surface": surface,
             "cutoff": assume_utc(materialization.cutoff).isoformat(),
             "manifest_id": materialization.manifest_id,
             "event_catalog_publication_id": materialization.event_catalog_publication_id,
             "event_catalog_checksum": materialization.event_catalog_checksum,
             "provider_window_identity": materialization.provider_window_identity,
-            "game_ids_by_team": {
-                str(team_id): sorted(str(game_id) for game_id in game_ids)
-                for team_id, game_ids in sorted(materialization.game_ids_by_team.items())
-            },
-            "facts": sorted(
-                (normalize(fact) for fact in materialization.facts),
-                key=lambda row: json.dumps(row, sort_keys=True),
-            ),
-            "observations": sorted(
-                (normalize(observation) for observation in materialization.observations),
-                key=lambda row: json.dumps(row, sort_keys=True),
-            ),
+            "game_ids_by_team": game_ids_by_team,
+            "game_set_checksum": game_set_checksum,
+            "evidence_checksum": evidence_checksum,
+            "facts": facts,
+            "observations": observations,
         }
         capture_checksum = hashlib.sha256(
             _canonical_capture_payload(document).encode("utf-8")
@@ -613,12 +638,15 @@ class LegacyMatchupDiagnosticCaptureRepository:
         session.flush()
         return LegacyMatchupDiagnosticCapture(
             capture_id=capture_id, capture_checksum=capture_checksum,
-            season=materialization.season, window=materialization.window,
+            publication_id=publication_id, season=materialization.season,
+            window=materialization.window, surface=surface,
             cutoff=assume_utc(materialization.cutoff),
             manifest_id=str(materialization.manifest_id),
             event_catalog_publication_id=str(materialization.event_catalog_publication_id),
             event_catalog_checksum=str(materialization.event_catalog_checksum),
             provider_window_identity=materialization.provider_window_identity,
+            game_set_checksum=game_set_checksum,
+            evidence_checksum=evidence_checksum,
             document=report,
         )
 
@@ -749,7 +777,18 @@ def matchup_parity_artifact_is_activatable(
         )
         or not isinstance(lineage, Mapping)
         or not _is_sha256(lineage.get("capture_checksum"))
+        or not _is_sha256(lineage.get("evidence_checksum"))
         or not isinstance(lineage.get("capture_id"), str)
+        or lineage.get("publication_id") != artifact.publication_id
+        or lineage.get("window") != document.get("window")
+        or lineage.get("surface") != document.get("surface")
+        or lineage.get("manifest_id") != document.get("legacy_manifest_id")
+        or lineage.get("event_catalog_publication_id")
+        != document.get("legacy_event_catalog_publication_id")
+        or lineage.get("event_catalog_checksum")
+        != document.get("legacy_event_catalog_checksum")
+        or lineage.get("game_set_checksum")
+        != document.get("legacy_game_set_checksum")
         or document["legacy_game_ids_by_team"] != document["ledger_game_ids_by_team"]
         or legacy_checksum is None
         or ledger_checksum is None
@@ -782,6 +821,12 @@ def matchup_parity_artifact_is_activatable(
             recomputed_capture_checksum = hashlib.sha256(
                 _canonical_capture_payload(capture_payload).encode("utf-8")
             ).hexdigest()
+            recomputed_evidence_checksum = hashlib.sha256(
+                _canonical_capture_payload({
+                    "facts": capture_document["facts"],
+                    "observations": capture_document["observations"],
+                }).encode("utf-8")
+            ).hexdigest()
         except (TypeError, ValueError, KeyError, json.JSONDecodeError):
             return False
         if (
@@ -792,10 +837,26 @@ def matchup_parity_artifact_is_activatable(
             )
             or capture is None
             or capture.stream_key != LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM
+            or capture.publication_id != artifact.publication_id
             or capture.payload_checksum != lineage["capture_checksum"]
             or embedded_capture_id != lineage["capture_id"]
             or embedded_capture_checksum != lineage["capture_checksum"]
             or recomputed_capture_checksum != lineage["capture_checksum"]
+            or recomputed_evidence_checksum != lineage["evidence_checksum"]
+            or capture_document.get("publication_id") != artifact.publication_id
+            or capture_document.get("window") != document.get("window")
+            or capture_document.get("surface") != document.get("surface")
+            or capture_document.get("manifest_id")
+            != document.get("legacy_manifest_id")
+            or capture_document.get("event_catalog_publication_id")
+            != document.get("legacy_event_catalog_publication_id")
+            or capture_document.get("event_catalog_checksum")
+            != document.get("legacy_event_catalog_checksum")
+            or capture_document.get("game_ids_by_team")
+            != document.get("legacy_game_ids_by_team")
+            or capture_document.get("game_set_checksum") != legacy_checksum
+            or capture_document.get("evidence_checksum")
+            != recomputed_evidence_checksum
             or capture.season != artifact.season
             or assume_utc(capture.cutoff) != assume_utc(artifact.cutoff)
         ):
@@ -1173,6 +1234,25 @@ class LedgerParityArtifactRepository:
             raise ValueError("matchup parity publication does not match the report publication")
         if getattr(report, "ledger_payload_checksum", None) not in {None, payload_checksum}:
             raise ValueError("matchup parity checksum does not match the report publication")
+        expected_game_map = {
+            str(team_id): sorted(str(game_id) for game_id in game_ids)
+            for team_id, game_ids in sorted(report.legacy_game_ids_by_team.items())
+        }
+        if (
+            legacy_capture.publication_id != publication_id
+            or legacy_capture.season != report.season
+            or legacy_capture.window != report.window
+            or legacy_capture.surface != report.surface
+            or legacy_capture.cutoff != assume_utc(cutoff)
+            or legacy_capture.manifest_id != report.legacy_manifest_id
+            or legacy_capture.event_catalog_publication_id
+            != report.legacy_event_catalog_publication_id
+            or legacy_capture.event_catalog_checksum
+            != report.legacy_event_catalog_checksum
+            or legacy_capture.game_set_checksum != report.legacy_game_set_checksum
+            or legacy_capture.document.get("game_ids_by_team") != expected_game_map
+        ):
+            raise ValueError("legacy diagnostic capture does not match parity report")
         self._verify_matchup_candidate(
             stream_key,
             report=report,
@@ -1198,13 +1278,19 @@ class LedgerParityArtifactRepository:
                 "legacy_capture": {
                     "capture_id": legacy_capture.capture_id,
                     "capture_checksum": legacy_capture.capture_checksum,
+                    "publication_id": legacy_capture.publication_id,
+                    "window": legacy_capture.window,
+                    "surface": legacy_capture.surface,
+                    "manifest_id": legacy_capture.manifest_id,
+                    "event_catalog_publication_id": (
+                        legacy_capture.event_catalog_publication_id
+                    ),
+                    "event_catalog_checksum": legacy_capture.event_catalog_checksum,
+                    "game_set_checksum": legacy_capture.game_set_checksum,
+                    "evidence_checksum": legacy_capture.evidence_checksum,
                 },
             }, sort_keys=True, default=str),
             created_at=self.clock(),
-            decision="rejected" if report.hard_failure else None,
-            adjudication_reason=(
-                "automatic hard parity failure" if report.hard_failure else None
-            ),
         )
         self._insert_artifact(row, session=session, connection=connection)
         return row

@@ -1412,11 +1412,6 @@ class MatchupParityRunner:
             session_scope = nullcontext(session)
             transaction_scope = nullcontext()
         with session_scope as active_session, transaction_scope:
-            legacy_capture = self._legacy_capture_repository.record(
-                legacy,
-                publication_id=tuple((publications or {}).values())[-1],
-                session=active_session,
-            )
             for surface in LEDGER_OWNED_SURFACES:
                 stream_key = matchup_stream_key(surface, window)
                 publication_id = (publications or {}).get(stream_key)
@@ -1435,6 +1430,11 @@ class MatchupParityRunner:
                     event_catalog_checksum=governance.event_catalog_checksum,
                 )
                 ledger = materialization_from_publication(publication, surface=surface)
+                legacy_capture = self._legacy_capture_repository.record(
+                    legacy, surface=surface,
+                    publication_id=publication.publication_id,
+                    session=active_session,
+                )
                 report = compare_matchup_materializations(
                     legacy,
                     ledger,

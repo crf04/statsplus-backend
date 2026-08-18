@@ -131,6 +131,17 @@ def _pbp_totals_request_descriptor(
     )
 
 
+def _recorded_transport_request(
+    provider: object, operation: str, fallback: Mapping[str, object]
+) -> Mapping[str, object]:
+    reader = getattr(provider, "transport_request_descriptor", None)
+    if callable(reader):
+        descriptor = reader(operation)
+        if isinstance(descriptor, Mapping):
+            return dict(descriptor)
+    return dict(fallback)
+
+
 class TeamWindowBoundaryResolver:
     """Resolve rolling windows from the canonical governed schedule."""
 
@@ -948,22 +959,26 @@ class TeamMatchupRefreshService:
         }
         failures: dict[str, tuple[str, str | None]] = {}
         provider_ids_by_surface: dict[str, dict[int, tuple[str, ...]]] = {}
-        try:
-            if verify_window:
+        if verify_window:
+            try:
                 provider_ids_by_surface["traditional"] = (
                     self._independent_provider_game_ids(
-                        season=season,
-                        season_type="Regular Season",
-                        team_ids=team_ids,
-                        date_from=None,
-                        date_to=date_to,
+                        season=season, season_type="Regular Season",
+                        team_ids=team_ids, date_from=None, date_to=date_to,
                         expected_game_ids_by_team=expected_game_ids_by_team,
                     )
                 )
+            except (ProviderResponseError, ValueError) as error:
+                failures["traditional"] = self._provider_failure(error)
+        try:
             traditional_frame = self.nba_stats.fetch_opponent_team_stats(
                 None, per_mode_detailed="Totals", **common
             )
-            if verify_window:
+            aggregate_requests["traditional:league"] = _recorded_transport_request(
+                self.nba_stats, "league_opponent_team_stats",
+                aggregate_requests["traditional:league"],
+            )
+            if verify_window and "traditional" not in failures:
                 self._verify_aggregate_window(
                     traditional_frame,
                     expected_game_counts=expected_game_counts,
@@ -982,12 +997,13 @@ class TeamMatchupRefreshService:
             for surface in dependent_surfaces:
                 failures[surface] = self._provider_failure(error)
         if minutes_by_team is not None:
-            try:
-                facts_by_surface["traditional"] = self._require_governed_roster(
-                    self._traditional_facts(traditional_frame), team_ids
-                )
-            except (ProviderResponseError, ValueError) as error:
-                failures["traditional"] = self._provider_failure(error)
+            if "traditional" not in failures:
+                try:
+                    facts_by_surface["traditional"] = self._require_governed_roster(
+                        self._traditional_facts(traditional_frame), team_ids
+                    )
+                except (ProviderResponseError, ValueError) as error:
+                    failures["traditional"] = self._provider_failure(error)
             try:
                 for shooting_type in SHOOTING_TYPES:
                     facts_by_surface["shot_types"].extend(
@@ -1053,10 +1069,6 @@ class TeamMatchupRefreshService:
                         expected_game_ids_by_team=expected_game_ids_by_team,
                     )
                 )
-                if provider_ids_by_surface["traditional"] is None:
-                    raise _ProviderWindowUnverified(
-                        "independent provider game membership is unavailable"
-                    )
             assist_frame = self.pbp_stats.fetch_totals_frame(
                         "opponent",
                         season=season,
@@ -1065,6 +1077,10 @@ class TeamMatchupRefreshService:
                         from_date=None,
                         to_date=snapshot_date.isoformat(),
                     )
+            aggregate_requests["assist_locations:league"] = _recorded_transport_request(
+                self.pbp_stats, "get_totals_opponent",
+                aggregate_requests["assist_locations:league"],
+            )
             if verify_window:
                 self._verify_aggregate_window(
                     assist_frame,
@@ -1155,36 +1171,41 @@ class TeamMatchupRefreshService:
                 surface not in failures
                 for surface in ("traditional", "shot_types", "shot_zones")
             ):
-                try:
-                    if verify_window:
+                membership_verified = not verify_window
+                if verify_window:
+                    try:
                         provider_ids = self._independent_provider_game_ids(
-                            season=season,
-                            season_type=season_type,
+                            season=season, season_type=season_type,
                             team_ids=(team_id,),
                             date_from=self._nba_date(boundary.from_date),
                             date_to=date_to,
-                            expected_game_ids_by_team={
-                                team_id: boundary.game_ids,
-                            },
+                            expected_game_ids_by_team={team_id: boundary.game_ids},
                         )
                         provider_ids_by_surface["traditional"][team_id] = (
                             provider_ids[team_id]
                         )
+                        membership_verified = True
+                    except (ProviderResponseError, ValueError) as error:
+                        failures.setdefault("traditional", self._provider_failure(error))
+                try:
                     traditional_frame = self.nba_stats.fetch_opponent_team_stats(
                         self._nba_date(boundary.from_date),
                         per_mode_detailed="Totals",
                         **common,
                     )
-                    self._verify_team_window(
-                        traditional_frame,
-                        team_id=team_id,
-                        expected_games=len(boundary.game_ids),
-                        expected_game_ids=boundary.game_ids,
-                        require_game_count=True,
-                        # LeagueDashTeamStats is aggregate-only; membership is
-                        # independently evidenced by TeamGameLog above.
-                        require_game_ids=False,
+                    aggregate_requests[f"traditional:{team_id}"] = (
+                        _recorded_transport_request(
+                            self.nba_stats, "league_opponent_team_stats",
+                            aggregate_requests[f"traditional:{team_id}"],
+                        )
                     )
+                    if membership_verified:
+                        self._verify_team_window(
+                            traditional_frame, team_id=team_id,
+                            expected_games=len(boundary.game_ids),
+                            expected_game_ids=boundary.game_ids,
+                            require_game_count=True, require_game_ids=False,
+                        )
                     minutes_by_team = self._minutes_by_team(traditional_frame)
                     if "traditional" not in failures:
                         facts_by_surface["traditional"].extend(
@@ -1283,6 +1304,12 @@ class TeamMatchupRefreshService:
                         team_id=team_id,
                         from_date=boundary.from_date.isoformat(),
                         to_date=boundary.to_date.isoformat(),
+                    )
+                    aggregate_requests[f"assist_locations:{team_id}"] = (
+                        _recorded_transport_request(
+                            self.pbp_stats, "get_totals_opponent",
+                            aggregate_requests[f"assist_locations:{team_id}"],
+                        )
                     )
                     self._verify_team_window(
                         frame,

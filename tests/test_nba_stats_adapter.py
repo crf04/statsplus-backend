@@ -37,7 +37,10 @@ from app.providers.nba_stats import (
     normalize_player_game_logs,
     normalize_season_player_game_logs,
 )
-from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
+from app.services.nba_stats_adapter import (
+    GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter,
+    opponent_team_stats_request_descriptor,
+)
 from app.services.nba_stats_adapter import (
     parse_recorded_game_logs,
     parse_recorded_player_diet,
@@ -787,6 +790,34 @@ def test_existing_opponent_stats_call_keeps_provider_scope_defaults(monkeypatch)
             "timeout": adapter.timeout,
         }
     ]
+
+
+def test_opponent_request_evidence_uses_endpoint_wire_parameters(monkeypatch):
+    expected = opponent_team_stats_request_descriptor(
+        date_from="03/01/2025", date_to="04/15/2025", season="2024-25",
+        season_type="Regular Season", team_id=1610612738, last_n_games=15,
+        per_mode_detailed="Totals", league_id="00",
+    )
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            self.parameters = dict(expected["parameters"])
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{"TEAM_ID": 1610612738, "TEAM_NAME": "Boston"}])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+    adapter.fetch_opponent_team_stats(
+        "03/01/2025", date_to="04/15/2025", season="2024-25",
+        season_type="Regular Season", team_id=1610612738, last_n_games=15,
+        per_mode_detailed="Totals",
+    )
+    recorded = adapter.transport_request_descriptor("league_opponent_team_stats")
+    assert recorded == expected
+    changed = json.loads(json.dumps(recorded))
+    changed["parameters"]["Month"] = "1"
+    assert changed != recorded
 
 
 def test_opponent_shot_chart_uses_the_installed_endpoint_league_id_keyword(

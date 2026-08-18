@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
+import json
 from typing import Any
 
 import pandas as pd
@@ -139,6 +140,13 @@ class PBPTotalsAdapter:
     ):
         self.settings = settings or get_runtime_settings()
         self.session = session or get_shared_nba_session(self.settings)
+        self._last_transport_requests: dict[str, dict[str, object]] = {}
+
+    def transport_request_descriptor(
+        self, operation: str
+    ) -> dict[str, object] | None:
+        descriptor = self._last_transport_requests.get(operation)
+        return json.loads(json.dumps(descriptor)) if descriptor is not None else None
 
     @property
     def connect_timeout(self) -> float:
@@ -158,13 +166,19 @@ class PBPTotalsAdapter:
     ) -> Iterator[Any]:
         """Execute one instrumented PBP request and yield its response."""
 
+        request_url = url or self.base_url
+        self._last_transport_requests[operation] = {
+            "adapter": "pbp_stats", "operation": operation,
+            "endpoint": request_url,
+            "parameters": json.loads(json.dumps(params, sort_keys=True)),
+        }
         with provider_call(
             PROVIDER_PBP_STATS,
             operation,
             cache_status=CACHE_DISABLED,
         ) as tracker:
             response = self.session.get(
-                url or self.base_url,
+                request_url,
                 params=params,
                 timeout=(self.connect_timeout, self.read_timeout),
             )

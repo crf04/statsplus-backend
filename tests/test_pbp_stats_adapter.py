@@ -198,6 +198,11 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
             },
         )
     ]
+    assert adapter.transport_request_descriptor("get_totals_opponent") == {
+        "adapter": "pbp_stats", "operation": "get_totals_opponent",
+        "endpoint": adapter.base_url,
+        "parameters": calls[0][1]["params"],
+    }
 
 
 def test_fetch_team_game_ids_uses_independent_bounded_game_log_identity():

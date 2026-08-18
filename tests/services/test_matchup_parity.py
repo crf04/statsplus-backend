@@ -944,10 +944,19 @@ def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
     assert all(report.exact for report in reports)
     with engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM publication_pointers")).scalar_one() == 0
-        capture = connection.execute(text(
+        captures = connection.execute(text(
             "SELECT artifact_id, payload_checksum, report "
             "FROM canonical_game_ledger_parity_artifacts WHERE stream_key = :stream"
-        ), {"stream": LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM}).mappings().one()
+        ), {"stream": LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM}).mappings().all()
+    assert len(captures) == 2
+    assert {json.loads(row["report"])["surface"] for row in captures} == {
+        "traditional", "assist_locations",
+    }
+    assert all(
+        json.loads(row["report"])["publication_id"] in publications.values()
+        for row in captures
+    )
+    capture = captures[0]
     original_report = capture["report"]
     with engine.begin() as connection:
         connection.execute(text(
@@ -966,6 +975,22 @@ def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
         assert artifact is not None
         assert artifact.status == "exact"
         assert assume_utc(artifact.cutoff) == CUTOFF
+    tampered = json.loads(original_report)
+    tampered["facts"][0]["raw_value"] += 1
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE canonical_game_ledger_parity_artifacts SET report = :report "
+            "WHERE artifact_id = :artifact_id"
+        ), {
+            "report": json.dumps(tampered, sort_keys=True, separators=(",", ":")),
+            "artifact_id": capture["artifact_id"],
+        })
+    stream = matchup_stream_key(tampered["surface"], tampered["window"])
+    artifact = repository.latest(stream, "2025-26")
+    with Session(engine) as session:
+        assert not matchup_parity_artifact_is_activatable(
+            artifact, stream_key=stream, session=session
+        )
 
 
 def test_legacy_provider_aggregate_request_checksum_is_required(tmp_path):
@@ -984,6 +1009,35 @@ def test_legacy_provider_aggregate_request_checksum_is_required(tmp_path):
         ), {"identity": encoded})
         connection.execute(text(
             "UPDATE team_matchup_surface_observations SET provider_window_identity = :identity"
+        ), {"identity": encoded})
+
+    with pytest.raises(MatchupParityError, match="window identity"):
+        StoredLegacyMatchupSource(TeamMatchupRepository(engine)).produce(
+            season="2025-26", window="season", cutoff=CUTOFF,
+            governance=governance,
+        )
+
+
+def test_legacy_request_rejects_changed_wire_default_even_with_valid_checksum(tmp_path):
+    engine, governance, _ = _runner_world(tmp_path)
+    _write_legacy_facts(engine, game_ids_by_team=governance.expected_season_game_ids)
+    with engine.begin() as connection:
+        identity = json.loads(connection.execute(text(
+            "SELECT provider_window_identity FROM team_matchup_facts LIMIT 1"
+        )).scalar_one())
+        identity["aggregate_requests"]["traditional:league"]["parameters"][
+            "Month"
+        ] = "1"
+        identity["aggregate_request_checksum"] = hashlib.sha256(json.dumps(
+            identity["aggregate_requests"], sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        connection.execute(text(
+            "UPDATE team_matchup_facts SET provider_window_identity = :identity"
+        ), {"identity": encoded})
+        connection.execute(text(
+            "UPDATE team_matchup_surface_observations "
+            "SET provider_window_identity = :identity"
         ), {"identity": encoded})
 
     with pytest.raises(MatchupParityError, match="window identity"):
@@ -1094,6 +1148,7 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
     with create_session(engine) as session:
         latest = session.scalar(select(LedgerParityArtifact).where(
             LedgerParityArtifact.publication_id == rerun_publication,
+            LedgerParityArtifact.stream_key == "traditional_opponent_season",
         ))
         assert latest is not None
         session.add(LedgerParityArtifact(
@@ -1194,8 +1249,10 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
         session.commit()
         mixed = session.get(LedgerParityArtifact, "mixed-authority-artifact")
         assert mixed is not None
-        assert matchup_parity_artifact_is_activatable(mixed)
-        assert not matchup_parity_cohort_is_activatable(
+        assert not matchup_parity_artifact_is_activatable(mixed, session=session)
+        # The forged newer artifact is ignored; the latest fully bound cohort
+        # remains the previously captured authority generation.
+        assert matchup_parity_cohort_is_activatable(
             session,
             season="2025-26",
             cutoff=CUTOFF,
@@ -1291,7 +1348,7 @@ def test_runner_rejects_ledger_publication_authority_mismatch(tmp_path):
                    })
 
 
-def test_runner_records_hard_failed_reports_as_permanently_blocking(tmp_path):
+def test_runner_records_hard_failed_reports_as_pending_and_unapprovable(tmp_path):
     engine, governance, binding = _runner_world(tmp_path)
     season_ids = governance.expected_season_game_ids
     _write_legacy_facts(engine, game_ids_by_team=season_ids)
@@ -1330,7 +1387,10 @@ def test_runner_records_hard_failed_reports_as_permanently_blocking(tmp_path):
         "traditional_opponent_season", "2025-26"
     )
     assert artifact is not None
-    assert artifact.decision == "rejected"
+    assert artifact.status == "pending_adjudication"
+    assert artifact.decision is None
+    assert artifact.adjudicated_by is None
+    assert artifact.adjudicated_at is None
     assert json.loads(artifact.report)["status"] == "failed"
     with create_session(engine) as session:
         assert not matchup_parity_artifact_is_activatable(
@@ -1610,6 +1670,23 @@ def test_sanitized_summary_omits_row_values():
     assert "ledger_value" not in encoded
     assert "legacy_value" not in encoded
     assert "semantic_rule_reason" not in encoded
+
+
+def test_hard_reports_are_pending_and_protected_ids_stay_out_of_summary(capsys):
+    import scripts.matchup_parity as matchup_parity_script
+
+    assert matchup_parity_script._overall_status([
+        {"status": "exact"}, {"status": "failed"},
+    ]) == "pending_adjudication"
+    governance = SimpleNamespace(
+        expected_season_game_ids={TEAM_A: ("season-2", "season-1")},
+        expected_l15_game_ids={TEAM_A: ("l15-1",)},
+    )
+    matchup_parity_script._print_protected_game_ids(governance)
+    output = capsys.readouterr().out
+    assert "PROTECTED OPERATOR OUTPUT" in output
+    assert f"{TEAM_A}: season-1,season-2" in output
+    assert f"{TEAM_A}: l15-1" in output
 
 
 def test_invalid_summary_keeps_nonmutation_proof_when_prestate_was_captured():

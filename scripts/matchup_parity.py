@@ -846,6 +846,27 @@ def _print_table(summary: Mapping[str, Any]) -> None:
     print(f"overall status: {summary.get('status', 'invalid_evidence')}")
 
 
+def _print_protected_game_ids(governance) -> None:
+    print("PROTECTED OPERATOR OUTPUT — exact governed game IDs; do not paste into trackers")
+    for window, game_ids_by_team in (
+        ("Season", governance.expected_season_game_ids),
+        ("L15", governance.expected_l15_game_ids),
+    ):
+        print(f"{window} exact game IDs by team:")
+        for team_id, game_ids in sorted(game_ids_by_team.items()):
+            print(f"  {team_id}: {','.join(sorted(map(str, game_ids)))}")
+
+
+def _overall_status(reports: list[Mapping[str, Any]]) -> str:
+    if any(report.get("status") == "failed" for report in reports):
+        return "pending_adjudication"
+    if any(report.get("status") == "adjudication_required" for report in reports):
+        return "pending_adjudication"
+    if reports and all(report.get("status") == "exact" for report in reports):
+        return "exact"
+    return "invalid_evidence"
+
+
 def _record_compare_audit(
     engine, *, actor: str, manifest_id: str, status: str,
     reports: list[Mapping[str, Any]], session: Session | None = None,
@@ -981,17 +1002,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     if before != after:
         raise InvalidEvidenceError("pointer_or_stream_state_changed")
 
-    if any(report.get("status") == "failed" for report in sanitized_reports):
-        status = "invalid_evidence"
-    elif any(
-        report.get("status") == "adjudication_required"
-        for report in sanitized_reports
-    ):
-        status = "pending_adjudication"
-    elif all(report.get("status") == "exact" for report in sanitized_reports):
-        status = "exact"
-    else:
-        status = "invalid_evidence"
+    status = _overall_status(sanitized_reports)
 
     audit_id = _record_compare_audit(
         engine,
@@ -1047,6 +1058,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     args._staged_summary = staged_summary
     _commit_and_publish_summary(transaction, session, args, staged_summary)
     _print_table(summary)
+    _print_protected_game_ids(governance)
     return {
         "exact": EXIT_EXACT,
         "pending_adjudication": EXIT_PENDING_ADJUDICATION,

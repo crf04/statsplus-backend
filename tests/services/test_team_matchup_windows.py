@@ -537,21 +537,60 @@ def test_transport_descriptors_bind_phase_measure_mode_and_pbp_type():
         season="2025-26", season_type="Regular Season", team_id=BOS,
         from_date="2025-10-18", to_date="2025-11-02",
     )
-    assert nba["parameters"]["measure_type_detailed_defense"] == "Opponent"
-    assert nba["parameters"]["per_mode_detailed"] == "Totals"
-    assert nba["parameters"]["season_type_all_star"] == "Regular Season"
+    assert nba["parameters"]["MeasureType"] == "Opponent"
+    assert nba["parameters"]["PerMode"] == "Totals"
+    assert nba["parameters"]["SeasonType"] == "Regular Season"
+    assert nba["parameters"]["Month"] == "0"
+    assert nba["parameters"]["PaceAdjust"] == "N"
+    assert nba["parameters"]["Period"] == "0"
     assert pbp["parameters"] == {
         "Season": "2025-26", "SeasonType": "Regular+Season",
         "Type": "Opponent", "TeamId": str(BOS),
         "FromDate": "2025-10-18", "ToDate": "2025-11-02",
     }
     changed = json.loads(json.dumps({"nba": nba, "pbp": pbp}))
-    changed["nba"]["parameters"]["per_mode_detailed"] = "Per48"
+    changed["nba"]["parameters"]["PerMode"] = "Per48"
     assert hashlib.sha256(json.dumps(
         {"nba": nba, "pbp": pbp}, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest() != hashlib.sha256(json.dumps(
         changed, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
+
+
+def test_membership_failure_only_disables_parity_owned_traditional_surface(tmp_path):
+    team_ids = tuple(_fixture_team_ids())
+    game_ids = {
+        team_id: tuple(f"{team_id}-game-{index}" for index in range(82))
+        for team_id in team_ids
+    }
+
+    class MembershipFailureNBA(_FakeMatchupNBA):
+        def fetch_team_game_ids(self, **kwargs):
+            raise ProviderResponseError("team-game membership unavailable")
+
+    nba = MembershipFailureNBA(team_ids)
+    engine = create_engine(f"sqlite:///{tmp_path / 'membership-isolation.sqlite3'}")
+    run_migrations(engine)
+    service = TeamMatchupRefreshService(
+        repository=TeamMatchupRepository(engine), event_catalog=FakeEventCatalog([]),
+        nba_stats_provider=nba,
+        pbp_stats_provider=_TeamLogPBP(team_ids, game_ids),
+    )
+    facts, failures, provider_ids, _ = service._collect_season(
+        "2024-25", snapshot_date=date(2025, 4, 15),
+        include_play_types=True, team_ids=team_ids,
+        expected_game_counts={team_id: 82 for team_id in team_ids},
+        expected_game_ids_by_team=game_ids, verify_window=True,
+    )
+
+    assert set(failures) == {"traditional"}
+    assert provider_ids is None
+    assert {fact.base for fact in facts} == {
+        "assist_locations", "play_types", "shot_types", "shot_zones",
+    }
+    assert {call[0] for call in nba.calls} >= {
+        "traditional", "play_types", "shot_types", "shot_zones",
+    }
 
 
 @pytest.mark.parametrize(
