@@ -100,10 +100,12 @@ checksums, then creates an immutable source observation, capture artifact and
 audit event in one transaction. Its receipt contains IDs and checksums only.
 `provider_window_identity.transport_request` must be the adapter-captured
 `LeagueDashPlayerStats` request descriptor: operation `player_per36_stats` and
-the complete canonical wire parameter map, including `LeagueID`, `Season`,
-`SeasonType`, `PerMode=Per36`, `MeasureType=Base`, and endpoint defaults. The
-request checksum hashes that complete descriptor; a caller-synthesized date
-window or selected parameter summary is not accepted.
+the exact complete canonical wire parameter map exported by the NBA adapter,
+including every empty/default parameter as well as `LeagueID`, `Season`,
+`SeasonType`, `PerMode=Per36`, and `MeasureType=Base`. Missing keys, extra keys,
+type changes, and default changes are rejected. The request checksum hashes
+that complete descriptor; a caller-synthesized date window or selected
+parameter summary is not accepted.
 
 ## What the report proves
 

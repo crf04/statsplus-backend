@@ -2964,15 +2964,38 @@ class PublicationService(_SessionService):
         return row
 
     def register_default_streams(self) -> tuple[PublicationStream, ...]:
-        rows = []
-        for definition in SURFACE_REGISTRY:
-            rows.append(self.register_stream(
-                definition["stream_key"], provider=definition["provider"], owner=definition["owner"],
-                required_observations=definition["required"], publication_strategy=definition["strategy"],
-                supported_windows=definition["windows"], enabled=None, schema_versions=definition["schema"],
-                completeness_rule=definition["complete"], freshness_rule=definition["freshness"],
-            ))
-        return tuple(rows)
+        now = self.clock()
+        with self.session() as session, session.begin():
+            rows = []
+            for definition in SURFACE_REGISTRY:
+                row = session.scalar(select(PublicationStream).where(
+                    PublicationStream.stream_key == definition["stream_key"]
+                ).with_for_update())
+                if row is None:
+                    row = PublicationStream(
+                        stream_key=definition["stream_key"],
+                        provider=definition["provider"], owner=definition["owner"],
+                        required_observations=_json(sorted(set(definition["required"]))),
+                        publication_strategy=definition["strategy"],
+                        supported_windows=_json(sorted(set(definition["windows"]))),
+                        schema_versions=_json(sorted(set(definition["schema"]))),
+                        completeness_rule=definition["complete"],
+                        freshness_rule=definition["freshness"], enabled=False,
+                        created_at=now,
+                    )
+                    session.add(row)
+                else:
+                    row.provider = definition["provider"]
+                    row.owner = definition["owner"]
+                    row.required_observations = _json(sorted(set(definition["required"])))
+                    row.publication_strategy = definition["strategy"]
+                    row.supported_windows = _json(sorted(set(definition["windows"])))
+                    row.schema_versions = _json(sorted(set(definition["schema"])))
+                    row.completeness_rule = definition["complete"]
+                    row.freshness_rule = definition["freshness"]
+                rows.append(row)
+            session.flush()
+            return tuple(rows)
 
     def activate_stream(self, stream_key: str, *, reason: str,
                         season: str | None = None, cutoff: datetime | None = None,
@@ -3128,7 +3151,7 @@ class PublicationService(_SessionService):
                         artifact, stream_key=parity_stream, session=session
                     ):
                         raise ControlPlaneError("ledger_parity_hard_failure")
-                    if parity_stream != "player_per36" and not matchup_parity_cohort_is_activatable(
+                    if not matchup_parity_cohort_is_activatable(
                         session,
                         season=season,
                         cutoff=cutoff,

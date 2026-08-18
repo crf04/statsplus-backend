@@ -94,6 +94,23 @@ class TeamMatchupProvenance:
     canonical_ledger_pointer_publication_id: str | None = None
 
 
+def _qualifying_matchup_manifest(row: Mapping[str, Any], *, now: datetime) -> bool:
+    if row["status"] != "active" or not row["checksum"]:
+        return False
+    try:
+        scopes = set(json.loads(row["scopes"]))
+        versions = {int(value) for value in json.loads(row["accepted_versions"])}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        "canonical_game_ledger" in scopes
+        and 1 in versions
+        and row["event_catalog_publication_id"]
+        and row["event_catalog_checksum"]
+        and assume_utc(row["collect_before"]) > now
+    )
+
+
 class _ProviderGameMembership(dict[int, tuple[str, ...]]):
     """Common governed IDs plus the exact independently returned source sets."""
 
@@ -523,33 +540,22 @@ class TeamMatchupRefreshService:
             pointer = connection.execute(select(PublicationPointer.__table__).where(
                 PublicationPointer.stream_key == "canonical_game_ledger",
             ).with_for_update()).mappings().one_or_none()
-        same_slate = [
+        same_slate_history = [
             row for row in rows
             if assume_utc(row["cutoff"]).astimezone(EASTERN).date() == snapshot_date
         ]
-        # Multiple manifests for one slate date are ambiguous even when one
-        # is active: choosing by date would silently relabel a different
-        # governed cutoff or Event Catalog publication.
-        if len(same_slate) != 1:
+        if not same_slate_history:
             return None
-        row = same_slate[0]
-        if row["status"] != "active" or not row["checksum"]:
-            return None
-        try:
-            scopes = set(json.loads(row["scopes"]))
-            accepted_versions = {
-                int(value) for value in json.loads(row["accepted_versions"])
-            }
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None
-        if (
-            "canonical_game_ledger" not in scopes
-            or 1 not in accepted_versions
-            or not row["event_catalog_publication_id"]
-            or not row["event_catalog_checksum"]
-            or assume_utc(row["collect_before"]) <= now
-        ):
-            return None
+        qualifying = []
+        for row in same_slate_history:
+            if _qualifying_matchup_manifest(row, now=now):
+                qualifying.append(row)
+        # Once governed history exists, mutable catalog fallback is forbidden.
+        # Superseded rows are ordinary history; zero or multiple active,
+        # complete authorities are an explicit governance failure.
+        if len(qualifying) != 1:
+            raise _ProviderWindowUnverified("governed manifest authority is ambiguous")
+        row = qualifying[0]
         pointer_row = pointer
         return TeamMatchupProvenance(
             cutoff=assume_utc(row["cutoff"]),
@@ -582,6 +588,12 @@ class TeamMatchupRefreshService:
         manifest = connection.execute(select(CollectionManifest.__table__).where(
             CollectionManifest.manifest_id == provenance.manifest_id,
         ).with_for_update()).mappings().one_or_none()
+        same_slate_active = connection.execute(select(
+            CollectionManifest.__table__
+        ).where(
+            CollectionManifest.season == season,
+            CollectionManifest.status == "active",
+        ).with_for_update()).mappings().all()
         pointer = connection.execute(select(PublicationPointer.__table__).where(
             PublicationPointer.stream_key == "canonical_game_ledger",
         ).with_for_update()).mappings().one_or_none()
@@ -609,6 +621,12 @@ class TeamMatchupRefreshService:
             != provenance.event_catalog_publication_id
             or manifest["event_catalog_checksum"]
             != provenance.event_catalog_checksum
+            or sum(
+                1 for candidate in same_slate_active
+                if assume_utc(candidate["cutoff"]).astimezone(EASTERN).date()
+                == provenance.cutoff.astimezone(EASTERN).date()
+                and _qualifying_matchup_manifest(candidate, now=now)
+            ) != 1
             or (pointer is None)
             != (provenance.canonical_ledger_pointer_fence is None)
             or (

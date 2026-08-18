@@ -23,6 +23,7 @@ from app.providers.nba_stats import NBAStatsAdapter  # noqa: E402
 from app.providers.pbp_game_logs import PBPGameLogAdapter  # noqa: E402
 from app.providers.pbp_stats import PBPStatsAdapter  # noqa: E402
 from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
+from app.services.collection_control import PublicationService  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
 from app.services.database_first_activation import LegacyWriteFence  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
@@ -110,12 +111,23 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _bootstrap_legacy_write_fence(engine):
+    """Install the disabled registry atomically, then construct its fence."""
+
+    PublicationService(engine).register_default_streams()
+    return LegacyWriteFence(engine)
+
+
 def _run(database_url: str, *, hosted_only: bool = False) -> int:
     """Assemble and execute the command against one writable database."""
     settings = load_settings(overrides={"DATABASE_URL": database_url})
     engine = create_engine(_normalize_database_url(database_url))
     try:
         run_migrations(engine)
+        # The fence is fail-closed when a stream is absent. Bootstrap the
+        # canonical disabled registry in one transaction before constructing
+        # any legacy writer; activation may then selectively enable streams.
+        write_fence = None if hosted_only else _bootstrap_legacy_write_fence(engine)
         # Hosted Railway egress cannot reliably reach stats.nba.com.  The
         # hosted-only command therefore injects an inert catalog provider and
         # uses the catalog services strictly through their database read APIs.
@@ -159,7 +171,7 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
 
         pbp_provider = PBPStatsAdapter(settings=settings)
         stats_freshness = StatsFreshnessRepository(engine)
-        write_fence = LegacyWriteFence(engine)
+        assert write_fence is not None
         data_service = DataService(
             engine,
             settings=settings,

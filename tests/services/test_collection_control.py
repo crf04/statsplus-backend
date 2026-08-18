@@ -386,7 +386,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
     assert version.status == "candidate"
 
 
-def test_pending_parity_blocks_ledger_stream_activation(control_db):
+def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
@@ -501,6 +501,29 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             season="2025-26", cutoff=now, parity_artifact_id="pending-parity",
             candidate_publication_id="corrected-candidate",
         )
+    import app.services.ledger_parity as ledger_parity
+
+    cohort_calls = []
+    monkeypatch.setattr(
+        ledger_parity, "matchup_parity_artifact_is_activatable",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        ledger_parity, "matchup_parity_cohort_is_activatable",
+        lambda *args, **kwargs: cohort_calls.append(kwargs) or False,
+    )
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.update().where(
+            LedgerParityArtifact.artifact_id == "pending-parity",
+        ).values(status="exact", decision=None))
+    with pytest.raises(ControlPlaneError, match="ledger_parity_cohort_incomplete"):
+        publications.activate_stream(
+            "player_per36", reason="five-surface cohort required",
+            season="2025-26", cutoff=now,
+            parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
+        )
+    assert cohort_calls[0]["artifact_id"] == "pending-parity"
     with control_db.begin() as connection:
         connection.execute(LedgerParityArtifact.__table__.update().where(
             LedgerParityArtifact.artifact_id == "pending-parity",

@@ -664,6 +664,29 @@ def opponent_team_stats_request_descriptor(
     }
 
 
+def player_per36_request_descriptor(*, season: str) -> dict[str, object]:
+    """Return the complete LeagueDashPlayerStats per-36 wire request."""
+
+    return {
+        "adapter": "nba_stats",
+        "operation": "player_per36_stats",
+        "endpoint": "LeagueDashPlayerStats",
+        "parameters": {
+            "LastNGames": "0", "MeasureType": "Base", "Month": "0",
+            "OpponentTeamID": 0, "PaceAdjust": "N", "PerMode": "Per36",
+            "Period": "0", "PlusMinus": "N", "Rank": "N",
+            "Season": season, "SeasonType": "Regular Season", "College": "",
+            "Conference": "", "Country": "", "DateFrom": "", "DateTo": "",
+            "Division": "", "DraftPick": "", "DraftYear": "", "GameScope": "",
+            "GameSegment": "", "Height": "", "LeagueID": "00", "Location": "",
+            "Outcome": "", "PORound": "", "PlayerExperience": "",
+            "PlayerPosition": "", "SeasonSegment": "", "ShotClockRange": "",
+            "StarterBench": "", "TeamID": "", "TwoWay": "",
+            "VsConference": "", "VsDivision": "", "Weight": "",
+        },
+    }
+
+
 class NBAStatsAdapter:
     """Run NBA Stats provider calls under one explicit concurrency bound."""
 

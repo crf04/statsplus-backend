@@ -40,6 +40,7 @@ from app.providers.nba_stats import (
 from app.services.nba_stats_adapter import (
     GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter,
     opponent_team_stats_request_descriptor,
+    player_per36_request_descriptor,
 )
 from app.services.nba_stats_adapter import (
     parse_recorded_game_logs,
@@ -1013,12 +1014,9 @@ def test_player_diet_synergy_uses_pinned_offensive_season_contract(monkeypatch):
 def test_player_per36_records_the_exact_endpoint_wire_request(monkeypatch):
     class Endpoint:
         def __init__(self, **kwargs):
-            self.parameters = {
-                "LeagueID": "00", "Season": "2025-26",
-                "SeasonType": "Regular Season", "PerMode": "Per36",
-                "MeasureType": "Base", "LastNGames": 0, "Month": 0,
-                "PaceAdjust": "N", "Period": 0,
-            }
+            self.parameters = player_per36_request_descriptor(
+                season="2025-26"
+            )["parameters"]
 
         def get_data_frames(self):
             return [pd.DataFrame([{"PLAYER_ID": 2544}])]

@@ -719,6 +719,11 @@ class StoredLegacyMatchupSource:
                 key: value for key, value in aggregate_requests.items()
                 if key.split(":", 1)[0] in selected_surfaces
             }
+            unavailable_candidate = (
+                identity.get("status") == "unavailable"
+                and not facts
+                and all(item.status == "unavailable" for item in observations)
+            )
             if window == "season":
                 all_expected_requests = {
                     "traditional:league": _nba_team_stats_request_descriptor(
@@ -748,10 +753,14 @@ class StoredLegacyMatchupSource:
                     existing = boundaries_by_team.setdefault(fact.team_id, value)
                     if existing != value or value is None:
                         raise ValueError
+                request_team_ids = (
+                    governance.team_ids if unavailable_candidate
+                    else boundaries_by_team
+                )
                 expected_request_keys = {
                     f"{surface}:{team_id}"
                     for surface in selected_surfaces
-                    for team_id in boundaries_by_team
+                    for team_id in request_team_ids
                 }
                 aggregate_requests_valid = (
                     isinstance(aggregate_requests, dict)
@@ -801,20 +810,21 @@ class StoredLegacyMatchupSource:
                 str(team_id): sorted(str(game_id) for game_id in game_ids)
                 for team_id, game_ids in game_ids_by_team.items()
             }
-            unavailable_identity = (
-                identity.get("status") == "unavailable"
-                and not facts
-                and all(item.status == "unavailable" for item in observations)
-            )
-            if unavailable_identity:
+            if unavailable_candidate:
+                governed_ids = (
+                    governance.expected_l15_game_ids
+                    if window == "l15"
+                    else governance.expected_season_game_ids
+                )
                 if (
                     set(identity_teams) != {
                         str(team_id) for team_id in governance.team_ids
                     }
                     or any(
                         evidence.get("provider_game_ids") != []
-                        or not isinstance(evidence.get("authority_game_ids"), list)
-                        for evidence in identity_teams.values()
+                        or sorted(evidence.get("authority_game_ids", ()))
+                        != sorted(governed_ids[int(team_id)])
+                        for team_id, evidence in identity_teams.items()
                     )
                     or any(source_memberships[source] != {} for source in expected_sources)
                 ):
@@ -822,7 +832,10 @@ class StoredLegacyMatchupSource:
                 return MatchupMaterialization(
                     season=season, window=window, cutoff=cutoff,
                     facts=facts, observations=observations,
-                    game_ids_by_team={}, producer=PRODUCER_LEGACY,
+                    game_ids_by_team={
+                        int(team_id): frozenset() for team_id in governance.team_ids
+                    },
+                    producer=PRODUCER_LEGACY,
                     manifest_id=manifest_id,
                     event_catalog_publication_id=catalog_id,
                     event_catalog_checksum=catalog_checksum,

@@ -43,11 +43,13 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.matchup_authority import resolve_unique_matchup_authority
+from app.services.nba_stats_adapter import player_per36_request_descriptor
 from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 
 
 _MATCHUP_STREAMS = MATCHUP_REQUIRED_STREAMS
+_MATCHUP_PARITY_COHORT_STREAMS = frozenset((*_MATCHUP_STREAMS, "player_per36"))
 _MATCHUP_HARD_CLASSIFICATIONS = HARD_CLASSIFICATIONS
 _MATCHUP_SOFT_CLASSIFICATIONS = SOFT_CLASSIFICATIONS
 
@@ -239,21 +241,8 @@ class Per36DiagnosticCaptureRepository:
             "adapter", "endpoint", "operation", "parameters",
         }:
             raise ValueError("per36 transport request is invalid")
-        parameters = transport_request.get("parameters")
-        if not isinstance(parameters, Mapping):
-            raise ValueError("per36 transport request is invalid")
-        required_parameters = {
-            "LeagueID": "00",
-            "Season": document["season"],
-            "SeasonType": "Regular Season",
-            "PerMode": "Per36",
-            "MeasureType": "Base",
-        }
-        if (
-            transport_request.get("adapter") != "nba_stats"
-            or transport_request.get("endpoint") != "LeagueDashPlayerStats"
-            or transport_request.get("operation") != "player_per36_stats"
-            or any(parameters.get(key) != value for key, value in required_parameters.items())
+        if dict(transport_request) != player_per36_request_descriptor(
+            season=str(document["season"])
         ):
             raise ValueError("per36 transport request is invalid")
         expected_request_checksum = hashlib.sha256(
@@ -948,6 +937,16 @@ def matchup_parity_cohort_is_activatable(
         try:
             document = json.loads(row.report)
             authority = verify_publication_authority(session, publication)
+            if stream_key == "player_per36":
+                if (
+                    authority.manifest_id != unique_authority.manifest_id
+                    or authority.event_catalog_publication_id
+                    != unique_authority.catalog_id
+                    or authority.event_catalog_checksum
+                    != unique_authority.catalog_checksum
+                ):
+                    return None
+                return authority
             if (
                 authority.manifest_id != unique_authority.manifest_id
                 or authority.event_catalog_publication_id
@@ -994,6 +993,13 @@ def matchup_parity_cohort_is_activatable(
         return authority
 
     target_cutoff = assume_utc(cutoff)
+    requested_artifact = session.get(LedgerParityArtifact, artifact_id)
+    cohort_streams = (
+        _MATCHUP_PARITY_COHORT_STREAMS
+        if requested_artifact is not None
+        and requested_artifact.stream_key == "player_per36"
+        else _MATCHUP_STREAMS
+    )
     try:
         unique_authority = resolve_unique_matchup_authority(
             session, season=season, cutoff=target_cutoff, lock=True,
@@ -1006,7 +1012,7 @@ def matchup_parity_cohort_is_activatable(
     all_rows = session.scalars(
         select(LedgerParityArtifact).where(
             LedgerParityArtifact.season == season,
-            LedgerParityArtifact.stream_key.in_(_MATCHUP_STREAMS),
+            LedgerParityArtifact.stream_key.in_(cohort_streams),
         ).order_by(
             LedgerParityArtifact.stream_key,
             LedgerParityArtifact.created_at,
@@ -1049,7 +1055,9 @@ def matchup_parity_cohort_is_activatable(
             ).order_by(CatalogPublication.publication_id).with_for_update()
             .execution_options(populate_existing=True)
         ).all()
-    pointer_streams = tuple(sorted((*_MATCHUP_STREAMS, "canonical_game_ledger")))
+    pointer_streams = tuple(sorted((
+        *cohort_streams, "canonical_game_ledger",
+    )))
     session.scalars(
         select(PublicationPointer).where(
             PublicationPointer.stream_key.in_(pointer_streams)
@@ -1066,7 +1074,7 @@ def matchup_parity_cohort_is_activatable(
             key=lambda row: (assume_utc(row.created_at), row.artifact_id),
             reverse=True,
         )
-        for stream_key in _MATCHUP_STREAMS
+        for stream_key in cohort_streams
     }
     selected: dict[str, tuple[LedgerParityArtifact, object]] = {}
     for stream_key, candidates in rows_by_stream.items():
@@ -1075,7 +1083,7 @@ def matchup_parity_cohort_is_activatable(
             if authority is not None:
                 selected[stream_key] = (row, authority)
                 break
-    if set(selected) != _MATCHUP_STREAMS:
+    if set(selected) != cohort_streams:
         return False
 
     authorities = {
@@ -1130,7 +1138,7 @@ def matchup_parity_cohort_is_activatable(
     # mutates the selected stream pointer in this activation transaction.
 
     supplied = session.get(LedgerParityArtifact, artifact_id)
-    if supplied is None or supplied.stream_key not in _MATCHUP_STREAMS:
+    if supplied is None or supplied.stream_key not in cohort_streams:
         return False
     selected_row, _ = selected[supplied.stream_key]
     return (

@@ -83,6 +83,8 @@ from app.services.team_matchup_repository import (
     TeamMatchupSnapshotScope,
 )
 from app.services.team_matchup_refresh import (
+    TeamMatchupRefreshService,
+    _ProviderWindowUnverified,
     _nba_team_stats_request_descriptor,
     _pbp_totals_request_descriptor,
 )
@@ -795,6 +797,42 @@ def _runner_world(tmp_path):
     return engine, governance, binding
 
 
+def test_refresh_manifest_resolution_ignores_superseded_history_and_fails_closed(
+    tmp_path,
+):
+    engine, _, _ = _runner_world(tmp_path)
+    with engine.begin() as connection:
+        original = connection.execute(select(CollectionManifest.__table__).where(
+            CollectionManifest.manifest_id == MANIFEST
+        )).mappings().one()
+        historical = dict(original)
+        historical.update({
+            "manifest_id": "superseded-history", "status": "superseded",
+            "checksum": "superseded-manifest-checksum",
+            "created_at": CUTOFF + timedelta(seconds=1),
+        })
+        connection.execute(CollectionManifest.__table__.insert().values(**historical))
+    service = object.__new__(TeamMatchupRefreshService)
+    service.repository = TeamMatchupRepository(engine)
+    service._clock = lambda: CUTOFF
+
+    assert service._provenance_for_snapshot("2025-26", CUTOFF.date()).manifest_id == MANIFEST
+
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.update().where(
+            CollectionManifest.manifest_id == MANIFEST
+        ).values(status="superseded"))
+    with pytest.raises(_ProviderWindowUnverified, match="authority"):
+        service._provenance_for_snapshot("2025-26", CUTOFF.date())
+
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.update().where(
+            CollectionManifest.manifest_id.in_((MANIFEST, "superseded-history"))
+        ).values(status="active"))
+    with pytest.raises(_ProviderWindowUnverified, match="authority"):
+        service._provenance_for_snapshot("2025-26", CUTOFF.date())
+
+
 def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
     repository = TeamMatchupRepository(engine, write_fence=_AllowTestLegacyWrites())
     scope = TeamMatchupSnapshotScope(
@@ -1090,6 +1128,99 @@ def test_legacy_season_and_l15_use_one_locked_caller_snapshot(tmp_path):
     assert [window for _, _, window in calls] == [None, 15]
     assert all(lock is True for _, lock, _ in calls)
     assert calls[0][0] is calls[1][0]
+
+
+def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path):
+    engine, governance, binding = _runner_world(tmp_path)
+    game_ids = governance.expected_l15_game_ids
+    requests = {
+        **{
+            f"traditional:{team_id}": _nba_team_stats_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=team_id,
+                last_n_games=15, date_from="10/31/2024", date_to="11/15/2024",
+            )
+            for team_id in TEAM_IDS
+        },
+        **{
+            f"assist_locations:{team_id}": _pbp_totals_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=team_id,
+                from_date="2024-10-31", to_date="2024-11-15",
+            )
+            for team_id in TEAM_IDS
+        },
+    }
+    identities = TeamMatchupRefreshService._surface_window_identities(
+        window="l15", game_ids_by_team=game_ids,
+        provider_game_ids_by_surface={"assist_locations": game_ids},
+        expected_counts={team_id: 15 for team_id in TEAM_IDS},
+        collect_before=governance.collect_before, aggregate_requests=requests,
+    )
+    observation = TeamMatchupObservation(
+        surface="traditional", status="unavailable",
+        unavailable_reason="provider_window_unverified", cutoff=CUTOFF,
+        manifest_id=governance.manifest_id,
+        event_catalog_publication_id=governance.event_catalog_publication_id,
+        event_catalog_checksum=governance.event_catalog_checksum,
+        provider_window_identity=identities["traditional"],
+    )
+    assist_observation = replace(
+        observation, surface="assist_locations", status="available",
+        unavailable_reason=None,
+        provider_window_identity=identities["assist_locations"],
+    )
+    assist_facts = tuple(
+        replace(
+            fact, cutoff=CUTOFF, manifest_id=governance.manifest_id,
+            event_catalog_publication_id=governance.event_catalog_publication_id,
+            event_catalog_checksum=governance.event_catalog_checksum,
+            provider_window_identity=identities["assist_locations"],
+            window_start_date=date(2024, 10, 31),
+        )
+        for fact in _surface_facts(
+            TEAM_IDS, surface="assist_locations", provider="pbp_stats",
+            game_ids_by_team=game_ids,
+        )
+    )
+
+    class SnapshotRepository:
+        def get_snapshot(self, scope, **kwargs):
+            assert scope.window_games == 15
+            return SimpleNamespace(
+                facts=assist_facts,
+                observations=(observation, assist_observation),
+            )
+
+    materialization = StoredLegacyMatchupSource(SnapshotRepository()).produce(
+        season="2025-26", window="l15", cutoff=CUTOFF,
+        governance=governance, surface="traditional",
+    )
+
+    assert materialization.facts == ()
+    assert materialization.observations == (observation,)
+    assert set(materialization.game_ids_by_team) == set(TEAM_IDS)
+    assert all(not ids for ids in materialization.game_ids_by_team.values())
+
+    publications = {
+        stream: _insert_runner_publication(
+            engine, stream_key=stream,
+            surface=("traditional" if stream.startswith("traditional") else "assist_locations"),
+            window="l15", game_ids_by_team=game_ids, binding=binding,
+        )
+        for stream in ("traditional_opponent_l15", "assist_locations_l15")
+    }
+    reports = MatchupParityRunner(
+        engine, governance=ActiveManifestLedgerGovernanceReader(engine),
+        legacy_source=StoredLegacyMatchupSource(SnapshotRepository()),
+    ).run("2025-26", "l15", cutoff=CUTOFF, publications=publications)
+
+    assert reports[0].hard_failure
+    assert reports[1].exact
+    assert LedgerParityArtifactRepository(engine).latest(
+        "traditional_opponent_l15", "2025-26"
+    ).status == "pending_adjudication"
+    assert LedgerParityArtifactRepository(engine).latest(
+        "assist_locations_l15", "2025-26"
+    ).status == "exact"
 
 
 def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path):
