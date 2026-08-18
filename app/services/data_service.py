@@ -55,6 +55,10 @@ class DataService:
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.stats_freshness = stats_freshness
+        if write_fence is None:
+            from app.services.database_first_activation import LegacyWriteFence
+
+            write_fence = LegacyWriteFence(db_engine)
         self.write_fence = write_fence
 
     def update_all_data(

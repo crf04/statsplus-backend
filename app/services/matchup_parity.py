@@ -88,6 +88,10 @@ from app.services.team_matchup_repository import (
     TeamMatchupObservation,
     TeamMatchupSnapshotScope,
 )
+from app.services.team_matchup_refresh import (
+    _nba_team_stats_request_descriptor,
+    _pbp_totals_request_descriptor,
+)
 
 #: The single documented tolerance for floating denominators and derived
 #: per-48 rates.  Integer counts compare exactly; only denominators (effective
@@ -699,17 +703,16 @@ class StoredLegacyMatchupSource:
             as_of = slate_date_for_instant(cutoff)
             if window == "season":
                 expected_aggregate_requests = {
-                    "traditional:league": {
-                        "provider": "nba_stats", "team_id": None,
-                        "date_from": None,
-                        "date_to": as_of.strftime("%m/%d/%Y"),
-                        "last_n_games": 0,
-                    },
-                    "assist_locations:league": {
-                        "provider": "pbp_stats", "team_id": None,
-                        "date_from": None, "date_to": as_of.isoformat(),
-                        "last_n_games": 0,
-                    },
+                    "traditional:league": _nba_team_stats_request_descriptor(
+                        season=season, season_type="Regular Season",
+                        team_id=None, last_n_games=0, date_from=None,
+                        date_to=as_of.strftime("%m/%d/%Y"),
+                    ),
+                    "assist_locations:league": _pbp_totals_request_descriptor(
+                        season=season, season_type="Regular Season",
+                        team_id=None, from_date=None,
+                        to_date=as_of.isoformat(),
+                    ),
                 }
                 aggregate_requests_valid = (
                     aggregate_requests == expected_aggregate_requests
@@ -739,20 +742,19 @@ class StoredLegacyMatchupSource:
                     assists = aggregate_requests.get(
                         f"assist_locations:{team_id}", {}
                     )
+                    traditional_expected = _nba_team_stats_request_descriptor(
+                        season=season, season_type="Regular Season",
+                        team_id=team_id, last_n_games=15,
+                        date_from=start.strftime("%m/%d/%Y"),
+                        date_to=as_of.strftime("%m/%d/%Y"),
+                    )
                     aggregate_requests_valid = aggregate_requests_valid and (
-                        traditional == {
-                            "provider": "nba_stats", "team_id": team_id,
-                            "date_from": start.strftime("%m/%d/%Y"),
-                            "date_to": as_of.strftime("%m/%d/%Y"),
-                            "last_n_games": 15,
-                        }
-                        and assists.get("provider") == "pbp_stats"
-                        and assists.get("team_id") == team_id
-                        and assists.get("date_from") == start.isoformat()
-                        and assists.get("last_n_games") == 15
-                        and start <= datetime.fromisoformat(
-                            assists["date_to"]
-                        ).date() <= as_of
+                        traditional == traditional_expected
+                        and assists == _pbp_totals_request_descriptor(
+                            season=season, season_type="Regular Season",
+                            team_id=team_id, from_date=start.isoformat(),
+                            to_date=as_of.isoformat(),
+                        )
                     )
             if (
                 identity["window"] != window
@@ -1316,7 +1318,7 @@ class MatchupParityRunner:
     legacy materializer seam, derives the ledger side from the verified
     candidate publications, and records per-stream artifacts bound to their
     exact publication and payload checksum.  It never reads or advances a
-    ``PublicationPointer`` and refuses to record a report with hard failures.
+    ``PublicationPointer``; hard failures are retained as blocking evidence.
     """
 
     def __init__(
@@ -1331,9 +1333,15 @@ class MatchupParityRunner:
         self.engine = engine
         self.governance = governance
         self.legacy_source = legacy_source
-        from app.services.ledger_parity import LedgerParityArtifactRepository
+        from app.services.ledger_parity import (
+            LedgerParityArtifactRepository,
+            LegacyMatchupDiagnosticCaptureRepository,
+        )
 
         self._parity_repository = parity_repository or LedgerParityArtifactRepository(
+            engine, clock=clock
+        )
+        self._legacy_capture_repository = LegacyMatchupDiagnosticCaptureRepository(
             engine, clock=clock
         )
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -1404,6 +1412,11 @@ class MatchupParityRunner:
             session_scope = nullcontext(session)
             transaction_scope = nullcontext()
         with session_scope as active_session, transaction_scope:
+            legacy_capture = self._legacy_capture_repository.record(
+                legacy,
+                publication_id=tuple((publications or {}).values())[-1],
+                session=active_session,
+            )
             for surface in LEDGER_OWNED_SURFACES:
                 stream_key = matchup_stream_key(surface, window)
                 publication_id = (publications or {}).get(stream_key)
@@ -1432,15 +1445,15 @@ class MatchupParityRunner:
                     semantic_rule_reason=semantic_rule_reason,
                 )
                 reports.append(report)
-                if not report.hard_failure:
-                    self._parity_repository.record_matchup_parity(
-                        stream_key,
-                        cutoff=cutoff,
-                        report=report,
-                        publication_id=publication.publication_id,
-                        payload_checksum=publication.payload_checksum,
-                        session=active_session,
-                    )
+                self._parity_repository.record_matchup_parity(
+                    stream_key,
+                    cutoff=cutoff,
+                    report=report,
+                    publication_id=publication.publication_id,
+                    payload_checksum=publication.payload_checksum,
+                    session=active_session,
+                    legacy_capture=legacy_capture,
+                )
         return tuple(reports)
 
     @staticmethod

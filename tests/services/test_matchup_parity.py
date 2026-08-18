@@ -33,6 +33,7 @@ from app.models.collection_control import (
 from app.models.canonical_game_ledger import LedgerParityArtifact
 from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.ledger_parity import (
+    LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
     LedgerParityArtifactRepository,
     matchup_parity_artifact_is_activatable,
     matchup_parity_cohort_is_activatable,
@@ -80,6 +81,10 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
+from app.services.team_matchup_refresh import (
+    _nba_team_stats_request_descriptor,
+    _pbp_totals_request_descriptor,
+)
 from tests.services.test_ledger_runtime import (
     _immutable_event_catalog,
     _manifest_catalog_binding,
@@ -106,6 +111,11 @@ CUTOFF = datetime(2024, 11, 15, 18, 0, tzinfo=timezone.utc)
 MANIFEST = "manifest"
 CATALOG_ID = "event-catalog"
 CATALOG_CHECKSUM = "c" * 64
+
+
+class _AllowTestLegacyWrites:
+    def assert_writable(self, stream_key, *, connection=None):
+        return None
 
 
 def _surface_facts(team_ids, *, surface, offset=0, minutes=48.0, unit="minutes", provider="recorded", game_ids_by_team=None):
@@ -777,7 +787,7 @@ def _runner_world(tmp_path):
 
 
 def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(engine, write_fence=_AllowTestLegacyWrites())
     scope = TeamMatchupSnapshotScope(
         "2025-26", CUTOFF.date(), 15 if window == "l15" else None
     )
@@ -790,33 +800,31 @@ def _write_legacy_facts(engine, *, game_ids_by_team, window="season"):
         ).mappings().one()
     if window == "season":
         aggregate_requests = {
-            "traditional:league": {
-                "provider": "nba_stats", "team_id": None,
-                "date_from": None, "date_to": "11/15/2024",
-                "last_n_games": 0,
-            },
-            "assist_locations:league": {
-                "provider": "pbp_stats", "team_id": None,
-                "date_from": None, "date_to": "2024-11-15",
-                "last_n_games": 0,
-            },
+            "traditional:league": _nba_team_stats_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=None,
+                last_n_games=0, date_from=None, date_to="11/15/2024",
+            ),
+            "assist_locations:league": _pbp_totals_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=None,
+                from_date=None, to_date="2024-11-15",
+            ),
         }
     else:
         aggregate_requests = {
             **{
-                f"traditional:{team_id}": {
-                    "provider": "nba_stats", "team_id": team_id,
-                    "date_from": "10/31/2024", "date_to": "11/15/2024",
-                    "last_n_games": 15,
-                }
+                f"traditional:{team_id}": _nba_team_stats_request_descriptor(
+                    season="2025-26", season_type="Regular Season",
+                    team_id=team_id, last_n_games=15,
+                    date_from="10/31/2024", date_to="11/15/2024",
+                )
                 for team_id in TEAM_IDS
             },
             **{
-                f"assist_locations:{team_id}": {
-                    "provider": "pbp_stats", "team_id": team_id,
-                    "date_from": "2024-10-31", "date_to": "2024-11-14",
-                    "last_n_games": 15,
-                }
+                f"assist_locations:{team_id}": _pbp_totals_request_descriptor(
+                    season="2025-26", season_type="Regular Season",
+                    team_id=team_id, from_date="2024-10-31",
+                    to_date="2024-11-15",
+                )
                 for team_id in TEAM_IDS
             },
         }
@@ -936,6 +944,22 @@ def test_runner_records_exact_artifacts_and_never_advances_pointers(tmp_path):
     assert all(report.exact for report in reports)
     with engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM publication_pointers")).scalar_one() == 0
+        capture = connection.execute(text(
+            "SELECT artifact_id, payload_checksum, report "
+            "FROM canonical_game_ledger_parity_artifacts WHERE stream_key = :stream"
+        ), {"stream": LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM}).mappings().one()
+    original_report = capture["report"]
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE team_matchup_facts SET raw_value = raw_value + 1"
+        ))
+    with engine.connect() as connection:
+        preserved = connection.execute(text(
+            "SELECT payload_checksum, report FROM canonical_game_ledger_parity_artifacts "
+            "WHERE artifact_id = :artifact_id"
+        ), {"artifact_id": capture["artifact_id"]}).mappings().one()
+    assert preserved["report"] == original_report
+    assert preserved["payload_checksum"] == capture["payload_checksum"]
     repository = LedgerParityArtifactRepository(engine)
     for stream in ("traditional_opponent_season", "assist_locations_season"):
         artifact = repository.latest(stream, "2025-26")
@@ -1182,7 +1206,7 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
 
 def test_stored_legacy_rejects_nullable_date_only_rows(tmp_path):
     engine, governance, _ = _runner_world(tmp_path)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(engine, write_fence=_AllowTestLegacyWrites())
     repository.replace_snapshots(
         (
             (
@@ -1267,7 +1291,7 @@ def test_runner_rejects_ledger_publication_authority_mismatch(tmp_path):
                    })
 
 
-def test_runner_does_not_record_hard_failed_reports(tmp_path):
+def test_runner_records_hard_failed_reports_as_permanently_blocking(tmp_path):
     engine, governance, binding = _runner_world(tmp_path)
     season_ids = governance.expected_season_game_ids
     _write_legacy_facts(engine, game_ids_by_team=season_ids)
@@ -1302,9 +1326,16 @@ def test_runner_does_not_record_hard_failed_reports(tmp_path):
                          })
 
     assert reports[0].hard_failure
-    assert LedgerParityArtifactRepository(engine).latest(
+    artifact = LedgerParityArtifactRepository(engine).latest(
         "traditional_opponent_season", "2025-26"
-    ) is None
+    )
+    assert artifact is not None
+    assert artifact.decision == "rejected"
+    assert json.loads(artifact.report)["status"] == "failed"
+    with create_session(engine) as session:
+        assert not matchup_parity_artifact_is_activatable(
+            artifact, stream_key="traditional_opponent_season", session=session
+        )
 
 
 # --- Activation revalidation -----------------------------------------------
@@ -1394,7 +1425,7 @@ def test_script_rejects_non_aware_cutoff(tmp_path):
 def test_public_read_model_is_byte_identical_for_legacy_and_ledger_facts(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'byte.sqlite3'}")
     run_migrations(engine)
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(engine, write_fence=_AllowTestLegacyWrites())
     scope = TeamMatchupSnapshotScope("2025-26", CUTOFF.date())
     query = TeamMatchupQueryService(repository)
 

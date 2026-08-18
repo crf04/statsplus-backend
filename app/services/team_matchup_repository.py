@@ -376,6 +376,10 @@ class TeamMatchupRepository:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store team matchup facts")
         self.engine = engine
+        if write_fence is None:
+            from app.services.database_first_activation import LegacyWriteFence
+
+            write_fence = LegacyWriteFence(engine)
         self._write_fence = write_fence
         self._issued_authorities: dict[
             _LedgerRecompositionAuthority, _IssuedLedgerAuthority

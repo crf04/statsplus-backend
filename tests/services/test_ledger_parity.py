@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -31,6 +32,7 @@ from app.services.ledger_parity import (
     generate_semantic_difference_report,
     matchup_parity_artifact_is_activatable,
 )
+from app.services.ledger_lineage import LedgerLineage
 from tests.services.test_canonical_game_ledger import _game
 
 
@@ -342,10 +344,23 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         )
 
 
-def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_path):
+def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
+    tmp_path, monkeypatch
+):
     engine = create_engine(f"sqlite:///{tmp_path / 'operator-capture.sqlite3'}")
     run_migrations(engine)
     game = _game()
+    import app.services.ledger_runtime as ledger_runtime
+
+    monkeypatch.setattr(
+        ledger_runtime,
+        "ActiveManifestLedgerGovernanceReader",
+        lambda engine: SimpleNamespace(
+            read_for_composition=lambda *args, **kwargs: SimpleNamespace(
+                expected_game_ids=frozenset({game.game_id})
+            )
+        ),
+    )
     fact = derive_player_per36_facts((game,), season=game.season)[0]
     raw_fields = (
         "points", "rebounds", "assists", "field_goals_made",
@@ -414,7 +429,8 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_
     capture = Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
         publication_id="candidate", season=game.season, cutoff=cutoff,
         manifest_id="manifest", event_catalog_publication_id="catalog",
-        event_catalog_checksum=catalog_checksum, game_set_checksum="c" * 64,
+        event_catalog_checksum=catalog_checksum,
+        game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
         request_checksum=request_checksum, provider_window_identity=identity,
         rows=(row,), actor="operator@example.com",
     )
@@ -429,6 +445,15 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(tmp_
     assert Per36DiagnosticCaptureRepository(engine).read(
         capture.capture_id
     ).capture_checksum == capture.capture_checksum
+    with pytest.raises(ValueError, match="game set"):
+        Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
+            publication_id="candidate", season=game.season, cutoff=cutoff,
+            manifest_id="manifest", event_catalog_publication_id="catalog",
+            event_catalog_checksum=catalog_checksum,
+            game_set_checksum="c" * 64, request_checksum=request_checksum,
+            provider_window_identity=identity, rows=(row,),
+            actor="operator@example.com",
+        )
 
 
 @pytest.mark.parametrize(

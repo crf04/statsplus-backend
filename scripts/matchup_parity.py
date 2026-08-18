@@ -939,7 +939,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
             )
             if {report.surface for report in window_reports} != {
                 "traditional", "assist_locations"
-            } or any(report.hard_failure for report in window_reports):
+            }:
                 raise InvalidEvidenceError("matchup_reports_incomplete")
             reports.extend(window_reports)
         per36_report, per36_artifact_id = _compare_candidate_per36(
@@ -1160,10 +1160,14 @@ def _capture_per36(args, engine) -> int:
     if not args.actor.strip() or len(args.actor) > 128:
         raise InvalidEvidenceError("actor_required")
     source = Path(args.input)
-    if not source.is_file():
+    if (
+        not source.is_file()
+        or source.stat().st_size > MAX_CAPTURE_INPUT_BYTES
+    ):
         raise InvalidEvidenceError("per36_capture_input_invalid")
     try:
-        raw = source.read_bytes()
+        with source.open("rb") as handle:
+            raw = handle.read(MAX_CAPTURE_INPUT_BYTES + 1)
         if len(raw) > MAX_CAPTURE_INPUT_BYTES:
             raise InvalidEvidenceError("per36_capture_input_invalid")
         document = json.loads(raw.decode("utf-8"))

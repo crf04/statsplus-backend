@@ -51,6 +51,7 @@ _MATCHUP_HARD_CLASSIFICATIONS = HARD_CLASSIFICATIONS
 _MATCHUP_SOFT_CLASSIFICATIONS = SOFT_CLASSIFICATIONS
 
 PER36_DIAGNOSTIC_CAPTURE_STREAM = "player_per36_diagnostic_capture"
+LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM = "legacy_matchup_diagnostic_capture"
 PER36_RAW_FIELDS = (
     "points",
     "rebounds",
@@ -88,6 +89,22 @@ class Per36DiagnosticCapture:
     actor: str
     capture_checksum: str
     source_observation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyMatchupDiagnosticCapture:
+    """Immutable copy of the protected legacy side used by one dual run."""
+
+    capture_id: str
+    capture_checksum: str
+    season: str
+    window: str
+    cutoff: datetime
+    manifest_id: str
+    event_catalog_publication_id: str
+    event_catalog_checksum: str
+    provider_window_identity: str
+    document: Mapping[str, object]
 
 
 def _is_sha256(value: object) -> bool:
@@ -362,6 +379,7 @@ class Per36DiagnosticCaptureRepository:
                 owned.execute(LedgerParityArtifact.__table__.insert().values(**values))
         return capture
 
+
     def record_operator_evidence(
         self,
         *,
@@ -381,6 +399,28 @@ class Per36DiagnosticCaptureRepository:
 
         rows_tuple = self._validate_rows(rows)
         now = self.clock()
+        from app.services.ledger_runtime import (
+            ActiveManifestLedgerGovernanceReader,
+        )
+
+        governance = ActiveManifestLedgerGovernanceReader(
+            self.engine
+        ).read_for_composition(season, cutoff, manifest_id=manifest_id)
+        expected_game_ids = sorted(map(str, governance.expected_game_ids))
+        governed_game_set_checksum = LedgerLineage.for_game_ids(
+            expected_game_ids
+        )
+        mapping_trace = provider_window_identity.get(
+            "event_catalog_mapping_trace"
+        )
+        if (
+            game_set_checksum != governed_game_set_checksum
+            or not isinstance(mapping_trace, Mapping)
+            or len(mapping_trace) != len(expected_game_ids)
+            or set(map(str, mapping_trace.values())) != set(expected_game_ids)
+            or provider_window_identity.get("game_ids") != expected_game_ids
+        ):
+            raise ValueError("per36 operator evidence game set is invalid")
         with Session(self.engine) as session, session.begin():
             publication = session.scalar(
                 select(PublicationVersion)
@@ -466,7 +506,7 @@ class Per36DiagnosticCaptureRepository:
                 manifest_id=manifest_id,
                 event_catalog_publication_id=event_catalog_publication_id,
                 event_catalog_checksum=event_catalog_checksum,
-                game_set_checksum=game_set_checksum,
+                game_set_checksum=governed_game_set_checksum,
                 request_checksum=request_checksum,
                 provider_window_identity=provider_window_identity,
                 rows=rows_tuple,
@@ -513,6 +553,74 @@ class Per36DiagnosticCaptureRepository:
         ):
             raise ValueError("per36 diagnostic capture binding is invalid")
         return capture
+
+
+class LegacyMatchupDiagnosticCaptureRepository:
+    """Append an exact, reproducible legacy snapshot before it is compared."""
+
+    def __init__(self, engine: Engine, *, clock: Callable[[], datetime] | None = None):
+        self.engine = engine
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def record(
+        self, materialization, *, publication_id: str, session: Session
+    ) -> LegacyMatchupDiagnosticCapture:
+        if not materialization.provider_window_identity:
+            raise ValueError("legacy diagnostic capture requires provider window identity")
+        def normalize(value: object) -> Mapping[str, object]:
+            row = asdict(value)
+            # The identical bounded identity is captured once above, not
+            # repeated in every canonical fact and observation row.
+            row.pop("provider_window_identity", None)
+            return json.loads(json.dumps(row, sort_keys=True, default=str))
+        document: dict[str, object] = {
+            "season": materialization.season,
+            "window": materialization.window,
+            "cutoff": assume_utc(materialization.cutoff).isoformat(),
+            "manifest_id": materialization.manifest_id,
+            "event_catalog_publication_id": materialization.event_catalog_publication_id,
+            "event_catalog_checksum": materialization.event_catalog_checksum,
+            "provider_window_identity": materialization.provider_window_identity,
+            "game_ids_by_team": {
+                str(team_id): sorted(str(game_id) for game_id in game_ids)
+                for team_id, game_ids in sorted(materialization.game_ids_by_team.items())
+            },
+            "facts": sorted(
+                (normalize(fact) for fact in materialization.facts),
+                key=lambda row: json.dumps(row, sort_keys=True),
+            ),
+            "observations": sorted(
+                (normalize(observation) for observation in materialization.observations),
+                key=lambda row: json.dumps(row, sort_keys=True),
+            ),
+        }
+        capture_checksum = hashlib.sha256(
+            _canonical_capture_payload(document).encode("utf-8")
+        ).hexdigest()
+        capture_id = str(uuid4())
+        report = {**document, "capture_id": capture_id, "capture_checksum": capture_checksum}
+        session.add(LedgerParityArtifact(
+            artifact_id=capture_id,
+            publication_id=publication_id,
+            payload_checksum=capture_checksum,
+            stream_key=LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
+            season=materialization.season,
+            cutoff=assume_utc(materialization.cutoff),
+            status="exact",
+            report=json.dumps(report, sort_keys=True, separators=(",", ":")),
+            created_at=self.clock(),
+        ))
+        session.flush()
+        return LegacyMatchupDiagnosticCapture(
+            capture_id=capture_id, capture_checksum=capture_checksum,
+            season=materialization.season, window=materialization.window,
+            cutoff=assume_utc(materialization.cutoff),
+            manifest_id=str(materialization.manifest_id),
+            event_catalog_publication_id=str(materialization.event_catalog_publication_id),
+            event_catalog_checksum=str(materialization.event_catalog_checksum),
+            provider_window_identity=materialization.provider_window_identity,
+            document=report,
+        )
 
 
 def matchup_parity_artifact_is_activatable(
@@ -608,6 +716,7 @@ def matchup_parity_artifact_is_activatable(
 
     legacy_checksum = game_set_checksum(document["legacy_game_ids_by_team"])
     ledger_checksum = game_set_checksum(document["ledger_game_ids_by_team"])
+    lineage = document.get("legacy_capture")
     expected_team_ids = {
         str(team_id) for team_id in NBA_TEAM_ID_TO_TRICODE
     }
@@ -638,6 +747,9 @@ def matchup_parity_artifact_is_activatable(
                 "ledger_event_catalog_publication_id", "ledger_event_catalog_checksum",
             )
         )
+        or not isinstance(lineage, Mapping)
+        or not _is_sha256(lineage.get("capture_checksum"))
+        or not isinstance(lineage.get("capture_id"), str)
         or document["legacy_game_ids_by_team"] != document["ledger_game_ids_by_team"]
         or legacy_checksum is None
         or ledger_checksum is None
@@ -661,12 +773,31 @@ def matchup_parity_artifact_is_activatable(
         return False
     if session is not None:
         publication = session.get(PublicationVersion, artifact.publication_id)
+        capture = session.get(LedgerParityArtifact, lineage["capture_id"])
+        try:
+            capture_document = json.loads(capture.report) if capture is not None else None
+            capture_payload = dict(capture_document)
+            embedded_capture_id = capture_payload.pop("capture_id")
+            embedded_capture_checksum = capture_payload.pop("capture_checksum")
+            recomputed_capture_checksum = hashlib.sha256(
+                _canonical_capture_payload(capture_payload).encode("utf-8")
+            ).hexdigest()
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            return False
         if (
             publication is None
             or publication.checksum != artifact.payload_checksum
             or not publication_payload_matches_checksum(
                 publication.payload, publication.checksum
             )
+            or capture is None
+            or capture.stream_key != LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM
+            or capture.payload_checksum != lineage["capture_checksum"]
+            or embedded_capture_id != lineage["capture_id"]
+            or embedded_capture_checksum != lineage["capture_checksum"]
+            or recomputed_capture_checksum != lineage["capture_checksum"]
+            or capture.season != artifact.season
+            or assume_utc(capture.cutoff) != assume_utc(artifact.cutoff)
         ):
             return False
     differences = document.get("differences", ())
@@ -1004,6 +1135,7 @@ class LedgerParityArtifactRepository:
         payload_checksum: str,
         session: Session | None = None,
         connection: Connection | None = None,
+        legacy_capture: LegacyMatchupDiagnosticCapture,
     ) -> LedgerParityArtifact:
         """Persist one matchup materializer dual-run report as parity evidence.
 
@@ -1015,8 +1147,6 @@ class LedgerParityArtifactRepository:
 
         if not publication_id or len(payload_checksum) != 64:
             raise ValueError("candidate publication and payload checksum are required")
-        if getattr(report, "hard_failure", False):
-            raise ValueError("matchup parity report contains non-adjudicable hard failures")
         known_classifications = (
             _MATCHUP_SOFT_CLASSIFICATIONS | _MATCHUP_HARD_CLASSIFICATIONS
         )
@@ -1058,9 +1188,23 @@ class LedgerParityArtifactRepository:
             stream_key=stream_key,
             season=report.season,
             cutoff=cutoff,
-            status="pending_adjudication" if report.adjudication_required else "exact",
-            report=json.dumps(report.to_dict(), sort_keys=True, default=str),
+            status=(
+                "pending_adjudication"
+                if report.hard_failure or report.adjudication_required
+                else "exact"
+            ),
+            report=json.dumps({
+                **report.to_dict(),
+                "legacy_capture": {
+                    "capture_id": legacy_capture.capture_id,
+                    "capture_checksum": legacy_capture.capture_checksum,
+                },
+            }, sort_keys=True, default=str),
             created_at=self.clock(),
+            decision="rejected" if report.hard_failure else None,
+            adjudication_reason=(
+                "automatic hard parity failure" if report.hard_failure else None
+            ),
         )
         self._insert_artifact(row, session=session, connection=connection)
         return row

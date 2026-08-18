@@ -635,6 +635,32 @@ def _response_status(endpoint: object) -> int | None:
     return None
 
 
+def opponent_team_stats_request_descriptor(
+    *, date_from: str | None, date_to: str | None = None,
+    season: str | None = None, season_type: str | None = None,
+    team_id: int | None = None, last_n_games: int | None = None,
+    per_mode_detailed: str = "Per48", league_id: str = "00",
+) -> dict[str, object]:
+    """Return the exact non-timeout LeagueDashTeamStats wire parameters."""
+
+    parameters: dict[str, object] = {
+        "measure_type_detailed_defense": "Opponent",
+        "per_mode_detailed": per_mode_detailed,
+        "date_from_nullable": date_from,
+        "league_id_nullable": league_id,
+    }
+    optional = {
+        "date_to_nullable": date_to, "season": season,
+        "season_type_all_star": season_type, "team_id_nullable": team_id,
+        "last_n_games": last_n_games,
+    }
+    parameters.update({key: value for key, value in optional.items() if value is not None})
+    return {
+        "adapter": "nba_stats", "operation": "league_opponent_team_stats",
+        "endpoint": "LeagueDashTeamStats", "parameters": parameters,
+    }
+
+
 class NBAStatsAdapter:
     """Run NBA Stats provider calls under one explicit concurrency bound."""
 
@@ -898,22 +924,13 @@ class NBAStatsAdapter:
         """Fetch league opponent team stats from the cutoff ``date_from``."""
 
         def build(timeout: float) -> object:
-            parameters = {
-                "measure_type_detailed_defense": "Opponent",
-                "per_mode_detailed": per_mode_detailed,
-                "date_from_nullable": date_from,
-                "league_id_nullable": league_id,
-                "timeout": timeout,
-            }
-            self._add_optional_matchup_scope(
-                parameters,
-                date_to=date_to,
-                season=season,
-                season_type=season_type,
-                team_id=team_id,
-                last_n_games=last_n_games,
-                last_n_parameter="last_n_games",
+            descriptor = opponent_team_stats_request_descriptor(
+                date_from=date_from, date_to=date_to, season=season,
+                season_type=season_type, team_id=team_id,
+                last_n_games=last_n_games, per_mode_detailed=per_mode_detailed,
+                league_id=league_id,
             )
+            parameters = {**descriptor["parameters"], "timeout": timeout}
             return endpoints.LeagueDashTeamStats(**parameters)
 
         return self.run_endpoint(

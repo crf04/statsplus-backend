@@ -26,6 +26,12 @@ from app.domain.utc import assume_utc, parse_utc_iso
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.models.collection_control import CollectionManifest, PublicationPointer
 from app.providers.nba_stats import validate_canonical_season
+from app.services.nba_stats_adapter import (
+    opponent_team_stats_request_descriptor as _transport_nba_team_stats_request_descriptor,
+)
+from app.services.pbp_stats_adapter import (
+    totals_request_descriptor as _totals_request_descriptor,
+)
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
@@ -102,6 +108,27 @@ class _ProviderGameMembership(dict[int, tuple[str, ...]]):
             source: dict(membership)
             for source, membership in by_source.items()
         }
+
+
+def _nba_team_stats_request_descriptor(
+    *, season: str, season_type: str, team_id: int | None,
+    last_n_games: int, date_from: str | None, date_to: str,
+) -> dict[str, object]:
+    return _transport_nba_team_stats_request_descriptor(
+        date_from=date_from, date_to=date_to, season=season,
+        season_type=season_type, team_id=team_id,
+        last_n_games=last_n_games, per_mode_detailed="Totals", league_id="00",
+    )
+
+
+def _pbp_totals_request_descriptor(
+    *, season: str, season_type: str, team_id: int | None,
+    from_date: str | None, to_date: str,
+) -> dict[str, object]:
+    return _totals_request_descriptor(
+        "opponent", season=season, season_type=season_type,
+        team_id=team_id, from_date=from_date, to_date=to_date,
+    )
 
 
 class TeamWindowBoundaryResolver:
@@ -900,16 +927,14 @@ class TeamMatchupRefreshService:
     ]:
         date_to = self._nba_date(snapshot_date)
         aggregate_requests = {
-            "traditional:league": {
-                "provider": "nba_stats", "team_id": None,
-                "date_from": None, "date_to": date_to,
-                "last_n_games": 0,
-            },
-            "assist_locations:league": {
-                "provider": "pbp_stats", "team_id": None,
-                "date_from": None, "date_to": snapshot_date.isoformat(),
-                "last_n_games": 0,
-            },
+            "traditional:league": _nba_team_stats_request_descriptor(
+                season=season, season_type="Regular Season", team_id=None,
+                last_n_games=0, date_from=None, date_to=date_to,
+            ),
+            "assist_locations:league": _pbp_totals_request_descriptor(
+                season=season, season_type="Regular Season", team_id=None,
+                from_date=None, to_date=snapshot_date.isoformat(),
+            ),
         }
         common = {
             "season": season,
@@ -1110,17 +1135,21 @@ class TeamMatchupRefreshService:
                 "last_n_games": 15,
                 "date_to": date_to,
             }
-            aggregate_requests[f"traditional:{team_id}"] = {
-                "provider": "nba_stats", "team_id": team_id,
-                "date_from": self._nba_date(boundary.from_date),
-                "date_to": date_to, "last_n_games": 15,
-            }
-            aggregate_requests[f"assist_locations:{team_id}"] = {
-                "provider": "pbp_stats", "team_id": team_id,
-                "date_from": boundary.from_date.isoformat(),
-                "date_to": boundary.to_date.isoformat(),
-                "last_n_games": 15,
-            }
+            aggregate_requests[f"traditional:{team_id}"] = (
+                _nba_team_stats_request_descriptor(
+                    season=season, season_type=season_type, team_id=team_id,
+                    last_n_games=15,
+                    date_from=self._nba_date(boundary.from_date),
+                    date_to=date_to,
+                )
+            )
+            aggregate_requests[f"assist_locations:{team_id}"] = (
+                _pbp_totals_request_descriptor(
+                    season=season, season_type=season_type, team_id=team_id,
+                    from_date=boundary.from_date.isoformat(),
+                    to_date=boundary.to_date.isoformat(),
+                )
+            )
             minutes_by_team = None
             if any(
                 surface not in failures

@@ -256,10 +256,17 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
         publication_strategy="replace",
         enabled=True,
     )
+    service.register_stream(
+        "traditional_opponent",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
     data_service = DataService(
         engine,
         settings=load_settings(),
-        write_fence=LegacyWriteFence(engine),
     )
     frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
     monkeypatch.setattr(data_service, "_fetch_opponent_data", lambda *args, **kwargs: frame)
@@ -270,6 +277,24 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
     assert data_service.update_all_data() is False
     with pytest.raises(Exception, match="legacy_write_fenced"):
         data_service.process_opponent_scoring()
+
+    from app.services.team_matchup_repository import (
+        TeamMatchupFact, TeamMatchupObservation, TeamMatchupRepository,
+        TeamMatchupSnapshotScope,
+    )
+    repository = TeamMatchupRepository(engine)
+    with pytest.raises(Exception, match="legacy_write_fenced"):
+        repository.replace_snapshots((
+            (
+                TeamMatchupSnapshotScope("2025-26", NOW.date()),
+                (TeamMatchupFact(
+                    team_id=1610612747, base="traditional", slice_key="OPP_REB",
+                    stat_key="OPP_REB", raw_value=1, denominator_value=48,
+                    denominator_unit="minutes", provider="nba_stats",
+                ),),
+                (TeamMatchupObservation("traditional", "available"),),
+            ),
+        ), retrieved_at=NOW)
 
 
 def test_provider_guard_is_fail_closed():

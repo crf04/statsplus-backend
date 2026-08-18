@@ -97,6 +97,36 @@ def _date_key(value: object) -> str:
     return parsed.isoformat()
 
 
+def totals_request_descriptor(
+    data_type: PBPDataKind, *, season: str, season_type: str,
+    team_id: int | None = None, from_date: str | None = None,
+    to_date: str | None = None,
+) -> dict[str, object]:
+    """Return the exact non-secret PBP totals request sent on the wire."""
+
+    provider_season_type = (
+        PBP_REGULAR_SEASON
+        if season_type in {"Regular Season", PBP_REGULAR_SEASON}
+        else season_type
+    )
+    parameters: dict[str, object] = {
+        "Season": season, "SeasonType": provider_season_type,
+        "Type": "Player" if data_type == "player" else "Opponent",
+    }
+    if team_id is not None:
+        parameters["TeamId"] = str(team_id)
+    if from_date is not None:
+        parameters["FromDate"] = from_date
+    if to_date is not None:
+        parameters["ToDate"] = to_date
+    return {
+        "adapter": "pbp_stats",
+        "operation": "get_totals_player" if data_type == "player" else "get_totals_opponent",
+        "endpoint": PBP_TOTALS_URL,
+        "parameters": parameters,
+    }
+
+
 class PBPTotalsAdapter:
     """Fetch and normalize PBP totals through the shared, retrying session."""
 
@@ -240,23 +270,13 @@ class PBPTotalsAdapter:
                 f"Unsupported PBP data type {data_type!r}. "
                 f"Expected one of {sorted(PBP_DATA_KINDS)}."
             )
-        provider_season_type = (
-            PBP_REGULAR_SEASON
-            if season_type in {"Regular Season", PBP_REGULAR_SEASON}
-            else season_type
+        descriptor = totals_request_descriptor(
+            data_type, season=season or self.settings.nba.current_season,
+            season_type=season_type, team_id=team_id,
+            from_date=from_date, to_date=to_date,
         )
-        params = {
-            "Season": season or self.settings.nba.current_season,
-            "SeasonType": provider_season_type,
-            "Type": "Player" if data_type == "player" else "Opponent",
-        }
-        if team_id is not None:
-            params["TeamId"] = str(team_id)
-        if from_date is not None:
-            params["FromDate"] = from_date
-        if to_date is not None:
-            params["ToDate"] = to_date
-        operation = "get_totals_player" if data_type == "player" else "get_totals_opponent"
+        params = dict(descriptor["parameters"])  # type: ignore[arg-type]
+        operation = str(descriptor["operation"])
 
         with self._request(operation, params) as response:
             try:
