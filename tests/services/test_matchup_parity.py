@@ -1532,3 +1532,64 @@ def test_postcommit_output_failure_is_not_reported_as_rollback():
 
     assert summary["artifact_transaction_committed"] is True
     assert "artifact_writes_rolled_back" not in summary
+
+
+def test_failed_database_commit_never_publishes_staged_summary(
+    tmp_path, monkeypatch
+):
+    import scripts.matchup_parity as matchup_parity_script
+
+    destination = tmp_path / "summary.json"
+    staged = matchup_parity_script._stage_summary(
+        str(destination), {"status": "exact"}
+    )
+    args = SimpleNamespace(
+        output=str(destination), _artifact_session=object(),
+        _staged_summary=staged,
+    )
+    transaction = SimpleNamespace(
+        commit=lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
+    )
+    session = SimpleNamespace(close=lambda: None)
+    published = []
+    monkeypatch.setattr(
+        matchup_parity_script, "_publish_summary",
+        lambda *values: published.append(values),
+    )
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        matchup_parity_script._commit_and_publish_summary(
+            transaction, session, args, staged
+        )
+
+    assert published == []
+    assert not destination.exists()
+    assert not getattr(args, "_database_transaction_committed", False)
+
+
+def test_output_failure_occurs_only_after_commit(monkeypatch, tmp_path):
+    import scripts.matchup_parity as matchup_parity_script
+
+    calls = []
+    transaction = SimpleNamespace(commit=lambda: calls.append("commit"))
+    session = SimpleNamespace(close=lambda: calls.append("close"))
+    args = SimpleNamespace(
+        output=str(tmp_path / "summary.json"),
+        _artifact_session=session,
+        _staged_summary=tmp_path / ".summary.tmp",
+    )
+
+    def fail_publish(*_args):
+        calls.append("publish")
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(matchup_parity_script, "_publish_summary", fail_publish)
+
+    with pytest.raises(OSError, match="rename failed"):
+        matchup_parity_script._commit_and_publish_summary(
+            transaction, session, args, args._staged_summary
+        )
+
+    assert calls == ["commit", "close", "publish"]
+    assert args._database_transaction_committed is True
+    assert args._artifact_session is None

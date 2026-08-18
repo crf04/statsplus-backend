@@ -803,6 +803,19 @@ def _write_summary(path: str, summary: Mapping[str, Any]) -> None:
     _publish_summary(path, _stage_summary(path, summary))
 
 
+def _commit_and_publish_summary(
+    transaction, session: Session, args, staged_summary: Path
+) -> None:
+    """Publish final evidence only after the artifact transaction commits."""
+
+    transaction.commit()
+    session.close()
+    args._artifact_session = None
+    args._database_transaction_committed = True
+    _publish_summary(args.output, staged_summary)
+    args._staged_summary = None
+
+
 def _print_table(summary: Mapping[str, Any]) -> None:
     manifest = summary.get("manifest", {})
     if manifest:
@@ -1031,12 +1044,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     session.flush()
     staged_summary = _stage_summary(args.output, summary)
     args._staged_summary = staged_summary
-    transaction.commit()
-    session.close()
-    args._artifact_session = None
-    args._database_transaction_committed = True
-    _publish_summary(args.output, staged_summary)
-    args._staged_summary = None
+    _commit_and_publish_summary(transaction, session, args, staged_summary)
     _print_table(summary)
     return {
         "exact": EXIT_EXACT,
