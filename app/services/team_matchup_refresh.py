@@ -406,25 +406,18 @@ class TeamMatchupRefreshService:
             expected_game_ids_by_team=season_game_ids_by_team,
             verify_window=provenance is not None,
         )
-        season_window_identity = None
-        if season_provider_game_ids is not None:
-            season_window_identity = self._provider_window_identity(
-                window="season",
-                game_ids_by_team=season_game_ids_by_team,
-                provider_game_ids_by_team=season_provider_game_ids,
-                provider_sources=(
-                    "nba_stats.team_game_log",
-                    "pbp_stats.team_game_log",
-                ),
-                expected_counts={
-                    team_id: len(game_ids)
-                    for team_id, game_ids in season_game_ids_by_team.items()
-                },
-                collect_before=provenance.collect_before if provenance else None,
-                aggregate_requests=season_aggregate_requests,
-            )
+        season_window_identities = self._surface_window_identities(
+            window="season", game_ids_by_team=season_game_ids_by_team,
+            provider_game_ids_by_surface=season_provider_game_ids,
+            expected_counts={
+                team_id: len(game_ids)
+                for team_id, game_ids in season_game_ids_by_team.items()
+            },
+            collect_before=provenance.collect_before if provenance else None,
+            aggregate_requests=season_aggregate_requests,
+        )
         season_facts = self._bind_legacy_window_evidence(
-            season_facts, season_provider_game_ids or {}, season_window_identity,
+            season_facts, season_provider_game_ids, season_window_identities,
             provenance=provenance, cutoff=retrieved_at,
         )
         season_observations = self._surface_observations(
@@ -443,7 +436,7 @@ class TeamMatchupRefreshService:
             }
         )
         season_observations = self._bind_observation_evidence(
-            season_observations, season_window_identity,
+            season_observations, season_window_identities,
             provenance=provenance, cutoff=retrieved_at,
         )
         if set(boundaries) != set(team_ids):
@@ -474,25 +467,15 @@ class TeamMatchupRefreshService:
                 team_id: boundary.game_ids
                 for team_id, boundary in boundaries.items()
             }
-            rolling_window_identity = None
-            if rolling_provider_game_ids is not None:
-                rolling_window_identity = self._provider_window_identity(
-                    window="l15",
-                    game_ids_by_team=rolling_game_ids_by_team,
-                    provider_game_ids_by_team=rolling_provider_game_ids,
-                    provider_sources=(
-                        "nba_stats.team_game_log",
-                        "pbp_stats.team_game_log",
-                    ),
-                    expected_counts={
-                        team_id: 15 for team_id in rolling_game_ids_by_team
-                    },
-                    collect_before=provenance.collect_before if provenance else None,
-                    aggregate_requests=rolling_aggregate_requests,
-                )
+            rolling_window_identities = self._surface_window_identities(
+                window="l15", game_ids_by_team=rolling_game_ids_by_team,
+                provider_game_ids_by_surface=rolling_provider_game_ids,
+                expected_counts={team_id: 15 for team_id in rolling_game_ids_by_team},
+                collect_before=provenance.collect_before if provenance else None,
+                aggregate_requests=rolling_aggregate_requests,
+            )
             rolling_facts = self._bind_legacy_window_evidence(
-                rolling_facts,
-                rolling_provider_game_ids or {}, rolling_window_identity,
+                rolling_facts, rolling_provider_game_ids, rolling_window_identities,
                 provenance=provenance, cutoff=retrieved_at,
             )
             rolling_observations = self._surface_observations(
@@ -502,7 +485,7 @@ class TeamMatchupRefreshService:
                 }
             )
             rolling_observations = self._bind_observation_evidence(
-                rolling_observations, rolling_window_identity,
+                rolling_observations, rolling_window_identities,
                 provenance=provenance, cutoff=retrieved_at,
             )
         snapshots = (
@@ -808,10 +791,7 @@ class TeamMatchupRefreshService:
             source_memberships = {
                 provider_sources[0]: provider_game_ids_by_team,
             }
-        if set(source_memberships) != {
-            "nba_stats.team_game_log",
-            "pbp_stats.team_game_log",
-        }:
+        if set(source_memberships) != set(provider_sources):
             raise _ProviderWindowUnverified(
                 "independent provider sources are incomplete"
             )
@@ -852,15 +832,65 @@ class TeamMatchupRefreshService:
         }, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
+    def _surface_window_identities(
+        *, window: str, game_ids_by_team: Mapping[int, tuple[str, ...]],
+        provider_game_ids_by_surface: Mapping[str, Mapping[int, tuple[str, ...]]],
+        expected_counts: Mapping[int, int], collect_before: datetime | None,
+        aggregate_requests: Mapping[str, Mapping[str, object]],
+    ) -> dict[str, str]:
+        identities = {}
+        source_by_surface = {
+            "traditional": "nba_stats.team_game_log",
+            "assist_locations": "pbp_stats.team_game_log",
+        }
+        for surface, source in source_by_surface.items():
+            membership = provider_game_ids_by_surface.get(surface)
+            requests = {
+                key: value for key, value in aggregate_requests.items()
+                if key.startswith(f"{surface}:")
+            }
+            if membership and set(membership) == set(game_ids_by_team):
+                identities[surface] = TeamMatchupRefreshService._provider_window_identity(
+                    window=window, game_ids_by_team=game_ids_by_team,
+                    provider_game_ids_by_team=membership,
+                    expected_counts=expected_counts, provider_sources=(source,),
+                    collect_before=collect_before, aggregate_requests=requests,
+                )
+            elif collect_before is not None:
+                request_checksum = hashlib.sha256(json.dumps(
+                    requests, sort_keys=True, separators=(",", ":")
+                ).encode()).hexdigest()
+                identities[surface] = json.dumps({
+                    "window": window,
+                    "status": "unavailable",
+                    "provider_sources": [source],
+                    "collect_before": assume_utc(collect_before).isoformat(),
+                    "aggregate_requests": requests,
+                    "aggregate_request_checksum": request_checksum,
+                    "provider_game_ids_by_source": {source: {}},
+                    "teams": {
+                        str(team_id): {
+                            "expected_games": expected_counts[team_id],
+                            "authority_game_ids": sorted(game_ids),
+                            "provider_game_ids": [],
+                        }
+                        for team_id, game_ids in sorted(game_ids_by_team.items())
+                    },
+                }, sort_keys=True, separators=(",", ":"))
+        return identities
+
+    @staticmethod
     def _bind_legacy_window_evidence(
         facts: list[TeamMatchupFact],
-        game_ids_by_team: Mapping[int, tuple[str, ...]],
-        provider_window_identity: str | None,
+        game_ids_by_surface: Mapping[str, Mapping[int, tuple[str, ...]]],
+        provider_window_identities: Mapping[str, str],
         *, provenance: TeamMatchupProvenance | None,
         cutoff: datetime,
     ) -> list[TeamMatchupFact]:
         bound = []
         for fact in facts:
+            provider_window_identity = provider_window_identities.get(fact.base)
+            game_ids_by_team = game_ids_by_surface.get(fact.base, {})
             if not (
                 provider_window_identity
                 and fact.base in {"traditional", "assist_locations"}
@@ -885,7 +915,7 @@ class TeamMatchupRefreshService:
     @staticmethod
     def _bind_observation_evidence(
         observations: tuple[TeamMatchupObservation, ...],
-        provider_window_identity: str | None,
+        provider_window_identities: Mapping[str, str],
         *, provenance: TeamMatchupProvenance | None,
         cutoff: datetime,
     ) -> tuple[TeamMatchupObservation, ...]:
@@ -901,9 +931,9 @@ class TeamMatchupRefreshService:
                 event_catalog_checksum=(
                     provenance.event_catalog_checksum if provenance else None
                 ),
-                provider_window_identity=provider_window_identity,
+                provider_window_identity=provider_window_identities[observation.surface],
             )
-            if provider_window_identity
+            if observation.surface in provider_window_identities
             and observation.surface in {"traditional", "assist_locations"}
             else observation
             for observation in observations
@@ -933,7 +963,7 @@ class TeamMatchupRefreshService:
     ) -> tuple[
         list[TeamMatchupFact],
         dict[str, tuple[str, str | None]],
-        dict[int, tuple[str, ...]] | None,
+        dict[str, dict[int, tuple[str, ...]]],
         dict[str, Mapping[str, object]],
     ]:
         date_to = self._nba_date(snapshot_date)
@@ -1094,17 +1124,9 @@ class TeamMatchupRefreshService:
             )
         except (ProviderResponseError, ValueError) as error:
             failures["assist_locations"] = self._provider_failure(error)
-        provider_game_ids = None
-        traditional_ids = provider_ids_by_surface.get("traditional")
-        assist_ids = provider_ids_by_surface.get("assist_locations")
-        if traditional_ids is not None and assist_ids == traditional_ids:
-            provider_game_ids = _ProviderGameMembership(
-                traditional_ids,
-                by_source={
-                    "nba_stats.team_game_log": traditional_ids,
-                    "pbp_stats.team_game_log": assist_ids,
-                },
-            )
+        for failed_surface in ("traditional", "assist_locations"):
+            if failed_surface in failures:
+                provider_ids_by_surface.pop(failed_surface, None)
         return (
             [
                 fact
@@ -1113,7 +1135,7 @@ class TeamMatchupRefreshService:
                 for fact in surface_facts
             ],
             failures,
-            provider_game_ids,
+            provider_ids_by_surface,
             aggregate_requests,
         )
 
@@ -1128,7 +1150,7 @@ class TeamMatchupRefreshService:
     ) -> tuple[
         list[TeamMatchupFact],
         dict[str, tuple[str, str | None]],
-        dict[int, tuple[str, ...]] | None,
+        dict[str, dict[int, tuple[str, ...]]],
         dict[str, Mapping[str, object]],
     ]:
         facts_by_surface: dict[str, list[TeamMatchupFact]] = {
@@ -1344,22 +1366,10 @@ class TeamMatchupRefreshService:
             if surface not in failures
             for fact in facts_by_surface[surface]
         ]
-        provider_game_ids = None
-        if (
-            provider_ids_by_surface["traditional"]
-            and provider_ids_by_surface["assist_locations"]
-            == provider_ids_by_surface["traditional"]
-        ):
-            provider_game_ids = _ProviderGameMembership(
-                provider_ids_by_surface["traditional"],
-                by_source={
-                    "nba_stats.team_game_log": provider_ids_by_surface["traditional"],
-                    "pbp_stats.team_game_log": provider_ids_by_surface[
-                        "assist_locations"
-                    ],
-                },
-            )
-        return facts, failures, provider_game_ids, aggregate_requests
+        for failed_surface in ("traditional", "assist_locations"):
+            if failed_surface in failures:
+                provider_ids_by_surface.pop(failed_surface, None)
+        return facts, failures, provider_ids_by_surface, aggregate_requests
 
     @staticmethod
     def _nba_date(value: date) -> str:

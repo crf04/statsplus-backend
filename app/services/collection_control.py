@@ -2216,9 +2216,13 @@ class CollectionControlService(_SessionService):
                     "event_catalog_checksum": event.checksum}
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
-            active = session.get(ActiveSeason, season)
-            if active is None or active.status != "active":
-                raise ControlPlaneError("season_not_active")
+            from app.services.matchup_authority import (
+                lock_matchup_authority_serialization,
+            )
+            try:
+                lock_matchup_authority_serialization(session, season)
+            except ValueError as error:
+                raise ControlPlaneError("season_not_active") from error
             if not self._catalog_complete_against_governed_evidence(
                 session, event_document, "event", season,
             ) or not self._catalog_complete_against_governed_evidence(

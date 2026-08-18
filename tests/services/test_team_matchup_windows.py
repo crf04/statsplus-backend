@@ -419,7 +419,11 @@ def test_last_15_rejects_wrong_same_count_pbp_membership():
         "unavailable",
         "provider_window_unverified",
     )
-    assert provider_game_ids is None
+    assert provider_game_ids["traditional"] == {
+        team_id: tuple(sorted(game_ids))
+        for team_id, game_ids in game_ids_by_team.items()
+    }
+    assert "assist_locations" not in provider_game_ids
 
 
 def test_refresh_rejects_a_future_as_of_before_provider_or_storage_work(tmp_path):
@@ -576,7 +580,7 @@ def test_membership_failure_only_disables_parity_owned_traditional_surface(tmp_p
         nba_stats_provider=nba,
         pbp_stats_provider=_TeamLogPBP(team_ids, game_ids),
     )
-    facts, failures, provider_ids, _ = service._collect_season(
+    facts, failures, provider_ids, aggregate_requests = service._collect_season(
         "2024-25", snapshot_date=date(2025, 4, 15),
         include_play_types=True, team_ids=team_ids,
         expected_game_counts={team_id: 82 for team_id in team_ids},
@@ -584,13 +588,26 @@ def test_membership_failure_only_disables_parity_owned_traditional_surface(tmp_p
     )
 
     assert set(failures) == {"traditional"}
-    assert provider_ids is None
+    assert provider_ids == {
+        "assist_locations": {
+            team_id: tuple(sorted(ids)) for team_id, ids in game_ids.items()
+        }
+    }
     assert {fact.base for fact in facts} == {
         "assist_locations", "play_types", "shot_types", "shot_zones",
     }
     assert {call[0] for call in nba.calls} >= {
         "traditional", "play_types", "shot_types", "shot_zones",
     }
+    identities = service._surface_window_identities(
+        window="season", game_ids_by_team=game_ids,
+        provider_game_ids_by_surface=provider_ids,
+        expected_counts={team_id: len(ids) for team_id, ids in game_ids.items()},
+        collect_before=datetime(2025, 4, 16, tzinfo=timezone.utc),
+        aggregate_requests=aggregate_requests,
+    )
+    assert json.loads(identities["traditional"])["status"] == "unavailable"
+    assert "status" not in json.loads(identities["assist_locations"])
 
 
 @pytest.mark.parametrize(

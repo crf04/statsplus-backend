@@ -42,6 +42,7 @@ from app.services.ledger_derivations import (
     derive_traditional_opponent_facts,
 )
 from app.services.ledger_lineage import LedgerLineage
+from app.services.matchup_authority import resolve_unique_matchup_authority
 from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 
@@ -231,15 +232,32 @@ class Per36DiagnosticCaptureRepository:
             raise ValueError("per36 provider window identity is invalid") from error
         game_ids = identity.get("game_ids")
         mapping_trace = identity.get("event_catalog_mapping_trace")
-        request_identity = {
-            key: identity.get(key)
-            for key in (
-                "season", "window", "cutoff", "provider_start_date",
-                "provider_end_date",
-            )
+        transport_request = identity.get("transport_request")
+        if not isinstance(transport_request, Mapping):
+            raise ValueError("per36 transport request is invalid")
+        if set(transport_request) != {
+            "adapter", "endpoint", "operation", "parameters",
+        }:
+            raise ValueError("per36 transport request is invalid")
+        parameters = transport_request.get("parameters")
+        if not isinstance(parameters, Mapping):
+            raise ValueError("per36 transport request is invalid")
+        required_parameters = {
+            "LeagueID": "00",
+            "Season": document["season"],
+            "SeasonType": "Regular Season",
+            "PerMode": "Per36",
+            "MeasureType": "Base",
         }
+        if (
+            transport_request.get("adapter") != "nba_stats"
+            or transport_request.get("endpoint") != "LeagueDashPlayerStats"
+            or transport_request.get("operation") != "player_per36_stats"
+            or any(parameters.get(key) != value for key, value in required_parameters.items())
+        ):
+            raise ValueError("per36 transport request is invalid")
         expected_request_checksum = hashlib.sha256(
-            _canonical_capture_payload(request_identity).encode("utf-8")
+            _canonical_capture_payload(transport_request).encode("utf-8")
         ).hexdigest()
         if (
             identity.get("season") != document["season"]
@@ -589,7 +607,10 @@ class LegacyMatchupDiagnosticCaptureRepository:
             ),
             key=lambda row: json.dumps(row, sort_keys=True),
         )
-        if not facts or not observations:
+        if not observations or (
+            not facts
+            and not all(item.get("status") == "unavailable" for item in observations)
+        ):
             raise ValueError("legacy diagnostic capture surface is incomplete")
         game_ids_by_team = {
             str(team_id): sorted(str(game_id) for game_id in game_ids)
@@ -928,7 +949,12 @@ def matchup_parity_cohort_is_activatable(
             document = json.loads(row.report)
             authority = verify_publication_authority(session, publication)
             if (
-                document.get("ledger_manifest_id") != authority.manifest_id
+                authority.manifest_id != unique_authority.manifest_id
+                or authority.event_catalog_publication_id
+                != unique_authority.catalog_id
+                or authority.event_catalog_checksum
+                != unique_authority.catalog_checksum
+                or document.get("ledger_manifest_id") != authority.manifest_id
                 or document.get("ledger_event_catalog_publication_id")
                 != authority.event_catalog_publication_id
                 or document.get("ledger_event_catalog_checksum")
@@ -968,6 +994,12 @@ def matchup_parity_cohort_is_activatable(
         return authority
 
     target_cutoff = assume_utc(cutoff)
+    try:
+        unique_authority = resolve_unique_matchup_authority(
+            session, season=season, cutoff=target_cutoff, lock=True,
+        )
+    except ValueError:
+        return False
     # Lock the complete candidate history before selecting.  The lock order is
     # deterministic so concurrent activation attempts cannot validate one
     # generation and mutate a different one between reads.

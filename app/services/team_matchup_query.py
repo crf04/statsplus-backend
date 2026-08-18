@@ -350,19 +350,23 @@ class TeamMatchupQueryService:
                         or read.unavailable_reason
                         or f"publication_{read.status}"
                     ),
-                    # An invalid/unavailable publication is not a successful
-                    # observation.  Do not leak its failed-read timestamp as
-                    # surface freshness or attach it to retained legacy facts.
-                    retrieved_at=None,
+                    retrieved_at=read.retrieved_at or self._clock(),
                     publication=publication_lineage(read),
                 ))
                 continue
             league.extend(window.league_metrics)
             for team_id, metrics in window.team_metrics.items():
                 team_metrics.setdefault(team_id, []).extend(metrics)
-            observations.extend(window.observations)
+            retained_retrieved_at = legacy_retrieved.get(base)
+            observations.extend(
+                replace(item, retrieved_at=retained_retrieved_at)
+                if retained_retrieved_at is not None else item
+                for item in window.observations
+            )
             fact_scopes[base] = window.scope
-            fact_retrieved[base] = next(iter(window.fact_retrieved_at.values()))
+            fact_retrieved[base] = retained_retrieved_at or next(
+                iter(window.fact_retrieved_at.values())
+            )
         if legacy is None and not league and not observations:
             return None
         return TeamMatchupWindow(
@@ -629,21 +633,22 @@ class TeamMatchupQueryService:
         for surface, reason in invalid_surfaces.items():
             observation = observations_by_surface.get(surface)
             if observation is None:
+                retrieved_at = max(
+                    fact.retrieved_at
+                    for fact in fact_rows
+                    if fact.base == surface
+                )
                 observations_by_surface[surface] = StoredTeamMatchupObservation(
                     surface=surface,
                     status="unavailable",
                     unavailable_reason=reason,
-                    # Invalid provider facts are retained for audit, but are
-                    # not a successful read and therefore have no public
-                    # freshness timestamp.
-                    retrieved_at=None,
+                    retrieved_at=retrieved_at,
                 )
             else:
                 observations_by_surface[surface] = replace(
                     observation,
                     status="unavailable",
                     unavailable_reason=reason,
-                    retrieved_at=None,
                 )
         return TeamMatchupWindow(
             scope=scope,

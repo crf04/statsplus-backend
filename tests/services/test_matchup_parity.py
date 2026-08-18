@@ -586,6 +586,10 @@ def _publication_world(tmp_path):
     catalog = _immutable_event_catalog(events, CUTOFF)
     binding = _manifest_catalog_binding(events, CUTOFF)
     with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=CUTOFF, activated_at=CUTOFF, activated_by="test",
+        ))
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id=MANIFEST, season="2025-26", cutoff=CUTOFF,
@@ -774,6 +778,10 @@ def _runner_world(tmp_path):
     catalog = _immutable_event_catalog(events, CUTOFF)
     binding = _manifest_catalog_binding(events, CUTOFF)
     with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=CUTOFF, activated_at=CUTOFF, activated_by="test",
+        ))
         connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id=MANIFEST, season="2025-26", cutoff=CUTOFF,
@@ -1251,9 +1259,9 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
         mixed = session.get(LedgerParityArtifact, "mixed-authority-artifact")
         assert mixed is not None
         assert not matchup_parity_artifact_is_activatable(mixed, session=session)
-        # The forged newer artifact is ignored; the latest fully bound cohort
-        # remains the previously captured authority generation.
-        assert matchup_parity_cohort_is_activatable(
+        # A second qualifying authority at the same cutoff invalidates even
+        # the previously complete cohort.
+        assert not matchup_parity_cohort_is_activatable(
             session,
             season="2025-26",
             cutoff=CUTOFF,
@@ -1565,11 +1573,6 @@ def test_manifest_preflight_requires_one_unique_qualifying_authority(tmp_path):
     import scripts.matchup_parity as matchup_parity_script
 
     engine, _, _ = _runner_world(tmp_path)
-    with engine.begin() as connection:
-        connection.execute(ActiveSeason.__table__.insert().values(
-            season="2025-26", phase="Regular Season", status="active",
-            cutoff=CUTOFF, activated_at=CUTOFF, activated_by="test",
-        ))
     _, manifest, _ = matchup_parity_script._manifest_preflight(
         engine, season="2025-26", manifest_id=MANIFEST,
     )

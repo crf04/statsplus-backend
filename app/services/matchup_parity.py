@@ -593,6 +593,7 @@ class LegacyMatchupSource(Protocol):
         cutoff: datetime,
         governance: Any,
         session: Session | None = None,
+        surface: str | None = None,
     ) -> MatchupMaterialization: ...
 
 
@@ -619,6 +620,7 @@ class StoredLegacyMatchupSource:
         cutoff: datetime,
         governance: Any,
         session: Session | None = None,
+        surface: str | None = None,
     ) -> MatchupMaterialization:
         as_of = slate_date_for_instant(cutoff)
         scope = TeamMatchupSnapshotScope(
@@ -634,13 +636,17 @@ class StoredLegacyMatchupSource:
             if (
                 fact.provider in self.LEGACY_PROVIDERS
                 and fact.base in LEDGER_OWNED_SURFACES
+                and (surface is None or fact.base == surface)
             )
         )
         observations = tuple(
             observation for observation in snapshot.observations
             if observation.surface in LEDGER_OWNED_SURFACES
+            and (surface is None or observation.surface == surface)
         )
-        if not facts or not observations:
+        if not observations or (
+            not facts and not all(item.status == "unavailable" for item in observations)
+        ):
             raise MatchupParityError("legacy materialization provenance unavailable")
         expected_authority = (
             governance.manifest_id,
@@ -701,8 +707,20 @@ class StoredLegacyMatchupSource:
             if not isinstance(aggregate_requests, dict):
                 raise ValueError
             as_of = slate_date_for_instant(cutoff)
+            selected_surfaces = (
+                (surface,) if surface is not None else LEDGER_OWNED_SURFACES
+            )
+            selected_sources = {
+                "traditional": "nba_stats.team_game_log",
+                "assist_locations": "pbp_stats.team_game_log",
+            }
+            expected_sources = {selected_sources[item] for item in selected_surfaces}
+            selected_aggregate_requests = {
+                key: value for key, value in aggregate_requests.items()
+                if key.split(":", 1)[0] in selected_surfaces
+            }
             if window == "season":
-                expected_aggregate_requests = {
+                all_expected_requests = {
                     "traditional:league": _nba_team_stats_request_descriptor(
                         season=season, season_type="Regular Season",
                         team_id=None, last_n_games=0, date_from=None,
@@ -714,8 +732,12 @@ class StoredLegacyMatchupSource:
                         to_date=as_of.isoformat(),
                     ),
                 }
+                expected_aggregate_requests = {
+                    key: value for key, value in all_expected_requests.items()
+                    if key.split(":", 1)[0] in selected_surfaces
+                }
                 aggregate_requests_valid = (
-                    aggregate_requests == expected_aggregate_requests
+                    selected_aggregate_requests == expected_aggregate_requests
                 )
             else:
                 boundaries_by_team = {}
@@ -728,44 +750,40 @@ class StoredLegacyMatchupSource:
                         raise ValueError
                 expected_request_keys = {
                     f"{surface}:{team_id}"
-                    for surface in LEDGER_OWNED_SURFACES
+                    for surface in selected_surfaces
                     for team_id in boundaries_by_team
                 }
                 aggregate_requests_valid = (
                     isinstance(aggregate_requests, dict)
-                    and set(aggregate_requests) == expected_request_keys
+                    and set(selected_aggregate_requests) == expected_request_keys
                 )
                 for team_id, start in boundaries_by_team.items():
-                    traditional = aggregate_requests.get(
-                        f"traditional:{team_id}", {}
-                    )
-                    assists = aggregate_requests.get(
-                        f"assist_locations:{team_id}", {}
-                    )
-                    traditional_expected = _nba_team_stats_request_descriptor(
-                        season=season, season_type="Regular Season",
-                        team_id=team_id, last_n_games=15,
-                        date_from=start.strftime("%m/%d/%Y"),
-                        date_to=as_of.strftime("%m/%d/%Y"),
-                    )
-                    aggregate_requests_valid = aggregate_requests_valid and (
-                        traditional == traditional_expected
-                        and assists == _pbp_totals_request_descriptor(
+                    if "traditional" in selected_surfaces:
+                        aggregate_requests_valid = aggregate_requests_valid and (
+                            selected_aggregate_requests.get(f"traditional:{team_id}")
+                            == _nba_team_stats_request_descriptor(
+                                season=season, season_type="Regular Season",
+                                team_id=team_id, last_n_games=15,
+                                date_from=start.strftime("%m/%d/%Y"),
+                                date_to=as_of.strftime("%m/%d/%Y"),
+                            )
+                        )
+                    if "assist_locations" in selected_surfaces:
+                        aggregate_requests_valid = aggregate_requests_valid and (
+                            selected_aggregate_requests.get(f"assist_locations:{team_id}")
+                            == _pbp_totals_request_descriptor(
                             season=season, season_type="Regular Season",
                             team_id=team_id, from_date=start.isoformat(),
                             to_date=as_of.isoformat(),
                         )
-                    )
+                        )
             if (
                 identity["window"] != window
-                or set(provider_sources) != {
-                    "nba_stats.team_game_log",
-                    "pbp_stats.team_game_log",
-                }
+                or not expected_sources.issubset(set(provider_sources))
                 or not isinstance(identity.get("collect_before"), str)
                 or not isinstance(identity_teams, dict)
                 or not isinstance(source_memberships, dict)
-                or set(source_memberships) != set(provider_sources)
+                or not expected_sources.issubset(set(source_memberships))
                 or not aggregate_requests_valid
                 or hashlib.sha256(json.dumps(
                     aggregate_requests, sort_keys=True, separators=(",", ":")
@@ -783,6 +801,33 @@ class StoredLegacyMatchupSource:
                 str(team_id): sorted(str(game_id) for game_id in game_ids)
                 for team_id, game_ids in game_ids_by_team.items()
             }
+            unavailable_identity = (
+                identity.get("status") == "unavailable"
+                and not facts
+                and all(item.status == "unavailable" for item in observations)
+            )
+            if unavailable_identity:
+                if (
+                    set(identity_teams) != {
+                        str(team_id) for team_id in governance.team_ids
+                    }
+                    or any(
+                        evidence.get("provider_game_ids") != []
+                        or not isinstance(evidence.get("authority_game_ids"), list)
+                        for evidence in identity_teams.values()
+                    )
+                    or any(source_memberships[source] != {} for source in expected_sources)
+                ):
+                    raise ValueError
+                return MatchupMaterialization(
+                    season=season, window=window, cutoff=cutoff,
+                    facts=facts, observations=observations,
+                    game_ids_by_team={}, producer=PRODUCER_LEGACY,
+                    manifest_id=manifest_id,
+                    event_catalog_publication_id=catalog_id,
+                    event_catalog_checksum=catalog_checksum,
+                    provider_window_identity=window_identity,
+                )
             for team_id, game_ids in actual_ids_by_team.items():
                 evidence = identity_teams[team_id]
                 if (
@@ -793,7 +838,7 @@ class StoredLegacyMatchupSource:
                     != game_ids
                 ):
                     raise ValueError
-            for source in provider_sources:
+            for source in expected_sources:
                 membership = source_memberships[source]
                 if set(membership) != set(actual_ids_by_team):
                     raise ValueError
@@ -1374,19 +1419,24 @@ class MatchupParityRunner:
         governance = self.governance.read_for_composition(season, cutoff)
         if self.legacy_source is None:
             raise MatchupParityError("legacy materializer source is required")
-        try:
-            legacy = self.legacy_source.produce(
-                season=season, window=window, cutoff=cutoff,
-                governance=governance, session=session,
+        stored_legacy = isinstance(self.legacy_source, StoredLegacyMatchupSource)
+        legacy_materialization = None
+        if not stored_legacy:
+            try:
+                legacy_materialization = self.legacy_source.produce(
+                    season=season, window=window, cutoff=cutoff,
+                    governance=governance, session=session,
+                )
+            except TypeError as error:
+                if "session" not in str(error):
+                    raise
+                legacy_materialization = self.legacy_source.produce(
+                    season=season, window=window, cutoff=cutoff,
+                    governance=governance,
+                )
+            self._validate_legacy_provenance(
+                legacy_materialization, season, window, cutoff, governance
             )
-        except TypeError as error:
-            if "session" not in str(error):
-                raise
-            legacy = self.legacy_source.produce(
-                season=season, window=window, cutoff=cutoff,
-                governance=governance,
-            )
-        self._validate_legacy_provenance(legacy, season, window, cutoff, governance)
         expected_team_ids = frozenset(int(team_id) for team_id in governance.team_ids)
         if expected_team_ids != frozenset(NBA_TEAM_ID_TO_TRICODE):
             raise MatchupParityError("governed team roster is not the canonical 30-team set")
@@ -1413,6 +1463,16 @@ class MatchupParityRunner:
             transaction_scope = nullcontext()
         with session_scope as active_session, transaction_scope:
             for surface in LEDGER_OWNED_SURFACES:
+                if stored_legacy:
+                    legacy_materialization = self.legacy_source.produce(
+                        season=season, window=window, cutoff=cutoff,
+                        governance=governance, session=active_session,
+                        surface=surface,
+                    )
+                    self._validate_legacy_provenance(
+                        legacy_materialization, season, window, cutoff, governance
+                    )
+                assert legacy_materialization is not None
                 stream_key = matchup_stream_key(surface, window)
                 publication_id = (publications or {}).get(stream_key)
                 if publication_id is None:
@@ -1431,12 +1491,12 @@ class MatchupParityRunner:
                 )
                 ledger = materialization_from_publication(publication, surface=surface)
                 legacy_capture = self._legacy_capture_repository.record(
-                    legacy, surface=surface,
+                    legacy_materialization, surface=surface,
                     publication_id=publication.publication_id,
                     session=active_session,
                 )
                 report = compare_matchup_materializations(
-                    legacy,
+                    legacy_materialization,
                     ledger,
                     surface=surface,
                     expected_team_ids=expected_team_ids,

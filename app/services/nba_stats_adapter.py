@@ -769,6 +769,8 @@ class NBAStatsAdapter:
                         "endpoint": (
                             "LeagueDashTeamStats"
                             if operation == "league_opponent_team_stats"
+                            else "LeagueDashPlayerStats"
+                            if operation == "player_per36_stats"
                             else type(endpoint).__name__
                         ),
                         "parameters": json.loads(json.dumps(

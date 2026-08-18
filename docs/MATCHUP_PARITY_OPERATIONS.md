@@ -98,6 +98,12 @@ The bounded input contains only `rows`, `provider_window_identity`,
 manifest, Event Catalog, candidate publication, raw evidence schema and exact
 checksums, then creates an immutable source observation, capture artifact and
 audit event in one transaction. Its receipt contains IDs and checksums only.
+`provider_window_identity.transport_request` must be the adapter-captured
+`LeagueDashPlayerStats` request descriptor: operation `player_per36_stats` and
+the complete canonical wire parameter map, including `LeagueID`, `Season`,
+`SeasonType`, `PerMode=Per36`, `MeasureType=Base`, and endpoint defaults. The
+request checksum hashes that complete descriptor; a caller-synthesized date
+window or selected parameter summary is not accepted.
 
 ## What the report proves
 

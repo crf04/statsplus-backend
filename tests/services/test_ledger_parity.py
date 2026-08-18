@@ -249,11 +249,23 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         "provider_start_date": "2024-10-22",
         "provider_end_date": "2024-11-16",
     }
+    transport_request = {
+        "adapter": "nba_stats",
+        "endpoint": "LeagueDashPlayerStats",
+        "operation": "player_per36_stats",
+        "parameters": {
+            "LeagueID": "00", "Season": game.season,
+            "SeasonType": "Regular Season", "PerMode": "Per36",
+            "MeasureType": "Base", "LastNGames": 0, "Month": 0,
+            "PaceAdjust": "N", "Period": 0,
+        },
+    }
     request_checksum = hashlib.sha256(json.dumps(
-        request_identity, sort_keys=True, separators=(",", ":")
+        transport_request, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     provider_identity = {
         **request_identity,
+        "transport_request": transport_request,
         "game_ids": [game.game_id],
         "request_checksum": request_checksum,
         "returned_row_count": 1,
@@ -391,11 +403,23 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
         "cutoff": cutoff.isoformat(), "provider_start_date": "2024-10-22",
         "provider_end_date": "2024-11-16",
     }
+    transport_request = {
+        "adapter": "nba_stats",
+        "endpoint": "LeagueDashPlayerStats",
+        "operation": "player_per36_stats",
+        "parameters": {
+            "LeagueID": "00", "Season": game.season,
+            "SeasonType": "Regular Season", "PerMode": "Per36",
+            "MeasureType": "Base", "LastNGames": 0, "Month": 0,
+            "PaceAdjust": "N", "Period": 0,
+        },
+    }
     request_checksum = hashlib.sha256(json.dumps(
-        request_identity, sort_keys=True, separators=(",", ":")
+        transport_request, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
     identity = {
         **request_identity,
+        "transport_request": transport_request,
         "game_ids": [game.game_id], "request_checksum": request_checksum,
         "returned_row_count": 1, "returned_game_count": 1,
         "event_catalog_mapping_trace": {game.game_id: game.game_id},
@@ -445,6 +469,46 @@ def test_operator_per36_capture_flow_creates_observation_artifact_and_audit(
     assert Per36DiagnosticCaptureRepository(engine).read(
         capture.capture_id
     ).capture_checksum == capture.capture_checksum
+
+    for field, invalid_value in (
+        ("endpoint", "LeagueDashTeamStats"),
+        ("operation", "player_totals"),
+    ):
+        invalid_identity = json.loads(json.dumps(identity))
+        invalid_identity["transport_request"][field] = invalid_value
+        invalid_checksum = hashlib.sha256(json.dumps(
+            invalid_identity["transport_request"],
+            sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        invalid_identity["request_checksum"] = invalid_checksum
+        with pytest.raises(ValueError, match="transport request"):
+            Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
+                publication_id="candidate", season=game.season, cutoff=cutoff,
+                manifest_id="manifest", event_catalog_publication_id="catalog",
+                event_catalog_checksum=catalog_checksum,
+                game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
+                request_checksum=invalid_checksum,
+                provider_window_identity=invalid_identity,
+                rows=(row,), actor="operator@example.com",
+            )
+
+    invalid_identity = json.loads(json.dumps(identity))
+    invalid_identity["transport_request"]["parameters"]["PerMode"] = "Totals"
+    invalid_checksum = hashlib.sha256(json.dumps(
+        invalid_identity["transport_request"],
+        sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    invalid_identity["request_checksum"] = invalid_checksum
+    with pytest.raises(ValueError, match="transport request"):
+        Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
+            publication_id="candidate", season=game.season, cutoff=cutoff,
+            manifest_id="manifest", event_catalog_publication_id="catalog",
+            event_catalog_checksum=catalog_checksum,
+            game_set_checksum=LedgerLineage.for_game_ids([game.game_id]),
+            request_checksum=invalid_checksum,
+            provider_window_identity=invalid_identity,
+            rows=(row,), actor="operator@example.com",
+        )
     with pytest.raises(ValueError, match="game set"):
         Per36DiagnosticCaptureRepository(engine).record_operator_evidence(
             publication_id="candidate", season=game.season, cutoff=cutoff,

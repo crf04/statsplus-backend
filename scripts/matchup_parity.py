@@ -100,6 +100,9 @@ from app.services.matchup_parity import (  # noqa: E402
     StoredLegacyMatchupSource,
     resolve_matchup_publication,
 )
+from app.services.matchup_authority import (  # noqa: E402
+    resolve_unique_matchup_authority,
+)
 from app.services.publication_authority import (  # noqa: E402
     verify_publication_authority,
 )
@@ -303,43 +306,16 @@ def _manifest_preflight(engine, *, season: str, manifest_id: str):
         cutoff = assume_utc(manifest.cutoff)
         if active.cutoff is not None and assume_utc(active.cutoff) != cutoff:
             raise InvalidEvidenceError("active_season_cutoff_mismatch")
-        qualifying_authorities: list[tuple[str, str]] = []
-        candidates = session.scalars(
-            select(CollectionManifest).where(
-                CollectionManifest.season == season,
-                CollectionManifest.status == "active",
+        try:
+            unique_authority = resolve_unique_matchup_authority(
+                session, season=season, cutoff=cutoff, lock=False,
             )
-        )
-        for candidate in candidates:
-            try:
-                candidate_scopes = set(json.loads(candidate.scopes))
-                candidate_versions = set(json.loads(candidate.accepted_versions))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if (
-                assume_utc(candidate.cutoff) != cutoff
-                or "canonical_game_ledger" not in candidate_scopes
-                or 1 not in candidate_versions
-            ):
-                continue
-            candidate_catalog = session.get(
-                CatalogPublication, candidate.event_catalog_publication_id
-            )
-            if (
-                candidate_catalog is not None
-                and candidate_catalog.catalog_type == "event"
-                and candidate_catalog.complete
-                and candidate_catalog.season == season
-                and assume_utc(candidate_catalog.cutoff) == cutoff
-                and candidate_catalog.checksum == candidate.event_catalog_checksum
-                and publication_payload_matches_checksum(
-                    candidate_catalog.payload, candidate_catalog.checksum
-                )
-            ):
-                qualifying_authorities.append((
-                    candidate.manifest_id, candidate_catalog.publication_id,
-                ))
-        if qualifying_authorities != [(manifest_id, catalog.publication_id)]:
+        except ValueError as error:
+            raise InvalidEvidenceError(str(error)) from error
+        if (
+            unique_authority.manifest_id != manifest_id
+            or unique_authority.catalog_id != catalog.publication_id
+        ):
             raise InvalidEvidenceError("manifest_authority_ambiguous")
 
     governance_reader = ActiveManifestLedgerGovernanceReader(engine)
@@ -964,6 +940,20 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     transaction = session.begin()
     args._artifact_session = session
     with session.no_autoflush:
+        try:
+            transaction_authority = resolve_unique_matchup_authority(
+                session, season=args.season, cutoff=cutoff, lock=True,
+            )
+        except ValueError as error:
+            raise InvalidEvidenceError(str(error)) from error
+        if (
+            transaction_authority.manifest_id != args.manifest_id
+            or transaction_authority.catalog_id
+            != governance.event_catalog_publication_id
+            or transaction_authority.catalog_checksum
+            != governance.event_catalog_checksum
+        ):
+            raise InvalidEvidenceError("manifest_authority_ambiguous")
         candidate_rows = _compose_candidate_set(
             engine,
             session=session,

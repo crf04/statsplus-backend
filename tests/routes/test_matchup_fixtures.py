@@ -210,17 +210,14 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble"):
 def _source_independent_matchup_contract(response):
     """Compare documented source-independent fields.
 
-    Provenance, additive coverage, and team-matchup freshness are source
-    metadata; the journey asserts those envelopes explicitly at each side of
-    the transition before excluding them from the byte-compatible contract.
+    Provenance and additive coverage are source metadata; the journey asserts
+    those envelopes explicitly at each side of the transition before excluding
+    them from the byte-compatible contract.
     """
 
     payload = json.loads(response.data)
     payload.pop("provenance", None)
     payload.pop("coverage", None)
-    freshness = payload.get("freshness")
-    if isinstance(freshness, dict):
-        freshness.pop("team_matchups", None)
     return payload
 
 
@@ -2098,7 +2095,7 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     assert_matchup_freshness_envelope(
         matchup,
         source="ledger",
-        expected_retrieved_at=NOW.isoformat(),
+        expected_retrieved_at=legacy_retrieved_at.isoformat(),
     )
     for stream_key in (
         *matchup_publications["season"].keys(),

@@ -1010,6 +1010,32 @@ def test_player_diet_synergy_uses_pinned_offensive_season_contract(monkeypatch):
     ]
 
 
+def test_player_per36_records_the_exact_endpoint_wire_request(monkeypatch):
+    class Endpoint:
+        def __init__(self, **kwargs):
+            self.parameters = {
+                "LeagueID": "00", "Season": "2025-26",
+                "SeasonType": "Regular Season", "PerMode": "Per36",
+                "MeasureType": "Base", "LastNGames": 0, "Month": 0,
+                "PaceAdjust": "N", "Period": 0,
+            }
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{"PLAYER_ID": 2544}])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_player_per36_stats()
+
+    assert adapter.transport_request_descriptor("player_per36_stats") == {
+        "adapter": "nba_stats",
+        "operation": "player_per36_stats",
+        "endpoint": "LeagueDashPlayerStats",
+        "parameters": Endpoint().parameters,
+    }
+
+
 def test_player_diet_shot_type_uses_pinned_league_dash_player_contract(monkeypatch):
     calls = []
 
