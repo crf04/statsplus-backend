@@ -69,6 +69,7 @@ from app.services.matchup_parity import (
     PRODUCER_LEGACY,
     SOFT_CLASSIFICATIONS,
     StoredLegacyMatchupSource,
+    _decode_ledger_rows,
     compare_matchup_materializations,
     materialization_from_publication,
     matchup_stream_key,
@@ -1737,6 +1738,14 @@ def test_matchup_stream_key_maps_surfaces_and_windows():
     assert matchup_stream_key("assist_locations", "l15") == "assist_locations_l15"
     with pytest.raises(ValueError):
         matchup_stream_key("shot_zones", "season")
+
+
+def test_empty_assist_candidate_is_scoped_unavailable_not_invalid_payload():
+    assert _decode_ledger_rows(
+        "[]", stream_key="assist_locations_season"
+    ) == ()
+    with pytest.raises(MatchupParityError, match="publication_payload_invalid"):
+        _decode_ledger_rows("[]", stream_key="traditional_opponent_season")
 
 
 def test_bounded_compare_requires_player_per36_for_season():

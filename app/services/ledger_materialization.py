@@ -162,6 +162,10 @@ class LedgerMaterializationService:
                     expected_game_ids=expected_game_ids,
                     team_ids=team_ids,
                 )
+            except ValueError as error:
+                if require_assist_locations:
+                    raise LedgerMaterializationUnavailable(str(error)) from error
+            try:
                 assist_l15 = materialize_assist_location_window(
                     eligible,
                     season=canonical_season,
@@ -174,7 +178,6 @@ class LedgerMaterializationService:
             except ValueError as error:
                 if require_assist_locations:
                     raise LedgerMaterializationUnavailable(str(error)) from error
-                assist_status = "unavailable"
         result = LedgerMaterialization(
             season=canonical_season,
             as_of=as_of,
@@ -221,11 +224,22 @@ class LedgerMaterializationService:
             ("team_matchups_season", season_window.teams, "season", 0, season_status, season_reason),
             ("team_matchups_l15", l15_window.teams, "rolling_games", 15, l15_status, l15_reason),
         ]
-        if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
-            publication_specs.extend((
-                ("assist_locations_season", assist_season.teams, "season", 0, season_status, season_reason),
-                ("assist_locations_l15", assist_l15.teams, "rolling_games", 15, l15_status, l15_reason),
-            ))
+        publication_specs.extend((
+            (
+                "assist_locations_season",
+                assist_season.teams if assist_season is not None else (),
+                "season", 0,
+                season_status if assist_season is not None else "unavailable",
+                season_reason if assist_season is not None else "assist_location_evidence_incomplete",
+            ),
+            (
+                "assist_locations_l15",
+                assist_l15.teams if assist_l15 is not None else (),
+                "rolling_games", 15,
+                l15_status if assist_l15 is not None else "unavailable",
+                l15_reason if assist_l15 is not None else "assist_location_evidence_incomplete",
+            ),
+        ))
         if candidate_stream_keys is not None:
             publication_specs = [
                 spec for spec in publication_specs
@@ -283,11 +297,16 @@ class LedgerMaterializationService:
                 ))
             if l15_window.complete:
                 candidates.append(("traditional_opponent_l15", l15_window.teams))
-            if assist_status == "complete" and assist_season is not None and assist_l15 is not None:
-                if season_window.complete:
-                    candidates.append(("assist_locations_season", assist_season.teams))
-                if l15_window.complete:
-                    candidates.append(("assist_locations_l15", assist_l15.teams))
+            if season_window.complete:
+                candidates.append((
+                    "assist_locations_season",
+                    assist_season.teams if assist_season is not None else (),
+                ))
+            if l15_window.complete:
+                candidates.append((
+                    "assist_locations_l15",
+                    assist_l15.teams if assist_l15 is not None else (),
+                ))
             if candidate_stream_keys is not None:
                 candidates = [
                     candidate for candidate in candidates

@@ -86,6 +86,7 @@ from app.services.ledger_parity import (  # noqa: E402
     PER36_RAW_FIELDS,
     PER36_RATE_FIELDS,
     Per36DiagnosticCaptureRepository,
+    SemanticDifference,
 )
 from app.services.ledger_lineage import LedgerLineage  # noqa: E402
 from app.services.ledger_materialization import (  # noqa: E402
@@ -477,7 +478,7 @@ def _compose_candidate_set(
             for team_id, game_ids in governance.expected_l15_game_ids.items()
         },
         team_ids=frozenset(map(int, governance.team_ids)),
-        require_assist_locations=True,
+        require_assist_locations=False,
         activate=False,
         candidate_stream_keys=ALL_REQUIRED_STREAMS,
         session=session,
@@ -595,8 +596,15 @@ def _compare_candidate_per36(
                 raise InvalidEvidenceError("player_per36_candidate_mismatch")
 
     capture_by_id = {int(row["player_id"]): row for row in capture.rows}
-    if set(capture_by_id) != set(expected_by_id):
-        raise InvalidEvidenceError("player_per36_diagnostic_capture_identity_invalid")
+    differences: list[SemanticDifference] = []
+    for player_id in sorted(set(expected_by_id) | set(capture_by_id)):
+        if player_id not in expected_by_id or player_id not in capture_by_id:
+            differences.append(SemanticDifference(
+                identity=f"per36:{player_id}", field="player_id",
+                pbp_value=player_id if player_id in expected_by_id else None,
+                legacy_value=player_id if player_id in capture_by_id else None,
+                classification="identity_mismatch",
+            ))
     raw_fields_by_player: dict[int, dict[str, int]] = {}
     for game in canonical_games:
         for fact in game.player_facts:
@@ -605,22 +613,42 @@ def _compare_candidate_per36(
             )
             for field in PER36_RAW_FIELDS:
                 totals[field] += int(getattr(fact, field))
-    for player_id, expected in expected_by_id.items():
+    for player_id in sorted(set(expected_by_id) & set(capture_by_id)):
+        expected = expected_by_id[player_id]
         actual = capture_by_id[player_id]
         expected_raw = raw_fields_by_player[player_id]
-        if any(actual[field] != value for field, value in expected_raw.items()):
-            raise InvalidEvidenceError("player_per36_diagnostic_capture_raw_mismatch")
+        for field, value in expected_raw.items():
+            if actual[field] != value:
+                differences.append(SemanticDifference(
+                    identity=f"per36:{player_id}", field=field,
+                    pbp_value=value, legacy_value=actual[field],
+                    classification="raw_count_difference",
+                ))
         if actual["game_count"] != expected.game_count:
-            raise InvalidEvidenceError("player_per36_diagnostic_capture_game_count_mismatch")
+            differences.append(SemanticDifference(
+                identity=f"per36:{player_id}", field="game_count",
+                pbp_value=expected.game_count, legacy_value=actual["game_count"],
+                classification="game_count_difference",
+            ))
         if actual["team_ids_at_game"] != list(expected.team_ids_at_game):
-            raise InvalidEvidenceError("player_per36_diagnostic_capture_team_mismatch")
+            differences.append(SemanticDifference(
+                identity=f"per36:{player_id}", field="team_ids_at_game",
+                pbp_value=list(expected.team_ids_at_game),
+                legacy_value=actual["team_ids_at_game"],
+                classification="team_identity_difference",
+            ))
         if not math.isclose(
             float(actual["minutes"]), expected.minutes, rel_tol=1e-9, abs_tol=1e-9
         ):
-            raise InvalidEvidenceError("player_per36_diagnostic_capture_minutes_mismatch")
+            differences.append(SemanticDifference(
+                identity=f"per36:{player_id}", field="minutes",
+                pbp_value=expected.minutes, legacy_value=actual["minutes"],
+                classification="minutes_difference",
+            ))
     provider_rate_difference_count = sum(
         1
-        for player_id, expected in expected_by_id.items()
+        for player_id in sorted(set(expected_by_id) & set(capture_by_id))
+        for expected in (expected_by_id[player_id],)
         for field in PER36_RATE_FIELDS
         if not math.isclose(
             float(capture_by_id[player_id][field]),
@@ -637,8 +665,8 @@ def _compare_candidate_per36(
             season=season,
             game_count=len(canonical_games),
             compared_count=len(expected_rows),
-            differences=(),
-            adjudication_required=False,
+            differences=tuple(differences),
+            adjudication_required=bool(differences),
         ),
         publication_id=publication.publication_id,
         payload_checksum=publication.checksum,
@@ -652,11 +680,13 @@ def _compare_candidate_per36(
     )
     return {
         "stream": "player_per36",
-        "status": "exact",
+        "status": "pending_adjudication" if differences else "exact",
         "game_count": len(canonical_games),
         "compared_count": len(expected_rows),
-        "difference_count": 0,
-        "difference_classifications": {},
+        "difference_count": len(differences),
+        "difference_classifications": dict(sorted(Counter(
+            difference.classification for difference in differences
+        ).items())),
         "publication_id": publication.publication_id,
         "payload_checksum": publication.checksum,
         "provider_rate_difference_count": provider_rate_difference_count,
@@ -725,23 +755,36 @@ def _validate_matchup_candidate_composition(
                     team_ids=frozenset(int(team_id) for team_id in governance.team_ids),
                 )
             else:
-                materialization = materialize_assist_location_window(
-                    canonical_games,
-                    season=season,
-                    as_of=cutoff.date(),
-                    window_games=15 if window == "l15" else None,
-                    expected_game_ids=frozenset(
-                        str(game_id)
-                        for game_ids_for_team in expected_game_ids_by_team.values()
-                        for game_id in game_ids_for_team
-                    ),
-                    expected_team_game_ids=(
-                        {int(team_id): frozenset(map(str, ids)) for team_id, ids in expected_game_ids_by_team.items()}
-                        if window == "l15" else None
-                    ),
-                    team_ids=frozenset(int(team_id) for team_id in governance.team_ids),
-                )
+                try:
+                    materialization = materialize_assist_location_window(
+                        canonical_games,
+                        season=season,
+                        as_of=cutoff.date(),
+                        window_games=15 if window == "l15" else None,
+                        expected_game_ids=frozenset(
+                            str(game_id)
+                            for game_ids_for_team in expected_game_ids_by_team.values()
+                            for game_id in game_ids_for_team
+                        ),
+                        expected_team_game_ids=(
+                            {int(team_id): frozenset(map(str, ids)) for team_id, ids in expected_game_ids_by_team.items()}
+                            if window == "l15" else None
+                        ),
+                        team_ids=frozenset(int(team_id) for team_id in governance.team_ids),
+                    )
+                except ValueError:
+                    if publication.rows:
+                        raise InvalidEvidenceError(
+                            "candidate_composition_assist_evidence_invalid"
+                        )
+                    # A bound empty candidate is the precise dependent
+                    # unavailable result for missing optional assist
+                    # primitives. Healthy traditional/per-36 candidates in
+                    # this bounded transaction remain independently valid.
+                    continue
             if not materialization.complete:
+                if surface == "assist_locations" and not publication.rows:
+                    continue
                 raise InvalidEvidenceError("ledger_matchup_composition_incomplete")
             expected_by_id = {row.team_id: row for row in materialization.teams}
             actual_by_id = {row.team_id: row for row in publication.rows}

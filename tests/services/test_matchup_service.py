@@ -929,7 +929,7 @@ def test_missing_pool_and_stats_are_degraded_without_provider_fallback():
     assert all(not rows for rows in payload["league"]["defense_sheet"].values())
 
 
-def test_unavailable_team_surface_has_no_failed_read_timestamp():
+def test_stored_unavailable_team_surface_retains_observation_timestamp():
     window = _window()
     unavailable = replace(
         window,
@@ -952,7 +952,7 @@ def test_unavailable_team_surface_has_no_failed_read_timestamp():
     assert payload["freshness"]["team_matchups"]["season"]["surfaces"]["traditional"] == {
         "status": "unavailable",
         "unavailable_reason": "provider_invalid_numeric",
-        "retrieved_at": None,
+        "retrieved_at": RETRIEVED_AT.isoformat(),
     }
 
 

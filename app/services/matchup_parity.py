@@ -429,15 +429,16 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
             TEAM_METRICS,
         )
 
-        # Reuse the public typed row decoder for scalar and envelope checks,
-        # then retain the raw mapping below for the ledger-only primitive
-        # counts and denominator that the public decoder intentionally omits.
-        decode_team_window(document, stream_key=stream_key)
         surface = (
             "assist_locations"
             if stream_key.startswith("assist_locations_")
             else "traditional"
         )
+        # Reuse the public typed row decoder for scalar and envelope checks.
+        # Empty assist is the sole scoped unavailable candidate; every other
+        # empty or malformed payload remains invalid evidence.
+        if document or surface != "assist_locations":
+            decode_team_window(document, stream_key=stream_key)
         expected_metrics = frozenset(
             ASSIST_DERIVED_METRICS if surface == "assist_locations" else TEAM_METRICS
         )
@@ -522,6 +523,8 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
             ))
         except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as error:
             raise MatchupParityError("publication_payload_invalid") from error
+    if not rows and surface == "assist_locations":
+        return ()
     if len(rows) != 30 or seen_team_ids != set(NBA_TEAM_ID_TO_TRICODE):
         raise MatchupParityError("publication_payload_invalid")
     return tuple(rows)

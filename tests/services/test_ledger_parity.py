@@ -28,6 +28,7 @@ from app.services.ledger_parity import (
     LegacyParityDiagnosticReader,
     PER36_DIAGNOSTIC_CAPTURE_STREAM,
     Per36DiagnosticCaptureRepository,
+    SemanticDifference,
     compare_ledger_to_legacy,
     generate_semantic_difference_report,
     matchup_parity_artifact_is_activatable,
@@ -102,6 +103,43 @@ def test_empty_comparison_cannot_claim_exact_parity():
     assert not report.exact
     assert report.status == "adjudication_required"
     assert report.differences[0].classification == "empty_comparison"
+
+
+def test_per36_well_formed_differences_persist_pending_and_are_unapprovable(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'per36-differences.sqlite3'}")
+    run_migrations(engine)
+    publication_id, checksum = _candidate(engine)
+    differences = (
+        SemanticDifference(
+            identity="per36:1", field="points", pbp_value=10,
+            legacy_value=11, classification="raw_count_difference",
+        ),
+        SemanticDifference(
+            identity="per36:2", field="player_id", pbp_value=2,
+            legacy_value=None, classification="identity_mismatch",
+        ),
+        SemanticDifference(
+            identity="per36:999", field="player_id", pbp_value=None,
+            legacy_value=999, classification="identity_mismatch",
+        ),
+    )
+
+    artifact = LedgerParityArtifactRepository(engine).record(
+        "player_per36", cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        report=LedgerParityReport(
+            season="2024-25", game_count=1, compared_count=1,
+            differences=differences, adjudication_required=True,
+        ),
+        publication_id=publication_id, payload_checksum=checksum,
+    )
+
+    assert artifact.status == "pending_adjudication"
+    assert artifact.decision is None
+    assert len(json.loads(artifact.report)["differences"]) == 3
+    with Session(engine) as session:
+        assert not matchup_parity_artifact_is_activatable(
+            artifact, stream_key="player_per36", session=session
+        )
 
 
 def test_traditional_opponent_and_per36_compare_derived_semantics():

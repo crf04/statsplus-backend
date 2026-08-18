@@ -524,9 +524,78 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
 
     assert result.assist_location_season is None
     with engine.connect() as connection:
-        streams = set(connection.execute(select(LedgerPublication.stream_key)).scalars())
+        publications = connection.execute(
+            select(LedgerPublication.__table__)
+        ).mappings().all()
+        streams = {row["stream_key"] for row in publications}
     assert {"player_game_logs", "traditional_opponent_season", "traditional_opponent_l15", "player_per36"} <= streams
-    assert not {"assist_locations_season", "assist_locations_l15"} & streams
+    assert {"assist_locations_season", "assist_locations_l15"} <= streams
+    unavailable = {
+        row["stream_key"]: row for row in publications
+        if row["stream_key"].startswith("assist_locations_")
+    }
+    assert {row["status"] for row in unavailable.values()} == {"unavailable"}
+    assert {row["payload"] for row in unavailable.values()} == {"[]"}
+
+
+def test_one_unavailable_assist_window_does_not_suppress_healthy_sibling(
+    tmp_path, monkeypatch,
+):
+    import app.services.ledger_materialization as materialization_module
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'assist-window.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = _league_games()
+    repository.replace_games_atomic(games)
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    real_materialize = materialization_module.materialize_assist_location_window
+
+    def fail_season_only(*args, **kwargs):
+        if kwargs.get("window_games") is None:
+            raise ValueError("Season assist evidence unavailable")
+        return real_materialize(*args, **kwargs)
+
+    monkeypatch.setattr(
+        materialization_module,
+        "materialize_assist_location_window",
+        fail_season_only,
+    )
+    result = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
+    ).compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+
+    assert result.assist_location_season is None
+    assert result.assist_location_l15 is not None
+    with engine.connect() as connection:
+        publications = connection.execute(
+            select(LedgerPublication.__table__).where(
+                LedgerPublication.stream_key.in_((
+                    "assist_locations_season", "assist_locations_l15",
+                ))
+            )
+        ).mappings().all()
+    by_stream = {row["stream_key"]: row for row in publications}
+    assert by_stream["assist_locations_season"]["status"] == "unavailable"
+    assert by_stream["assist_locations_season"]["payload"] == "[]"
+    assert by_stream["assist_locations_l15"]["status"] == "complete"
+    assert by_stream["assist_locations_l15"]["payload"] != "[]"
 
 
 def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():

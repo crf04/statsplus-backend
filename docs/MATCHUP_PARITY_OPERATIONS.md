@@ -70,6 +70,10 @@ fails closed.
 The command composes all five inactive candidate publications from the exact
 governed ledger inside its bounded transaction. Operators do not supply
 candidate IDs.
+Assist-location primitives are optional and scoped by window: missing evidence
+produces a bound, empty `unavailable` candidate and a pending artifact for only
+that assist window. Traditional Season/L15, player per-36, and an independently
+healthy assist window still compose and commit in the same bounded run.
 Stdout includes a clearly labeled protected-operator section with every exact
 Season/L15 game ID by team. Do not paste that section into trackers; the JSON
 summary remains bounded to team IDs, counts, checksums, and artifact IDs.
@@ -132,6 +136,10 @@ audited rejection; rejection records actor, timestamp, and reason. Required
 denominator/rate mismatches likewise cannot be approved; provider rounding is
 retained only as diagnostic context.
 Ranking differences are hard failures under deterministic #117 rankings.
+Well-formed per-36 identity, raw-count, game-count, team-identity, or minute
+differences are likewise durable blocking differences: the command persists
+them row by row as `pending_adjudication` and exits `2`. Malformed or unbound
+per-36 capture evidence is invalid input, is rolled back, and exits `3`.
 
 The artifact is bound to the report's own surface, window, exact aware cutoff,
 publication, payload checksum, and exact game-set/authority evidence. An L15
