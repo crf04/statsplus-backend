@@ -29,16 +29,24 @@ from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
     CollectionManifest,
+    CollectionObservation,
     PublicationVersion,
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact
+from app.services.canonical_game_ledger import (
+    CanonicalGameLedgerRepository,
+    raw_rows_from_facts,
+)
 from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.ledger_lineage import LedgerLineage
 from app.services.ledger_parity import (
     LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
+    PER36_RAW_FIELDS,
     LedgerParityArtifactRepository,
     matchup_parity_artifact_is_activatable,
     matchup_parity_cohort_is_activatable,
 )
+from app.services.nba_stats_adapter import player_per36_request_descriptor
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
@@ -1608,6 +1616,319 @@ def test_assist_stream_activation_requires_parity(tmp_path):
 
 # --- CLI integration -------------------------------------------------------
 
+def _bounded_cli_world(tmp_path):
+    import scripts.matchup_parity as matchup_parity_script
+    from tests.services.test_ledger_derivations import _league_games
+
+    database_path = tmp_path / "bounded-cli.sqlite3"
+    database_url = f"sqlite:///{database_path}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    PublicationService(engine).register_default_streams()
+    team_mapping = dict(zip(range(1, 31), TEAM_IDS, strict=True))
+    games = []
+    for index, source in enumerate(_league_games()):
+        home = team_mapping[source.home_team_id]
+        away = team_mapping[source.away_team_id]
+        game = replace(
+            source,
+            season="2025-26",
+            game_date=date(2024, 11, 1) + timedelta(days=index // 15),
+            home_team_id=home,
+            home_team_tricode=NBA_TEAM_ID_TO_TRICODE[home],
+            away_team_id=away,
+            away_team_tricode=NBA_TEAM_ID_TO_TRICODE[away],
+            team_facts=tuple(replace(
+                fact,
+                team_id=team_mapping[fact.team_id],
+                team_tricode=NBA_TEAM_ID_TO_TRICODE[team_mapping[fact.team_id]],
+                opponent_team_id=team_mapping[fact.opponent_team_id],
+                opponent_team_tricode=NBA_TEAM_ID_TO_TRICODE[
+                    team_mapping[fact.opponent_team_id]
+                ],
+            ) for fact in source.team_facts),
+            player_facts=tuple(replace(
+                fact, team_id=team_mapping[fact.team_id],
+                team_tricode=NBA_TEAM_ID_TO_TRICODE[team_mapping[fact.team_id]],
+            ) for fact in source.player_facts),
+            participant_ids_by_team=tuple(
+                (team_mapping[team_id], player_ids)
+                for team_id, player_ids in source.participant_ids_by_team
+            ),
+            retrieved_at=CUTOFF - timedelta(minutes=30),
+            raw_rows=(),
+            checksum=None,
+        )
+        games.append(replace(game, raw_rows=raw_rows_from_facts(game)).with_checksum())
+    games = tuple(games)
+    events = [{
+        "nba_game_id": game.game_id,
+        "season": game.season,
+        "home_team_id": game.home_team_id,
+        "home_team_name": f"Team {game.home_team_id}",
+        "home_team_tricode": game.home_team_tricode,
+        "away_team_id": game.away_team_id,
+        "away_team_name": f"Team {game.away_team_id}",
+        "away_team_tricode": game.away_team_tricode,
+        "scheduled_at": datetime.combine(
+            game.game_date, datetime.min.time(), tzinfo=timezone.utc,
+        ) + timedelta(hours=1),
+        "status_text": "Final", "status_code": 3,
+        "classification": "Regular Season",
+        "first_seen_at": CUTOFF - timedelta(days=20),
+        "last_seen_at": CUTOFF,
+    } for game in games]
+    catalog = _immutable_event_catalog(events, CUTOFF)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=CUTOFF, activated_at=CUTOFF, activated_by="test",
+        ))
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=MANIFEST, season="2025-26", cutoff=CUTOFF,
+            collect_before=CUTOFF + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="manifest",
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"], status="active",
+            created_at=CUTOFF,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [{
+            "observation_id": game.source_observation_id,
+            "client_observation_id": game.source_observation_id,
+            "collector_id": "offline-cli-fixture", "manifest_id": MANIFEST,
+            "environment": "testing", "provider": "pbp",
+            "observation_type": "canonical_game_ledger",
+            "scope": json.dumps({
+                "game_id": game.game_id, "surface": "canonical_game_ledger",
+            }),
+            "season": game.season, "cutoff": CUTOFF, "schema_version": 1,
+            "checksum": game.checksum, "payload": "{}", "payload_bytes": 2,
+            "retrieved_at": game.retrieved_at, "accepted_at": game.retrieved_at,
+        } for game in games])
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
+        "2025-26", CUTOFF,
+    )
+    with Session(engine) as session, session.begin():
+        composed = matchup_parity_script._compose_candidate_set(
+            engine, session=session, governance=governance,
+            season="2025-26", cutoff=CUTOFF,
+        )
+        candidates = {
+            stream: SimpleNamespace(
+                publication_id=row.publication_id,
+                payload=row.payload,
+                checksum=row.checksum,
+            )
+            for stream, row in composed.items()
+        }
+
+    # Seed the protected legacy snapshots, then copy the independently
+    # composed candidate primitives into their provider-owned rows. This keeps
+    # the provider request/membership capture real while making the first run
+    # intentionally exact.
+    legacy_repository = TeamMatchupRepository(
+        engine, write_fence=_AllowTestLegacyWrites(),
+    )
+    for window, game_ids in (
+        ("season", governance.expected_season_game_ids),
+        ("l15", governance.expected_l15_game_ids),
+    ):
+        _write_legacy_facts(engine, game_ids_by_team=game_ids, window=window)
+        scope = TeamMatchupSnapshotScope(
+            "2025-26", CUTOFF.date(), 15 if window == "l15" else None,
+        )
+        snapshot = legacy_repository.get_snapshot(scope)
+        exact_values = {}
+        for surface in ("traditional", "assist_locations"):
+            stream = matchup_stream_key(surface, window)
+            with Session(engine) as session:
+                publication = resolve_matchup_publication(
+                    session, publication_id=candidates[stream].publication_id,
+                    stream_key=stream, season="2025-26", cutoff=CUTOFF,
+                    manifest_id=MANIFEST,
+                    event_catalog_publication_id=catalog["publication_id"],
+                    event_catalog_checksum=catalog["checksum"],
+                )
+            materialization = materialization_from_publication(
+                publication, surface=surface,
+            )
+            exact_values.update({
+                (fact.base, fact.team_id, fact.stat_key): (
+                    fact.raw_value, fact.denominator_value,
+                )
+                for fact in materialization.facts
+            })
+        exact_facts = tuple(replace(
+            fact,
+            raw_value=exact_values[(fact.base, fact.team_id, fact.stat_key)][0],
+            denominator_value=exact_values[
+                (fact.base, fact.team_id, fact.stat_key)
+            ][1],
+        ) for fact in snapshot.facts)
+        legacy_repository.replace_snapshots(
+            ((scope, exact_facts, snapshot.observations),), retrieved_at=CUTOFF,
+        )
+    return database_url, engine, governance, candidates
+
+
+def _run_per36_capture_cli(
+    monkeypatch, *, database_url, governance, candidate, output_path,
+    input_path, raw_offset=0,
+):
+    import scripts.matchup_parity as matchup_parity_script
+
+    rows = json.loads(candidate.payload)
+    for row in rows:
+        for field in PER36_RAW_FIELDS:
+            row[field] = round(row[f"{field}_per36"] * row["minutes"] / 36.0)
+    if raw_offset:
+        rows[0]["points"] += raw_offset
+    game_ids = sorted(map(str, governance.expected_game_ids))
+    request = player_per36_request_descriptor(season="2025-26")
+    request_checksum = hashlib.sha256(json.dumps(
+        request, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    identity = {
+        "season": "2025-26", "window": "season",
+        "cutoff": CUTOFF.isoformat(),
+        "provider_start_date": "2024-11-01",
+        "provider_end_date": "2024-11-15",
+        "transport_request": request, "request_checksum": request_checksum,
+        "game_ids": game_ids, "returned_row_count": len(rows),
+        "returned_game_count": len(game_ids),
+        "event_catalog_mapping_trace": {game_id: game_id for game_id in game_ids},
+    }
+    input_path.write_text(json.dumps({
+        "rows": rows, "provider_window_identity": identity,
+        "request_checksum": request_checksum,
+        "game_set_checksum": LedgerLineage.for_game_ids(game_ids),
+    }), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "matchup_parity.py", "capture-per36",
+        "--database-url", database_url, "--season", "2025-26",
+        "--manifest-id", MANIFEST, "--publication-id", candidate.publication_id,
+        "--actor", "operator@example.com", "--input", str(input_path),
+        "--output", str(output_path),
+    ])
+    exit_code = matchup_parity_script.main()
+    assert exit_code == 0, output_path.read_text()
+    return json.loads(output_path.read_text())["capture_id"]
+
+
+def _run_compare_cli(monkeypatch, *, database_url, capture_id, output_path):
+    import scripts.matchup_parity as matchup_parity_script
+
+    monkeypatch.setattr(sys, "argv", [
+        "matchup_parity.py", "compare", "--database-url", database_url,
+        "--season", "2025-26", "--manifest-id", MANIFEST,
+        "--actor", "operator@example.com", "--output", str(output_path),
+        "--target", "candidate", "--per36-capture-id", capture_id,
+    ])
+    return matchup_parity_script.main()
+
+
+def test_bounded_cli_real_database_exact_pending_and_invalid(
+    tmp_path, monkeypatch, capsys,
+):
+    database_url, engine, governance, candidates = _bounded_cli_world(tmp_path)
+    with engine.connect() as connection:
+        before_control = {
+            "pointers": connection.execute(text(
+                "SELECT stream_key, active_publication_id, previous_publication_id, fence "
+                "FROM publication_pointers ORDER BY stream_key"
+            )).all(),
+            "streams": connection.execute(text(
+                "SELECT stream_key, enabled FROM publication_streams ORDER BY stream_key"
+            )).all(),
+        }
+    exact_capture = _run_per36_capture_cli(
+        monkeypatch, database_url=database_url, governance=governance,
+        candidate=candidates["player_per36"],
+        input_path=tmp_path / "exact-capture.json",
+        output_path=tmp_path / "exact-capture-receipt.json",
+    )
+    exact_output = tmp_path / "exact-summary.json"
+    exact_exit = _run_compare_cli(
+        monkeypatch, database_url=database_url, capture_id=exact_capture,
+        output_path=exact_output,
+    )
+    assert exact_exit == 0, exact_output.read_text()
+    exact_summary = json.loads(exact_output.read_text())
+    protected_stdout = capsys.readouterr().out
+    assert exact_summary["status"] == "exact"
+    assert exact_summary["pointer_nonmutation"]["unchanged"] is True
+    assert exact_summary["stream_nonmutation"]["unchanged"] is True
+    assert "PROTECTED OPERATOR OUTPUT" in protected_stdout
+    assert next(iter(governance.expected_game_ids)) in protected_stdout
+    encoded_summary = exact_output.read_text()
+    assert next(iter(governance.expected_game_ids)) not in encoded_summary
+    assert "operator@example.com" not in encoded_summary
+    with engine.connect() as connection:
+        exact_streams = set(connection.execute(text(
+            "SELECT stream_key FROM canonical_game_ledger_parity_artifacts "
+            "WHERE status = 'exact'"
+        )).scalars())
+    assert set(candidates) <= exact_streams
+
+    pending_capture = _run_per36_capture_cli(
+        monkeypatch, database_url=database_url, governance=governance,
+        candidate=candidates["player_per36"], raw_offset=1,
+        input_path=tmp_path / "pending-capture.json",
+        output_path=tmp_path / "pending-capture-receipt.json",
+    )
+    pending_output = tmp_path / "pending-summary.json"
+    pending_exit = _run_compare_cli(
+        monkeypatch, database_url=database_url, capture_id=pending_capture,
+        output_path=pending_output,
+    )
+    assert pending_exit == 2, pending_output.read_text()
+    pending_summary = json.loads(pending_output.read_text())
+    assert pending_summary["status"] == "pending_adjudication"
+    with engine.connect() as connection:
+        pending = connection.execute(text(
+            "SELECT report FROM canonical_game_ledger_parity_artifacts "
+            "WHERE stream_key = 'player_per36' AND status = 'pending_adjudication' "
+            "ORDER BY created_at DESC LIMIT 1"
+        )).scalar_one()
+        artifact_count = connection.execute(text(
+            "SELECT COUNT(*) FROM canonical_game_ledger_parity_artifacts"
+        )).scalar_one()
+        candidate_count = connection.execute(text(
+            "SELECT COUNT(*) FROM publication_versions WHERE status = 'candidate'"
+        )).scalar_one()
+    assert json.loads(pending)["differences"][0]["classification"] == "raw_count_difference"
+
+    invalid_output = tmp_path / "invalid-summary.json"
+    assert _run_compare_cli(
+        monkeypatch, database_url=database_url, capture_id="missing-capture",
+        output_path=invalid_output,
+    ) == 3
+    invalid_summary = json.loads(invalid_output.read_text())
+    assert invalid_summary["status"] == "invalid_evidence"
+    assert invalid_summary["artifact_writes_rolled_back"] is True
+    assert invalid_summary["pointer_nonmutation"]["unchanged"] is True
+    assert invalid_summary["stream_nonmutation"]["unchanged"] is True
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM canonical_game_ledger_parity_artifacts"
+        )).scalar_one() == artifact_count
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM publication_versions WHERE status = 'candidate'"
+        )).scalar_one() == candidate_count
+        after_control = {
+            "pointers": connection.execute(text(
+                "SELECT stream_key, active_publication_id, previous_publication_id, fence "
+                "FROM publication_pointers ORDER BY stream_key"
+            )).all(),
+            "streams": connection.execute(text(
+                "SELECT stream_key, enabled FROM publication_streams ORDER BY stream_key"
+            )).all(),
+        }
+    assert after_control == before_control
+
 def test_script_compare_uses_actual_publications_and_stored_legacy(tmp_path):
     import scripts.matchup_parity as matchup_parity_script
 
@@ -1917,6 +2238,9 @@ def test_hard_reports_are_pending_and_protected_ids_stay_out_of_summary(capsys):
 
     assert matchup_parity_script._overall_status([
         {"status": "exact"}, {"status": "failed"},
+    ]) == "pending_adjudication"
+    assert matchup_parity_script._overall_status([
+        {"status": "exact"}, {"status": "pending_adjudication"},
     ]) == "pending_adjudication"
     governance = SimpleNamespace(
         expected_season_game_ids={TEAM_A: ("season-2", "season-1")},

@@ -366,7 +366,7 @@ def _candidate_preflight(
         publication is None
         or publication.stream_key != stream_key
         or publication.season != season
-        or _aware_utc(publication.cutoff) != cutoff
+        or assume_utc(publication.cutoff) != cutoff
         or publication.status != "candidate"
         or not publication_payload_matches_checksum(
             publication.payload, publication.checksum
@@ -524,8 +524,13 @@ def _compare_candidate_per36(
     """Compare a candidate against scoped immutable per-36 evidence."""
 
     try:
-        candidate_rows = tuple(decode_player_per36(publication.payload, season=season))
-    except (TypeError, ValueError, KeyError) as error:
+        candidate_payload = (
+            json.loads(publication.payload)
+            if isinstance(publication.payload, str)
+            else publication.payload
+        )
+        candidate_rows = tuple(decode_player_per36(candidate_payload, season=season))
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
         raise InvalidEvidenceError("player_per36_candidate_invalid") from error
 
     game_ids = frozenset(
@@ -921,7 +926,9 @@ def _print_protected_game_ids(governance) -> None:
 def _overall_status(reports: list[Mapping[str, Any]]) -> str:
     if any(report.get("status") == "failed" for report in reports):
         return "pending_adjudication"
-    if any(report.get("status") == "adjudication_required" for report in reports):
+    if any(report.get("status") in {
+        "adjudication_required", "pending_adjudication",
+    } for report in reports):
         return "pending_adjudication"
     if reports and all(report.get("status") == "exact" for report in reports):
         return "exact"
