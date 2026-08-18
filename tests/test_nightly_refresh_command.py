@@ -100,6 +100,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     pbp_log_provider = object()
     catalog = object()
     stats_freshness = object()
+    write_fence = object()
     player_log_repository = object()
     team_matchup_repository = object()
 
@@ -143,6 +144,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
             "pbp_provider": pbp_provider,
             "nba_stats_provider": provider,
             "stats_freshness": stats_freshness,
+            "write_fence": write_fence,
         }
         return stats_service
 
@@ -237,11 +239,13 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         "PlayerDietService",
         build_player_diet_service,
     )
-    monkeypatch.setattr(
-        nightly_refresh,
-        "TeamMatchupRepository",
-        lambda actual_engine: team_matchup_repository,
-    )
+    def build_team_matchup_repository(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {"write_fence": write_fence}
+        return team_matchup_repository
+
+    monkeypatch.setattr(nightly_refresh, "LegacyWriteFence", lambda actual_engine: write_fence)
+    monkeypatch.setattr(nightly_refresh, "TeamMatchupRepository", build_team_matchup_repository)
     monkeypatch.setattr(
         nightly_refresh,
         "TeamMatchupRefreshService",

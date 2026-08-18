@@ -2,6 +2,8 @@
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+import hashlib
+import json
 
 import pytest
 from sqlalchemy import create_engine
@@ -230,6 +232,41 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
     }
     cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
     publication_id, payload_checksum = _candidate(engine)
+    request_identity = {
+        "season": game.season,
+        "window": "season",
+        "cutoff": cutoff.isoformat(),
+        "provider_start_date": "2024-10-22",
+        "provider_end_date": "2024-11-16",
+    }
+    request_checksum = hashlib.sha256(json.dumps(
+        request_identity, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+    provider_identity = {
+        **request_identity,
+        "game_ids": [game.game_id],
+        "request_checksum": request_checksum,
+        "returned_row_count": 1,
+        "returned_game_count": 1,
+        "event_catalog_mapping_trace": {game.game_id: game.game_id},
+    }
+    observation_payload = json.dumps({
+        "rows": [row],
+        "provider_window_identity": provider_identity,
+        "request_checksum": request_checksum,
+    }, sort_keys=True, separators=(",", ":"))
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO collection_observations "
+            "(observation_id, client_observation_id, collector_id, manifest_id, environment, provider, observation_type, scope, season, cutoff, schema_version, checksum, payload, payload_bytes, retrieved_at, accepted_at) "
+            "VALUES ('per36-observation', 'client-per36', 'collector', 'manifest-1', 'test', 'nba', 'player_per36_diagnostic', '{}', :season, :cutoff, 1, :checksum, :payload, :payload_bytes, :cutoff, :cutoff)"
+        ), {
+            "season": game.season,
+            "cutoff": cutoff,
+            "checksum": hashlib.sha256(observation_payload.encode()).hexdigest(),
+            "payload": observation_payload,
+            "payload_bytes": len(observation_payload.encode()),
+        })
     repository = Per36DiagnosticCaptureRepository(engine)
     capture = repository.record(
         capture_id="capture-per36",
@@ -241,16 +278,11 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         event_catalog_publication_id="catalog-1",
         event_catalog_checksum="b" * 64,
         game_set_checksum="c" * 64,
-        request_checksum="d" * 64,
-        provider_window_identity={
-            "season": game.season,
-            "window": "season",
-            "cutoff": cutoff.isoformat(),
-            "game_ids": [game.game_id],
-            "request_checksum": "d" * 64,
-        },
+        request_checksum=request_checksum,
+        provider_window_identity=provider_identity,
         rows=(row,),
         actor="operator@example.com",
+        source_observation_id="per36-observation",
     )
     assert capture.capture_id == "capture-per36"
     assert repository.read(capture.capture_id).rows == (row,)
@@ -258,7 +290,7 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         assert connection.execute(
             text("SELECT stream_key FROM canonical_game_ledger_parity_artifacts WHERE artifact_id = 'capture-per36'")
         ).scalar_one() == PER36_DIAGNOSTIC_CAPTURE_STREAM
-    with pytest.raises(ValueError, match="window identity"):
+    with pytest.raises(ValueError, match="source observation|window identity"):
         repository.record(
             publication_id=publication_id,
             payload_checksum="a" * 64,
@@ -268,17 +300,56 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
             event_catalog_publication_id="catalog-1",
             event_catalog_checksum="b" * 64,
             game_set_checksum="c" * 64,
-            request_checksum="d" * 64,
+            request_checksum=request_checksum,
             provider_window_identity={
                 "season": game.season,
                 "window": "l15",
                 "cutoff": cutoff.isoformat(),
                 "game_ids": [game.game_id],
-                "request_checksum": "d" * 64,
+                "request_checksum": request_checksum,
             },
             rows=(row,),
             actor="operator@example.com",
+            source_observation_id="per36-observation",
         )
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    (("rejected", "approved"), ("approved", "rejected")),
+)
+def test_parity_adjudication_decision_is_immutable(tmp_path, first, second):
+    engine = create_engine(f"sqlite:///{tmp_path / f'adjudication-{first}.sqlite3'}")
+    run_migrations(engine)
+    game = _game()
+    publication_id, checksum = _candidate(engine, stream_key="player_game_logs")
+    report = compare_ledger_to_legacy(
+        (game,), _legacy_player_rows(game), season=game.season
+    )
+    repository = LedgerParityArtifactRepository(engine)
+    artifact = repository.record(
+        "player_game_logs",
+        cutoff=datetime(2024, 11, 16, tzinfo=timezone.utc),
+        report=report,
+        publication_id=publication_id,
+        payload_checksum=checksum,
+    )
+    repository.adjudicate(
+        artifact.artifact_id,
+        decision=first,
+        actor="operator@example.com",
+        reason="first immutable operator decision",
+    )
+
+    with pytest.raises(ValueError, match="decision is immutable"):
+        repository.adjudicate(
+            artifact.artifact_id,
+            decision=second,
+            actor="other@example.com",
+            reason="second stale operator decision",
+        )
+
+    assert repository.latest("player_game_logs", game.season).decision == first
 
 
 def test_traditional_parity_reads_general_opponent_stats_semantics(tmp_path):

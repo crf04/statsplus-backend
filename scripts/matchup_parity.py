@@ -15,10 +15,10 @@ Example::
         --actor "operator@example.com" \
         --output parity-summary.json \
         --target candidate \
-        --publications-json publications.json \
         --per36-capture-id "<capture id>"
 
-``publications.json`` names all five inactive candidate publications:
+The command composes all five inactive candidates in its transaction.  An
+optional ``publications.json`` can pin the exact expected output identities:
 
     {
       "traditional_opponent_season": "<publication id>",
@@ -55,6 +55,7 @@ from app.domain.publication_integrity import (  # noqa: E402
     publication_payload_matches_checksum,
 )
 from app.domain.utc import assume_utc  # noqa: E402
+from app.domain.slate_time import slate_date_for_instant  # noqa: E402
 from app.migrations import (  # noqa: E402
     MIGRATIONS,
     MIGRATION_TABLE_NAME,
@@ -84,11 +85,15 @@ from app.services.ledger_derivations import (  # noqa: E402
 )
 from app.services.ledger_parity import (  # noqa: E402
     LedgerParityArtifactRepository,
+    LedgerParityReport,
     PER36_RAW_FIELDS,
     PER36_RATE_FIELDS,
     Per36DiagnosticCaptureRepository,
 )
 from app.services.ledger_lineage import LedgerLineage  # noqa: E402
+from app.services.ledger_materialization import (  # noqa: E402
+    LedgerMaterializationService,
+)
 from app.services.ledger_runtime import (  # noqa: E402
     ActiveManifestLedgerGovernanceReader,
 )
@@ -107,6 +112,7 @@ from app.services.team_matchup_repository import (  # noqa: E402
 from app.services.team_matchup_publications import (  # noqa: E402
     PublicationGovernanceUnavailable,
 )
+from app.services.collection_control import PublicationService  # noqa: E402
 
 
 EXIT_EXACT = 0
@@ -205,10 +211,23 @@ def _migration_version(engine) -> int:
     return expected
 
 
-def _control_state(engine) -> dict[str, Any]:
+def _control_state(
+    engine, *, session: Session | None = None, lock: bool = False
+) -> dict[str, Any]:
     """Capture all pointers and stream gates used to prove non-mutation."""
 
-    with Session(engine) as session:
+    owned = session is None
+    session = session or Session(engine)
+    try:
+        pointer_query = select(PublicationPointer).order_by(
+            PublicationPointer.stream_key
+        )
+        stream_query = select(PublicationStream).order_by(
+            PublicationStream.stream_key
+        )
+        if lock:
+            pointer_query = pointer_query.with_for_update()
+            stream_query = stream_query.with_for_update()
         pointers = {
             str(row.stream_key): {
                 "active": row.active_publication_id,
@@ -221,15 +240,18 @@ def _control_state(engine) -> dict[str, Any]:
                 ),
             }
             for row in session.scalars(
-                select(PublicationPointer).order_by(PublicationPointer.stream_key)
+                pointer_query
             )
         }
         streams = {
             str(row.stream_key): bool(row.enabled)
             for row in session.scalars(
-                select(PublicationStream).order_by(PublicationStream.stream_key)
+                stream_query
             )
         }
+    finally:
+        if owned:
+            session.close()
     return {"pointers": pointers, "streams": streams}
 
 
@@ -357,31 +379,68 @@ def _required_streams(window: str) -> frozenset[str]:
     return frozenset(streams)
 
 
-def _validate_candidate_set(
-    engine,
-    *,
-    publications: Mapping[str, str],
-    required_streams: frozenset[str],
-    season: str,
-    cutoff: datetime,
-    manifest: Mapping[str, str],
+class _UnavailableDiagnosticReader:
+    def read(self, _stream_key, *, session=None):
+        raise RuntimeError("bounded comparison records diagnostics separately")
+
+
+def _compose_candidate_set(
+    engine, *, session: Session, governance, season: str, cutoff: datetime,
 ) -> dict[str, PublicationVersion]:
-    if set(publications) != set(required_streams):
-        raise InvalidEvidenceError("candidate_publications_incomplete")
-    with Session(engine) as session:
-        rows = {
-            stream_key: _candidate_preflight(
-                session,
-                publication_id=publications[stream_key],
-                stream_key=stream_key,
-                season=season,
-                cutoff=cutoff,
-                manifest_id=manifest["id"],
-                catalog_id=manifest["event_catalog_publication_id"],
-                catalog_checksum=manifest["event_catalog_checksum"],
+    """Compose all five exact inactive candidates from the governed ledger."""
+
+    repository = CanonicalGameLedgerRepository(engine)
+    games = tuple(
+        repository.get_game(str(game_id))
+        for game_id in sorted(governance.expected_game_ids)
+    )
+    if any(game is None for game in games):
+        raise InvalidEvidenceError("ledger_game_set_incomplete")
+    LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_UnavailableDiagnosticReader(),
+        publication_service=PublicationService(engine),
+    ).compose(
+        tuple(game for game in games if game is not None),
+        season=season,
+        as_of=slate_date_for_instant(cutoff),
+        cutoff=cutoff,
+        expected_game_ids=frozenset(map(str, governance.expected_game_ids)),
+        expected_l15_game_ids={
+            int(team_id): frozenset(map(str, game_ids))
+            for team_id, game_ids in governance.expected_l15_game_ids.items()
+        },
+        team_ids=frozenset(map(int, governance.team_ids)),
+        require_assist_locations=True,
+        activate=False,
+        session=session,
+    )
+    rows = {}
+    for stream_key in sorted(ALL_REQUIRED_STREAMS):
+        row = session.scalar(
+            select(PublicationVersion)
+            .where(
+                PublicationVersion.stream_key == stream_key,
+                PublicationVersion.season == season,
+                PublicationVersion.cutoff == cutoff,
+                PublicationVersion.status == "candidate",
             )
-            for stream_key in sorted(required_streams)
-        }
+            .order_by(PublicationVersion.version.desc())
+            .limit(1)
+        )
+        if row is None:
+            raise InvalidEvidenceError("candidate_composition_incomplete")
+        rows[stream_key] = _candidate_preflight(
+            session,
+            publication_id=row.publication_id,
+            stream_key=stream_key,
+            season=season,
+            cutoff=cutoff,
+            manifest_id=governance.manifest_id,
+            catalog_id=governance.event_catalog_publication_id,
+            catalog_checksum=governance.event_catalog_checksum,
+        )
     return rows
 
 
@@ -420,9 +479,7 @@ def _compare_candidate_per36(
     except ValueError as error:
         raise InvalidEvidenceError("player_per36_diagnostic_capture_invalid") from error
     if (
-        capture.publication_id != publication.publication_id
-        or capture.payload_checksum != publication.checksum
-        or capture.season != season
+        capture.season != season
         or capture.cutoff != assume_utc(cutoff)
         or capture.manifest_id != governance.manifest_id
         or capture.event_catalog_publication_id != governance.event_catalog_publication_id
@@ -430,6 +487,15 @@ def _compare_candidate_per36(
         or capture.game_set_checksum != LedgerLineage.for_game_ids(expected_game_ids)
         or capture.provider_window_identity.get("game_ids") != expected_game_ids
         or capture.provider_window_identity.get("request_checksum") != capture.request_checksum
+        or capture.provider_window_identity.get("provider_end_date")
+        != slate_date_for_instant(cutoff).isoformat()
+        or capture.provider_window_identity.get("returned_game_count")
+        != len(expected_game_ids)
+        or set(
+            capture.provider_window_identity.get(
+                "event_catalog_mapping_trace", {}
+            ).values()
+        ) != set(expected_game_ids)
     ):
         raise InvalidEvidenceError("player_per36_diagnostic_capture_authority_invalid")
 
@@ -490,6 +556,20 @@ def _compare_candidate_per36(
         ):
             raise InvalidEvidenceError("player_per36_diagnostic_capture_rate_mismatch")
 
+    artifact = LedgerParityArtifactRepository(engine).record(
+        "player_per36",
+        cutoff=cutoff,
+        report=LedgerParityReport(
+            season=season,
+            game_count=len(canonical_games),
+            compared_count=len(expected_rows),
+            differences=(),
+            adjudication_required=False,
+        ),
+        publication_id=publication.publication_id,
+        payload_checksum=publication.checksum,
+        session=session,
+    )
     return {
         "stream": "player_per36",
         "status": "exact",
@@ -499,7 +579,7 @@ def _compare_candidate_per36(
         "difference_classifications": {},
         "publication_id": publication.publication_id,
         "payload_checksum": publication.checksum,
-    }, capture_id
+    }, artifact.artifact_id
 
 
 def _validate_matchup_candidate_composition(
@@ -627,7 +707,6 @@ def _sanitize_matchup_report(report) -> dict[str, Any]:
         "ledger_publication_id": report.ledger_publication_id,
         "ledger_payload_checksum": report.ledger_payload_checksum,
         "semantic_rule": report.semantic_rule,
-        "semantic_rule_reason": report.semantic_rule_reason,
     }
 
 
@@ -673,15 +752,17 @@ def _print_table(summary: Mapping[str, Any]) -> None:
     print(f"overall status: {summary.get('status', 'invalid_evidence')}")
 
 
-def _record_compare_audit(engine, *, actor: str, manifest_id: str, status: str, reports: list[Mapping[str, Any]]) -> str:
+def _record_compare_audit(
+    engine, *, actor: str, manifest_id: str, status: str,
+    reports: list[Mapping[str, Any]], session: Session | None = None,
+) -> str:
     event_id = str(uuid4())
     details = {
         "status": status,
         "report_count": len(reports),
         "streams": [report.get("stream") for report in reports],
     }
-    with Session(engine) as session, session.begin():
-        session.add(AuditEvent(
+    event = AuditEvent(
             event_id=event_id,
             actor=actor[:128],
             action="ledger.matchup_parity_compare",
@@ -689,14 +770,27 @@ def _record_compare_audit(engine, *, actor: str, manifest_id: str, status: str, 
             reason="bounded parity comparison",
             details=json.dumps(details, sort_keys=True),
             created_at=datetime.now(timezone.utc),
-        ))
+        )
+    if session is not None:
+        session.add(event)
+    else:
+        with Session(engine) as owned, owned.begin():
+            owned.add(event)
     return event_id
 
 
 def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
-    if not isinstance(args.actor, str) or not args.actor.strip():
+    if (
+        not isinstance(args.actor, str)
+        or not args.actor.strip()
+        or len(args.actor) > 128
+    ):
         raise InvalidEvidenceError("actor_required")
-    publications = _load_publications(args.publications_json)
+    expected_publications = (
+        _load_publications(args.publications_json)
+        if getattr(args, "publications_json", None)
+        else None
+    )
     governance, manifest, migration_version = _manifest_preflight(
         engine, season=args.season, manifest_id=args.manifest_id
     )
@@ -704,30 +798,34 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
     cutoff = _aware_utc(manifest["cutoff"])
     required_streams = ALL_REQUIRED_STREAMS
     semantic_rule = getattr(args, "semantic_rule", None)
-    semantic_rule_reason = getattr(args, "semantic_rule_reason", None)
-    if bool(semantic_rule) != bool(semantic_rule_reason):
-        raise InvalidEvidenceError("semantic_rule_reason_required")
     if any(
         stream_key not in before["streams"] or before["streams"][stream_key]
         for stream_key in required_streams
     ):
         raise InvalidEvidenceError("ledger_stream_already_enabled")
-    candidate_rows = _validate_candidate_set(
-        engine,
-        publications=publications,
-        required_streams=required_streams,
-        season=args.season,
-        cutoff=cutoff,
-        manifest=manifest,
-    )
-
     runner = MatchupParityRunner(
         engine,
         governance=ActiveManifestLedgerGovernanceReader(engine),
         legacy_source=StoredLegacyMatchupSource(TeamMatchupRepository(engine)),
     )
     reports = []
-    with Session(engine) as session, session.begin():
+    session = Session(engine)
+    transaction = session.begin()
+    args._artifact_session = session
+    with session.no_autoflush:
+        candidate_rows = _compose_candidate_set(
+            engine,
+            session=session,
+            governance=governance,
+            season=args.season,
+            cutoff=cutoff,
+        )
+        publications = {
+            stream_key: row.publication_id
+            for stream_key, row in candidate_rows.items()
+        }
+        if expected_publications is not None and expected_publications != publications:
+            raise InvalidEvidenceError("composed_candidate_identity_mismatch")
         _validate_matchup_candidate_composition(
             engine,
             session=session,
@@ -753,7 +851,6 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
                 publications=matchup_publications,
                 session=session,
                 semantic_rule=semantic_rule,
-                semantic_rule_reason=semantic_rule_reason,
             )
             if {report.surface for report in window_reports} != {
                 "traditional", "assist_locations"
@@ -795,7 +892,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
                 raise InvalidEvidenceError("parity_artifact_missing")
             artifact_ids[stream_key] = row.artifact_id
 
-    after = _control_state(engine)
+    after = _control_state(engine, session=session, lock=True)
     if before != after:
         raise InvalidEvidenceError("pointer_or_stream_state_changed")
 
@@ -817,11 +914,14 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
         manifest_id=args.manifest_id,
         status=status,
         reports=sanitized_reports,
+        session=session,
     )
     summary = {
         "status": status,
         "target": args.target,
-        "actor": args.actor,
+        "actor_fingerprint": hashlib.sha256(
+            args.actor.strip().encode("utf-8")
+        ).hexdigest(),
         "backend_git_sha": _git_sha(),
         "environment": _environment(),
         "database_fingerprint": _database_fingerprint(engine),
@@ -857,7 +957,11 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
             "after_checksum": _control_state_checksum(after),
         },
     }
+    session.flush()
     _write_summary(args.output, summary)
+    transaction.commit()
+    session.close()
+    args._artifact_session = None
     _print_table(summary)
     return {
         "exact": EXIT_EXACT,
@@ -882,7 +986,6 @@ def _invalid_summary(args, code: str) -> dict[str, Any]:
         after_checksum = _control_state_checksum(after)
         unchanged = before == after
         summary.update({
-            "artifact_writes_rolled_back": True,
             "pointer_nonmutation": {
                 "unchanged": unchanged,
                 "before_checksum": before_checksum,
@@ -894,6 +997,8 @@ def _invalid_summary(args, code: str) -> dict[str, Any]:
                 "after_checksum": after_checksum,
             },
         })
+        if getattr(args, "_artifact_transaction_rolled_back", False):
+            summary["artifact_writes_rolled_back"] = True
     else:
         summary["nonmutation_proof"] = {"available": False}
     return summary
@@ -926,6 +1031,12 @@ def _compare(args, engine) -> int:
         args._control_state_before = _control_state(engine)
         return _bounded_compare(args, engine, before=args._control_state_before)
     except (InvalidEvidenceError, MatchupParityError, PublicationGovernanceUnavailable, OSError, ValueError) as error:
+        artifact_session = getattr(args, "_artifact_session", None)
+        if artifact_session is not None:
+            artifact_session.rollback()
+            artifact_session.close()
+            args._artifact_session = None
+            args._artifact_transaction_rolled_back = True
         code = error.code if isinstance(error, InvalidEvidenceError) else "comparison_invalid"
         try:
             args._control_state_after = _control_state(engine)
@@ -963,13 +1074,15 @@ def main() -> int:
     compare.add_argument("--actor", required=True)
     compare.add_argument("--output", required=True, help="sanitized JSON summary path")
     compare.add_argument("--target", choices=("isolated", "candidate"), required=True)
-    compare.add_argument("--publications-json", required=True)
+    compare.add_argument(
+        "--publications-json",
+        help="optional exact expected IDs; candidates are always composed in-command",
+    )
     compare.add_argument("--per36-capture-id", required=True)
     compare.add_argument(
         "--semantic-rule",
-        choices=("provider_rounding", "parent_approved_semantic_difference"),
+        choices=("parent.matchup.denominator-rate.v1",),
     )
-    compare.add_argument("--semantic-rule-reason")
 
     adjudicate = subparsers.add_parser("adjudicate")
     adjudicate.add_argument("artifact_id")

@@ -283,7 +283,7 @@ def test_unexplained_floating_denominator_difference_is_hard():
     }
 
 
-def test_provider_rounding_rule_makes_only_soft_difference_adjudicable():
+def test_provider_rounding_cannot_soften_public_minutes_or_rates():
     legacy = _replace_fact(
         _materialization(),
         surface="traditional",
@@ -298,8 +298,15 @@ def test_provider_rounding_rule_makes_only_soft_difference_adjudicable():
         semantic_rule_reason="provider rounding in the legacy denominator",
     )
 
-    assert not report.hard_failure
-    assert report.adjudication_required
+    assert report.hard_failure
+    assert not report.adjudication_required
+
+    approved = _compare(
+        legacy=legacy,
+        semantic_rule="parent.matchup.denominator-rate.v1",
+    )
+    assert not approved.hard_failure
+    assert approved.adjudication_required
 
 
 def test_matchup_tolerance_is_exactly_one_nanounit():
@@ -1384,8 +1391,6 @@ def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
         "create_engine",
         lambda database_url: database_url,
     )
-    publications = tmp_path / "publications.json"
-    publications.write_text("{}", encoding="utf-8")
     summary = tmp_path / "summary.json"
     monkeypatch.setattr(sys, "argv", [
         "matchup_parity.py",
@@ -1396,7 +1401,6 @@ def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
         "--actor", "operator@example.com",
         "--output", str(summary),
         "--target", "isolated",
-        "--publications-json", str(publications),
         "--per36-capture-id", "capture-id",
     ])
 
@@ -1404,6 +1408,7 @@ def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
     assert received["target"] == "isolated"
     assert received["actor"] == "operator@example.com"
     assert received["output"] == str(summary)
+    assert received["publications_json"] is None
 
 
 def test_sanitized_summary_omits_row_values():
@@ -1424,6 +1429,7 @@ def test_sanitized_summary_omits_row_values():
     assert summary["difference_classifications"]
     assert "ledger_value" not in encoded
     assert "legacy_value" not in encoded
+    assert "semantic_rule_reason" not in encoded
 
 
 def test_invalid_summary_keeps_nonmutation_proof_when_prestate_was_captured():
@@ -1435,6 +1441,7 @@ def test_invalid_summary_keeps_nonmutation_proof_when_prestate_was_captured():
         season="2025-26",
         _control_state_before=before,
         _control_state_after=before.copy(),
+        _artifact_transaction_rolled_back=True,
     )
 
     summary = matchup_parity_script._invalid_summary(args, "candidate_provenance_invalid")
@@ -1442,3 +1449,19 @@ def test_invalid_summary_keeps_nonmutation_proof_when_prestate_was_captured():
     assert summary["artifact_writes_rolled_back"] is True
     assert summary["pointer_nonmutation"]["unchanged"] is True
     assert summary["stream_nonmutation"]["unchanged"] is True
+
+
+def test_invalid_summary_does_not_claim_an_unproven_rollback():
+    import scripts.matchup_parity as matchup_parity_script
+
+    before = {"pointers": {}, "streams": {}}
+    args = SimpleNamespace(
+        target="candidate",
+        season="2025-26",
+        _control_state_before=before,
+        _control_state_after=before.copy(),
+    )
+
+    summary = matchup_parity_script._invalid_summary(args, "output_failed")
+
+    assert "artifact_writes_rolled_back" not in summary

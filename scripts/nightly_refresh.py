@@ -24,6 +24,7 @@ from app.providers.pbp_game_logs import PBPGameLogAdapter  # noqa: E402
 from app.providers.pbp_stats import PBPStatsAdapter  # noqa: E402
 from app.services.athlete_catalog_service import AthleteCatalogService  # noqa: E402
 from app.services.data_service import DataService  # noqa: E402
+from app.services.database_first_activation import LegacyWriteFence  # noqa: E402
 from app.services.event_catalog_service import EventCatalogService  # noqa: E402
 from app.services.player_game_log_ingest import PlayerGameLogIngestService  # noqa: E402
 from app.services.player_game_log_repository import PlayerGameLogRepository  # noqa: E402
@@ -158,12 +159,14 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
 
         pbp_provider = PBPStatsAdapter(settings=settings)
         stats_freshness = StatsFreshnessRepository(engine)
+        write_fence = LegacyWriteFence(engine)
         data_service = DataService(
             engine,
             settings=settings,
             pbp_provider=pbp_provider,
             nba_stats_provider=provider,
             stats_freshness=stats_freshness,
+            write_fence=write_fence,
         )
         player_diet_service = PlayerDietService(
             engine,
@@ -172,7 +175,7 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
             pbp_stats_provider=pbp_provider,
         )
         team_matchup_service = TeamMatchupRefreshService(
-            repository=TeamMatchupRepository(engine),
+            repository=TeamMatchupRepository(engine, write_fence=write_fence),
             event_catalog=event_service,
             nba_stats_provider=provider,
             pbp_stats_provider=pbp_provider,

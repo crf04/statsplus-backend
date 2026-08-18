@@ -21,6 +21,7 @@ from app.models.collection_control import (
     CollectionManifest,
     PublicationPointer,
     PublicationVersion,
+    CollectionObservation,
 )
 
 from app.domain.matchup_parity_contract import (
@@ -86,6 +87,7 @@ class Per36DiagnosticCapture:
     rows: tuple[Mapping[str, object], ...]
     actor: str
     capture_checksum: str
+    source_observation_id: str
 
 
 def _is_sha256(value: object) -> bool:
@@ -167,6 +169,7 @@ class Per36DiagnosticCaptureRepository:
             "manifest_id", "event_catalog_publication_id", "event_catalog_checksum",
             "game_set_checksum", "request_checksum", "provider_window_identity",
             "rows", "actor", "capture_checksum",
+            "source_observation_id",
         )
         if any(key not in document for key in required):
             raise ValueError("per36 capture evidence is incomplete")
@@ -177,6 +180,7 @@ class Per36DiagnosticCaptureRepository:
             for key in (
                 "capture_id", "publication_id", "season", "manifest_id",
                 "event_catalog_publication_id", "actor",
+                "source_observation_id",
             )
         ):
             raise ValueError("per36 capture identity is invalid")
@@ -195,7 +199,27 @@ class Per36DiagnosticCaptureRepository:
         identity = document["provider_window_identity"]
         if not isinstance(identity, Mapping):
             raise ValueError("per36 provider window identity is invalid")
+        try:
+            provider_start = datetime.fromisoformat(
+                str(identity.get("provider_start_date"))
+            ).date()
+            provider_end = datetime.fromisoformat(
+                str(identity.get("provider_end_date"))
+            ).date()
+        except ValueError as error:
+            raise ValueError("per36 provider window identity is invalid") from error
         game_ids = identity.get("game_ids")
+        mapping_trace = identity.get("event_catalog_mapping_trace")
+        request_identity = {
+            key: identity.get(key)
+            for key in (
+                "season", "window", "cutoff", "provider_start_date",
+                "provider_end_date",
+            )
+        }
+        expected_request_checksum = hashlib.sha256(
+            _canonical_capture_payload(request_identity).encode("utf-8")
+        ).hexdigest()
         if (
             identity.get("season") != document["season"]
             or identity.get("window") != "season"
@@ -205,6 +229,15 @@ class Per36DiagnosticCaptureRepository:
             or any(not isinstance(game_id, str) or not game_id for game_id in game_ids)
             or game_ids != sorted(set(game_ids))
             or identity.get("request_checksum") != document["request_checksum"]
+            or document["request_checksum"] != expected_request_checksum
+            or not isinstance(identity.get("provider_start_date"), str)
+            or not isinstance(identity.get("provider_end_date"), str)
+            or provider_start > provider_end
+            or identity.get("returned_row_count") != len(document["rows"])
+            or identity.get("returned_game_count") != len(game_ids)
+            or not isinstance(mapping_trace, Mapping)
+            or set(mapping_trace) != set(game_ids)
+            or any(not isinstance(value, str) or not value for value in mapping_trace.values())
         ):
             raise ValueError("per36 provider window identity is invalid")
         rows = cls._validate_rows(document["rows"])
@@ -230,6 +263,7 @@ class Per36DiagnosticCaptureRepository:
             rows=rows,
             actor=str(document["actor"]),
             capture_checksum=str(document["capture_checksum"]),
+            source_observation_id=str(document["source_observation_id"]),
         )
 
     def record(
@@ -247,13 +281,43 @@ class Per36DiagnosticCaptureRepository:
         provider_window_identity: Mapping[str, object],
         rows: Iterable[Mapping[str, object]],
         actor: str,
+        source_observation_id: str,
         capture_id: str | None = None,
         session: Session | None = None,
     ) -> Per36DiagnosticCapture:
         if cutoff is None or cutoff.tzinfo is None:
             raise ValueError("per36 capture cutoff must be aware")
+        if not actor.strip() or len(actor) > 128:
+            raise ValueError("per36 capture actor is invalid")
         capture_id = capture_id or str(uuid4())
         rows_tuple = self._validate_rows(rows)
+        owned = session is None
+        lookup_session = session or Session(self.engine)
+        try:
+            observation = lookup_session.get(CollectionObservation, source_observation_id)
+            if (
+                observation is None
+                or observation.observation_type != "player_per36_diagnostic"
+                or observation.season != season
+                or assume_utc(observation.cutoff) != assume_utc(cutoff)
+                or observation.manifest_id != manifest_id
+                or not publication_payload_matches_checksum(
+                    observation.payload, observation.checksum
+                )
+            ):
+                raise ValueError("per36 capture source observation is invalid")
+            observation_payload = json.loads(observation.payload)
+            if (
+                not isinstance(observation_payload, Mapping)
+                or observation_payload.get("rows") != [dict(row) for row in rows_tuple]
+                or observation_payload.get("provider_window_identity")
+                != dict(provider_window_identity)
+                or observation_payload.get("request_checksum") != request_checksum
+            ):
+                raise ValueError("per36 capture source observation does not match evidence")
+        finally:
+            if owned:
+                lookup_session.close()
         document: dict[str, object] = {
             "kind": PER36_DIAGNOSTIC_CAPTURE_STREAM,
             "capture_id": capture_id,
@@ -269,6 +333,7 @@ class Per36DiagnosticCaptureRepository:
             "provider_window_identity": dict(provider_window_identity),
             "rows": [dict(row) for row in rows_tuple],
             "actor": actor,
+            "source_observation_id": source_observation_id,
         }
         capture_checksum = hashlib.sha256(
             _canonical_capture_payload(document).encode("utf-8")
@@ -972,13 +1037,25 @@ class LedgerParityArtifactRepository:
     ) -> LedgerParityArtifact:
         if decision not in {"approved", "rejected"}:
             raise ValueError("decision must be approved or rejected")
-        if len(reason.strip()) < 3 or not actor.strip():
+        if (
+            len(reason.strip()) < 3
+            or len(reason) > 255
+            or not actor.strip()
+            or len(actor) > 128
+        ):
             raise ValueError("actor and reason are required")
         now = self.clock()
         with Session(self.engine, expire_on_commit=False) as session, session.begin():
-            row = session.get(LedgerParityArtifact, artifact_id)
+            row = session.scalar(
+                select(LedgerParityArtifact)
+                .where(LedgerParityArtifact.artifact_id == artifact_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
             if row is None:
                 raise ValueError("parity artifact not found")
+            if row.decision is not None:
+                raise ValueError("parity artifact decision is immutable")
             if decision == "approved" and (
                 len(reason.strip()) < 20
                 or not matchup_parity_artifact_is_activatable(row)

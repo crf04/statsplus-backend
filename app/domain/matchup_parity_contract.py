@@ -63,21 +63,19 @@ SOFT_CLASSIFICATIONS = frozenset({
 })
 
 APPROVED_SEMANTIC_RULES = frozenset({
-    "provider_rounding",
-    "parent_approved_semantic_difference",
+    "parent.matchup.denominator-rate.v1",
 })
 
 
 def semantic_rule_is_approved(rule: object, reason: object) -> bool:
-    """Require a named rule and concrete parent/operator rationale."""
+    """Accept only a bounded, parent-owned semantic-rule identifier.
 
-    if not isinstance(rule, str) or rule not in APPROVED_SEMANTIC_RULES:
-        return False
-    if not isinstance(reason, str) or len(reason.strip()) < 20:
-        return False
-    if rule == "provider_rounding":
-        return "provider" in reason.casefold() and "round" in reason.casefold()
-    return reason.strip().casefold().startswith("parent-approved:")
+    Provider rounding is diagnostic context, not authority to soften public
+    team minutes or derived rates.  Free-form operator prose is deliberately
+    excluded from this gate.
+    """
+
+    return rule in APPROVED_SEMANTIC_RULES and reason is None
 
 MATCHUP_REQUIRED_STREAMS = frozenset({
     "traditional_opponent_season",
