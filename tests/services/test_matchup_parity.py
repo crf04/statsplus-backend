@@ -15,6 +15,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
@@ -30,6 +31,7 @@ from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
     CollectionObservation,
+    PublicationStream,
     PublicationVersion,
 )
 from app.models.canonical_game_ledger import LedgerParityArtifact
@@ -38,7 +40,6 @@ from app.services.canonical_game_ledger import (
     raw_rows_from_facts,
 )
 from app.services.collection_control import ControlPlaneError, PublicationService
-from app.services.ledger_lineage import LedgerLineage
 from app.services.ledger_parity import (
     LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
     PER36_RAW_FIELDS,
@@ -47,6 +48,7 @@ from app.services.ledger_parity import (
     matchup_parity_cohort_is_activatable,
 )
 from app.services.nba_stats_adapter import player_per36_request_descriptor
+from app.services.nba_stats_adapter import player_totals_request_descriptor
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
@@ -286,6 +288,10 @@ def test_integer_count_difference_is_a_hard_failure():
 
     assert report.hard_failure
     assert not report.adjudication_required
+    persisted = report.differences[0].to_dict()
+    assert persisted["blocks_approval"] is True
+    assert len(persisted["ledger_checksum"]) == 64
+    assert len(persisted["legacy_checksum"]) == 64
     assert not report.exact
     assert any(
         d.classification == CLASSIFICATION_INTEGER_COUNT_DIFFERENCE
@@ -1338,7 +1344,9 @@ def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path
             created_at=CUTOFF + timedelta(minutes=6),
         ))
         session.commit()
-        assert matchup_parity_cohort_is_activatable(
+        # This compact historical fixture is intentionally midseason; a
+        # partial 15-game authority can no longer authorize activation.
+        assert not matchup_parity_cohort_is_activatable(
             session,
             season="2025-26",
             cutoff=CUTOFF,
@@ -1616,7 +1624,7 @@ def test_assist_stream_activation_requires_parity(tmp_path):
 
 # --- CLI integration -------------------------------------------------------
 
-def _bounded_cli_world(tmp_path):
+def _bounded_cli_world(tmp_path, monkeypatch):
     import scripts.matchup_parity as matchup_parity_script
     from tests.services.test_ledger_derivations import _league_games
 
@@ -1627,13 +1635,20 @@ def _bounded_cli_world(tmp_path):
     PublicationService(engine).register_default_streams()
     team_mapping = dict(zip(range(1, 31), TEAM_IDS, strict=True))
     games = []
-    for index, source in enumerate(_league_games()):
+    source_rounds = _league_games()
+    # 75 games per team from five 15-round cycles, plus seven rounds, yields
+    # the authentic 82-team-game/1,230-game completed Regular Season shape.
+    completed_schedule = (*source_rounds * 5, *source_rounds[: 7 * 15])
+    for index, source in enumerate(completed_schedule):
         home = team_mapping[source.home_team_id]
         away = team_mapping[source.away_team_id]
+        game_id = f"{source.game_id}-{index // len(source_rounds)}"
         game = replace(
             source,
+            game_id=game_id,
+            source_observation_id=f"obs:{game_id}",
             season="2025-26",
-            game_date=date(2024, 11, 1) + timedelta(days=index // 15),
+            game_date=date(2024, 8, 26) + timedelta(days=index // 15),
             home_team_id=home,
             home_team_tricode=NBA_TEAM_ID_TO_TRICODE[home],
             away_team_id=away,
@@ -1711,19 +1726,25 @@ def _bounded_cli_world(tmp_path):
     governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
         "2025-26", CUTOFF,
     )
-    with Session(engine) as session, session.begin():
-        composed = matchup_parity_script._compose_candidate_set(
-            engine, session=session, governance=governance,
-            season="2025-26", cutoff=CUTOFF,
-        )
-        candidates = {
-            stream: SimpleNamespace(
+    prepare_output = tmp_path / "prepare-receipt.json"
+    monkeypatch.setattr(sys, "argv", [
+        "matchup_parity.py", "prepare", "--database-url", database_url,
+        "--season", "2025-26", "--manifest-id", MANIFEST,
+        "--output", str(prepare_output),
+    ])
+    assert matchup_parity_script.main() == 0, prepare_output.read_text()
+    prepared = json.loads(prepare_output.read_text())
+    assert set(prepared["candidates"]) == set(matchup_parity_script.ALL_REQUIRED_STREAMS)
+    with Session(engine) as session:
+        candidates = {}
+        for stream, identity in prepared["candidates"].items():
+            row = session.get(PublicationVersion, identity["publication_id"])
+            assert row is not None
+            candidates[stream] = SimpleNamespace(
                 publication_id=row.publication_id,
                 payload=row.payload,
                 checksum=row.checksum,
             )
-            for stream, row in composed.items()
-        }
 
     # Seed the protected legacy snapshots, then copy the independently
     # composed candidate primitives into their provider-owned rows. This keeps
@@ -1775,37 +1796,66 @@ def _bounded_cli_world(tmp_path):
 
 
 def _run_per36_capture_cli(
-    monkeypatch, *, database_url, governance, candidate, output_path,
+    monkeypatch, *, database_url, candidate, output_path,
     input_path, raw_offset=0,
 ):
     import scripts.matchup_parity as matchup_parity_script
+    from app.services import matchup_parity_operation
 
-    rows = json.loads(candidate.payload)
+    total_rows = []
+    rate_rows = []
+    for local_team_id, team_id in enumerate(TEAM_IDS, start=1):
+        raw = {
+            "PTS": (10 + local_team_id) * 82,
+            "REB": 5 * 82, "AST": (4 + local_team_id % 3) * 82,
+            "FGM": 5 * 82, "FGA": 10 * 82,
+            "FG3M": 1 * 82, "FG3A": 2 * 82,
+            "FTM": 0, "FTA": 0, "TOV": 1 * 82,
+            "STL": 1 * 82, "BLK": 0, "PF": 1 * 82,
+        }
+        minutes = 240.0 * 82
+        total_rows.append({
+            "PLAYER_ID": 1000 + local_team_id, "TEAM_ID": team_id,
+            "GP": 82, "MIN": minutes, **raw,
+        })
+        rate_rows.append({
+            "PLAYER_ID": 1000 + local_team_id,
+            **{key: value * 36.0 / minutes for key, value in raw.items()},
+        })
+
+    class FakeAdapter:
+        def fetch_player_per36_stats(self, *, season):
+            assert season == "2025-26"
+            return pd.DataFrame(rate_rows)
+
+        def fetch_player_totals_stats(self, *, season):
+            assert season == "2025-26"
+            return pd.DataFrame(total_rows)
+
+        def transport_request_descriptor(self, operation):
+            return {
+                "player_per36_stats": player_per36_request_descriptor(
+                    season="2025-26"
+                ),
+                "player_totals_stats": player_totals_request_descriptor(
+                    season="2025-26"
+                ),
+            }[operation]
+
+    monkeypatch.setattr(matchup_parity_operation, "NBAStatsAdapter", FakeAdapter)
+    monkeypatch.setattr(sys, "argv", [
+        "matchup_parity.py", "collect-per36", "--database-url", database_url,
+        "--season", "2025-26", "--manifest-id", MANIFEST,
+        "--output", str(input_path),
+    ])
+    assert matchup_parity_script.main() == 0, input_path.read_text()
+    evidence = json.loads(input_path.read_text())
+    rows = evidence["rows"]
     for row in rows:
-        for field in PER36_RAW_FIELDS:
-            row[field] = round(row[f"{field}_per36"] * row["minutes"] / 36.0)
+        assert set(PER36_RAW_FIELDS) <= set(row)
     if raw_offset:
         rows[0]["points"] += raw_offset
-    game_ids = sorted(map(str, governance.expected_game_ids))
-    request = player_per36_request_descriptor(season="2025-26")
-    request_checksum = hashlib.sha256(json.dumps(
-        request, sort_keys=True, separators=(",", ":"),
-    ).encode()).hexdigest()
-    identity = {
-        "season": "2025-26", "window": "season",
-        "cutoff": CUTOFF.isoformat(),
-        "provider_start_date": "2024-11-01",
-        "provider_end_date": "2024-11-15",
-        "transport_request": request, "request_checksum": request_checksum,
-        "game_ids": game_ids, "returned_row_count": len(rows),
-        "returned_game_count": len(game_ids),
-        "event_catalog_mapping_trace": {game_id: game_id for game_id in game_ids},
-    }
-    input_path.write_text(json.dumps({
-        "rows": rows, "provider_window_identity": identity,
-        "request_checksum": request_checksum,
-        "game_set_checksum": LedgerLineage.for_game_ids(game_ids),
-    }), encoding="utf-8")
+    input_path.write_text(json.dumps(evidence), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", [
         "matchup_parity.py", "capture-per36",
         "--database-url", database_url, "--season", "2025-26",
@@ -1833,7 +1883,9 @@ def _run_compare_cli(monkeypatch, *, database_url, capture_id, output_path):
 def test_bounded_cli_real_database_exact_pending_and_invalid(
     tmp_path, monkeypatch, capsys,
 ):
-    database_url, engine, governance, candidates = _bounded_cli_world(tmp_path)
+    database_url, engine, governance, candidates = _bounded_cli_world(
+        tmp_path, monkeypatch,
+    )
     with engine.connect() as connection:
         before_control = {
             "pointers": connection.execute(text(
@@ -1845,7 +1897,7 @@ def test_bounded_cli_real_database_exact_pending_and_invalid(
             )).all(),
         }
     exact_capture = _run_per36_capture_cli(
-        monkeypatch, database_url=database_url, governance=governance,
+        monkeypatch, database_url=database_url,
         candidate=candidates["player_per36"],
         input_path=tmp_path / "exact-capture.json",
         output_path=tmp_path / "exact-capture-receipt.json",
@@ -1872,9 +1924,54 @@ def test_bounded_cli_real_database_exact_pending_and_invalid(
             "WHERE status = 'exact'"
         )).scalars())
     assert set(candidates) <= exact_streams
+    with Session(engine) as session:
+        assert matchup_parity_cohort_is_activatable(
+            session, season="2025-26", cutoff=CUTOFF,
+            candidate_publication_id=candidates["player_per36"].publication_id,
+            artifact_id=exact_summary["artifact_ids"]["player_per36"],
+        )
+    empty_payload = "[]"
+    with engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.update().where(
+            PublicationVersion.publication_id.in_((
+                candidates["assist_locations_season"].publication_id,
+                candidates["assist_locations_l15"].publication_id,
+            ))
+        ).values(
+            payload=empty_payload,
+            checksum=publication_payload_checksum(empty_payload),
+        ))
+    with Session(engine) as session:
+        assert matchup_parity_cohort_is_activatable(
+            session, season="2025-26", cutoff=CUTOFF,
+            candidate_publication_id=candidates["player_per36"].publication_id,
+            artifact_id=exact_summary["artifact_ids"]["player_per36"],
+        )
+        assert not matchup_parity_cohort_is_activatable(
+            session, season="2025-26", cutoff=CUTOFF,
+            candidate_publication_id=(
+                candidates["assist_locations_season"].publication_id
+            ),
+            artifact_id=exact_summary["artifact_ids"]["assist_locations_season"],
+        )
+    with engine.begin() as connection:
+        for stream in ("assist_locations_season", "assist_locations_l15"):
+            connection.execute(PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == candidates[stream].publication_id
+            ).values(
+                payload=candidates[stream].payload,
+                checksum=candidates[stream].checksum,
+            ))
+        connection.execute(PublicationStream.__table__.update().where(
+            PublicationStream.stream_key.in_(tuple(candidates))
+        ).values(enabled=True))
+    with engine.connect() as connection:
+        enabled_control = connection.execute(text(
+            "SELECT stream_key, enabled FROM publication_streams ORDER BY stream_key"
+        )).all()
 
     pending_capture = _run_per36_capture_cli(
-        monkeypatch, database_url=database_url, governance=governance,
+        monkeypatch, database_url=database_url,
         candidate=candidates["player_per36"], raw_offset=1,
         input_path=tmp_path / "pending-capture.json",
         output_path=tmp_path / "pending-capture-receipt.json",
@@ -1888,6 +1985,9 @@ def test_bounded_cli_real_database_exact_pending_and_invalid(
     pending_summary = json.loads(pending_output.read_text())
     assert pending_summary["status"] == "pending_adjudication"
     with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT stream_key, enabled FROM publication_streams ORDER BY stream_key"
+        )).all() == enabled_control
         pending = connection.execute(text(
             "SELECT report FROM canonical_game_ledger_parity_artifacts "
             "WHERE stream_key = 'player_per36' AND status = 'pending_adjudication' "
@@ -1899,6 +1999,10 @@ def test_bounded_cli_real_database_exact_pending_and_invalid(
         candidate_count = connection.execute(text(
             "SELECT COUNT(*) FROM publication_versions WHERE status = 'candidate'"
         )).scalar_one()
+    with engine.begin() as connection:
+        connection.execute(PublicationStream.__table__.update().where(
+            PublicationStream.stream_key.in_(tuple(candidates))
+        ).values(enabled=False))
     assert json.loads(pending)["differences"][0]["classification"] == "raw_count_difference"
 
     invalid_output = tmp_path / "invalid-summary.json"
@@ -2087,10 +2191,13 @@ def test_manifest_preflight_requires_one_unique_qualifying_authority(tmp_path):
     import scripts.matchup_parity as matchup_parity_script
 
     engine, _, _ = _runner_world(tmp_path)
-    _, manifest, _ = matchup_parity_script._manifest_preflight(
-        engine, season="2025-26", manifest_id=MANIFEST,
-    )
-    assert manifest["id"] == MANIFEST
+    with pytest.raises(
+        matchup_parity_script.InvalidEvidenceError,
+        match="completed_2025_26_regular_season_required",
+    ):
+        matchup_parity_script._manifest_preflight(
+            engine, season="2025-26", manifest_id=MANIFEST,
+        )
 
     with Session(engine) as session, session.begin():
         authority = session.get(CollectionManifest, MANIFEST)

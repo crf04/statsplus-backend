@@ -46,6 +46,34 @@ authority, status, cutoff, or pointer drift fails the window closed.
 
 ## Bounded dual-run
 
+Prepare the immutable candidates first. This is a database-only operation and
+does not enable a stream or move a publication pointer:
+
+```sh
+./scripts/matchup_parity.py prepare \
+  --database-url "$DATABASE_URL" \
+  --season 2025-26 \
+  --manifest-id "<exact completed-season manifest id>" \
+  --output parity-preparation.json
+```
+
+On the residential collection host, collect independent NBA evidence. The
+adapter makes explicit `LeagueDashPlayerStats` Regular Season requests for
+both `PerMode=Per36` diagnostic rates and `PerMode=Totals` raw integer counts
+and minutes; it records the clients' complete wire parameters in the envelope:
+
+```sh
+./scripts/matchup_parity.py collect-per36 \
+  --database-url "$DATABASE_URL" \
+  --season 2025-26 \
+  --manifest-id "<same manifest id>" \
+  --output per36-provider-evidence.json
+```
+
+Ingest that immutable envelope with `capture-per36` below, using the prepared
+`player_per36` publication ID, then run `compare`. No operator synthesizes raw
+counts, rates, game IDs, request parameters, or checksums.
+
 ```sh
 ./scripts/matchup_parity.py compare \
   --database-url "$DATABASE_URL" \
@@ -66,6 +94,9 @@ candidate publications. It reads no provider and never reads or advances a
 authority: if more than one active schema-v1 canonical-ledger manifest with a
 complete bound Event Catalog qualifies for the Season and cutoff, preflight
 fails closed.
+For issue #117, authority is a completed 2025-26 Regular Season: exactly 30
+teams, 82 completed non-postponed games per team, and 1,230 unique games.
+`complete: true` on a partial or midseason catalog is not sufficient.
 
 The command composes all five inactive candidate publications from the exact
 governed ledger inside its bounded transaction. Operators do not supply
@@ -102,13 +133,13 @@ The bounded input contains only `rows`, `provider_window_identity`,
 manifest, Event Catalog, candidate publication, raw evidence schema and exact
 checksums, then creates an immutable source observation, capture artifact and
 audit event in one transaction. Its receipt contains IDs and checksums only.
-`provider_window_identity.transport_request` must be the adapter-captured
-`LeagueDashPlayerStats` request descriptor: operation `player_per36_stats` and
-the exact complete canonical wire parameter map exported by the NBA adapter,
-including every empty/default parameter as well as `LeagueID`, `Season`,
-`SeasonType`, `PerMode=Per36`, and `MeasureType=Base`. Missing keys, extra keys,
-type changes, and default changes are rejected. The request checksum hashes
-that complete descriptor; a caller-synthesized date window or selected
+`provider_window_identity.transport_requests` must contain both adapter-captured
+`LeagueDashPlayerStats` request descriptors: `player_per36_stats` with
+`PerMode=Per36` and `player_totals_stats` with `PerMode=Totals`. Both carry the
+exact complete canonical wire parameter map, including empty/default values,
+`LeagueID`, `Season`, `SeasonType`, and `MeasureType=Base`. Missing keys, extra
+keys, type changes, and default changes are rejected. The request checksum
+hashes both complete descriptors; a caller-synthesized date window or selected
 parameter summary is not accepted.
 
 ## What the report proves

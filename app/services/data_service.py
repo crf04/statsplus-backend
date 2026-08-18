@@ -742,7 +742,9 @@ class DataService:
         )
 
     def _fetch_player_per36_stats(self):
-        return self.nba_stats.fetch_player_per36_stats()
+        return self.nba_stats.fetch_player_per36_stats(
+            season=self.settings.nba.current_season,
+        )
 
     def _fetch_data_from_table(self, table_name):
         from ..utils.tables import normalize_table_name

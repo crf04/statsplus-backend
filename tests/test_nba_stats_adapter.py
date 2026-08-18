@@ -41,6 +41,7 @@ from app.services.nba_stats_adapter import (
     GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter,
     opponent_team_stats_request_descriptor,
     player_per36_request_descriptor,
+    player_totals_request_descriptor,
 )
 from app.services.nba_stats_adapter import (
     parse_recorded_game_logs,
@@ -1014,6 +1015,8 @@ def test_player_diet_synergy_uses_pinned_offensive_season_contract(monkeypatch):
 def test_player_per36_records_the_exact_endpoint_wire_request(monkeypatch):
     class Endpoint:
         def __init__(self, **kwargs):
+            assert kwargs["season"] == "2025-26"
+            assert kwargs["season_type_all_star"] == "Regular Season"
             self.parameters = player_per36_request_descriptor(
                 season="2025-26"
             )["parameters"]
@@ -1024,14 +1027,42 @@ def test_player_per36_records_the_exact_endpoint_wire_request(monkeypatch):
     monkeypatch.setattr(endpoints, "LeagueDashPlayerStats", Endpoint)
     adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
 
-    adapter.fetch_player_per36_stats()
+    adapter.fetch_player_per36_stats(season="2025-26")
 
     assert adapter.transport_request_descriptor("player_per36_stats") == {
         "adapter": "nba_stats",
         "operation": "player_per36_stats",
         "endpoint": "LeagueDashPlayerStats",
-        "parameters": Endpoint().parameters,
+        "parameters": player_per36_request_descriptor(
+            season="2025-26"
+        )["parameters"],
     }
+
+
+def test_player_totals_records_independent_raw_count_request(monkeypatch):
+    descriptor = player_totals_request_descriptor(season="2025-26")
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            assert kwargs["season"] == "2025-26"
+            assert kwargs["per_mode_detailed"] == "Totals"
+            self.parameters = descriptor["parameters"]
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{
+                "PLAYER_ID": 2544, "TEAM_ID": 1610612747, "GP": 82,
+                "MIN": 2800, "PTS": 2000, "REB": 600, "AST": 500,
+                "FGM": 700, "FGA": 1400, "FG3M": 200, "FG3A": 500,
+                "FTM": 400, "FTA": 500, "TOV": 200, "STL": 80,
+                "BLK": 40, "PF": 100,
+            }])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_player_totals_stats(season="2025-26")
+
+    assert adapter.transport_request_descriptor("player_totals_stats") == descriptor
 
 
 def test_player_diet_shot_type_uses_pinned_league_dash_player_contract(monkeypatch):

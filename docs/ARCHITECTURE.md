@@ -82,7 +82,7 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -1915,6 +1915,16 @@ difference artifact remains pending until an audited decision. Floating denomina
 required public fields are hard failures; provider rounding is diagnostic
 context only and never activation authority.
 
+`app.services.matchup_parity_operation.MatchupParityOperation` is the deep
+application module that owns authority resolution, candidate composition and
+verification, capture validation, comparison, transaction outcomes, and
+sanitized output. `scripts/matchup_parity.py` only parses command-line input
+and selects that interface.
+
+The supported sequence is `prepare`, residential-host `collect-per36`, audited
+`capture-per36`, then `compare`. The immutable authority must describe the
+completed 2025-26 Regular Season (30 teams, 82 completed non-postponed games
+per team, 1,230 unique games); a partial catalog marked complete is rejected.
 `scripts/matchup_parity.py compare` requires an explicit database URL, Season,
 manifest ID, actor, sanitized output path, `isolated|candidate` target, and a
 scoped per-36 diagnostic-capture ID. One

@@ -6,7 +6,7 @@ import math
 import json
 import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, make_dataclass
+from dataclasses import asdict, dataclass, field as dataclass_field, make_dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -43,7 +43,10 @@ from app.services.ledger_derivations import (
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.matchup_authority import resolve_unique_matchup_authority
-from app.services.nba_stats_adapter import player_per36_request_descriptor
+from app.services.nba_stats_adapter import (
+    player_per36_request_descriptor,
+    player_totals_request_descriptor,
+)
 from app.services.publication_authority import verify_publication_authority
 from app.services.team_matchup_publications import PublicationGovernanceUnavailable
 
@@ -235,18 +238,31 @@ class Per36DiagnosticCaptureRepository:
         game_ids = identity.get("game_ids")
         mapping_trace = identity.get("event_catalog_mapping_trace")
         transport_request = identity.get("transport_request")
-        if not isinstance(transport_request, Mapping):
-            raise ValueError("per36 transport request is invalid")
-        if set(transport_request) != {
-            "adapter", "endpoint", "operation", "parameters",
-        }:
-            raise ValueError("per36 transport request is invalid")
-        if dict(transport_request) != player_per36_request_descriptor(
+        transport_requests = identity.get("transport_requests")
+        expected_per36 = player_per36_request_descriptor(
             season=str(document["season"])
-        ):
-            raise ValueError("per36 transport request is invalid")
+        )
+        if transport_requests is not None:
+            if not isinstance(transport_requests, Mapping) or dict(
+                transport_requests
+            ) != {
+                "per36": expected_per36,
+                "totals": player_totals_request_descriptor(
+                    season=str(document["season"])
+                ),
+            }:
+                raise ValueError("per36 transport request is invalid")
+            checksummed_request = transport_requests
+        else:
+            if not isinstance(transport_request, Mapping):
+                raise ValueError("per36 transport request is invalid")
+            if set(transport_request) != {
+                "adapter", "endpoint", "operation", "parameters",
+            } or dict(transport_request) != expected_per36:
+                raise ValueError("per36 transport request is invalid")
+            checksummed_request = transport_request
         expected_request_checksum = hashlib.sha256(
-            _canonical_capture_payload(transport_request).encode("utf-8")
+            _canonical_capture_payload(checksummed_request).encode("utf-8")
         ).hexdigest()
         if (
             identity.get("season") != document["season"]
@@ -713,6 +729,7 @@ def matchup_parity_artifact_is_activatable(
             )
         if any(
             not isinstance(difference, Mapping)
+            or not _difference_evidence_valid(difference)
             or difference.get("classification") != "semantic_difference"
             for difference in differences
         ):
@@ -876,7 +893,9 @@ def matchup_parity_artifact_is_activatable(
         return False
     classifications = []
     for difference in differences:
-        if not isinstance(difference, Mapping):
+        if not isinstance(difference, Mapping) or not _difference_evidence_valid(
+            difference
+        ):
             return False
         classification = difference.get("classification")
         if classification not in (
@@ -894,6 +913,29 @@ def matchup_parity_artifact_is_activatable(
     return semantic_rule_is_approved(
         document.get("semantic_rule"),
         document.get("semantic_rule_reason"),
+    )
+
+
+def _difference_evidence_valid(difference: Mapping[str, object]) -> bool:
+    """Validate new checksummed rows while decoding historical `pbp_value`."""
+
+    legacy_shape = "ledger_value" not in difference and "pbp_value" in difference
+    ledger_value = difference.get(
+        "ledger_value", difference.get("pbp_value")
+    )
+    legacy_value = difference.get("legacy_value")
+    if legacy_shape and "ledger_checksum" not in difference:
+        return True
+    expected_ledger = hashlib.sha256(json.dumps(
+        ledger_value, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()
+    expected_legacy = hashlib.sha256(json.dumps(
+        legacy_value, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()
+    return (
+        difference.get("ledger_checksum") == expected_ledger
+        and difference.get("legacy_checksum") == expected_legacy
+        and isinstance(difference.get("blocks_approval"), bool)
     )
 
 
@@ -997,6 +1039,7 @@ def matchup_parity_cohort_is_activatable(
         unique_authority = resolve_unique_matchup_authority(
             session, season=season, cutoff=target_cutoff, lock=True,
         )
+        unique_authority.require_completed_regular_season()
     except ValueError:
         return False
     requested_artifact = session.scalar(
@@ -1004,12 +1047,36 @@ def matchup_parity_cohort_is_activatable(
             LedgerParityArtifact.artifact_id == artifact_id
         ).with_for_update().execution_options(populate_existing=True)
     )
-    cohort_streams = (
-        _MATCHUP_PARITY_COHORT_STREAMS
-        if requested_artifact is not None
-        and requested_artifact.stream_key == "player_per36"
-        else _MATCHUP_STREAMS
-    )
+    # Traditional and per-36 are always required. Assist is conditional on
+    # the immutable candidate carrying primitives for that window; a bound
+    # empty unavailable assist candidate cannot block healthy sibling streams,
+    # but the unavailable assist stream itself remains ineligible.
+    required_streams = {
+        "traditional_opponent_season", "traditional_opponent_l15",
+        "player_per36",
+    }
+    for assist_stream in ("assist_locations_season", "assist_locations_l15"):
+        publications = session.scalars(select(PublicationVersion).where(
+            PublicationVersion.stream_key == assist_stream,
+            PublicationVersion.season == season,
+            PublicationVersion.cutoff == target_cutoff,
+            PublicationVersion.manifest_id == unique_authority.manifest_id,
+            PublicationVersion.status.in_(("candidate", "active")),
+        )).all()
+        has_primitives = False
+        for publication in publications:
+            try:
+                payload = json.loads(publication.payload)
+                has_primitives = has_primitives or bool(payload)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                has_primitives = True
+        if has_primitives:
+            required_streams.add(assist_stream)
+    if requested_artifact is not None and requested_artifact.stream_key.startswith(
+        "assist_locations_"
+    ):
+        required_streams.add(requested_artifact.stream_key)
+    cohort_streams = frozenset(required_streams)
     # Lock the complete candidate history before selecting.  The lock order is
     # deterministic so concurrent activation attempts cannot validate one
     # generation and mutate a different one between reads.
@@ -1155,9 +1222,22 @@ def matchup_parity_cohort_is_activatable(
 class SemanticDifference:
     identity: str
     field: str
-    pbp_value: object
+    ledger_value: object
     legacy_value: object
     classification: str
+    ledger_checksum: str = dataclass_field(init=False)
+    legacy_checksum: str = dataclass_field(init=False)
+    blocks_approval: bool = dataclass_field(default=True, init=False)
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("ledger_checksum", self.ledger_value),
+            ("legacy_checksum", self.legacy_value),
+        ):
+            encoded = json.dumps(
+                value, sort_keys=True, separators=(",", ":"), default=str,
+            ).encode("utf-8")
+            object.__setattr__(self, name, hashlib.sha256(encoded).hexdigest())
 
 
 @dataclass(frozen=True, slots=True)

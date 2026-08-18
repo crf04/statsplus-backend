@@ -687,6 +687,17 @@ def player_per36_request_descriptor(*, season: str) -> dict[str, object]:
     }
 
 
+def player_totals_request_descriptor(*, season: str) -> dict[str, object]:
+    """Return the complete LeagueDashPlayerStats raw-totals wire request."""
+
+    descriptor = player_per36_request_descriptor(season=season)
+    return {
+        **descriptor,
+        "operation": "player_totals_stats",
+        "parameters": {**descriptor["parameters"], "PerMode": "Totals"},
+    }
+
+
 class NBAStatsAdapter:
     """Run NBA Stats provider calls under one explicit concurrency bound."""
 
@@ -793,7 +804,9 @@ class NBAStatsAdapter:
                             "LeagueDashTeamStats"
                             if operation == "league_opponent_team_stats"
                             else "LeagueDashPlayerStats"
-                            if operation == "player_per36_stats"
+                            if operation in {
+                                "player_per36_stats", "player_totals_stats",
+                            }
                             else type(endpoint).__name__
                         ),
                         "parameters": json.loads(json.dumps(
@@ -1189,7 +1202,7 @@ class NBAStatsAdapter:
             required_columns=required_columns,
         )
 
-    def fetch_player_per36_stats(self) -> pd.DataFrame:
+    def fetch_player_per36_stats(self, *, season: str) -> pd.DataFrame:
         """Fetch the player per-36 baseline used by archetype calculations."""
 
         return self.run_endpoint(
@@ -1197,9 +1210,30 @@ class NBAStatsAdapter:
             lambda timeout: endpoints.LeagueDashPlayerStats(
                 measure_type_detailed_defense="Base",
                 per_mode_detailed="Per36",
+                season=season,
+                season_type_all_star="Regular Season",
                 timeout=timeout,
             ),
             required_columns=("PLAYER_ID",),
+        )
+
+    def fetch_player_totals_stats(self, *, season: str) -> pd.DataFrame:
+        """Fetch independent raw Season counts/minutes for parity capture."""
+
+        return self.run_endpoint(
+            "player_totals_stats",
+            lambda timeout: endpoints.LeagueDashPlayerStats(
+                measure_type_detailed_defense="Base",
+                per_mode_detailed="Totals",
+                season=season,
+                season_type_all_star="Regular Season",
+                timeout=timeout,
+            ),
+            required_columns=(
+                "PLAYER_ID", "TEAM_ID", "GP", "MIN", "PTS", "REB", "AST",
+                "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA", "TOV",
+                "STL", "BLK", "PF",
+            ),
         )
 
     def fetch_player_shot_type(
@@ -1383,6 +1417,8 @@ __all__ = [
     "SCHEDULE_REQUIRED_COLUMNS",
     "CANONICAL_SCHEDULE_COLUMNS",
     "NBAStatsAdapter",
+    "player_per36_request_descriptor",
+    "player_totals_request_descriptor",
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
     "parse_recorded_player_roster",

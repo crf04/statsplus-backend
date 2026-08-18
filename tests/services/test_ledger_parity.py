@@ -111,15 +111,15 @@ def test_per36_well_formed_differences_persist_pending_and_are_unapprovable(tmp_
     publication_id, checksum = _candidate(engine)
     differences = (
         SemanticDifference(
-            identity="per36:1", field="points", pbp_value=10,
+            identity="per36:1", field="points", ledger_value=10,
             legacy_value=11, classification="raw_count_difference",
         ),
         SemanticDifference(
-            identity="per36:2", field="player_id", pbp_value=2,
+            identity="per36:2", field="player_id", ledger_value=2,
             legacy_value=None, classification="identity_mismatch",
         ),
         SemanticDifference(
-            identity="per36:999", field="player_id", pbp_value=None,
+            identity="per36:999", field="player_id", ledger_value=None,
             legacy_value=999, classification="identity_mismatch",
         ),
     )
@@ -135,7 +135,15 @@ def test_per36_well_formed_differences_persist_pending_and_are_unapprovable(tmp_
 
     assert artifact.status == "pending_adjudication"
     assert artifact.decision is None
-    assert len(json.loads(artifact.report)["differences"]) == 3
+    persisted = json.loads(artifact.report)["differences"]
+    assert len(persisted) == 3
+    assert all(
+        len(row["ledger_checksum"]) == 64
+        and len(row["legacy_checksum"]) == 64
+        and row["blocks_approval"] is True
+        and "pbp_value" not in row
+        for row in persisted
+    )
     with Session(engine) as session:
         assert not matchup_parity_artifact_is_activatable(
             artifact, stream_key="player_per36", session=session

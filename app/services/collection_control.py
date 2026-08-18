@@ -4002,7 +4002,7 @@ class PublicationService(_SessionService):
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-            if stream is None or stream.provider != "ledger" or stream.enabled:
+            if stream is None or stream.provider != "ledger":
                 raise ControlPlaneError("inactive_ledger_stream_required")
             self._assert_ledger_provenance(
                 session, season=season, cutoff=_aware(cutoff), provenance=provenance,
@@ -4021,7 +4021,7 @@ class PublicationService(_SessionService):
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,
                 PublicationVersion.cutoff == _aware(cutoff),
-                PublicationVersion.status.in_(("candidate", "active")),
+                PublicationVersion.status == "candidate",
             ).order_by(PublicationVersion.version.desc())))
             existing = replaceable[0] if replaceable else None
             if (

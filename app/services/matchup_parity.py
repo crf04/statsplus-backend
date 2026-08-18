@@ -191,14 +191,23 @@ class MatchupParityDifference:
     classification: str
 
     def to_dict(self) -> dict[str, Any]:
+        ledger_value = _json_value(self.ledger_value)
+        legacy_value = _json_value(self.legacy_value)
+        def checksum(value):
+            return hashlib.sha256(json.dumps(
+                value, sort_keys=True, separators=(",", ":"), default=str,
+            ).encode("utf-8")).hexdigest()
         return {
             "window": self.window,
             "surface": self.surface,
             "team_id": self.team_id,
             "field": self.field,
-            "ledger_value": _json_value(self.ledger_value),
-            "legacy_value": _json_value(self.legacy_value),
+            "ledger_value": ledger_value,
+            "legacy_value": legacy_value,
+            "ledger_checksum": checksum(ledger_value),
+            "legacy_checksum": checksum(legacy_value),
             "classification": self.classification,
+            "blocks_approval": self.classification in HARD_CLASSIFICATIONS,
         }
 
 

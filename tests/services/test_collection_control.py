@@ -297,6 +297,25 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
             updated_at=now,
         ))
 
+    corrected_candidate = publications.compose_inactive_ledger(
+        "player_game_logs", season="2025-26", cutoff=now,
+        payload=_player_log_payload(points=31),
+        provenance={"pbp:game-1": "game-1"},
+        reason="enabled correction rehearsal",
+    )
+    assert corrected_candidate.status == "candidate"
+    with control_db.connect() as connection:
+        active_status = connection.scalar(select(PublicationVersion.status).where(
+            PublicationVersion.publication_id == "current-player-logs"
+        ))
+        pointer = connection.execute(select(
+            PublicationPointer.active_publication_id,
+            PublicationPointer.previous_publication_id,
+            PublicationPointer.fence,
+        ).where(PublicationPointer.stream_key == "player_game_logs")).one()
+    assert active_status == "active"
+    assert pointer == ("current-player-logs", candidate.publication_id, 2)
+
     rollback = publications.rollback(
         "player_game_logs",
         reason="restore prior player logs",

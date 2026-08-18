@@ -883,7 +883,7 @@ def _unavailable_parity_report(
         differences=(SemanticDifference(
             identity=diagnostic_key,
             field="diagnostic",
-            pbp_value="candidate_persisted",
+            ledger_value="candidate_persisted",
             legacy_value=None,
             classification=f"diagnostic_unavailable:{type(error).__name__}",
         ),),
