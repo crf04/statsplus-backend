@@ -947,7 +947,10 @@ def matchup_parity_cohort_is_activatable(
     candidate_publication_id: str,
     artifact_id: str,
 ) -> bool:
-    """Require one exact Season+L15, traditional+assist evidence cohort.
+    """Require one exact governed evidence cohort for the ledger-owned streams.
+
+    The cohort is always traditional Season+L15 and player per-36; assist
+    Season/L15 join it when the bound candidate carries assist primitives.
 
     Artifact history is append-only: rejected, superseded, or failed reruns
     must not make an otherwise valid cohort unusable.  Select the newest

@@ -267,6 +267,7 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
     data_service = DataService(
         engine,
         settings=load_settings(),
+        write_fence=LegacyWriteFence(engine),
     )
     frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
     monkeypatch.setattr(data_service, "_fetch_opponent_data", lambda *args, **kwargs: frame)
@@ -282,7 +283,7 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
         TeamMatchupFact, TeamMatchupObservation, TeamMatchupRepository,
         TeamMatchupSnapshotScope,
     )
-    repository = TeamMatchupRepository(engine)
+    repository = TeamMatchupRepository(engine, write_fence=LegacyWriteFence(engine))
     with pytest.raises(Exception, match="legacy_write_fenced"):
         repository.replace_snapshots((
             (

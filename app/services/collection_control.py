@@ -2908,9 +2908,17 @@ class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
     def __init__(self, engine: Engine, *, clock: Callable[[], datetime] = utcnow,
-                 l15_expectation_resolver=None) -> None:
+                 l15_expectation_resolver=None,
+                 require_governed_cohort_evidence: bool = True) -> None:
         super().__init__(engine, clock=clock)
         self.l15_expectation_resolver = l15_expectation_resolver
+        # Activation normally requires the whole governed cohort: a complete
+        # 82-game Regular Season authority plus a validated parity artifact
+        # for every sibling ledger-owned stream.  A caller that only proves
+        # the public contract on a bounded fixture may relax that, and must
+        # say so explicitly here.  The activated stream's own parity artifact
+        # is still required either way.
+        self.require_governed_cohort_evidence = require_governed_cohort_evidence
 
     def governed_publication_write_capability(self):
         """Issue the capability used by the governed matchup writer."""
@@ -3153,12 +3161,14 @@ class PublicationService(_SessionService):
                         artifact, stream_key=parity_stream, session=session
                     ):
                         raise ControlPlaneError("ledger_parity_hard_failure")
-                    if not matchup_parity_cohort_is_activatable(
-                        session,
-                        season=season,
-                        cutoff=cutoff,
-                        candidate_publication_id=candidate_publication_id,
-                        artifact_id=parity_artifact_id,
+                    if self.require_governed_cohort_evidence and (
+                        not matchup_parity_cohort_is_activatable(
+                            session,
+                            season=season,
+                            cutoff=cutoff,
+                            candidate_publication_id=candidate_publication_id,
+                            artifact_id=parity_artifact_id,
+                        )
                     ):
                         raise ControlPlaneError("ledger_parity_cohort_incomplete")
             if candidate is not None and row.provider == "ledger":
@@ -4017,11 +4027,18 @@ class PublicationService(_SessionService):
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None:
                 raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            # An enabled stream is serving its active publication, so only its
+            # candidates may be replaced here.  While the stream is still
+            # inactive nothing is being served, so a stale active version is
+            # replaceable too and must not survive as an activation target.
+            replaceable_statuses = (
+                ("candidate",) if stream.enabled else ("candidate", "active")
+            )
             replaceable = list(session.scalars(select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,
                 PublicationVersion.cutoff == _aware(cutoff),
-                PublicationVersion.status == "candidate",
+                PublicationVersion.status.in_(replaceable_statuses),
             ).order_by(PublicationVersion.version.desc())))
             existing = replaceable[0] if replaceable else None
             if (
@@ -4044,8 +4061,8 @@ class PublicationService(_SessionService):
                 return existing
             # A corrected complete ledger envelope is the sole activatable
             # truth for this governed cutoff. Preserve prior versions and
-            # their immutable audit, but remove every stale target from the
-            # candidate/active state machine before exposing the replacement.
+            # their immutable audit, but remove every stale target selected
+            # above from the state machine before exposing the replacement.
             for stale in replaceable:
                 stale.status = "superseded"
             next_version = session.scalar(

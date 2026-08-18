@@ -1448,7 +1448,12 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     player_diets = _player_diets(engine)
     log_facts = player_logs.list_player_rows(SEASON, 2544)
     diet_facts = player_diets.repository.get_for_players(SEASON, (2544,)).players[2544]
-    publication_service = PublicationService(engine, clock=lambda: NOW)
+    # This journey proves the public HTTP contract across activation on a
+    # bounded fixture season; completed-season authority is covered by the
+    # parity suite.
+    publication_service = PublicationService(
+        engine, clock=lambda: NOW, require_governed_cohort_evidence=False,
+    )
     publication_service.register_default_streams()
     operations = CollectionOperationsService(
         engine,
