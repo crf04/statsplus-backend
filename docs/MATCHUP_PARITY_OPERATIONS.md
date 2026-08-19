@@ -221,4 +221,7 @@ ledger fact.
 Activation and rollback both move the fenced pointer atomically and preserve
 the last-good Publication. Backend #87 consumes the inactive validated
 Publications plus the recorded parity artifacts to perform database-first
-activation.
+activation. See
+[DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md) for the
+activation order, the evidence each stream requires, rollback, and what stays
+in place until a separate approved cleanup.
