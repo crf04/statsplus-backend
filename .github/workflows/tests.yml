@@ -16,8 +16,9 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    # The suite grew past the previous 15-minute budget; the last green run
-    # finished at 13m53s and the next one timed out at 15m04s.
+    # The suite runs distributed (see scripts/check.sh), which took the job from
+    # ~10-15 minutes to ~4. The budget stays well above that because the run time
+    # swings with runner size and the sleep-based concurrency tests.
     timeout-minutes: 25
 
     steps:
