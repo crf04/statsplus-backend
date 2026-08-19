@@ -2908,17 +2908,9 @@ class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
     def __init__(self, engine: Engine, *, clock: Callable[[], datetime] = utcnow,
-                 l15_expectation_resolver=None,
-                 require_governed_cohort_evidence: bool = True) -> None:
+                 l15_expectation_resolver=None) -> None:
         super().__init__(engine, clock=clock)
         self.l15_expectation_resolver = l15_expectation_resolver
-        # Activation normally requires the whole governed cohort: a complete
-        # 82-game Regular Season authority plus a validated parity artifact
-        # for every sibling ledger-owned stream.  A caller that only proves
-        # the public contract on a bounded fixture may relax that, and must
-        # say so explicitly here.  The activated stream's own parity artifact
-        # is still required either way.
-        self.require_governed_cohort_evidence = require_governed_cohort_evidence
 
     def governed_publication_write_capability(self):
         """Issue the capability used by the governed matchup writer."""
@@ -3161,14 +3153,12 @@ class PublicationService(_SessionService):
                         artifact, stream_key=parity_stream, session=session
                     ):
                         raise ControlPlaneError("ledger_parity_hard_failure")
-                    if self.require_governed_cohort_evidence and (
-                        not matchup_parity_cohort_is_activatable(
-                            session,
-                            season=season,
-                            cutoff=cutoff,
-                            candidate_publication_id=candidate_publication_id,
-                            artifact_id=parity_artifact_id,
-                        )
+                    if not matchup_parity_cohort_is_activatable(
+                        session,
+                        season=season,
+                        cutoff=cutoff,
+                        candidate_publication_id=candidate_publication_id,
+                        artifact_id=parity_artifact_id,
                     ):
                         raise ControlPlaneError("ledger_parity_cohort_incomplete")
             if candidate is not None and row.provider == "ledger":
@@ -4027,10 +4017,13 @@ class PublicationService(_SessionService):
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None:
                 raise ControlPlaneError("ledger_provenance_manifest_mismatch")
-            # An enabled stream is serving its active publication, so only its
-            # candidates may be replaced here.  While the stream is still
-            # inactive nothing is being served, so a stale active version is
-            # replaceable too and must not survive as an activation target.
+            # Unlike recompose_ledger, this method never advances the
+            # publication pointer.  Superseding the pointer's target would
+            # strand it on a superseded row and make the stream read as
+            # missing, so an enabled stream may replace only its candidates.
+            # While the stream is still inactive nothing is served and the
+            # pointer is not in play, so a stale active version is replaceable
+            # too and must not survive as an activation target.
             replaceable_statuses = (
                 ("candidate",) if stream.enabled else ("candidate", "active")
             )

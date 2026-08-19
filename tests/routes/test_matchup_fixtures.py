@@ -1448,12 +1448,21 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     player_diets = _player_diets(engine)
     log_facts = player_logs.list_player_rows(SEASON, 2544)
     diet_facts = player_diets.repository.get_for_players(SEASON, (2544,)).players[2544]
-    # This journey proves the public HTTP contract across activation on a
-    # bounded fixture season; completed-season authority is covered by the
-    # parity suite.
-    publication_service = PublicationService(
-        engine, clock=lambda: NOW, require_governed_cohort_evidence=False,
+    # This journey proves the public HTTP contract across activation, not the
+    # governed parity evidence behind it.  The cross-stream cohort gate needs a
+    # complete 82-game authority plus a validated artifact for every sibling
+    # ledger stream, which this bounded fixture cannot supply; that gate is
+    # covered by tests/services/test_matchup_parity.py.  Relax it here only,
+    # so the production activation path keeps requiring it.  The activated
+    # stream's own parity artifact is still checked.
+    import app.services.ledger_parity as _ledger_parity
+
+    monkeypatch.setattr(
+        _ledger_parity,
+        "matchup_parity_cohort_is_activatable",
+        lambda *args, **kwargs: True,
     )
+    publication_service = PublicationService(engine, clock=lambda: NOW)
     publication_service.register_default_streams()
     operations = CollectionOperationsService(
         engine,
