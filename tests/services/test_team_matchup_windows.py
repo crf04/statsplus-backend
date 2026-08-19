@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,26 +14,46 @@ from sqlalchemy import create_engine, delete, inspect, update
 from sqlalchemy.exc import IntegrityError
 
 from app.migrations import run_migrations
+from app.models.collection_control import PublicationStream
 from app.models.team_matchup import (
     TeamMatchupFactRow,
     TeamMatchupSurfaceObservationRow,
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
+from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.database_first_activation import LegacyWriteFence
 from app.services.team_matchup_repository import (
     TeamMatchupFact,
     TeamMatchupObservation,
-    TeamMatchupRepository,
+    TeamMatchupRepository as _ProductionTeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
 from app.services.team_matchup_refresh import (
     TeamMatchupRefreshService,
+    TeamWindowBoundary,
     TeamWindowBoundaryResolver,
+    _ProviderGameMembership,
+    _nba_team_stats_request_descriptor,
+    _pbp_totals_request_descriptor,
 )
 from app.utils.telemetry import ProviderResponseError
 
 
 BOS = 1610612738
 NYK = 1610612752
+
+
+class _AllowTestLegacyWrites:
+    def assert_writable(self, stream_key, *, connection=None):
+        return None
+
+
+class TeamMatchupRepository(_ProductionTeamMatchupRepository):
+    """Tests opt in explicitly; production's constructor remains fail-closed."""
+
+    def __init__(self, engine, **kwargs):
+        kwargs.setdefault("write_fence", _AllowTestLegacyWrites())
+        super().__init__(engine, **kwargs)
 
 
 class FakeEventCatalog:
@@ -180,6 +201,24 @@ class _FakeMatchupPBP:
         )
 
 
+class _TeamLogNBA(_FakeMatchupNBA):
+    def __init__(self, team_ids, game_ids_by_team):
+        super().__init__(team_ids)
+        self.game_ids_by_team = game_ids_by_team
+
+    def fetch_team_game_ids(self, *, team_id, **kwargs):
+        return self.game_ids_by_team[team_id]
+
+
+class _TeamLogPBP(_FakeMatchupPBP):
+    def __init__(self, team_ids, game_ids_by_team):
+        super().__init__(team_ids)
+        self.game_ids_by_team = game_ids_by_team
+
+    def fetch_team_game_ids(self, *, team_id, **kwargs):
+        return self.game_ids_by_team[team_id]
+
+
 def _fixture_team_ids():
     return [
         row["team_id"]
@@ -221,6 +260,42 @@ def _publish_snapshot_batch(
     repository.replace_snapshots(
         ((scope, facts, observations),),
         retrieved_at=retrieved_at,
+    )
+
+
+def test_legacy_fence_checks_only_the_exact_surface_window_stream(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'exact-fence.sqlite3'}")
+    run_migrations(engine)
+    PublicationService(engine).register_default_streams()
+    repository = _ProductionTeamMatchupRepository(
+        engine, write_fence=LegacyWriteFence(engine)
+    )
+    season_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
+    l15_scope = TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15), 15)
+    observation = (TeamMatchupObservation("traditional", "available"),)
+    retrieved_at = datetime(2025, 4, 15, 16, tzinfo=timezone.utc)
+
+    with engine.begin() as connection:
+        connection.execute(update(PublicationStream).where(
+            PublicationStream.stream_key == "traditional_opponent"
+        ).values(enabled=True))
+    repository.replace_snapshots(
+        ((season_scope, _complete_traditional_facts(), observation),),
+        retrieved_at=retrieved_at,
+    )
+
+    with engine.begin() as connection:
+        connection.execute(update(PublicationStream).where(
+            PublicationStream.stream_key == "traditional_opponent_season"
+        ).values(enabled=True))
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        repository.replace_snapshots(
+            ((season_scope, _complete_traditional_facts(11), observation),),
+            retrieved_at=retrieved_at + timedelta(minutes=1),
+        )
+    repository.replace_snapshots(
+        ((l15_scope, _complete_traditional_facts(12), observation),),
+        retrieved_at=retrieved_at + timedelta(minutes=1),
     )
 
 
@@ -342,6 +417,54 @@ def test_team_last_15_boundary_keeps_cross_phase_games_but_marks_them_unrepresen
     assert boundary.season_type is None
 
 
+def test_last_15_rejects_wrong_same_count_pbp_membership():
+    team_ids = tuple(_fixture_team_ids())
+    game_ids_by_team = {
+        team_id: tuple(f"game-{team_id}-{index}" for index in range(15))
+        for team_id in team_ids
+    }
+    wrong_pbp_ids = dict(game_ids_by_team)
+    wrong_pbp_ids[team_ids[0]] = (
+        "wrong-game",
+        *game_ids_by_team[team_ids[0]][1:],
+    )
+    boundaries = {
+        team_id: TeamWindowBoundary(
+            team_id=team_id,
+            from_date=date(2025, 3, 1),
+            to_date=date(2025, 4, 15),
+            game_ids=game_ids_by_team[team_id],
+            season_type="Regular Season",
+        )
+        for team_id in team_ids
+    }
+    engine = create_engine("sqlite:///:memory:")
+    service = TeamMatchupRefreshService(
+        repository=TeamMatchupRepository(engine),
+        event_catalog=FakeEventCatalog([]),
+        nba_stats_provider=_TeamLogNBA(team_ids, game_ids_by_team),
+        pbp_stats_provider=_TeamLogPBP(team_ids, wrong_pbp_ids),
+    )
+
+    _, failures, provider_game_ids, _ = service._collect_last_15(
+        "2024-25",
+        snapshot_date=date(2025, 4, 15),
+        team_ids=team_ids,
+        boundaries=boundaries,
+        verify_window=True,
+    )
+
+    assert failures["assist_locations"] == (
+        "unavailable",
+        "provider_window_unverified",
+    )
+    assert provider_game_ids["traditional"] == {
+        team_id: tuple(sorted(game_ids))
+        for team_id, game_ids in game_ids_by_team.items()
+    }
+    assert "assist_locations" not in provider_game_ids
+
+
 def test_refresh_rejects_a_future_as_of_before_provider_or_storage_work(tmp_path):
     team_ids = _fixture_team_ids()
     events = [
@@ -373,6 +496,199 @@ def test_refresh_rejects_a_future_as_of_before_provider_or_storage_work(tmp_path
     assert nba.calls == []
     assert pbp.calls == []
     assert repository.get_latest_scope("2024-25") is None
+
+
+@pytest.mark.parametrize(
+    "provider_row",
+    (
+        {"TEAM_ID": BOS, "GP": 14},
+        {"TEAM_ID": BOS, "GP": 15},
+        {"TEAM_ID": BOS, "GP": 15, "GAME_IDS": ["stale-game"]},
+    ),
+)
+def test_provider_aggregate_must_prove_immutable_window_identity(provider_row):
+    with pytest.raises(ValueError, match="provider"):
+        TeamMatchupRefreshService._verify_aggregate_window(
+            pd.DataFrame([provider_row]),
+            expected_game_counts={BOS: 15},
+            expected_game_ids_by_team={BOS: tuple(f"game-{index}" for index in range(15))},
+            require_game_ids=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("window", "requests"),
+    (
+        ("season", {
+            "traditional:league": _nba_team_stats_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=None,
+                last_n_games=0, date_from=None, date_to="11/02/2025",
+            ),
+            "assist_locations:league": _pbp_totals_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=None,
+                from_date=None, to_date="2025-11-02",
+            ),
+        }),
+        ("l15", {
+            f"traditional:{BOS}": _nba_team_stats_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=BOS,
+                last_n_games=15, date_from="10/18/2025", date_to="11/02/2025",
+            ),
+            f"assist_locations:{BOS}": _pbp_totals_request_descriptor(
+                season="2025-26", season_type="Regular Season", team_id=BOS,
+                from_date="2025-10-18", to_date="2025-11-02",
+            ),
+        }),
+    ),
+)
+def test_provider_window_identity_hashes_exact_evening_dst_request_params(
+    window, requests
+):
+    membership = {BOS: ("game-1",)}
+    provider_membership = _ProviderGameMembership(
+        membership,
+        by_source={
+            "nba_stats.team_game_log": membership,
+            "pbp_stats.team_game_log": membership,
+        },
+    )
+
+    identity = json.loads(TeamMatchupRefreshService._provider_window_identity(
+        window=window,
+        game_ids_by_team=membership,
+        provider_game_ids_by_team=provider_membership,
+        expected_counts={BOS: 1},
+        provider_sources=(
+            "nba_stats.team_game_log", "pbp_stats.team_game_log",
+        ),
+        collect_before=datetime(2025, 11, 3, 1, tzinfo=timezone.utc),
+        aggregate_requests=requests,
+    ))
+
+    assert identity["aggregate_requests"] == requests
+    assert identity["aggregate_request_checksum"] == hashlib.sha256(json.dumps(
+        requests, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+
+
+def test_transport_descriptors_bind_phase_measure_mode_and_pbp_type():
+    nba = _nba_team_stats_request_descriptor(
+        season="2025-26", season_type="Regular Season", team_id=BOS,
+        last_n_games=15, date_from="10/18/2025", date_to="11/02/2025",
+    )
+    pbp = _pbp_totals_request_descriptor(
+        season="2025-26", season_type="Regular Season", team_id=BOS,
+        from_date="2025-10-18", to_date="2025-11-02",
+    )
+    assert nba["parameters"]["MeasureType"] == "Opponent"
+    assert nba["parameters"]["PerMode"] == "Totals"
+    assert nba["parameters"]["SeasonType"] == "Regular Season"
+    assert nba["parameters"]["Month"] == "0"
+    assert nba["parameters"]["PaceAdjust"] == "N"
+    assert nba["parameters"]["Period"] == "0"
+    assert pbp["parameters"] == {
+        "Season": "2025-26", "SeasonType": "Regular+Season",
+        "Type": "Opponent", "TeamId": str(BOS),
+        "FromDate": "2025-10-18", "ToDate": "2025-11-02",
+    }
+    changed = json.loads(json.dumps({"nba": nba, "pbp": pbp}))
+    changed["nba"]["parameters"]["PerMode"] = "Per48"
+    assert hashlib.sha256(json.dumps(
+        {"nba": nba, "pbp": pbp}, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest() != hashlib.sha256(json.dumps(
+        changed, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+
+
+def test_membership_failure_only_disables_parity_owned_traditional_surface(tmp_path):
+    team_ids = tuple(_fixture_team_ids())
+    game_ids = {
+        team_id: tuple(f"{team_id}-game-{index}" for index in range(82))
+        for team_id in team_ids
+    }
+
+    class MembershipFailureNBA(_FakeMatchupNBA):
+        def fetch_team_game_ids(self, **kwargs):
+            raise ProviderResponseError("team-game membership unavailable")
+
+    nba = MembershipFailureNBA(team_ids)
+    engine = create_engine(f"sqlite:///{tmp_path / 'membership-isolation.sqlite3'}")
+    run_migrations(engine)
+    service = TeamMatchupRefreshService(
+        repository=TeamMatchupRepository(engine), event_catalog=FakeEventCatalog([]),
+        nba_stats_provider=nba,
+        pbp_stats_provider=_TeamLogPBP(team_ids, game_ids),
+    )
+    facts, failures, provider_ids, aggregate_requests = service._collect_season(
+        "2024-25", snapshot_date=date(2025, 4, 15),
+        include_play_types=True, team_ids=team_ids,
+        expected_game_counts={team_id: 82 for team_id in team_ids},
+        expected_game_ids_by_team=game_ids, verify_window=True,
+    )
+
+    assert set(failures) == {"traditional"}
+    assert provider_ids == {
+        "assist_locations": {
+            team_id: tuple(sorted(ids)) for team_id, ids in game_ids.items()
+        }
+    }
+    assert {fact.base for fact in facts} == {
+        "assist_locations", "play_types", "shot_types", "shot_zones",
+    }
+    assert {call[0] for call in nba.calls} >= {
+        "traditional", "play_types", "shot_types", "shot_zones",
+    }
+    identities = service._surface_window_identities(
+        window="season", game_ids_by_team=game_ids,
+        provider_game_ids_by_surface=provider_ids,
+        expected_counts={team_id: len(ids) for team_id, ids in game_ids.items()},
+        collect_before=datetime(2025, 4, 16, tzinfo=timezone.utc),
+        aggregate_requests=aggregate_requests,
+    )
+    assert json.loads(identities["traditional"])["status"] == "unavailable"
+    assert "status" not in json.loads(identities["assist_locations"])
+
+
+@pytest.mark.parametrize(
+    "returned_ids",
+    [
+        tuple(f"game-{index}" for index in range(15)),
+        tuple(f"wrong-{index}" for index in range(15)),
+        tuple(f"game-{index}" for index in range(14)),
+    ],
+)
+def test_independent_provider_detail_membership_rejects_missing_or_wrong_same_count(
+    returned_ids,
+):
+    class DetailProvider:
+        def fetch_team_game_ids(self, *, team_id, season, **kwargs):
+            assert team_id == BOS
+            assert season == "2024-25"
+            return returned_ids
+
+    service = object.__new__(TeamMatchupRefreshService)
+    service.nba_stats = DetailProvider()
+    expected = tuple(sorted(f"game-{index}" for index in range(15)))
+    if set(returned_ids) == set(expected) and len(returned_ids) == len(expected):
+        actual = service._independent_provider_game_ids(
+            season="2024-25",
+            season_type="Regular Season",
+            team_ids=(BOS,),
+            date_from="03/01/2025",
+            date_to="03/15/2025",
+            expected_game_ids_by_team={BOS: expected},
+        )
+        assert actual == {BOS: expected}
+    else:
+        with pytest.raises(ValueError, match="governed game membership"):
+            service._independent_provider_game_ids(
+                season="2024-25",
+                season_type="Regular Season",
+                team_ids=(BOS,),
+                date_from="03/01/2025",
+                date_to="03/15/2025",
+                expected_game_ids_by_team={BOS: expected},
+            )
 
 
 def test_repository_rejects_a_future_scope_without_polluting_latest(tmp_path):

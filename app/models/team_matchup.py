@@ -43,8 +43,9 @@ class TeamMatchupFactRow(Base):
     window_end_date = Column(Date, nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     #: Exact governed game IDs this team's window aggregated (JSON text) and the
-    #: deterministic ledger checksum of the selected game set.  ``NULL`` on
-    #: provider-collected legacy facts; ledger-owned facts always carry both.
+    #: deterministic ledger checksum of the selected game set. Legacy facts
+    #: carry IDs only after provider-window evidence has been verified;
+    #: ledger-owned facts carry both IDs and checksum.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
     source_observation_ids = Column(Text, nullable=True)
@@ -57,6 +58,12 @@ class TeamMatchupFactRow(Base):
     publication_cutoff = Column(String(64), nullable=True)
     publication_freshness = Column(String(32), nullable=True)
     publication_version = Column(Integer, nullable=True)
+    # Existing rows remain nullable for migration compatibility; parity
+    # rejects rows lacking this immutable provider evidence.
+    manifest_id = Column(String(128), nullable=True)
+    event_catalog_publication_id = Column(String(128), nullable=True)
+    event_catalog_checksum = Column(String(64), nullable=True)
+    provider_window_identity = Column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_facts_window"),
@@ -93,8 +100,7 @@ class TeamMatchupSurfaceObservationRow(Base):
     unavailable_reason = Column(String(64), nullable=True)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     #: Exact governed game IDs the window's surface observed (JSON text) plus the
-    #: deterministic ledger checksum of that selected game set; ``NULL`` on
-    #: provider-collected legacy observations.
+    #: deterministic ledger checksum of that selected game set.
     game_ids = Column(Text, nullable=True)
     ledger_checksum = Column(String(64), nullable=True)
     source_observation_ids = Column(Text, nullable=True)
@@ -105,6 +111,10 @@ class TeamMatchupSurfaceObservationRow(Base):
     publication_cutoff = Column(String(64), nullable=True)
     publication_freshness = Column(String(32), nullable=True)
     publication_version = Column(Integer, nullable=True)
+    manifest_id = Column(String(128), nullable=True)
+    event_catalog_publication_id = Column(String(128), nullable=True)
+    event_catalog_checksum = Column(String(64), nullable=True)
+    provider_window_identity = Column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(_WINDOW_CHECK, name="ck_team_matchup_observations_window"),

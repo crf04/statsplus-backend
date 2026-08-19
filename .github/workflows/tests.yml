@@ -16,7 +16,9 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The suite grew past the previous 15-minute budget; the last green run
+    # finished at 13m53s and the next one timed out at 15m04s.
+    timeout-minutes: 25
 
     steps:
       - name: Check out repository

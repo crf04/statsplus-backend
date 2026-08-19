@@ -81,8 +81,35 @@ NBA_PUBLICATION_TAXONOMY = {
     base: frozenset(keys) for base, keys in NBA_PUBLICATION_METRIC_KEYS.items()
 }
 
+#: The ledger-owned non-shot matchup surfaces that have a legacy-versus-ledger
+#: dual-run before activation.  NBA-owned shot zones, grouped shot types, and
+#: Synergy play types are composed from governed publications and excluded.
+LEDGER_OWNED_MATCHUP_SURFACES: tuple[str, ...] = ("traditional", "assist_locations")
+LEDGER_OWNED_MATCHUP_STREAM_PREFIX: dict[str, str] = {
+    "traditional": "traditional_opponent",
+    "assist_locations": "assist_locations",
+}
+LEDGER_OWNED_MATCHUP_STREAM_KEYS = frozenset(
+    f"{prefix}_{window}"
+    for prefix in LEDGER_OWNED_MATCHUP_STREAM_PREFIX.values()
+    for window in NBA_PUBLICATION_WINDOWS
+)
+
+
+def matchup_stream_key(surface: str, window: str) -> str:
+    """Return the canonical ledger-owned stream key for one surface and window."""
+
+    if surface not in LEDGER_OWNED_MATCHUP_STREAM_PREFIX:
+        raise ValueError(f"unsupported matchup surface {surface}")
+    if window not in NBA_PUBLICATION_WINDOWS:
+        raise ValueError(f"unsupported matchup window {window}")
+    return f"{LEDGER_OWNED_MATCHUP_STREAM_PREFIX[surface]}_{window}"
+
 
 __all__ = [
+    "LEDGER_OWNED_MATCHUP_STREAM_KEYS",
+    "LEDGER_OWNED_MATCHUP_STREAM_PREFIX",
+    "LEDGER_OWNED_MATCHUP_SURFACES",
     "NBA_PUBLICATION_BASES",
     "NBA_PUBLICATION_STREAM_KEYS",
     "NBA_PUBLICATION_STREAMS",
@@ -99,4 +126,5 @@ __all__ = [
     "SHOT_ZONE_STATS",
     "THREE_POINT_SHOT_ZONES",
     "TWO_POINT_SHOT_ZONES",
+    "matchup_stream_key",
 ]

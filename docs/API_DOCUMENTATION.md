@@ -737,9 +737,16 @@ unresolved-team telemetry instead of disappearing silently.
 `freshness` retains the existing `schedule`, `pool`, `stats`, and `injuries`
 surfaces and additionally reports `player_game_logs`, per-Base
 `player_diets.surfaces`, and Season/Last-15
-`team_matchups[window].surfaces`. Every stored observation carries its actual
-timezone-aware `retrieved_at`; missing observations carry null. Pool freshness
-and per-provider status are passed through from the selected stored snapshot.
+`team_matchups[window].surfaces`. A valid stored observation carries its actual
+stored timestamp even when its routine status is `unavailable` (for example,
+unsupported Synergy L15). Missing evidence and invalid/corrupt publication
+evidence carry null; request time is never synthesized as freshness. Switching
+between equivalent legacy and ledger sources preserves the established public
+matchup freshness timestamp byte-for-byte where the compatibility contract
+requires it. Source-specific publication timestamps and lineage remain in the
+additive provenance envelope.
+Pool freshness and per-provider status are passed through from the selected
+stored snapshot.
 When the projection-archive reader is activated, this block additionally
 contains `state: live | missing` and `observed_at`; the Matchup `game` header
 does not duplicate the Slate-only `projection_state` block.
@@ -1149,12 +1156,16 @@ evidence accepted before the deadline remains allowed for repair and
 rehearsal. Player game logs Season, traditional opponent Season and
 L15, assist locations Season and L15, and player per-36 each have independent
 candidate payloads. A missing assist primitive cannot suppress the other
-streams. Durable traditional/per-36 parity artifacts remain
-`pending_adjudication` until reviewed and prevent activation while pending.
+streams. Difference-free traditional/assist/per-36 parity artifacts become
+`exact` automatically. Every difference artifact remains
+`pending_adjudication` until an audited operator decision and prevents
+activation while pending. Hard blockers may be audited as rejected but can
+never be approved.
 An invalid staged PBP response creates no accepted observation, ledger row, or
 composition job. Successful initial games and corrections atomically enqueue
-every governed slice at the active manifest cutoff. Only traditional-opponent
-and per-36 activation require an exact or operator-approved parity artifact;
+every governed slice at the active manifest cutoff. Traditional-opponent,
+assist-location, and per-36 activation require an exact or operator-approved
+parity artifact;
 approval or rejection records actor, reason, time, and an audit event.
 Parity-gated activation identifies the exact artifact, season, cutoff, and
 candidate publication. The JSON body uses `artifact_id`,
@@ -1184,8 +1195,15 @@ calls. Injury
 Reports retain their existing live/snapshot contract; statistical activation
 does not change injury behavior. Existing fields remain
 backward compatible. Additive `provenance` stream entries identify the exact
-Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state;
-inactive streams explicitly report `legacy_database` fallback. Additive
+Publication ID, UTC Coverage Cutoff, age, source, and `fresh`/`stale` state for
+player and diet streams. Team-window entries expose the selected stored
+source's truthful availability, freshness, and retrieval metadata in the public
+Matchups response; inactive streams explicitly report `legacy_database`
+fallback with null publication, cutoff, age, and retrieval fields. Active or
+stale publications report their exact Publication ID, authority, cutoff, age,
+and stored creation timestamp. Consumers comparing legacy and ledger facts
+should ignore this additive provenance envelope rather than treating
+source-specific metadata as a semantic fact. Additive
 `coverage.mixed_cutoff` and `coverage.mixed_freshness` flags remain independent
 when one contributor is older or unavailable. A stale active Publication is
 served as the last good fact with its real age; a failed partial attempt never

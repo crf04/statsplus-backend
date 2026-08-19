@@ -12,7 +12,7 @@ import pytest
 import requests
 
 from app.config.settings import ProviderSettings, RuntimeSettings
-from app.services.pbp_stats_adapter import PBPTotalsAdapter
+from app.services.pbp_stats_adapter import PBP_GAME_LOGS_URL, PBPTotalsAdapter
 from app.utils import telemetry
 
 VALID_PAYLOAD = {
@@ -198,6 +198,66 @@ def test_fetch_totals_opponent_supports_exact_team_date_bounds():
             },
         )
     ]
+    assert adapter.transport_request_descriptor("get_totals_opponent") == {
+        "adapter": "pbp_stats", "operation": "get_totals_opponent",
+        "endpoint": adapter.base_url,
+        "parameters": calls[0][1]["params"],
+    }
+
+
+def test_fetch_team_game_ids_uses_independent_bounded_game_log_identity():
+    fake_session = requests.Session()
+    calls = []
+
+    def get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse(payload={
+            "multi_row_table_data": [
+                {"GameId": "g-2", "Date": "2025-04-15"},
+                {"GameId": "g-1", "Date": "2025-03-01"},
+                {"GameId": "outside", "Date": "2025-02-28"},
+            ]
+        })
+
+    fake_session.get = get
+    adapter = _adapter(fake_session)
+
+    assert adapter.fetch_team_game_ids(
+        1610612738,
+        "2024-25",
+        season_type="Regular Season",
+        date_from="2025-03-01",
+        date_to="2025-04-15",
+    ) == ("g-1", "g-2")
+    assert calls == [
+        (
+            (PBP_GAME_LOGS_URL,),
+            {
+                "params": {
+                    "Season": "2024-25",
+                    "SeasonType": "Regular+Season",
+                    "EntityType": "Team",
+                    "EntityId": "1610612738",
+                    "FromDate": "2025-03-01",
+                    "ToDate": "2025-04-15",
+                },
+                "timeout": (1.0, 2.0),
+            },
+        )
+    ]
+    assert telemetry.get_recorded_provider_events()[-1]["operation"] == (
+        "team_game_log"
+    )
+
+
+def test_fetch_team_game_ids_rejects_missing_provider_membership_id():
+    fake_session = requests.Session()
+    fake_session.get = lambda *args, **kwargs: FakeResponse(payload={
+        "multi_row_table_data": [{"Date": "2025-04-15"}],
+    })
+
+    with pytest.raises(telemetry.ProviderResponseError):
+        _adapter(fake_session).fetch_team_game_ids(1610612738, "2024-25")
 
 
 def test_player_diet_totals_project_sparse_rows_through_a_strict_identity_contract():

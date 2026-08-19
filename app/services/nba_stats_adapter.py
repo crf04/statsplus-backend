@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections.abc import Mapping
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -635,6 +636,68 @@ def _response_status(endpoint: object) -> int | None:
     return None
 
 
+def opponent_team_stats_request_descriptor(
+    *, date_from: str | None, date_to: str | None = None,
+    season: str | None = None, season_type: str | None = None,
+    team_id: int | None = None, last_n_games: int | None = None,
+    per_mode_detailed: str = "Per48", league_id: str = "00",
+) -> dict[str, object]:
+    """Return the exact non-timeout LeagueDashTeamStats wire parameters."""
+
+    parameters: dict[str, object] = {
+        "LastNGames": last_n_games if last_n_games is not None else "0",
+        "MeasureType": "Opponent", "Month": "0", "OpponentTeamID": 0,
+        "PaceAdjust": "N", "PerMode": per_mode_detailed, "Period": "0",
+        "PlusMinus": "N", "Rank": "N",
+        "Season": season or "", "SeasonType": season_type or "",
+        "Conference": "", "DateFrom": date_from, "DateTo": date_to or "",
+        "Division": "", "GameScope": "", "GameSegment": "",
+        "LeagueID": league_id, "Location": "", "Outcome": "",
+        "PORound": "", "PlayerExperience": "", "PlayerPosition": "",
+        "SeasonSegment": "", "ShotClockRange": "", "StarterBench": "",
+        "TeamID": team_id if team_id is not None else "", "TwoWay": "",
+        "VsConference": "", "VsDivision": "",
+    }
+    return {
+        "adapter": "nba_stats", "operation": "league_opponent_team_stats",
+        "endpoint": "LeagueDashTeamStats", "parameters": parameters,
+    }
+
+
+def player_per36_request_descriptor(*, season: str) -> dict[str, object]:
+    """Return the complete LeagueDashPlayerStats per-36 wire request."""
+
+    return {
+        "adapter": "nba_stats",
+        "operation": "player_per36_stats",
+        "endpoint": "LeagueDashPlayerStats",
+        "parameters": {
+            "LastNGames": "0", "MeasureType": "Base", "Month": "0",
+            "OpponentTeamID": 0, "PaceAdjust": "N", "PerMode": "Per36",
+            "Period": "0", "PlusMinus": "N", "Rank": "N",
+            "Season": season, "SeasonType": "Regular Season", "College": "",
+            "Conference": "", "Country": "", "DateFrom": "", "DateTo": "",
+            "Division": "", "DraftPick": "", "DraftYear": "", "GameScope": "",
+            "GameSegment": "", "Height": "", "LeagueID": "00", "Location": "",
+            "Outcome": "", "PORound": "", "PlayerExperience": "",
+            "PlayerPosition": "", "SeasonSegment": "", "ShotClockRange": "",
+            "StarterBench": "", "TeamID": "", "TwoWay": "",
+            "VsConference": "", "VsDivision": "", "Weight": "",
+        },
+    }
+
+
+def player_totals_request_descriptor(*, season: str) -> dict[str, object]:
+    """Return the complete LeagueDashPlayerStats raw-totals wire request."""
+
+    descriptor = player_per36_request_descriptor(season=season)
+    return {
+        **descriptor,
+        "operation": "player_totals_stats",
+        "parameters": {**descriptor["parameters"], "PerMode": "Totals"},
+    }
+
+
 class NBAStatsAdapter:
     """Run NBA Stats provider calls under one explicit concurrency bound."""
 
@@ -644,18 +707,21 @@ class NBAStatsAdapter:
         *,
         endpoint_factory: Callable[..., object] | None = None,
         roster_endpoint_factory: Callable[..., object] | None = None,
+        team_game_log_endpoint_factory: Callable[..., object] | None = None,
     ):
         self.settings = settings or get_runtime_settings()
         self.timeout = get_nba_stats_timeout(self.settings)
         self._concurrency_limit = self.settings.providers.nba_stats_max_concurrency
         self._bound = _shared_concurrency_bound(self._concurrency_limit)
         self._last_status_code: int | None = None
+        self._last_transport_requests: dict[str, dict[str, object]] = {}
         # The optional constructor seam is used by recorded/offline schedule
         # tests.  Existing game-log helpers construct their own endpoint and
         # remain unchanged.
         self._endpoint_factory = endpoint_factory
         self._schedule_endpoint_factory = endpoint_factory
         self._roster_endpoint_factory = roster_endpoint_factory
+        self._team_game_log_endpoint_factory = team_game_log_endpoint_factory
 
     @property
     def max_concurrency(self) -> int:
@@ -666,6 +732,12 @@ class NBAStatsAdapter:
     def last_status_code(self) -> int | None:
         """Return the most recent upstream status observed by this adapter."""
         return self._last_status_code
+
+    def transport_request_descriptor(
+        self, operation: str
+    ) -> dict[str, object] | None:
+        descriptor = self._last_transport_requests.get(operation)
+        return json.loads(json.dumps(descriptor)) if descriptor is not None else None
 
     def run_endpoint(
         self,
@@ -723,6 +795,24 @@ class NBAStatsAdapter:
                     raise ProviderResponseError(
                         "NBA Stats returned an invalid endpoint response."
                     )
+                wire_parameters = getattr(endpoint, "parameters", None)
+                if isinstance(wire_parameters, Mapping):
+                    self._last_transport_requests[operation] = {
+                        "adapter": "nba_stats",
+                        "operation": operation,
+                        "endpoint": (
+                            "LeagueDashTeamStats"
+                            if operation == "league_opponent_team_stats"
+                            else "LeagueDashPlayerStats"
+                            if operation in {
+                                "player_per36_stats", "player_totals_stats",
+                            }
+                            else type(endpoint).__name__
+                        ),
+                        "parameters": json.loads(json.dumps(
+                            dict(wire_parameters), sort_keys=True, default=str
+                        )),
+                    }
                 tracker.status_code = _response_status(endpoint)
                 self._last_status_code = tracker.status_code
                 if (
@@ -904,13 +994,9 @@ class NBAStatsAdapter:
                 "timeout": timeout,
             }
             self._add_optional_matchup_scope(
-                parameters,
-                date_to=date_to,
-                season=season,
-                season_type=season_type,
-                team_id=team_id,
-                last_n_games=last_n_games,
-                last_n_parameter="last_n_games",
+                parameters, date_to=date_to, season=season,
+                season_type=season_type, team_id=team_id,
+                last_n_games=last_n_games, last_n_parameter="last_n_games",
             )
             return endpoints.LeagueDashTeamStats(**parameters)
 
@@ -920,6 +1006,59 @@ class NBAStatsAdapter:
             cache_status=cache_status,
             required_columns=("TEAM_ID", "TEAM_NAME"),
         )
+
+    def fetch_team_game_ids(
+        self,
+        team_id: int,
+        season: str,
+        *,
+        season_type: str = "Regular Season",
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> tuple[str, ...]:
+        """Return exact game IDs from the independent TeamGameLog endpoint.
+
+        LeagueDash aggregates expose only counts and totals.  This endpoint is
+        the provider's detail-level membership evidence and is intentionally a
+        separate factory seam from the aggregate endpoints.
+        """
+        if not isinstance(team_id, int) or team_id <= 0:
+            raise ValueError("team_id must be a positive integer")
+        canonical_season = validate_canonical_season(season)
+        factory = (
+            self._team_game_log_endpoint_factory
+            or endpoints.teamgamelog.TeamGameLog
+        )
+
+        def build(timeout: float) -> object:
+            parameters: dict[str, object] = {
+                "team_id": team_id,
+                "season": canonical_season,
+                "season_type_all_star": season_type,
+                "date_from_nullable": date_from or "",
+                "date_to_nullable": date_to or "",
+                "timeout": timeout,
+            }
+            return factory(**parameters)
+
+        frame = self.run_endpoint(
+            "team_game_log",
+            build,
+            required_columns=("GAME_ID",),
+        )
+        if frame is None:
+            raise ProviderResponseError("NBA Stats returned no team game log.")
+        ids: list[str] = []
+        for value in frame["GAME_ID"].tolist():
+            if value is None or pd.isna(value):
+                raise ProviderResponseError("NBA Stats returned a game log without GAME_ID.")
+            game_id = str(value).strip()
+            if not game_id:
+                raise ProviderResponseError("NBA Stats returned an empty GAME_ID.")
+            ids.append(game_id)
+        if len(ids) != len(set(ids)):
+            raise ProviderResponseError("NBA Stats returned duplicate GAME_ID values.")
+        return tuple(sorted(ids))
 
     def fetch_opponent_shot_chart(
         self,
@@ -1063,7 +1202,7 @@ class NBAStatsAdapter:
             required_columns=required_columns,
         )
 
-    def fetch_player_per36_stats(self) -> pd.DataFrame:
+    def fetch_player_per36_stats(self, *, season: str) -> pd.DataFrame:
         """Fetch the player per-36 baseline used by archetype calculations."""
 
         return self.run_endpoint(
@@ -1071,9 +1210,30 @@ class NBAStatsAdapter:
             lambda timeout: endpoints.LeagueDashPlayerStats(
                 measure_type_detailed_defense="Base",
                 per_mode_detailed="Per36",
+                season=season,
+                season_type_all_star="Regular Season",
                 timeout=timeout,
             ),
             required_columns=("PLAYER_ID",),
+        )
+
+    def fetch_player_totals_stats(self, *, season: str) -> pd.DataFrame:
+        """Fetch independent raw Season counts/minutes for parity capture."""
+
+        return self.run_endpoint(
+            "player_totals_stats",
+            lambda timeout: endpoints.LeagueDashPlayerStats(
+                measure_type_detailed_defense="Base",
+                per_mode_detailed="Totals",
+                season=season,
+                season_type_all_star="Regular Season",
+                timeout=timeout,
+            ),
+            required_columns=(
+                "PLAYER_ID", "TEAM_ID", "GP", "MIN", "PTS", "REB", "AST",
+                "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA", "TOV",
+                "STL", "BLK", "PF",
+            ),
         )
 
     def fetch_player_shot_type(
@@ -1257,6 +1417,8 @@ __all__ = [
     "SCHEDULE_REQUIRED_COLUMNS",
     "CANONICAL_SCHEDULE_COLUMNS",
     "NBAStatsAdapter",
+    "player_per36_request_descriptor",
+    "player_totals_request_descriptor",
     "normalize_whole_season_schedule",
     "parse_recorded_schedule",
     "parse_recorded_player_roster",

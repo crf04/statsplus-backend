@@ -258,6 +258,17 @@ class NBAStatsProvider(Protocol):
     def fetch_whole_season_schedule(self, *, season: str) -> pd.DataFrame:
         """Return canonical schedule facts for one explicit NBA season."""
 
+    def fetch_player_per36_stats(self, *, season: str) -> pd.DataFrame:
+        """Return explicit-season diagnostic per-36 rates."""
+
+    def fetch_player_totals_stats(self, *, season: str) -> pd.DataFrame:
+        """Return explicit-season raw totals and minutes."""
+
+    def transport_request_descriptor(
+        self, operation: str,
+    ) -> dict[str, object] | None:
+        """Return the adapter-captured complete wire request."""
+
 
 # These fields are required by GameService's filters, summaries, and output.
 # Keep this list at the adapter boundary so a provider schema change fails
@@ -538,11 +549,13 @@ class NBAStatsAdapter(_InstrumentedNBAStatsAdapter):
         *,
         endpoint_factory: Callable[..., Any] | None = None,
         roster_endpoint_factory: Callable[..., Any] | None = None,
+        team_game_log_endpoint_factory: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__(
             settings=settings,
             endpoint_factory=endpoint_factory,
             roster_endpoint_factory=roster_endpoint_factory,
+            team_game_log_endpoint_factory=team_game_log_endpoint_factory,
         )
         self._endpoint_factory = (
             endpoint_factory or endpoints.playergamelogs.PlayerGameLogs

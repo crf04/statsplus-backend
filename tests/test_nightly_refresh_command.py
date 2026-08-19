@@ -4,9 +4,28 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine, update
 
+from app.migrations import run_migrations
+from app.models.collection_control import PublicationStream
+from app.services.collection_control import ControlPlaneError
 from scripts import nightly_refresh
 from scripts.nightly_refresh import run_nightly_refresh
+
+
+def test_fresh_database_bootstrap_allows_inactive_and_fences_enabled_stream(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fresh-nightly.sqlite3'}")
+    run_migrations(engine)
+
+    fence = nightly_refresh._bootstrap_legacy_write_fence(engine)
+    fence.assert_writable("player_per36")
+
+    with engine.begin() as connection:
+        connection.execute(update(PublicationStream).where(
+            PublicationStream.stream_key == "player_per36"
+        ).values(enabled=True))
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        fence.assert_writable("player_per36")
 
 
 def test_hosted_refresh_never_constructs_or_calls_nba_stats(monkeypatch):
@@ -100,6 +119,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     pbp_log_provider = object()
     catalog = object()
     stats_freshness = object()
+    write_fence = object()
     player_log_repository = object()
     team_matchup_repository = object()
 
@@ -143,6 +163,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
             "pbp_provider": pbp_provider,
             "nba_stats_provider": provider,
             "stats_freshness": stats_freshness,
+            "write_fence": write_fence,
         }
         return stats_service
 
@@ -206,6 +227,13 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         "run_migrations",
         lambda actual_engine: calls.append("migrations"),
     )
+    monkeypatch.setattr(
+        nightly_refresh,
+        "PublicationService",
+        lambda actual_engine: SimpleNamespace(
+            register_default_streams=lambda: calls.append("streams")
+        ),
+    )
     monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", lambda **kwargs: provider)
     monkeypatch.setattr(
         nightly_refresh, "PBPStatsAdapter", lambda **kwargs: pbp_provider
@@ -237,11 +265,13 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
         "PlayerDietService",
         build_player_diet_service,
     )
-    monkeypatch.setattr(
-        nightly_refresh,
-        "TeamMatchupRepository",
-        lambda actual_engine: team_matchup_repository,
-    )
+    def build_team_matchup_repository(actual_engine, **kwargs):
+        assert actual_engine is engine
+        assert kwargs == {"write_fence": write_fence}
+        return team_matchup_repository
+
+    monkeypatch.setattr(nightly_refresh, "LegacyWriteFence", lambda actual_engine: write_fence)
+    monkeypatch.setattr(nightly_refresh, "TeamMatchupRepository", build_team_matchup_repository)
     monkeypatch.setattr(
         nightly_refresh,
         "TeamMatchupRefreshService",
@@ -251,6 +281,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
     assert nightly_refresh._run("sqlite:///nightly.sqlite3") == 0
     assert calls == [
         "migrations",
+        "streams",
         "stats",
         ("schedule", "2025-26"),
         ("athlete_catalog", "2025-26"),

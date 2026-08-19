@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
@@ -321,6 +321,10 @@ class TeamMatchupFact:
     cutoff: datetime | None = None
     recomposition_reason: str | None = None
     publication: PublicationLineage | None = None
+    manifest_id: str | None = None
+    event_catalog_publication_id: str | None = None
+    event_catalog_checksum: str | None = None
+    provider_window_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +339,10 @@ class TeamMatchupObservation:
     cutoff: datetime | None = None
     recomposition_reason: str | None = None
     publication: PublicationLineage | None = None
+    manifest_id: str | None = None
+    event_catalog_publication_id: str | None = None
+    event_catalog_checksum: str | None = None
+    provider_window_identity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -790,13 +798,11 @@ class TeamMatchupRepository:
                 if callable(checker):
                     stream_by_surface = {
                         "traditional": (
-                            "traditional_opponent",
                             "traditional_opponent_l15"
                             if scope.window_games is not None
                             else "traditional_opponent_season",
                         ),
                         "assist_locations": (
-                            "assist_locations",
                             "assist_locations_l15"
                             if scope.window_games is not None
                             else "assist_locations_season",
@@ -901,6 +907,10 @@ class TeamMatchupRepository:
                                 "game_set_checksum": fact.game_set_checksum,
                                 "cutoff": fact.cutoff,
                                 "recomposition_reason": fact.recomposition_reason,
+                                "manifest_id": fact.manifest_id,
+                                "event_catalog_publication_id": fact.event_catalog_publication_id,
+                                "event_catalog_checksum": fact.event_catalog_checksum,
+                                "provider_window_identity": fact.provider_window_identity,
                                 **_publication_columns(fact.publication),
                             }
                             for fact in changed_fact_rows
@@ -934,6 +944,10 @@ class TeamMatchupRepository:
                                 game_set_checksum=fact.game_set_checksum,
                                 cutoff=fact.cutoff,
                                 recomposition_reason=fact.recomposition_reason,
+                                manifest_id=fact.manifest_id,
+                                event_catalog_publication_id=fact.event_catalog_publication_id,
+                                event_catalog_checksum=fact.event_catalog_checksum,
+                                provider_window_identity=fact.provider_window_identity,
                                 **_publication_columns(fact.publication),
                             )
                         )
@@ -960,6 +974,10 @@ class TeamMatchupRepository:
                                 "game_set_checksum": observation.game_set_checksum,
                                 "cutoff": observation.cutoff,
                                 "recomposition_reason": observation.recomposition_reason,
+                                "manifest_id": observation.manifest_id,
+                                "event_catalog_publication_id": observation.event_catalog_publication_id,
+                                "event_catalog_checksum": observation.event_catalog_checksum,
+                                "provider_window_identity": observation.provider_window_identity,
                                 **_publication_columns(observation.publication),
                             }
                             for observation in changed_observations
@@ -1003,6 +1021,10 @@ class TeamMatchupRepository:
             row["game_set_checksum"],
             _optional_aware(row["cutoff"]),
             row["recomposition_reason"],
+            row["manifest_id"],
+            row["event_catalog_publication_id"],
+            row["event_catalog_checksum"],
+            row["provider_window_identity"],
             _publication_from_row(row),
         )
 
@@ -1032,6 +1054,10 @@ class TeamMatchupRepository:
             or existing_observation["game_set_checksum"] != observation.game_set_checksum
             or _optional_aware(existing_observation["cutoff"]) != _optional_aware(observation.cutoff)
             or existing_observation["recomposition_reason"] != observation.recomposition_reason
+            or existing_observation["manifest_id"] != observation.manifest_id
+            or existing_observation["event_catalog_publication_id"] != observation.event_catalog_publication_id
+            or existing_observation["event_catalog_checksum"] != observation.event_catalog_checksum
+            or existing_observation["provider_window_identity"] != observation.provider_window_identity
             or _publication_from_row(existing_observation) != observation.publication
         ):
             return True
@@ -1057,6 +1083,10 @@ class TeamMatchupRepository:
                     fact.game_set_checksum,
                     _optional_aware(fact.cutoff),
                     fact.recomposition_reason,
+                    fact.manifest_id,
+                    fact.event_catalog_publication_id,
+                    fact.event_catalog_checksum,
+                    fact.provider_window_identity,
                     fact.publication,
                 )
                 for fact in facts
@@ -1160,15 +1190,24 @@ class TeamMatchupRepository:
         )
 
     def get_snapshot(
-        self, scope: TeamMatchupSnapshotScope
+        self, scope: TeamMatchupSnapshotScope, *,
+        connection: Connection | None = None, lock: bool = False,
     ) -> StoredTeamMatchupSnapshot:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        with self.engine.connect() as connection:
+        owned = connection is None
+        scope_context = self.engine.connect() if owned else nullcontext(connection)
+        with scope_context as connection:
+            fact_query = select(fact_table).where(*self._scope(fact_table, scope))
+            observation_query = select(observation_table).where(
+                *self._scope(observation_table, scope)
+            )
+            if lock:
+                fact_query = fact_query.with_for_update()
+                observation_query = observation_query.with_for_update()
             fact_rows = (
                 connection.execute(
-                    select(fact_table)
-                    .where(*self._scope(fact_table, scope))
+                    fact_query
                     .order_by(
                         fact_table.c.team_id,
                         fact_table.c.base,
@@ -1181,8 +1220,7 @@ class TeamMatchupRepository:
             )
             observation_rows = (
                 connection.execute(
-                    select(observation_table)
-                    .where(*self._scope(observation_table, scope))
+                    observation_query
                     .order_by(observation_table.c.surface)
                 )
                 .mappings()
@@ -1211,6 +1249,10 @@ class TeamMatchupRepository:
                     game_set_checksum=row["game_set_checksum"],
                     cutoff=_optional_aware(row["cutoff"]),
                     recomposition_reason=row["recomposition_reason"],
+                    manifest_id=row["manifest_id"],
+                    event_catalog_publication_id=row["event_catalog_publication_id"],
+                    event_catalog_checksum=row["event_catalog_checksum"],
+                    provider_window_identity=row["provider_window_identity"],
                     publication=_publication_from_row(row),
                 )
                 for row in fact_rows
@@ -1229,6 +1271,10 @@ class TeamMatchupRepository:
                     game_set_checksum=row["game_set_checksum"],
                     cutoff=_optional_aware(row["cutoff"]),
                     recomposition_reason=row["recomposition_reason"],
+                    manifest_id=row["manifest_id"],
+                    event_catalog_publication_id=row["event_catalog_publication_id"],
+                    event_catalog_checksum=row["event_catalog_checksum"],
+                    provider_window_identity=row["provider_window_identity"],
                     publication=_publication_from_row(row),
                 )
                 for row in observation_rows

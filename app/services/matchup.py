@@ -411,7 +411,10 @@ class MatchupService:
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
             },
-            **self._publication_metadata(season, publication_snapshot),
+            **self._publication_metadata(
+                season,
+                publication_snapshot,
+            ),
         }
 
     def _publication_snapshot(self, season: str):
@@ -444,9 +447,11 @@ class MatchupService:
         return method(*args, **kwargs)
 
     def _publication_metadata(
-        self, season: str, publication_snapshot=None
+        self,
+        season: str,
+        publication_snapshot=None,
     ) -> dict[str, Any]:
-        """Add additive provenance without collapsing independent clocks."""
+        """Add the immutable reader's truthful, additive provenance."""
 
         if publication_snapshot is not None:
             metadata = publication_snapshot.metadata()
@@ -1470,17 +1475,22 @@ class MatchupService:
         }
 
     @staticmethod
-    def _observation_time(window: TeamMatchupWindow | None, base: str) -> str | None:
-        if not window:
+    def _observation_time(
+        window: TeamMatchupWindow | None, base: str
+    ) -> str | None:
+        if not isinstance(window, TeamMatchupWindow):
             return None
         observation = next(
             (item for item in window.observations if item.surface == base), None
         )
-        return (
-            None
-            if observation is None
-            else assume_utc(observation.retrieved_at).isoformat()
-        )
+        if (
+            observation is None
+            or observation.status == "missing"
+            or observation.retrieved_at is None
+            or observation.retrieved_at == datetime.min
+        ):
+            return None
+        return assume_utc(observation.retrieved_at).isoformat()
 
     @staticmethod
     def _diet_freshness(diets: PlayerDietResult) -> dict[str, Any]:

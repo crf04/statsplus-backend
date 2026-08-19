@@ -37,11 +37,17 @@ from app.providers.nba_stats import (
     normalize_player_game_logs,
     normalize_season_player_game_logs,
 )
-from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter
+from app.services.nba_stats_adapter import (
+    GAME_LOG_REQUIRED_COLUMNS, NBAStatsAdapter,
+    opponent_team_stats_request_descriptor,
+    player_per36_request_descriptor,
+    player_totals_request_descriptor,
+)
 from app.services.nba_stats_adapter import (
     parse_recorded_game_logs,
     parse_recorded_player_diet,
 )
+from app.utils.telemetry import ProviderResponseError
 from app.services.game_service import GameService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats_player_game_logs.json"
@@ -290,6 +296,85 @@ def test_adapter_passes_configured_timeout_to_provider(monkeypatch):
     assert captured["timeout"] == 7.5
     assert captured["player_id_nullable"] == "123"
     assert captured["season_nullable"] == "2024-25"
+
+
+def test_team_game_log_returns_independent_exact_membership():
+    captured = {}
+
+    class TeamGameLogFixture:
+        def __init__(
+            self,
+            team_id,
+            season="2025-26",
+            season_type_all_star="Regular Season",
+            date_from_nullable="",
+            date_to_nullable="",
+            league_id_nullable="00",
+            proxy=None,
+            headers=None,
+            timeout=30,
+            get_request=True,
+        ):
+            captured.update({
+                "team_id": team_id,
+                "season": season,
+                "season_type_all_star": season_type_all_star,
+                "date_from_nullable": date_from_nullable,
+                "date_to_nullable": date_to_nullable,
+                "league_id_nullable": league_id_nullable,
+                "proxy": proxy,
+                "headers": headers,
+                "timeout": timeout,
+                "get_request": get_request,
+            })
+
+        def get_data_frames(self):
+            return [pd.DataFrame({"GAME_ID": ["g-2", "g-1"]})]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1, timeout=7.5),
+        team_game_log_endpoint_factory=TeamGameLogFixture,
+    )
+
+    assert adapter.fetch_team_game_ids(
+        1610612738,
+        "2024-25",
+        date_from="01/01/2025",
+        date_to="01/31/2025",
+    ) == ("g-1", "g-2")
+    assert captured["team_id"] == 1610612738
+    assert captured["season"] == "2024-25"
+    assert captured["date_from_nullable"] == "01/01/2025"
+    assert captured["date_to_nullable"] == "01/31/2025"
+    assert captured["timeout"] == 7.5
+
+
+def test_team_game_log_rejects_missing_membership_ids():
+    class TeamGameLogFixture:
+        def __init__(
+            self,
+            team_id,
+            season="2025-26",
+            season_type_all_star="Regular Season",
+            date_from_nullable="",
+            date_to_nullable="",
+            league_id_nullable="00",
+            proxy=None,
+            headers=None,
+            timeout=30,
+            get_request=True,
+        ):
+            pass
+
+        def get_data_frames(self):
+            return [pd.DataFrame({"GP": [15]})]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1),
+        team_game_log_endpoint_factory=TeamGameLogFixture,
+    )
+    with pytest.raises(ProviderResponseError):
+        adapter.fetch_team_game_ids(1610612738, "2024-25")
 
 
 def test_adapter_propagates_provider_timeout(monkeypatch):
@@ -709,6 +794,34 @@ def test_existing_opponent_stats_call_keeps_provider_scope_defaults(monkeypatch)
     ]
 
 
+def test_opponent_request_evidence_uses_endpoint_wire_parameters(monkeypatch):
+    expected = opponent_team_stats_request_descriptor(
+        date_from="03/01/2025", date_to="04/15/2025", season="2024-25",
+        season_type="Regular Season", team_id=1610612738, last_n_games=15,
+        per_mode_detailed="Totals", league_id="00",
+    )
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            self.parameters = dict(expected["parameters"])
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{"TEAM_ID": 1610612738, "TEAM_NAME": "Boston"}])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashTeamStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+    adapter.fetch_opponent_team_stats(
+        "03/01/2025", date_to="04/15/2025", season="2024-25",
+        season_type="Regular Season", team_id=1610612738, last_n_games=15,
+        per_mode_detailed="Totals",
+    )
+    recorded = adapter.transport_request_descriptor("league_opponent_team_stats")
+    assert recorded == expected
+    changed = json.loads(json.dumps(recorded))
+    changed["parameters"]["Month"] = "1"
+    assert changed != recorded
+
+
 def test_opponent_shot_chart_uses_the_installed_endpoint_league_id_keyword(
     monkeypatch,
 ):
@@ -897,6 +1010,59 @@ def test_player_diet_synergy_uses_pinned_offensive_season_contract(monkeypatch):
             "timeout": adapter.timeout,
         }
     ]
+
+
+def test_player_per36_records_the_exact_endpoint_wire_request(monkeypatch):
+    class Endpoint:
+        def __init__(self, **kwargs):
+            assert kwargs["season"] == "2025-26"
+            assert kwargs["season_type_all_star"] == "Regular Season"
+            self.parameters = player_per36_request_descriptor(
+                season="2025-26"
+            )["parameters"]
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{"PLAYER_ID": 2544}])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_player_per36_stats(season="2025-26")
+
+    assert adapter.transport_request_descriptor("player_per36_stats") == {
+        "adapter": "nba_stats",
+        "operation": "player_per36_stats",
+        "endpoint": "LeagueDashPlayerStats",
+        "parameters": player_per36_request_descriptor(
+            season="2025-26"
+        )["parameters"],
+    }
+
+
+def test_player_totals_records_independent_raw_count_request(monkeypatch):
+    descriptor = player_totals_request_descriptor(season="2025-26")
+
+    class Endpoint:
+        def __init__(self, **kwargs):
+            assert kwargs["season"] == "2025-26"
+            assert kwargs["per_mode_detailed"] == "Totals"
+            self.parameters = descriptor["parameters"]
+
+        def get_data_frames(self):
+            return [pd.DataFrame([{
+                "PLAYER_ID": 2544, "TEAM_ID": 1610612747, "GP": 82,
+                "MIN": 2800, "PTS": 2000, "REB": 600, "AST": 500,
+                "FGM": 700, "FGA": 1400, "FG3M": 200, "FG3A": 500,
+                "FTM": 400, "FTA": 500, "TOV": 200, "STL": 80,
+                "BLK": 40, "PF": 100,
+            }])]
+
+    monkeypatch.setattr(endpoints, "LeagueDashPlayerStats", Endpoint)
+    adapter = NBAStatsAdapter(settings=_settings(max_concurrency=1))
+
+    adapter.fetch_player_totals_stats(season="2025-26")
+
+    assert adapter.transport_request_descriptor("player_totals_stats") == descriptor
 
 
 def test_player_diet_shot_type_uses_pinned_league_dash_player_contract(monkeypatch):

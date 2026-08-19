@@ -297,6 +297,25 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
             updated_at=now,
         ))
 
+    corrected_candidate = publications.compose_inactive_ledger(
+        "player_game_logs", season="2025-26", cutoff=now,
+        payload=_player_log_payload(points=31),
+        provenance={"pbp:game-1": "game-1"},
+        reason="enabled correction rehearsal",
+    )
+    assert corrected_candidate.status == "candidate"
+    with control_db.connect() as connection:
+        active_status = connection.scalar(select(PublicationVersion.status).where(
+            PublicationVersion.publication_id == "current-player-logs"
+        ))
+        pointer = connection.execute(select(
+            PublicationPointer.active_publication_id,
+            PublicationPointer.previous_publication_id,
+            PublicationPointer.fence,
+        ).where(PublicationPointer.stream_key == "player_game_logs")).one()
+    assert active_status == "active"
+    assert pointer == ("current-player-logs", candidate.publication_id, 2)
+
     rollback = publications.rollback(
         "player_game_logs",
         reason="restore prior player logs",
@@ -386,7 +405,7 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
     assert version.status == "candidate"
 
 
-def test_pending_parity_blocks_ledger_stream_activation(control_db):
+def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
@@ -481,12 +500,12 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             LedgerParityArtifact.artifact_id == "pending-parity",
         ).values(decision="approved", adjudicated_by="operator", adjudicated_at=now,
                  adjudication_reason="reviewed differences"))
-    approved = publications.activate_stream(
-        "player_per36", reason="reviewed rehearsal", season="2025-26",
-        cutoff=now, parity_artifact_id="pending-parity",
-        candidate_publication_id="parity-candidate",
-    )
-    assert approved.enabled
+    with pytest.raises(ControlPlaneError, match="ledger_parity_hard_failure"):
+        publications.activate_stream(
+            "player_per36", reason="reviewed rehearsal", season="2025-26",
+            cutoff=now, parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
+        )
     corrected_payload = '{"corrected":true}'
     with control_db.begin() as connection:
         connection.execute(PublicationVersion.__table__.insert().values(
@@ -501,6 +520,29 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db):
             season="2025-26", cutoff=now, parity_artifact_id="pending-parity",
             candidate_publication_id="corrected-candidate",
         )
+    import app.services.ledger_parity as ledger_parity
+
+    cohort_calls = []
+    monkeypatch.setattr(
+        ledger_parity, "matchup_parity_artifact_is_activatable",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        ledger_parity, "matchup_parity_cohort_is_activatable",
+        lambda *args, **kwargs: cohort_calls.append(kwargs) or False,
+    )
+    with control_db.begin() as connection:
+        connection.execute(LedgerParityArtifact.__table__.update().where(
+            LedgerParityArtifact.artifact_id == "pending-parity",
+        ).values(status="exact", decision=None))
+    with pytest.raises(ControlPlaneError, match="ledger_parity_cohort_incomplete"):
+        publications.activate_stream(
+            "player_per36", reason="five-surface cohort required",
+            season="2025-26", cutoff=now,
+            parity_artifact_id="pending-parity",
+            candidate_publication_id="parity-candidate",
+        )
+    assert cohort_calls[0]["artifact_id"] == "pending-parity"
     with control_db.begin() as connection:
         connection.execute(LedgerParityArtifact.__table__.update().where(
             LedgerParityArtifact.artifact_id == "pending-parity",

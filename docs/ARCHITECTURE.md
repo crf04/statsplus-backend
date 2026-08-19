@@ -82,8 +82,8 @@ not counted twice:
 
 | Provider | Seam | Operations |
 | --- | --- | --- |
-| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
-| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats` |
+| NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
+| PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
@@ -1665,7 +1665,11 @@ team-specific `DateFrom`, common `DateTo`, and matching phase. NBA dates use
 the provider's `MM/DD/YYYY` format. The traditional and shot-type aggregate
 responses must identify the requested team and report exactly 15 games; the
 shot-zone aggregate must identify the team (that endpoint exposes no game
-count). A surface that cannot prove its requested aggregate is discarded and
+count). For parity-bearing traditional and assist surfaces, the provider
+response must additionally return exact game IDs that match the immutable
+Event Catalog authority; a missing-ID aggregate is unavailable even when its
+GP count matches, and catalog IDs are never copied into the provider row. A
+surface that cannot prove its requested aggregate is discarded and
 observed as `unavailable/provider_window_unverified`, never mislabeled
 Last-15. PBP Stats opponent totals use `TeamId`, matching phase, that team's
 ISO `FromDate`, and the common ISO `ToDate`; its response must identify the
@@ -1731,8 +1735,12 @@ are outside this team-window store and remain Season-only. If the 30-team mean
 is zero, percent-versus-average is null because that ratio is undefined; a
 zero population sigma yields a conventional zero sigma deviation.
 
-One fully available run makes 17 Season provider calls (16 NBA, one PBP) and
-180 rolling calls (five NBA plus one PBP for each of 30 teams). The calls stay
+One fully available run makes 77 Season provider calls: 46 NBA calls (the 16
+aggregate/shot/Synergy calls plus 30 independent TeamGameLog membership
+calls) and 31 PBP calls (one aggregate plus 30 independent team-game-log
+membership calls). It makes 240 rolling calls: six NBA plus two PBP calls for
+each of 30 teams, including one independent membership call per provider and
+team. The calls stay
 sequential: each NBA call already uses the shared configured timeout,
 concurrency bound, and provider telemetry, while each PBP call uses the shared
 pooled session, connect/read timeouts, retry accounting, and telemetry. The
@@ -1785,9 +1793,15 @@ evidence degrades only the `assist_locations` surface
 surface still publishes. Migration 034
 (`034_team_matchup_ledger_lineage`) adds the nullable `game_ids` (JSON) and
 `ledger_checksum` columns to `team_matchup_facts` and
-`team_matchup_surface_observations`; provider-collected legacy rows keep both
-columns NULL, and the existing authenticated Matchups and player-game-log HTTP
-contracts are unchanged and remain provider-free at request time.
+`team_matchup_surface_observations`; provider-collected legacy rows keep their
+ledger-only checksum columns NULL. Migration 042 adds immutable legacy
+`manifest_id`, Event Catalog publication ID/checksum, and
+`provider_window_identity` evidence. A fresh parity-bearing provider write
+must verify each aggregate's returned window/game count against that exact
+authority before storing its game IDs; old nullable/date-only rows are not
+backfilled and are rejected by `StoredLegacyMatchupSource`. The existing
+authenticated Matchups and player-game-log HTTP contracts remain provider-free
+at request time.
 Correction propagation adds nullable source-observation lineage, exact
 game-set checksum, cutoff, and recomposition reason to those read-model rows.
 Composition jobs retain the correction game, affected teams, source lineage,
@@ -1820,6 +1834,139 @@ legacy-fallback-shaped readers, while preserving the existing compatibility
 fallback for ledger-owned traditional and assist surfaces. Publication
 provenance and mixed freshness/cutoff metadata remain additive and request
 time provider-free.
+
+### Matchup materializer parity and legacy writer fencing (#117)
+
+`app.services.matchup_parity` owns the bounded dual-run that proves the legacy
+provider-aggregate writer and the ledger materializer selected the same
+governed teams and games and produced the same contracted facts before the
+legacy writer is fenced. The two materializers write the same
+`team_matchup_facts` surface rows, so their outputs never coexist in one
+stored snapshot and a fact's identity has no provider dimension; each side
+must be produced into its own isolated store or captured in memory and then
+handed to the comparator as an independent `MatchupMaterialization` (season,
+window, exact aware cutoff, facts, observations, and per-team game sets).
+`compare_matchup_materializations(legacy, ledger, *, surface,
+expected_team_ids, expected_game_ids_by_team, tolerance)` compares one surface
+per call — `traditional` or `assist_locations`, the two ledger-owned non-shot
+surfaces — and returns an immutable `MatchupParityReport`. NBA-owned shot
+zones, grouped shot types, and Synergy play types are composed from governed
+publications and have no legacy-vs-ledger dual-run.
+
+`MatchupParityRunner` is the bounded dual-run seam: it resolves the governed
+30-team roster and exact Season/L15 game sets from the injected governance
+reader — the checksummed immutable Event Catalog publication bound to the
+active manifest, never the mutable stored event table — and compares the two
+sides without reading or advancing a `PublicationPointer`. Each side's exact
+cutoff must be the same aware immutable manifest cutoff; the runner rejects
+mismatched cutoffs, and the persisted artifact is bound to that exact cutoff.
+`LedgerParityArtifactRepository.record_matchup_parity` rejects a `stream_key`
+that does not name the report's own surface and window and a cutoff that is
+not aware and equal to the report's, so an L15 artifact can never authorize a
+Season stream. The runner records one artifact per ledger-owned stream
+(`traditional_opponent_season`/`_l15`, `assist_locations_season`/`_l15`) bound
+to its exact Publication and payload checksum. Both `assist_locations_*`
+streams are parity-required for activation, exactly like the traditional and
+per-36 streams.
+The legacy writer proves membership independently for both parity surfaces:
+NBA Stats TeamGameLog supplies traditional IDs and the PBP Stats team
+game-log detail endpoint supplies assist IDs, each bounded to the governed
+window. Aggregate game counts cannot stand in for membership, and a
+same-count or missing-ID response leaves that surface unavailable. The
+persisted provider-window identity retains both exact source memberships and
+the immutable Event Catalog authority rather than relabeling catalog IDs after
+collection.
+Activation requires the complete aligned four-stream Season+L15 cohort at one
+exact cutoff; activation selects the newest fully valid artifact per stream,
+ignores rejected/superseded historical reruns, and verifies that the supplied
+candidate/artifact is the selected member. All four selected artifacts must
+share one exact manifest/Event Catalog/cutoff authority, so a one-window CLI
+run or one-stream artifact cannot activate by itself.
+
+The comparison rules match the parent's parity contract exactly. Team identity
+sets must be exactly equal and League Complete (the governed 30-team roster),
+with no duplicate or extra metric/game-set keys.
+Every team's exact Season/L15 game set must match the governed authority and
+each other, proven by byte-identical game-set checksums; a missing surface or
+a single missing metric fails. Integer counts — the four traditional opponent
+counts and the six assist surfaces — compare exactly; the single documented
+tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-9`) applies only to floating
+denominators (effective team minutes, with seconds normalized to minutes) and
+to the per-48 rates recomputed from counts and denominators. The ledger
+publication's served per-48 and competition-rank fields are also bound to
+those recomputed values; a missing or incorrect served value is a hard
+`served_rate_mismatch` or `served_rank_mismatch` failure. Deterministic
+competition ranks (`1, 1, 3` ties) are re-derived per metric from each side's
+per-48 values and compared, so a sub-tolerance near-tie flip that would change
+a ranking still fails. Independent per-surface availability is compared, and
+an unavailable or missing observation on either side is a real difference.
+Every produced difference carries exactly one classification from the closed
+vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
+`game_set_mismatch`, `integer_count_difference`, `non_integer_count`,
+`denominator_tolerance_exceeded`, `derived_rate_difference`,
+`ranking_difference`, `availability_difference`, `cutoff_mismatch`,
+`missing_surface`, `missing_metric`, `extra_metric`, `duplicate_metric`,
+`l15_game_count_mismatch`, `scope_mismatch`, `authority_mismatch`, and
+`invalid_denominator`, `served_rate_mismatch`, and `served_rank_mismatch`).
+Hard classifications produce a `failed` report inside a
+`pending_adjudication` artifact. They may be audited as rejected but cannot be
+approved. Difference-free artifacts become `exact` automatically; every
+difference artifact remains pending until an audited decision. Floating denominator/rate differences in the
+required public fields are hard failures; provider rounding is diagnostic
+context only and never activation authority.
+
+`app.services.matchup_parity_operation.MatchupParityOperation` is the deep
+application module that owns authority resolution, candidate composition and
+verification, capture validation, comparison, transaction outcomes, and
+sanitized output. `scripts/matchup_parity.py` only parses command-line input
+and selects that interface.
+
+The supported sequence is `prepare`, residential-host `collect-per36`, audited
+`capture-per36`, then `compare`. The immutable authority must describe the
+completed 2025-26 Regular Season (30 teams, 82 completed non-postponed games
+per team, 1,230 unique games); a partial catalog marked complete is rejected.
+`scripts/matchup_parity.py compare` requires an explicit database URL, Season,
+manifest ID, actor, sanitized output path, `isolated|candidate` target, and a
+scoped per-36 diagnostic-capture ID. One
+invocation runs both Season and exact-L15 matchup windows plus the player
+Season per-36 comparison. It resolves the exact manifest cutoff before work,
+preflights migrations, Active Season/phase, and stream/pointer state, then
+composes all five candidates from the governed
+canonical ledger before comparison. It never reads the unscoped legacy
+`player_per36_stats` table. The command prints a bounded human table followed
+by a clearly labeled protected-operator section containing the required exact
+Season/L15 game IDs. It persists only tracker-safe sanitized summary fields,
+records the per-stream artifacts atomically,
+and exits distinctly for exact, pending adjudication, and invalid evidence;
+invalid summaries include pointer/stream nonmutation proof when state capture
+succeeded. Required denominator/rate differences are never approvable.
+`scripts/matchup_parity.py adjudicate` records the operator decision. The
+reports are the evidence backend #87 consumes for database-first activation.
+See
+[MATCHUP_PARITY_OPERATIONS.md](MATCHUP_PARITY_OPERATIONS.md) for the operator
+runbook.
+
+Fencing is per stream and per surface. The legacy
+`TeamMatchupRefreshService` writes through
+`TeamMatchupRepository.replace_snapshots`, which enforces the injected
+`LegacyWriteFence` against the exact ledger-owned stream keys
+(`traditional_opponent_season`, `traditional_opponent_l15`,
+`assist_locations_season`, `assist_locations_l15`) for only the changed
+surfaces, so activating a Season stream fences its own writer without fencing
+L15 and a traditional write never fences assist locations. Once a stream is
+activated the legacy provider-aggregate writer for that surface raises
+`legacy_write_fenced` and fails closed rather than competing with the ledger.
+NBA shot zones, grouped shot types, and Synergy play types remain governed and
+operational: their facts and observations are written through the separate
+`replace_governed_publication_snapshots` path, which verifies the active
+publication capability and deliberately bypasses the legacy fence, so the
+legacy NBA-owned writers are not fenced by ledger activation. The request-time
+read fence is symmetric: an activated ledger-owned stream serves only its
+immutable Publication, an inactive stream is the only state that permits the
+legacy repository fallback, and an NBA-owned stream never falls back to a PBP
+or ledger fact. Activation and rollback both move the fenced pointer atomically
+and preserve the last-good Publication, so no competing source of truth is ever
+silently restored.
 
 ### Canonical athlete catalog
 

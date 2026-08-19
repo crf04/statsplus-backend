@@ -2216,9 +2216,13 @@ class CollectionControlService(_SessionService):
                     "event_catalog_checksum": event.checksum}
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
-            active = session.get(ActiveSeason, season)
-            if active is None or active.status != "active":
-                raise ControlPlaneError("season_not_active")
+            from app.services.matchup_authority import (
+                lock_matchup_authority_serialization,
+            )
+            try:
+                lock_matchup_authority_serialization(session, season)
+            except ValueError as error:
+                raise ControlPlaneError("season_not_active") from error
             if not self._catalog_complete_against_governed_evidence(
                 session, event_document, "event", season,
             ) or not self._catalog_complete_against_governed_evidence(
@@ -2960,15 +2964,38 @@ class PublicationService(_SessionService):
         return row
 
     def register_default_streams(self) -> tuple[PublicationStream, ...]:
-        rows = []
-        for definition in SURFACE_REGISTRY:
-            rows.append(self.register_stream(
-                definition["stream_key"], provider=definition["provider"], owner=definition["owner"],
-                required_observations=definition["required"], publication_strategy=definition["strategy"],
-                supported_windows=definition["windows"], enabled=None, schema_versions=definition["schema"],
-                completeness_rule=definition["complete"], freshness_rule=definition["freshness"],
-            ))
-        return tuple(rows)
+        now = self.clock()
+        with self.session() as session, session.begin():
+            rows = []
+            for definition in SURFACE_REGISTRY:
+                row = session.scalar(select(PublicationStream).where(
+                    PublicationStream.stream_key == definition["stream_key"]
+                ).with_for_update())
+                if row is None:
+                    row = PublicationStream(
+                        stream_key=definition["stream_key"],
+                        provider=definition["provider"], owner=definition["owner"],
+                        required_observations=_json(sorted(set(definition["required"]))),
+                        publication_strategy=definition["strategy"],
+                        supported_windows=_json(sorted(set(definition["windows"]))),
+                        schema_versions=_json(sorted(set(definition["schema"]))),
+                        completeness_rule=definition["complete"],
+                        freshness_rule=definition["freshness"], enabled=False,
+                        created_at=now,
+                    )
+                    session.add(row)
+                else:
+                    row.provider = definition["provider"]
+                    row.owner = definition["owner"]
+                    row.required_observations = _json(sorted(set(definition["required"])))
+                    row.publication_strategy = definition["strategy"]
+                    row.supported_windows = _json(sorted(set(definition["windows"])))
+                    row.schema_versions = _json(sorted(set(definition["schema"])))
+                    row.completeness_rule = definition["complete"]
+                    row.freshness_rule = definition["freshness"]
+                rows.append(row)
+            session.flush()
+            return tuple(rows)
 
     def activate_stream(self, stream_key: str, *, reason: str,
                         season: str | None = None, cutoff: datetime | None = None,
@@ -2991,6 +3018,8 @@ class PublicationService(_SessionService):
             ).with_for_update())
             if row is None:
                 raise ControlPlaneError("stream_not_found")
+            if stream_key in {"traditional_opponent", "assist_locations"}:
+                raise ControlPlaneError("stream_unavailable")
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
@@ -2999,6 +3028,8 @@ class PublicationService(_SessionService):
                 "traditional_opponent",
                 "traditional_opponent_season",
                 "traditional_opponent_l15",
+                "assist_locations_season",
+                "assist_locations_l15",
                 "player_per36",
             } else None
             if require_candidate and not candidate_publication_id:
@@ -3095,7 +3126,7 @@ class PublicationService(_SessionService):
                     LedgerParityArtifact.season == season,
                     LedgerParityArtifact.cutoff == _aware(cutoff),
                     LedgerParityArtifact.publication_id == candidate_publication_id,
-                ))
+                ).with_for_update().execution_options(populate_existing=True))
                 if (
                     candidate is None
                     or artifact is None
@@ -3106,6 +3137,30 @@ class PublicationService(_SessionService):
                     )
                 ):
                     raise ControlPlaneError("ledger_parity_pending")
+                if parity_stream in {
+                    "traditional_opponent_season",
+                    "traditional_opponent_l15",
+                    "assist_locations_season",
+                    "assist_locations_l15",
+                    "player_per36",
+                }:
+                    from app.services.ledger_parity import (
+                        matchup_parity_artifact_is_activatable,
+                        matchup_parity_cohort_is_activatable,
+                    )
+
+                    if not matchup_parity_artifact_is_activatable(
+                        artifact, stream_key=parity_stream, session=session
+                    ):
+                        raise ControlPlaneError("ledger_parity_hard_failure")
+                    if not matchup_parity_cohort_is_activatable(
+                        session,
+                        season=season,
+                        cutoff=cutoff,
+                        candidate_publication_id=candidate_publication_id,
+                        artifact_id=parity_artifact_id,
+                    ):
+                        raise ControlPlaneError("ledger_parity_cohort_incomplete")
             if candidate is not None and row.provider == "ledger":
                 lineage_rows = session.execute(select(
                     PublicationObservation.observation_id,
@@ -3947,7 +4002,7 @@ class PublicationService(_SessionService):
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-            if stream is None or stream.provider != "ledger" or stream.enabled:
+            if stream is None or stream.provider != "ledger":
                 raise ControlPlaneError("inactive_ledger_stream_required")
             self._assert_ledger_provenance(
                 session, season=season, cutoff=_aware(cutoff), provenance=provenance,
@@ -3962,11 +4017,21 @@ class PublicationService(_SessionService):
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None:
                 raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            # Unlike recompose_ledger, this method never advances the
+            # publication pointer.  Superseding the pointer's target would
+            # strand it on a superseded row and make the stream read as
+            # missing, so an enabled stream may replace only its candidates.
+            # While the stream is still inactive nothing is served and the
+            # pointer is not in play, so a stale active version is replaceable
+            # too and must not survive as an activation target.
+            replaceable_statuses = (
+                ("candidate",) if stream.enabled else ("candidate", "active")
+            )
             replaceable = list(session.scalars(select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,
                 PublicationVersion.cutoff == _aware(cutoff),
-                PublicationVersion.status.in_(("candidate", "active")),
+                PublicationVersion.status.in_(replaceable_statuses),
             ).order_by(PublicationVersion.version.desc())))
             existing = replaceable[0] if replaceable else None
             if (
@@ -3989,8 +4054,8 @@ class PublicationService(_SessionService):
                 return existing
             # A corrected complete ledger envelope is the sole activatable
             # truth for this governed cutoff. Preserve prior versions and
-            # their immutable audit, but remove every stale target from the
-            # candidate/active state machine before exposing the replacement.
+            # their immutable audit, but remove every stale target selected
+            # above from the state machine before exposing the replacement.
             for stale in replaceable:
                 stale.status = "superseded"
             next_version = session.scalar(

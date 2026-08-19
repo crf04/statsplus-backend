@@ -60,10 +60,12 @@ NBA_STATS_OPERATIONS = frozenset(
         "league_opponent_team_stats",
         "league_opponent_shot_chart",
         "league_opponent_shooting_zone",
+        "team_game_log",
         "league_player_shot_type",
         "synergy_team_play_types",
         "synergy_player_play_types",
         "player_per36_stats",
+        "player_totals_stats",
         "player_shooting_zone",
         "player_shot_chart",
         "player_gamelogs_against",
@@ -78,6 +80,7 @@ PBP_STATS_OPERATIONS = frozenset(
         "health_probe",
         "player_game_logs",
         "game_player_stats",
+        "team_game_log",
     }
 )
 DABBLE_OPERATIONS = frozenset(

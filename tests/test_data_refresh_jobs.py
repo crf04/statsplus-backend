@@ -22,6 +22,7 @@ from app.services.job_service import (
     DataRefreshJobService,
     SynchronousExecutor,
     adapt_zero_arg_handler,
+    build_default_refresh_handlers,
 )
 from app.services.table_publisher import AtomicTablePublisher, TablePublicationError
 from app.utils import telemetry
@@ -29,6 +30,47 @@ from app.utils import telemetry
 
 def _fixed_clock() -> datetime:
     return datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_default_refresh_builder_injects_fail_closed_legacy_fence(
+    job_engine, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from app.services.collection_control import PublicationService
+    import app.services.data_service as data_service_module
+
+    PublicationService(job_engine).register_stream(
+        "traditional_opponent_season",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    captured = {}
+
+    class FakeDataService:
+        def __init__(self, engine, **kwargs):
+            captured.update(kwargs)
+
+        def update_all_data(self, **kwargs):
+            return True
+
+        fetch_players_with_teams = update_all_data
+
+        def fetch_PBP_data(self, *args, **kwargs):
+            return True
+
+    monkeypatch.setattr(data_service_module, "DataService", FakeDataService)
+    build_default_refresh_handlers(
+        job_engine,
+        SimpleNamespace(),
+        player_service=SimpleNamespace(store_player_information=lambda: True),
+    )
+
+    with pytest.raises(Exception, match="legacy_write_fenced"):
+        captured["write_fence"].assert_writable("traditional_opponent_season")
 
 
 @pytest.fixture

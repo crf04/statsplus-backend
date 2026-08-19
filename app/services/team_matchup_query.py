@@ -249,6 +249,10 @@ class TeamMatchupQueryService:
             if not read.available:
                 base_windows[base] = None
                 continue
+            if read.retrieved_at is None:
+                base_windows[base] = None
+                validation_failures[base] = "publication_provenance_unavailable"
+                continue
             publication_game_ids = None
             if base in NBA_PUBLICATION_BASES:
                 publication_game_ids = self._publication_game_ids(
@@ -299,7 +303,7 @@ class TeamMatchupQueryService:
                 window_games=window_games,
                 base=base,
                 rows=rows,
-                retrieved_at=read.retrieved_at or self._clock(),
+                retrieved_at=read.retrieved_at,
                 publication=publication_lineage(read),
             )
         scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
@@ -308,6 +312,10 @@ class TeamMatchupQueryService:
         legacy_league = () if legacy is None else legacy.league_metrics
         legacy_team = {} if legacy is None else legacy.team_metrics
         legacy_observations = () if legacy is None else legacy.observations
+        legacy_observation_retrieved = {
+            observation.surface: observation.retrieved_at
+            for observation in legacy_observations
+        }
         legacy_fact_scopes = {} if legacy is None else legacy.fact_scopes
         legacy_retrieved = {} if legacy is None else legacy.fact_retrieved_at
         league = [metric for metric in legacy_league if metric.base not in active]
@@ -346,16 +354,31 @@ class TeamMatchupQueryService:
                         or read.unavailable_reason
                         or f"publication_{read.status}"
                     ),
-                    retrieved_at=read.retrieved_at or self._clock(),
+                    # Routine unavailable observations retain their durable
+                    # timestamp. Validation failures are invalid evidence and
+                    # must not expose or synthesize freshness.
+                    retrieved_at=(
+                        None
+                        if validation_reason is not None
+                        else read.retrieved_at
+                        or legacy_observation_retrieved.get(base)
+                    ),
                     publication=publication_lineage(read),
                 ))
                 continue
             league.extend(window.league_metrics)
             for team_id, metrics in window.team_metrics.items():
                 team_metrics.setdefault(team_id, []).extend(metrics)
-            observations.extend(window.observations)
+            retained_retrieved_at = legacy_retrieved.get(base)
+            observations.extend(
+                replace(item, retrieved_at=retained_retrieved_at)
+                if retained_retrieved_at is not None else item
+                for item in window.observations
+            )
             fact_scopes[base] = window.scope
-            fact_retrieved[base] = next(iter(window.fact_retrieved_at.values()))
+            fact_retrieved[base] = retained_retrieved_at or next(
+                iter(window.fact_retrieved_at.values())
+            )
         if legacy is None and not league and not observations:
             return None
         return TeamMatchupWindow(
