@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
-from app.services.collection_control import PublicationService
+from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.database_first_activation import (
     DatabaseFirstActivationService,
     DatabaseFirstPublicationReader,
@@ -75,6 +75,57 @@ def test_reader_serves_active_last_good_and_marks_it_stale(tmp_path):
     assert result.payload == {"value": 1}
     assert result.publication_id == publication.publication_id
     assert result.freshness == "stale"
+
+
+def test_rollback_restores_last_good_without_unfencing_the_legacy_writer(tmp_path):
+    """Rolling back returns to the prior Publication and stays database-first.
+
+    Rollback is the reflex when an activated stream looks wrong, so it is the
+    most likely moment for a legacy writer to be let back in by accident. The
+    stream stays enabled and its legacy writer stays fenced; recovering a bad
+    publication is a governed recomposition, not a return to legacy writes.
+    """
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    # A synthetic ledger stream: the fence keys off the registry row, not the
+    # payload, so this proves the rollback behavior without coupling the test
+    # to the matchup publication schema.
+    stream_key = "rollback_fence_test"
+    service.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    good = service.compose(
+        stream_key, season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    service.compose(
+        stream_key,
+        season="2025-26",
+        cutoff=NOW,
+        payload={"value": 2},
+        expected_fence=1,
+    )
+    fence = LegacyWriteFence(engine)
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        fence.assert_writable(stream_key)
+
+    service.rollback(stream_key, reason="restore last good")
+
+    result = DatabaseFirstPublicationReader(engine, clock=lambda: NOW).read(
+        stream_key, season="2025-26"
+    )
+    assert result.available
+    assert result.payload == {"value": 1}
+    assert result.publication_id != good.publication_id
+    # The fence is unchanged by rollback, and the stream is still activated.
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        fence.assert_writable(stream_key)
+    assert service.stream_enabled(stream_key) is True
 
 
 def test_reader_keeps_rollback_publication_available(tmp_path):
