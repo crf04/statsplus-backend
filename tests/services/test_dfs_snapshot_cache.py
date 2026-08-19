@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from threading import Event, Lock, Semaphore, Thread
+from threading import Event, Lock, Thread
 
 import pytest
 
@@ -752,6 +752,29 @@ def test_stale_failure_reason_is_sanitized_for_malformed_provider_payloads() -> 
     assert "raw body" not in repr(cache.last_result)
 
 
+def _signal_when_a_follower_joins(cache: ProviderSnapshotCache) -> Event:
+    """Report the moment a caller adopts an existing flight instead of owning one.
+
+    Starting a second thread does not establish that it reached the
+    coordinator. If the owner retires its flight first, the follower opens a
+    second one and the provider is called twice, so a test that releases the
+    owner on thread start alone is asserting against a schedule it never
+    arranged. Waiting on this event arranges it.
+    """
+
+    joined = Event()
+    coordinator_submit = cache.coordinator.submit
+
+    def submitting(*args, **kwargs):
+        flight, owner = coordinator_submit(*args, **kwargs)
+        if not owner:
+            joined.set()
+        return flight, owner
+
+    cache.coordinator.submit = submitting  # type: ignore[method-assign]
+    return joined
+
+
 def test_concurrent_same_key_refresh_is_single_flight_and_publishes_once() -> None:
     redis = FakeRedis()
     provider = FakeProvider(_snapshot())
@@ -762,7 +785,9 @@ def test_concurrent_same_key_refresh_is_single_flight_and_publishes_once() -> No
 
     def blocking_get_snapshot(query, context):
         started.set()
-        release.wait(timeout=2)
+        # Outlasts the wait for the follower to join, so the owner is released
+        # by the test rather than by its own timeout.
+        release.wait(timeout=5)
         return original_get_snapshot(query, context)
 
     provider.get_snapshot = blocking_get_snapshot  # type: ignore[method-assign]
@@ -775,20 +800,7 @@ def test_concurrent_same_key_refresh_is_single_flight_and_publishes_once() -> No
     results: list[ProviderSnapshot] = []
     errors: list[BaseException] = []
 
-    # A follower only joins the in-flight refresh if it reaches the coordinator
-    # before the owner retires that flight. Starting the second thread does not
-    # establish that on its own, so count arrivals and release the owner only
-    # once both callers have registered; otherwise a slow thread start lets the
-    # owner finish first and the follower opens a second flight.
-    registered = Semaphore(0)
-    coordinator_submit = cache.coordinator.submit
-
-    def counting_submit(*args, **kwargs):
-        flight = coordinator_submit(*args, **kwargs)
-        registered.release()
-        return flight
-
-    cache.coordinator.submit = counting_submit  # type: ignore[method-assign]
+    joined = _signal_when_a_follower_joins(cache)
 
     def retrieve() -> None:
         try:
@@ -800,9 +812,8 @@ def test_concurrent_same_key_refresh_is_single_flight_and_publishes_once() -> No
     second = Thread(target=retrieve)
     first.start()
     assert started.wait(timeout=1)
-    assert registered.acquire(timeout=1)
     second.start()
-    assert registered.acquire(timeout=1)
+    assert joined.wait(timeout=2)
     release.set()
     first.join(timeout=2)
     second.join(timeout=2)
@@ -1994,7 +2005,9 @@ def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
 
     def blocking_get_snapshot(query, context):
         started.set()
-        release.wait(timeout=2)
+        # Outlasts the wait for the follower to join, so the owner is released
+        # by the test rather than by its own timeout.
+        release.wait(timeout=5)
         return original_get_snapshot(query, context)
 
     provider.get_snapshot = blocking_get_snapshot  # type: ignore[method-assign]
@@ -2006,6 +2019,7 @@ def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
     )
     results: list[ProviderSnapshot] = []
     errors: list[BaseException] = []
+    joined = _signal_when_a_follower_joins(cache)
 
     def retrieve(query: NBAMarketQuery) -> None:
         try:
@@ -2021,6 +2035,7 @@ def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
     first.start()
     assert started.wait(timeout=1)
     second.start()
+    assert joined.wait(timeout=2)
     release.set()
     first.join(timeout=2)
     second.join(timeout=2)
