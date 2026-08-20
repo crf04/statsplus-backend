@@ -717,13 +717,21 @@ def test_partial_snapshot_does_not_emit_total_failure_normalization_event():
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     events = telemetry.get_recorded_provider_events()
-    assert [(event["operation"], event["outcome"]) for event in events] == [
+    recorded = [(event["operation"], event["outcome"]) for event in events]
+    # The two fixture detail fetches run concurrently, so which one records
+    # first is not determined. Everything around them is sequential, so only
+    # that pair is compared without order.
+    assert recorded[:2] == [
         ("competition_lookup", telemetry.OUTCOME_SUCCESS),
         ("competition_fixtures", telemetry.OUTCOME_SUCCESS),
-        ("fixture_details", telemetry.OUTCOME_SUCCESS),
-        ("fixture_details", telemetry.OUTCOME_MALFORMED),
-        ("snapshot_normalization", telemetry.OUTCOME_SUCCESS),
     ]
+    assert sorted(recorded[2:4]) == sorted(
+        [
+            ("fixture_details", telemetry.OUTCOME_SUCCESS),
+            ("fixture_details", telemetry.OUTCOME_MALFORMED),
+        ]
+    )
+    assert recorded[4:] == [("snapshot_normalization", telemetry.OUTCOME_SUCCESS)]
     assert telemetry.snapshot_metrics()["provider_failures"] == {
         telemetry.PROVIDER_DABBLE: {telemetry.OUTCOME_MALFORMED: 1}
     }
