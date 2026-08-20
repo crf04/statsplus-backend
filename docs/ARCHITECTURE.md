@@ -165,12 +165,20 @@ complete value. A complete value past its fresh window is used only as a
 stale-if-error fallback after a later expected total refresh failure. Redis
 failure bypasses the cache without an in-process stale copy, and
 `ProviderSnapshotCacheCoordinator` suppresses duplicate refreshes only within
-one worker (there is no distributed lock), and only for callers that reach it
-while a flight is still registered. The cache is read before that registration,
-so a caller whose read missed while an owner was in flight, but which registers
-after that flight is retired, refreshes again rather than adopting the value
-the owner just published. One flight shares the whole cache decision: a
-follower adopts the owner's result or failure verbatim, including
+one worker (there is no distributed lock). The cache is read before a flight is
+registered, so a caller whose read missed while an owner was in flight can
+still register once that flight retires; it reads the cache again inside its
+own flight, before the provider, and adopts a fresh published value rather than
+repeating the work. That second read is bounded by the same absolute deadline
+as the first, and calls no provider once the budget is gone. A refresh caused
+by a failed read does not look again, so Redis failure still bypasses the cache
+for that call. Only a complete refresh is ever published, so when the earlier
+owner returned a partial snapshot there is nothing to adopt and the later
+caller does refresh again. An adopted value is reported as the hit it is, with
+the age decided when its freshness was, and is never written back, so its
+expiry stays where the publishing refresh put it. One flight shares the whole
+cache decision: a follower adopts the owner's result or failure verbatim,
+including
 its cache status, age, and sanitized refresh-failure provenance, and never
 substitutes a stale value from its own Redis read. When the owner's deadline
 elapses before an uncancellable refresh finishes, that deadline failure becomes
