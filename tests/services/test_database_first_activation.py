@@ -781,16 +781,21 @@ def test_service_benchmark_retains_emitted_sql_and_query_ceiling(tmp_path):
 
 
 def test_benchmark_rejects_unplanned_governed_full_scan():
-    from app.services.database_first_benchmark import _plans_are_indexed
-
-    statements = ((
-        "SELECT payload FROM publication_versions WHERE stream_key = ?",
-        ("logs",),
-    ),)
-    assert not _plans_are_indexed(
-        (
-            "SELECT payload FROM publication_versions WHERE stream_key = ?"
-            " => (0, 0, 'SCAN publication_versions')",
-        ),
-        measured_statements=statements,
+    from app.services.database_first_benchmark import (
+        _PlanEvidence,
+        _PlanNode,
+        _plans_are_indexed,
     )
+
+    statement = "SELECT payload FROM publication_versions WHERE stream_key = ?"
+    statements = ((statement, ("logs",)),)
+    evidence = (
+        _PlanEvidence(
+            statement=statement,
+            parameters=None,
+            nodes=(_PlanNode(node_type="Seq Scan", relation="publication_versions"),),
+            available=True,
+        ),
+    )
+
+    assert not _plans_are_indexed(evidence, measured_statements=statements)
