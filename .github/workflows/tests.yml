@@ -17,8 +17,9 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     # The suite runs distributed (see scripts/check.sh), which took the job from
-    # ~10-15 minutes to ~4. The budget stays well above that because the run time
-    # swings with runner size and the sleep-based concurrency tests.
+    # ~15 minutes to between 5 and 8 on a four core runner. The budget stays well
+    # above that because distributing the work widens the spread: wall time
+    # follows the slowest worker, so runner contention arrives amplified.
     timeout-minutes: 25
 
     steps:
