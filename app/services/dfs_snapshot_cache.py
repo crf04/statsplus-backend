@@ -981,20 +981,42 @@ class ProviderSnapshotCache:
         decision: _CacheDecision,
     ) -> ProviderSnapshot:
         key = self.cache_key(query)
-        flight, owner = self.coordinator.submit(
-            key,
-            lambda: self.provider.get_snapshot(
+        # Recorded by the flight itself, with the age decided at the same
+        # instant as freshness, so the owner can tell a refresh it performed
+        # from a value it adopted without changing what followers receive.
+        adopted: list[tuple[ProviderSnapshot, Decimal]] = []
+        # A read that already failed is not consulted again.  Redis failure
+        # bypasses the cache for this call rather than being retried inside the
+        # refresh it caused.
+        may_adopt = cache_status != "error"
+
+        def refresh() -> ProviderSnapshot:
+            published = self._published_since_the_read(key, query) if may_adopt else None
+            # The second read spends budget of its own, and the deadline bounds
+            # the provider call it precedes exactly as the first read does.
+            if self._clock_utc() >= context.deadline:
+                raise DeadlineExceededError("provider retrieval deadline exceeded")
+            if published is not None:
+                adopted.append(published)
+                return published[0]
+            return self.provider.get_snapshot(
                 query, context.with_cache_status("stale" if stale is not None else cache_status)
-            ),
-        )
+            )
+
+        flight, owner = self.coordinator.submit(key, refresh)
         try:
             if owner:
-                result = self._publish(
-                    key,
-                    query,
-                    context,
-                    self._await(key, flight, context, owner=True),
-                    cache_status=cache_status,
+                refreshed = self._await(key, flight, context, owner=True)
+                result = (
+                    self._describe_adopted(adopted[0], context)
+                    if adopted
+                    else self._publish(
+                        key,
+                        query,
+                        context,
+                        refreshed,
+                        cache_status=cache_status,
+                    )
                 )
             else:
                 # Followers adopt the owner's complete cache decision, so stale
@@ -1021,6 +1043,79 @@ class ProviderSnapshotCache:
         self._last_result.value = result
         decision.status = result.cache_status
         return result.snapshot
+
+    def _published_since_the_read(
+        self,
+        key: str,
+        query: NBAMarketQuery,
+    ) -> tuple[ProviderSnapshot, Decimal] | None:
+        """Return a complete value published while this refresh was queued.
+
+        The cache is read before a flight is registered, so a caller can miss
+        while an owner is in flight and still become an owner itself once that
+        flight retires. Reading again here, inside the flight and before the
+        provider is reached, lets that second owner adopt what the first one
+        published rather than repeat its work. Only a fresh value is adopted;
+        a stale one is still the current caller's to refresh.
+
+        The age is decided at the same instant as freshness and travels with
+        the snapshot, so a value cannot be admitted as fresh and then served
+        with an age the window would have rejected.
+        """
+
+        if not self.enabled:
+            return None
+        try:
+            raw = self.redis_client.get(key)
+        except Exception:
+            # A failed second read is not this refresh's problem to report;
+            # calling the provider is exactly what it was queued to do.
+            return None
+        if raw is None:
+            return None
+        try:
+            cached = deserialize_provider_snapshot(
+                raw,
+                expected_contract_version=self.contract_version,
+                expected_provider=self.provider_name,
+                expected_query=query,
+            )
+        except SnapshotCacheError:
+            # Unusable bytes are retired here exactly as the ordinary read
+            # retires them, comparing and deleting atomically so a newer
+            # concurrent value survives.
+            self._delete_if_unchanged(key, raw)
+            return None
+        now = self._clock_utc()
+        if cached.retrieved_at > now:
+            self._delete_if_unchanged(key, raw)
+            return None
+        age = self._age_seconds(cached, now)
+        if not within_fresh_window(age, self.fresh_seconds):
+            return None
+        return cached, age
+
+    def _describe_adopted(
+        self,
+        adopted: tuple[ProviderSnapshot, Decimal],
+        context: RetrievalContext,
+    ) -> SnapshotCacheResult:
+        """Describe an adopted value without publishing it a second time.
+
+        Writing the identical payload again would reset the stale-if-error
+        window, so the adopting owner reports the hit it actually served and
+        leaves the published value and its expiry alone. The deadline still
+        bounds this caller however the value was obtained.
+        """
+
+        if self._clock_utc() >= context.deadline:
+            raise DeadlineExceededError("provider refresh completed at deadline")
+        snapshot, age = adopted
+        return SnapshotCacheResult(
+            snapshot=snapshot,
+            cache_status="hit",
+            age_seconds=age,
+        )
 
     def _publish(
         self,

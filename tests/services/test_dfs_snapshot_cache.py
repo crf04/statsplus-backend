@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 
 import pytest
 
@@ -18,6 +18,7 @@ from app.domain.statistics import (
 )
 from app.providers.dfs import (
     CoverageEvidence,
+    DeadlineExceededError,
     MarketStatus,
     AthleteEvidence,
     AppearanceEvidence,
@@ -627,7 +628,9 @@ def test_fresh_cache_hit_uses_provider_query_key_and_exposes_age() -> None:
     assert len(provider.calls) == 1
     assert len(redis.set_calls) == 1
     assert redis.set_calls[0][2] == 1800
-    assert len(redis.get_calls) == 2
+    # One read per call, plus the read the first call's refresh makes inside
+    # its own flight before reaching the provider.
+    assert len(redis.get_calls) == 3
     assert cache.last_result.cache_status == "hit"
     assert cache.last_result.age_seconds == 60
     assert cache.cache_key(NBAMarketQuery()).startswith(
@@ -1395,7 +1398,11 @@ def test_unusable_cached_payload_is_only_deleted_while_unchanged() -> None:
     cache.get_snapshot(NBAMarketQuery(), _context())
 
     assert redis.deleted == []
-    assert len(provider.calls) == 1
+    # The racing writer publishes a usable value before the refresh reads again
+    # inside its flight, so that value is adopted and the provider is spared.
+    # The unusable payload is gone, replaced by the racing write rather than by
+    # a delete, which is what leaves `deleted` empty.
+    assert provider.calls == []
 
 
 @pytest.mark.parametrize("late_value", [_snapshot(), _snapshot("underdog"), object()])
@@ -2044,6 +2051,238 @@ def test_repeated_query_statuses_share_one_single_flight_refresh() -> None:
     assert results == [provider.snapshot, provider.snapshot]
     assert len(provider.calls) == 1
     assert len(redis.set_calls) == 1
+
+
+def _cache_stalled_between_read_and_flight(
+    redis: FakeRedis, missed: Event, resume: Event
+) -> None:
+    """Hold the follower between its cache read and its flight registration.
+
+    That gap is the whole window: a caller that misses while an owner is in
+    flight can still register after the owner retires. Blocking the read
+    reproduces it exactly rather than hoping the scheduler supplies it.
+
+    ``missed`` reports that the read happened and returned nothing. Without it
+    a late follower would read after the owner published, take an ordinary
+    hit, and satisfy every assertion without ever entering the window.
+
+    Only the follower's own read is held. The re-read the flight performs runs
+    on a cache worker thread, so keying on the caller keeps the two apart.
+    """
+
+    original_get = redis.get
+    held = {"already": False}
+
+    def staged_get(key: str):
+        value = original_get(key)
+        if current_thread().name == "follower" and not held["already"]:
+            held["already"] = True
+            if value is None:
+                missed.set()
+            resume.wait(timeout=5)
+        return value
+
+    redis.get = staged_get  # type: ignore[method-assign]
+
+
+def _blocking_until(provider: FakeProvider, entered: Event, release: Event) -> None:
+    """Hold the owner inside the provider so a follower can read past it."""
+
+    original_get_snapshot = provider.get_snapshot
+
+    def blocking_get_snapshot(query, context):
+        entered.set()
+        release.wait(timeout=5)
+        return original_get_snapshot(query, context)
+
+    provider.get_snapshot = blocking_get_snapshot  # type: ignore[method-assign]
+
+
+def test_a_late_owner_adopts_the_value_the_previous_owner_published() -> None:
+    """The second owner must not repeat a refresh that already published."""
+
+    redis = FakeRedis()
+    provider = FakeProvider(_snapshot())
+    owner_retired = Event()
+    follower_missed = Event()
+    in_provider = Event()
+    owner_may_finish = Event()
+    _cache_stalled_between_read_and_flight(redis, follower_missed, owner_retired)
+    _blocking_until(provider, in_provider, owner_may_finish)
+
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=ControlledClock().now,
+    )
+    results: list[ProviderSnapshot] = []
+    errors: list[BaseException] = []
+    # last_result is per thread, so each caller records its own provenance
+    # where that provenance actually exists.
+    served: dict[str, SnapshotCacheResult] = {}
+
+    def retrieve() -> None:
+        try:
+            results.append(cache.get_snapshot(NBAMarketQuery(), _context()))
+            served[current_thread().name] = cache.last_result
+        except BaseException as error:  # pragma: no cover - diagnostic assertion
+            errors.append(error)
+
+    owner = Thread(target=retrieve, name="owner")
+    follower = Thread(target=retrieve, name="follower")
+    owner.start()
+    assert in_provider.wait(timeout=5)
+    # The follower reads while the owner is still in flight, so it misses, and
+    # is then held short of registering a flight of its own.
+    follower.start()
+    # The follower has read and found nothing;  only now may the owner publish.
+    assert follower_missed.wait(timeout=5)
+    owner_may_finish.set()
+    owner.join(timeout=5)
+    # The owner has published and retired;  only now may the follower register.
+    owner_retired.set()
+    follower.join(timeout=5)
+
+    assert errors == []
+    assert results == [provider.snapshot, provider.snapshot]
+    assert len(provider.calls) == 1
+    # Adoption reports the hit it served and leaves the published value and its
+    # expiry exactly where the publishing refresh put them.
+    assert len(redis.set_calls) == 1
+    assert redis.set_calls[0][2] == 1800
+    assert served["follower"].cache_status == "hit"
+    assert served["follower"].age_seconds == 0
+
+
+def test_an_adopting_owner_is_still_bound_by_its_own_deadline() -> None:
+    """Adoption is not an escape from the budget the caller arrived with."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    published = serialize_provider_snapshot(_snapshot())
+    original_get = redis.get
+    reads = {"count": 0}
+
+    def publish_then_expire(read_key: str):
+        reads["count"] += 1
+        value = original_get(read_key)
+        if reads["count"] == 1:
+            # The caller misses, and a value lands before its flight looks.
+            redis.values[read_key] = published
+        elif reads["count"] == 2:
+            # The flight's own read outlives the budget. The value it finds is
+            # still fresh, so this is the adopting path rather than a refresh.
+            clock.advance(1)
+        return value
+
+    redis.get = publish_then_expire  # type: ignore[method-assign]
+    context = RetrievalContext(
+        deadline=_RETRIEVED_AT + timedelta(seconds=0.5),
+        request_id="cache-test",
+    )
+
+    with pytest.raises(DeadlineExceededError):
+        cache.get_snapshot(NBAMarketQuery(), context)
+    assert provider.calls == []
+    assert redis.set_calls == []
+
+
+def test_a_slow_second_read_calls_no_provider_past_the_deadline() -> None:
+    """The read inside the flight bounds the provider exactly as the first does."""
+
+    redis = FakeRedis()
+    clock = ControlledClock()
+    provider = FakeProvider(_snapshot())
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=clock.now,
+    )
+    original_get = redis.get
+    reads = {"count": 0}
+
+    def slow_second_read(read_key: str):
+        reads["count"] += 1
+        value = original_get(read_key)
+        if reads["count"] == 2:
+            # Nothing was published, so there is nothing to adopt;  the budget
+            # is gone regardless and the provider must never be reached.
+            clock.advance(1)
+        return value
+
+    redis.get = slow_second_read  # type: ignore[method-assign]
+    context = RetrievalContext(
+        deadline=_RETRIEVED_AT + timedelta(seconds=0.5),
+        request_id="cache-test",
+    )
+
+    with pytest.raises(DeadlineExceededError):
+        cache.get_snapshot(NBAMarketQuery(), context)
+    assert provider.calls == []
+
+
+def test_a_late_owner_still_refreshes_when_the_first_published_nothing() -> None:
+    """A partial refresh is never written, so there is nothing to adopt."""
+
+    partial = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.PARTIAL,
+        markets=(PlayerProjectionMarket(provider="dabble"),),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            skipped_count=0,
+            pagination_complete=False,
+        ),
+        retrieved_at=_RETRIEVED_AT,
+    )
+    redis = FakeRedis()
+    provider = FakeProvider(partial)
+    owner_retired = Event()
+    follower_missed = Event()
+    in_provider = Event()
+    owner_may_finish = Event()
+    _cache_stalled_between_read_and_flight(redis, follower_missed, owner_retired)
+    _blocking_until(provider, in_provider, owner_may_finish)
+
+    cache = ProviderSnapshotCache(
+        provider,
+        provider_name="dabble",
+        redis_client=redis,
+        clock=ControlledClock().now,
+    )
+    results: list[ProviderSnapshot] = []
+
+    def retrieve() -> None:
+        results.append(cache.get_snapshot(NBAMarketQuery(), _context()))
+
+    owner = Thread(target=retrieve, name="owner")
+    follower = Thread(target=retrieve, name="follower")
+    owner.start()
+    assert in_provider.wait(timeout=5)
+    follower.start()
+    # The follower has read and found nothing;  only now may the owner publish.
+    assert follower_missed.wait(timeout=5)
+    owner_may_finish.set()
+    owner.join(timeout=5)
+    owner_retired.set()
+    follower.join(timeout=5)
+
+    assert results == [partial, partial]
+    assert redis.set_calls == []
+    # Documented rather than desired:  adoption reads the published value, and
+    # a partial refresh publishes none, so this caller repeats the work.
+    assert len(provider.calls) == 2
 
 
 def test_future_dated_cached_snapshot_is_a_miss_and_the_key_is_replaced() -> None:
