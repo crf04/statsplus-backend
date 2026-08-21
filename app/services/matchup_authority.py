@@ -9,6 +9,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.domain.nba_events import is_completed_non_postponed_event
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.domain.utc import assume_utc
 from app.models.collection_control import (
@@ -131,13 +132,7 @@ def resolve_unique_matchup_authority(
                 event for event in events
                 if (
                     event.get("phase") == "Regular Season"
-                    and (
-                        event.get("completed") is True
-                        or event.get("status_code") == 3
-                        or str(event.get("status", "")).strip().lower()
-                        in {"final", "final/ot", "final/2ot", "final/3ot"}
-                    )
-                    and not event.get("postponed_status")
+                    and is_completed_non_postponed_event(event)
                 )
             )
             chronological = tuple(sorted(

@@ -31,6 +31,7 @@ from app.migrations import run_migrations
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from app.models.collection_control import (
+    CatalogPublication,
     CollectionManifest,
     CollectionObservation,
     PublicationVersion,
@@ -323,6 +324,17 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     repository.replace_games_atomic(games)
     candidate_cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
     with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="ledger-event-catalog",
+            season="2025-26",
+            catalog_type="event",
+            cutoff=candidate_cutoff,
+            version="event-v1",
+            checksum="ledger-event-catalog-checksum",
+            payload='{"events":[]}',
+            complete=True,
+            published_at=candidate_cutoff,
+        ))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="ledger-manifest", season="2025-26",
             cutoff=candidate_cutoff,
@@ -330,6 +342,8 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
             accepted_versions="[1]", scopes='["canonical_game_ledger"]',
             checksum="ledger-manifest", status="expired",
             created_at=datetime(2025, 10, 15, tzinfo=timezone.utc),
+            event_catalog_publication_id="ledger-event-catalog",
+            event_catalog_checksum="ledger-event-catalog-checksum",
         ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {

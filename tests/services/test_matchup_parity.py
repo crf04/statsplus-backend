@@ -99,6 +99,7 @@ from app.services.team_matchup_refresh import (
     _nba_team_stats_request_descriptor,
     _pbp_totals_request_descriptor,
 )
+from app.services.matchup_authority import resolve_unique_matchup_authority
 from tests.services.test_ledger_runtime import (
     _immutable_event_catalog,
     _manifest_catalog_binding,
@@ -2199,6 +2200,7 @@ def test_manifest_preflight_requires_one_unique_qualifying_authority(tmp_path):
             engine, season="2025-26", manifest_id=MANIFEST,
         )
 
+
     with Session(engine) as session, session.begin():
         authority = session.get(CollectionManifest, MANIFEST)
         original = session.get(
@@ -2226,6 +2228,58 @@ def test_manifest_preflight_requires_one_unique_qualifying_authority(tmp_path):
         matchup_parity_script._manifest_preflight(
             engine, season="2025-26", manifest_id=MANIFEST,
         )
+
+
+def test_matchup_authority_accepts_catalog_numeric_final_status_string(tmp_path):
+    engine, _, _ = _runner_world(tmp_path)
+    with Session(engine) as session, session.begin():
+        manifest = session.get(CollectionManifest, MANIFEST)
+        catalog = session.get(
+            CatalogPublication, manifest.event_catalog_publication_id
+        )
+        document = json.loads(catalog.payload)
+        for index, event in enumerate(document["events"]):
+            event["status"] = "3" if index % 2 == 0 else "ignored"
+            event.pop("status_code", None)
+            if index % 2:
+                event["status_code"] = "3"
+        catalog.payload = json.dumps(
+            document, sort_keys=True, separators=(",", ":")
+        )
+        catalog.checksum = hashlib.sha256(catalog.payload.encode()).hexdigest()
+        manifest.event_catalog_checksum = catalog.checksum
+
+    with Session(engine) as session:
+        authority = resolve_unique_matchup_authority(
+            session, season="2025-26", cutoff=CUTOFF, lock=False
+        )
+
+    assert authority.provider_start_date == "2024-10-31"
+    assert authority.provider_end_date == "2024-11-14"
+
+
+def test_matchup_authority_excludes_explicitly_postponed_final_event(tmp_path):
+    engine, _, _ = _runner_world(tmp_path)
+    with Session(engine) as session, session.begin():
+        manifest = session.get(CollectionManifest, MANIFEST)
+        catalog = session.get(
+            CatalogPublication, manifest.event_catalog_publication_id
+        )
+        document = json.loads(catalog.payload)
+        postponed_id = document["events"][0]["nba_game_id"]
+        document["events"][0]["is_postponed"] = True
+        catalog.payload = json.dumps(
+            document, sort_keys=True, separators=(",", ":")
+        )
+        catalog.checksum = hashlib.sha256(catalog.payload.encode()).hexdigest()
+        manifest.event_catalog_checksum = catalog.checksum
+
+    with Session(engine) as session:
+        authority = resolve_unique_matchup_authority(
+            session, season="2025-26", cutoff=CUTOFF, lock=False
+        )
+
+    assert postponed_id not in authority.expected_game_ids
 
 
 def test_compare_cli_carries_explicit_safety_contract(monkeypatch, tmp_path):
