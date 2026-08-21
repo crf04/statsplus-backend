@@ -322,6 +322,9 @@ class LedgerBackfillService:
             summaries=summaries,
             now=started_at,
             repair=historical_repair,
+            accepted_manifest_game_ids=self.repository.game_ids_from_manifest(
+                season, manifest_id
+            ),
             missing_raw_evidence=missing_raw_evidence,
         )
         if max_games is not None:
@@ -503,9 +506,11 @@ class LedgerBackfillService:
         summaries: Mapping[str, object],
         now: datetime,
         repair: bool,
+        accepted_manifest_game_ids: Iterable[str] = (),
         missing_raw_evidence: Iterable[str] = (),
     ) -> tuple[_Target, ...]:
         targets: list[_Target] = []
+        accepted_manifest_game_ids = frozenset(accepted_manifest_game_ids)
         missing_raw_evidence = frozenset(missing_raw_evidence)
         for event in events:
             game_id = str(event["nba_game_id"])
@@ -518,7 +523,8 @@ class LedgerBackfillService:
                 targets.append(_Target(event, 0))
                 continue
             if repair:
-                targets.append(_Target(event, 1))
+                if game_id not in accepted_manifest_game_ids:
+                    targets.append(_Target(event, 1))
                 continue
             age_days = (now.date() - _event_datetime(event.get("scheduled_at")).date()).days
             if age_days <= self.daily_recheck_days and summary is not None:

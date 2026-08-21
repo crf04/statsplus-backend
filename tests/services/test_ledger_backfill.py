@@ -944,7 +944,7 @@ def test_pre_migration_ledger_games_are_refetched_until_raw_evidence_exists(tmp_
     assert repository.game_ids_without_raw_evidence("2024-25") == frozenset()
 
 
-def test_identical_replay_adds_no_persisted_observation_evidence(tmp_path):
+def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'replay.sqlite3'}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
@@ -973,7 +973,7 @@ def test_identical_replay_adds_no_persisted_observation_evidence(tmp_path):
 
     assert replayed.complete
     assert replayed.games_replaced == 0
-    assert [call[0] for call in provider.calls] == ["0022400001"]
+    assert provider.calls == []
     with engine.connect() as connection:
         observations = connection.execute(select(CollectionObservation)).mappings().all()
         stored = repository.get_game("0022400001")
