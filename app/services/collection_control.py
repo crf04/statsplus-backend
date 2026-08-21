@@ -4017,6 +4017,11 @@ class PublicationService(_SessionService):
             manifest = session.get(CollectionManifest, manifest_id)
             if manifest is None:
                 raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+            if (
+                not manifest.event_catalog_publication_id
+                or not manifest.event_catalog_checksum
+            ):
+                raise ControlPlaneError("event_catalog_required")
             # Unlike recompose_ledger, this method never advances the
             # publication pointer.  Superseding the pointer's target would
             # strand it on a superseded row and make the stream read as
@@ -4037,6 +4042,11 @@ class PublicationService(_SessionService):
             if (
                 existing is not None
                 and existing.checksum == _checksum(encoded)
+                and existing.manifest_id == manifest_id
+                and existing.event_catalog_publication_id
+                == manifest.event_catalog_publication_id
+                and existing.event_catalog_checksum
+                == manifest.event_catalog_checksum
                 and self._publication_provenance_matches(
                     session,
                     existing.publication_id,

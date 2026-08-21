@@ -144,11 +144,21 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="ledger-manifest", season="2025-26", cutoff=now,
             collect_before=now + timedelta(hours=1), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
+            event_catalog_publication_id="event-catalog",
+            event_catalog_checksum=catalog_checksum,
             status="active", created_at=now,
         ))
         connection.execute(CollectionObservation.__table__.insert(), [
@@ -211,13 +221,100 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
         ("pbp:game-1", "game-1"),
         ("pbp:game-2", "game-2"),
     }
+    with control_db.begin() as connection:
+        connection.execute(
+            CollectionManifest.__table__.update()
+            .where(CollectionManifest.manifest_id == "ledger-manifest")
+            .values(
+                event_catalog_publication_id=None,
+                event_catalog_checksum=None,
+            )
+        )
+    with pytest.raises(ControlPlaneError, match="event_catalog_required"):
+        publications.compose_inactive_ledger(
+            "traditional_opponent", season="2025-26", cutoff=now,
+            payload=[{"team_id": 1, "opponent_points": 99}],
+            provenance={"pbp:game-1": "game-1", "pbp:game-2": "game-2"},
+        )
+
+
+def test_inactive_ledger_replaces_legacy_candidate_without_manifest_binding(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="ledger-manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="ledger-manifest",
+            event_catalog_publication_id="event-catalog",
+            event_catalog_checksum=catalog_checksum,
+            status="active", created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:game-1", client_observation_id="pbp:game-1",
+            collector_id="test", manifest_id="ledger-manifest",
+            environment="testing", provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope='{"game_id":"game-1","surface":"canonical_game_ledger"}',
+            season="2025-26", cutoff=now, schema_version=1,
+            checksum="a" * 64, payload="{}", payload_bytes=2,
+            retrieved_at=now, accepted_at=now,
+        ))
+    _bind_current_ledger_source(
+        control_db, game_id="game-1", observation_id="pbp:game-1", cutoff=now,
+    )
+    payload = [{"team_id": 1, "opponent_points": 99}]
+    legacy = publications.compose_inactive_ledger(
+        "traditional_opponent", season="2025-26", cutoff=now,
+        payload=payload, provenance={"pbp:game-1": "game-1"},
+    )
+    with control_db.begin() as connection:
+        connection.execute(
+            PublicationVersion.__table__.update()
+            .where(PublicationVersion.publication_id == legacy.publication_id)
+            .values(
+                event_catalog_publication_id=None,
+                event_catalog_checksum=None,
+            )
+        )
+
+    replacement = publications.compose_inactive_ledger(
+        "traditional_opponent", season="2025-26", cutoff=now,
+        payload=payload, provenance={"pbp:game-1": "game-1"},
+    )
+
+    assert replacement.publication_id != legacy.publication_id
+    assert replacement.manifest_id == "ledger-manifest"
+    assert replacement.event_catalog_publication_id == "event-catalog"
+    assert replacement.event_catalog_checksum == catalog_checksum
+    with control_db.connect() as connection:
+        assert connection.scalar(select(PublicationVersion.status).where(
+            PublicationVersion.publication_id == legacy.publication_id
+        )) == "superseded"
 
 
 def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now)
     publications.register_default_streams()
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="player-log-event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="player-log-manifest",
             season="2025-26",
@@ -226,6 +323,8 @@ def test_player_log_candidate_and_rollback_keep_indexed_projection(control_db):
             accepted_versions="[1]",
             scopes='["canonical_game_ledger"]',
             checksum="player-log-manifest",
+            event_catalog_publication_id="player-log-event-catalog",
+            event_catalog_checksum=catalog_checksum,
             status="active",
             created_at=now,
         ))
@@ -345,11 +444,21 @@ def test_ledger_rehearsal_rejects_cross_manifest_and_cutoff_provenance(control_d
     now = datetime(2026, 8, 12, tzinfo=UTC)
     publications = PublicationService(control_db, clock=lambda: now + timedelta(days=2))
     publications.register_default_streams()
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="rehearsal-event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
         connection.execute(CollectionManifest.__table__.insert(), [{
             "manifest_id": manifest_id, "season": "2025-26", "cutoff": now,
             "collect_before": now + timedelta(hours=1), "accepted_versions": "[1]",
             "scopes": '["canonical_game_ledger"]', "checksum": manifest_id,
+            "event_catalog_publication_id": "rehearsal-event-catalog",
+            "event_catalog_checksum": catalog_checksum,
             "status": status, "created_at": now,
         } for manifest_id, status in (
             ("ledger-manifest-a", "expired"),

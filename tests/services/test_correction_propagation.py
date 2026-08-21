@@ -107,6 +107,17 @@ def _event_catalog_publication(
     }
 
 
+def _bind_manifest_catalog(connection, games, cutoff, manifest_id):
+    catalog = _event_catalog_publication(
+        games, cutoff, f"{manifest_id}-event-catalog",
+    )
+    connection.execute(CatalogPublication.__table__.insert().values(**catalog))
+    return {
+        "event_catalog_publication_id": catalog["publication_id"],
+        "event_catalog_checksum": catalog["checksum"],
+    }
+
+
 def test_keyed_lineage_merge_is_commutative_and_replaces_only_corrected_game():
     baseline_a = LedgerLineage.single(
         game_id="game-a", source_observation_id="obs:a:old",
@@ -2347,6 +2358,10 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
         )
     manifest_id = "atomic-manifest"
     with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            games, AS_OF, f"{manifest_id}-event-catalog",
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id=manifest_id,
             season="2025-26",
@@ -2355,6 +2370,8 @@ def test_production_materializer_failure_rolls_back_all_read_models_and_candidat
             accepted_versions="[1]",
             scopes='["canonical_game_ledger"]',
             checksum=manifest_id,
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
             status="active",
             created_at=AS_OF,
         ))
@@ -2698,11 +2715,15 @@ def test_scheduled_reconciliation_requeues_failed_ledger_job(tmp_path):
     publications = PublicationService(engine, clock=lambda: AS_OF)
     publications.register_default_streams()
     with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, (), AS_OF, "manifest",
+        )
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="manifest", season="2025-26", cutoff=AS_OF,
             collect_before=AS_OF + timedelta(days=1), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum="manifest",
             status="active", created_at=AS_OF,
+            **catalog_binding,
         ))
         connection.execute(CollectionObservation.__table__.insert().values(
             observation_id="obs:game-1", client_observation_id="obs:game-1",
@@ -2747,6 +2768,10 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
     manifest_id = "reconcile-lineage-manifest"
     ledger = CanonicalGameLedgerRepository(engine)
     with engine.begin() as connection:
+        catalog = _event_catalog_publication(
+            (game,), cutoff, f"{manifest_id}-event-catalog",
+        )
+        connection.execute(CatalogPublication.__table__.insert().values(**catalog))
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id=manifest_id,
             season=game.season,
@@ -2755,6 +2780,8 @@ def test_scheduled_reconciliation_requeues_accepted_lineage_missing_from_success
             accepted_versions="[1]",
             scopes='["canonical_game_ledger"]',
             checksum=manifest_id,
+            event_catalog_publication_id=catalog["publication_id"],
+            event_catalog_checksum=catalog["checksum"],
             status="active",
             created_at=cutoff,
         ))
@@ -2910,11 +2937,15 @@ def test_active_ledger_publication_advances_once_and_replay_keeps_pointer(tmp_pa
     publications = PublicationService(engine, clock=lambda: AS_OF + timedelta(hours=18))
     publications.register_default_streams()
     with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, games, AS_OF, "manifest",
+        )
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="manifest", season="2025-26", cutoff=AS_OF,
             collect_before=AS_OF + timedelta(days=30), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum="manifest",
             status="active", created_at=AS_OF,
+            **catalog_binding,
         ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {
@@ -3131,6 +3162,9 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
         enabled=False,
     )
     with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, (), AS_OF, "inactive-candidate-manifest",
+        )
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="inactive-candidate-manifest",
             season="2025-26",
@@ -3141,6 +3175,7 @@ def test_corrected_inactive_candidate_invalidates_stale_activation_target(tmp_pa
             checksum="inactive-candidate-manifest",
             status="active",
             created_at=AS_OF,
+            **catalog_binding,
         ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {
@@ -3228,6 +3263,9 @@ def test_activation_rejects_candidate_after_canonical_source_advances(tmp_path):
         enabled=False,
     )
     with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, (), AS_OF, "stale-source-manifest",
+        )
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="stale-source-manifest",
             season="2025-26",
@@ -3238,6 +3276,7 @@ def test_activation_rejects_candidate_after_canonical_source_advances(tmp_path):
             checksum="stale-source-manifest",
             status="active",
             created_at=AS_OF,
+            **catalog_binding,
         ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {
@@ -3316,6 +3355,9 @@ def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_p
         enabled=False,
     )
     with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, (), AS_OF, "activation-race-manifest",
+        )
         connection.execute(CollectionManifest.__table__.insert().values(
             manifest_id="activation-race-manifest",
             season="2025-26",
@@ -3326,6 +3368,7 @@ def test_correction_batch_refreshes_stream_lock_after_candidate_activation(tmp_p
             checksum="activation-race-manifest",
             status="active",
             created_at=AS_OF,
+            **catalog_binding,
         ))
         connection.execute(CollectionObservation.__table__.insert(), [
             {
@@ -3440,6 +3483,9 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
     with engine.begin() as connection:
         for index, (cutoff, source_id) in enumerate(zip(cutoffs, sources)):
             manifest_id = f"cross-manifest-{index}"
+            catalog_binding = _bind_manifest_catalog(
+                connection, (), cutoff, manifest_id,
+            )
             connection.execute(CollectionManifest.__table__.insert().values(
                 manifest_id=manifest_id,
                 season="2025-26",
@@ -3450,6 +3496,7 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
                 checksum=manifest_id,
                 status="active" if index == 2 else "superseded",
                 created_at=cutoff,
+                **catalog_binding,
             ))
             connection.execute(CollectionObservation.__table__.insert().values(
                 observation_id=source_id,
