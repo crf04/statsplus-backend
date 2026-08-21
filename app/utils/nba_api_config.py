@@ -81,9 +81,11 @@ def get_nba_api_session(settings: RuntimeSettings | None = None):
     # Configure retry strategy with exponential backoff and logging
     retry_strategy = RetryWithLogging(
         total=max_retries,
-        backoff_factor=1,  # Wait 1s, 2s, 4s between retries
+        backoff_factor=2,
+        backoff_jitter=1,
         status_forcelist=[429, 500, 502, 503, 504],  # Retry on these HTTP status codes
-        allowed_methods=["HEAD", "GET", "OPTIONS"]  # Only retry safe methods
+        allowed_methods=["HEAD", "GET", "OPTIONS"],  # Only retry safe methods
+        respect_retry_after_header=True,
     )
     
     # Configure adapter with connection pooling and keep-alive

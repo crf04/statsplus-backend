@@ -405,6 +405,7 @@ def build_dependencies(
                     details={"game_id": game_id, **details},
                 ),
                 repository=canonical_game_ledger_repository,
+                max_concurrency=1,
             )
 
     dfs_board_service = DFSBoardService(

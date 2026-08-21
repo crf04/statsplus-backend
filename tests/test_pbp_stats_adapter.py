@@ -459,6 +459,9 @@ def test_shared_session_is_configured_with_retrying_adapter():
 
     assert adapter.max_retries.total >= 1
     assert type(adapter.max_retries).__name__ == "RetryWithLogging"
+    assert adapter.max_retries.backoff_factor == 2
+    assert adapter.max_retries.backoff_jitter == 1
+    assert adapter.max_retries.respect_retry_after_header
 
 
 def test_parse_totals_valid_and_malformed():
