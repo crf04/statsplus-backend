@@ -352,8 +352,8 @@ def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
     normalized = normalize_schedule_response(
         [{
             "gameId": "0022500001",
-            "homeTeam_teamId": 1,
-            "awayTeam_teamId": 2,
+            "homeTeam_teamId": 1610612737,
+            "awayTeam_teamId": 1610612738,
             "gameDateTimeUTC": "2025-11-02T23:30:00-05:00",
             "gameStatus": 3,
         }],
@@ -398,6 +398,11 @@ def test_numeric_final_collector_shape_enters_immutable_governed_set(tmp_path):
         manifest_id="numeric-final-manifest",
     )
     assert frozenset().union(*game_ids.values()) == {"0022500001"}
+    governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
+        "2025-26", cutoff, manifest_id="numeric-final-manifest"
+    )
+    assert governance.events[0]["home_team_tricode"] == "ATL"
+    assert governance.events[0]["away_team_tricode"] == "BOS"
 
 
 def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):

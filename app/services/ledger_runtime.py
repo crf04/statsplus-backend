@@ -16,6 +16,7 @@ from app.domain.publication_integrity import publication_payload_matches_checksu
 from app.domain.nba_events import (
     is_completed_non_postponed_event,
 )
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.slate_time import slate_date_for_instant, slate_day_bounds_utc
 from app.models.collection_control import (
     ActiveSeason,
@@ -390,6 +391,12 @@ class ActiveManifestLedgerGovernanceReader:
                 game_id = str(raw_game_id).strip()
                 home_team_id = int(row["home_team_id"])
                 away_team_id = int(row["away_team_id"])
+                home_team_tricode = NBA_TEAM_ID_TO_TRICODE.get(home_team_id)
+                away_team_tricode = NBA_TEAM_ID_TO_TRICODE.get(away_team_id)
+                if home_team_tricode is None:
+                    home_team_tricode = str(row.get("home_team_tricode") or "").strip().upper()
+                if away_team_tricode is None:
+                    away_team_tricode = str(row.get("away_team_tricode") or "").strip().upper()
                 phase = str(
                     row.get("phase", row.get("season_phase", row.get("season_type")))
                 ).strip().lower().replace("_", " ")
@@ -427,7 +434,9 @@ class ActiveManifestLedgerGovernanceReader:
                     "phase": "Regular Season",
                     "classification": "Regular Season",
                     "home_team_id": home_team_id,
+                    **({"home_team_tricode": home_team_tricode} if home_team_tricode else {}),
                     "away_team_id": away_team_id,
+                    **({"away_team_tricode": away_team_tricode} if away_team_tricode else {}),
                     "scheduled_at": scheduled_at,
                 })
         return tuple(sorted(
