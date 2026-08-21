@@ -421,7 +421,11 @@ class ActiveManifestLedgerGovernanceReader:
                 and scheduled_at <= manifest_cutoff
             ):
                 eligible.append({
+                    **dict(row),
                     "nba_game_id": game_id,
+                    "season": str(manifest["season"]),
+                    "phase": "Regular Season",
+                    "classification": "Regular Season",
                     "home_team_id": home_team_id,
                     "away_team_id": away_team_id,
                     "scheduled_at": scheduled_at,

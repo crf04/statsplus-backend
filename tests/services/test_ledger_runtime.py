@@ -23,6 +23,8 @@ from app.services.ledger_runtime import (
     LedgerGovernance,
     LedgerRuntime,
 )
+from app.services.ledger_backfill import LedgerBackfillService
+from app.domain.nba_events import is_final_event, is_postponed_event, player_game_log_season_type
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
 from app.collector.normalizers import normalize_schedule_response
 from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
@@ -470,6 +472,13 @@ def test_runtime_governance_owns_exact_games_teams_cutoff_and_l15(tmp_path):
     governance = reader.read("2025-26", cutoff)
 
     assert governance.cutoff == cutoff
+    assert all(event["season"] == "2025-26" for event in governance.events)
+    assert all(player_game_log_season_type(event) == "Regular Season" for event in governance.events)
+    assert all(is_final_event(event) for event in governance.events)
+    assert not any(is_postponed_event(event) for event in governance.events)
+    assert len(LedgerBackfillService._authorized_events(
+        governance.events, season="2025-26", through=cutoff,
+    )) == 225
     assert len(governance.expected_game_ids) == 225
     assert len(governance.team_ids) == 30
     assert all(len(game_ids) == 15 for game_ids in governance.expected_l15_game_ids.values())
