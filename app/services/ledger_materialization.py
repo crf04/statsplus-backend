@@ -139,45 +139,46 @@ class LedgerMaterializationService:
             else l15_window.reason or "L15 ledger is incomplete"
         )
         traditional = derive_traditional_opponent_facts(eligible)
-        assist_status = "complete"
         try:
             assists = derive_assist_location_facts(eligible)
         except ValueError as error:
             if require_assist_locations:
                 raise LedgerMaterializationUnavailable(str(error)) from error
             assists = ()
-            assist_status = "unavailable"
         per36 = derive_player_per36_facts(eligible, season=canonical_season, cutoff=as_of)
         if team_ids is None or expected_game_ids is None:
             raise LedgerMaterializationUnavailable(
                 "assist-location windows require exact governed teams and game IDs"
             )
+        # Each assist window stands on its own governed game set: one game
+        # without a location observation makes the Season window (and the
+        # season-wide fact tuple) unavailable without touching an L15 window
+        # that never selects that game.
         assist_season = assist_l15 = None
-        if assist_status == "complete":
-            try:
-                assist_season = materialize_assist_location_window(
-                    eligible,
-                    season=canonical_season,
-                    as_of=as_of,
-                    expected_game_ids=expected_game_ids,
-                    team_ids=team_ids,
-                )
-            except ValueError as error:
-                if require_assist_locations:
-                    raise LedgerMaterializationUnavailable(str(error)) from error
-            try:
-                assist_l15 = materialize_assist_location_window(
-                    eligible,
-                    season=canonical_season,
-                    as_of=as_of,
-                    window_games=15,
-                    expected_game_ids=expected_game_ids,
-                    expected_team_game_ids=expected_l15_game_ids,
-                    team_ids=team_ids,
-                )
-            except ValueError as error:
-                if require_assist_locations:
-                    raise LedgerMaterializationUnavailable(str(error)) from error
+        try:
+            assist_season = materialize_assist_location_window(
+                eligible,
+                season=canonical_season,
+                as_of=as_of,
+                expected_game_ids=expected_game_ids,
+                team_ids=team_ids,
+            )
+        except ValueError as error:
+            if require_assist_locations:
+                raise LedgerMaterializationUnavailable(str(error)) from error
+        try:
+            assist_l15 = materialize_assist_location_window(
+                eligible,
+                season=canonical_season,
+                as_of=as_of,
+                window_games=15,
+                expected_game_ids=expected_game_ids,
+                expected_team_game_ids=expected_l15_game_ids,
+                team_ids=team_ids,
+            )
+        except ValueError as error:
+            if require_assist_locations:
+                raise LedgerMaterializationUnavailable(str(error)) from error
         result = LedgerMaterialization(
             season=canonical_season,
             as_of=as_of,
@@ -254,8 +255,13 @@ class LedgerMaterializationService:
                 as_of=as_of,
                 status=status,
                 checksum=_payload_checksum(payload),
-                game_count=len(season_window.governed_game_ids),
-                team_count=len(season_window.teams),
+                game_count=len(
+                    (l15_window if window_kind == "rolling_games" else season_window)
+                    .governed_game_ids
+                ),
+                team_count=len(
+                    (l15_window if window_kind == "rolling_games" else season_window).teams
+                ),
                 retrieved_at=retrieved_at,
                 reason=reason,
                 payload=_payload_json(payload),
