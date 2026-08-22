@@ -176,6 +176,8 @@ def test_composite_uses_governed_live_home_away_and_complete_team_rows():
         1610612747,
         1610612759,
     }
+    assert observation["_ledger_provenance"]["provider"] == "nba_live_data"
+    assert observation["_ledger_provenance"]["source_documents"]["pbp"] == pbp
 
 
 def test_live_only_fallback_is_accepted_without_claiming_pbp_provenance():
