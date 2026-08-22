@@ -71,11 +71,16 @@ def _candidate(engine, *, stream_key="player_per36", checksum="a" * 64):
 
 
 def _regulation_game():
-    """The shared fixture at a provable regulation game length."""
+    """The shared fixture at a regulation game length.
+
+    Each team's two player rows carry 120 minutes so the retained effective
+    denominator (player minutes over five) is exactly 48.
+    """
 
     game = _game()
     return replace(
         game,
+        player_facts=tuple(replace(player, minutes=120.0) for player in game.player_facts),
         team_facts=tuple(replace(fact, team_minutes=48.0) for fact in game.team_facts),
     )
 

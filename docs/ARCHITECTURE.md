@@ -1226,9 +1226,10 @@ exact L15 materialization selects governed game IDs only and refuses to call a
 window complete until all 30 governed teams are present (and L15 has 15
 eligible games for each). League averages use the population denominator;
 team values are normalized to per-48 from the nominal game length each
-retained team-minute value proves (48 minutes plus 5 per overtime; the
+retained team-minute value establishes (48 minutes plus 5 per overtime; the
 retained player-minutes-over-five drifts from it by seconds of PBP clock
-precision, and a value that does not prove a nominal length is unavailable;
+precision, accepted up to 0.05 minutes, and a value outside that band is
+unavailable because the ledger has no independent game-duration evidence;
 count-per-game fallback remains for hand-built replay facts without
 minutes), and competition ranks are deterministic with ties
 represented as `1, 1, 3`.
@@ -1918,7 +1919,8 @@ each other, proven by byte-identical game-set checksums; a missing surface or
 a single missing metric fails. Integer counts — the four traditional opponent
 counts and the six assist surfaces — compare exactly; the single documented
 tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-9`) applies only to floating
-denominators (effective team minutes, with seconds normalized to minutes) and
+denominators (the nominal game length derived from retained effective team
+minutes, with legacy seconds normalized to minutes) and
 to the per-48 rates recomputed from counts and denominators. The ledger
 publication's served per-48 and competition-rank fields are also bound to
 those recomputed values; a missing or incorrect served value is a hard

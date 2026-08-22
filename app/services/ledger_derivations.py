@@ -198,15 +198,20 @@ _PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds"})
 #: which drifts from nominal by seconds of PBP clock precision.
 REGULATION_MINUTES = 48.0
 OVERTIME_MINUTES = 5.0
-#: Largest drift from a nominal game length that still proves the length.
-NOMINAL_MINUTES_TOLERANCE = 0.5
+#: Largest drift from a nominal game length accepted as clock precision:
+#: three seconds of team minutes (fifteen player-seconds).  Production 2025-26
+#: drift peaks at 0.024 minutes; a missing player row with more than fifteen
+#: seconds of play therefore falls outside the band and fails closed.
+NOMINAL_MINUTES_TOLERANCE = 0.05
 
 
 def nominal_team_minutes(team_minutes: float) -> float:
-    """Return the nominal game length the retained team minutes prove.
+    """Return the nominal game length the retained team minutes establish.
 
-    Raises ``LedgerDerivationUnavailable`` when the retained value is not
-    within ``NOMINAL_MINUTES_TOLERANCE`` of ``48 + 5k`` minutes, because the
+    The retained value is the player-minute sum over five, which is within
+    seconds of ``48 + 5k`` when the observation is complete.  Raises
+    ``LedgerDerivationUnavailable`` when the value is not within
+    ``NOMINAL_MINUTES_TOLERANCE`` of a nominal length, because the
     denominator can then not be derived from evidence.
     """
 
@@ -570,9 +575,9 @@ def materialize_team_window(
                     totals[metric] += float(getattr(opponent, metric))
         counts_by_team[team_id] = totals
         minutes_by_team[team_id] = team_minutes
-        # FullGame stores the effective team-game minute denominator (the
-        # player-minute total divided by five).  A regulation game is 48
-        # minutes; overtime is normalized by its actual retained denominator.
+        # ``team_minutes`` here is the nominal game length (48 plus 5 per
+        # overtime) that each retained effective denominator (player minutes
+        # over five) establishes; see ``nominal_team_minutes``.
         # A manually assembled fact may not carry minutes; its count-per-game
         # values are the conservative equivalent for that test/replay seam.
         if team_minutes > 0:
