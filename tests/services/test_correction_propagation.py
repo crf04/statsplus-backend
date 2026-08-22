@@ -549,9 +549,20 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
         else fact
         for fact in original_game.team_facts
     )
+    corrected_player_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original_game.away_team_id
+        else fact
+        for fact in original_game.player_facts
+    )
     corrected_game = replace(
         original_game,
         team_facts=corrected_team_facts,
+        player_facts=corrected_player_facts,
         source_observation_id="obs:replay:corrected",
         retrieved_at=cutoff + timedelta(days=20),
     )
@@ -598,10 +609,10 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
         baseline_public["l15_fact"].ledger_checksum
     )
     assert after_success_public["season_fact"].ledger_checksum == (
-        "53617324660245c98262bfe374f4a7e2daa1ac9f2428a1e1355d0b5822389f54"
+        "07b341a431ec021ab1268e72da9a353348f00822db9ad9ebfbfdda1dfc2f49d2"
     )
     assert after_success_public["l15_fact"].ledger_checksum == (
-        "53617324660245c98262bfe374f4a7e2daa1ac9f2428a1e1355d0b5822389f54"
+        "07b341a431ec021ab1268e72da9a353348f00822db9ad9ebfbfdda1dfc2f49d2"
     )
     assert after_success_public["season_fact"].game_set_checksum == (
         "5df170f5cd61b6674db39e5e2bb4c3ff7e5baf7d2a0c2ededfc2970eb216ccc9"
@@ -1091,9 +1102,20 @@ def test_correction_changes_published_counts_and_rank(tmp_path, monkeypatch):
         else fact
         for fact in original.team_facts
     )
+    corrected_player_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original.away_team_id
+        else fact
+        for fact in original.player_facts
+    )
     corrected = replace(
         original,
         team_facts=corrected_team_facts,
+        player_facts=corrected_player_facts,
         source_observation_id=f"obs:correction:{original.game_id}",
         retrieved_at=cutoff + timedelta(days=20),
     )
@@ -1425,6 +1447,8 @@ def test_correction_changes_exact_l15_boundary(tmp_path):
             base_game.player_facts[1],
             team_id=2,
             team_tricode="T02",
+            defensive_rebounds=rebounds - 1,
+            rebounds=rebounds,
         )
         candidate = replace(
             base_game,
@@ -1766,11 +1790,22 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         else fact
         for fact in original_game.team_facts
     )
+    special_player_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original_game.away_team_id
+        else fact
+        for fact in original_game.player_facts
+    )
     special_game = replace(
         original_game,
         game_id=special_game_id,
         game_date=original_game.game_date + timedelta(days=15),
         team_facts=special_team_facts,
+        player_facts=special_player_facts,
         source_observation_id="obs:outside:special",
         retrieved_at=cutoff + timedelta(hours=1),
     )
@@ -1994,13 +2029,13 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         "28914f0b58204e7799fb4d6131bac3c1940d80d952c6b5b4a436c84068f6a019"
     )
     assert before_season_fact.ledger_checksum == (
-        "cf729f2d3aa24e1457d2bdd1e46f5ea6c9c7a47adefde6a17402ef5b11017ca4"
+        "045faf8550c6103d9c09afcb258c01e99c168acdfdbd2f3287a2f1dc45f30124"
     )
     assert before_l15_fact.game_set_checksum == (
         "87a9c816d1bc8d5371d0c8c7bba4948b2297c18c04754a8913dfedbf8d4335d9"
     )
     assert before_l15_fact.ledger_checksum == (
-        "c012e844ff5d8039c22e826365f5f61433afffad18c26292dff3554f6b8f5656"
+        "d9ed0d00cf47233e46815691cf231b928e5d8b25878c02a5b50e16dd6587c736"
     )
     assert before_l15_metric.allowed_per_48 == pytest.approx(85 / 15)
     assert before_season_metric.allowed_per_48 == pytest.approx(90 / 16)
@@ -2043,9 +2078,20 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         else fact
         for fact in original_game.team_facts
     )
+    corrected_player_facts = tuple(
+        replace(
+            fact,
+            defensive_rebounds=fact.defensive_rebounds + 10,
+            rebounds=fact.rebounds + 10,
+        )
+        if fact.team_id == original_game.away_team_id
+        else fact
+        for fact in original_game.player_facts
+    )
     corrected_game = replace(
         original_game,
         team_facts=corrected_team_facts,
+        player_facts=corrected_player_facts,
         source_observation_id="obs:outside:corrected",
         retrieved_at=cutoff + timedelta(days=20),
     )
@@ -2152,7 +2198,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         "28914f0b58204e7799fb4d6131bac3c1940d80d952c6b5b4a436c84068f6a019"
     )
     assert after_season_fact.ledger_checksum == (
-        "2d809ccf7b3be8eee45bce3c4c32d785afe53fd31b2375de37954986080115d5"
+        "c0552f9cb68f1641004f249cf224eb3f7539cfc1260a46bc7cdd8f2e7efe68f2"
     )
     assert after_season_fact.ledger_checksum != before_season_fact.ledger_checksum
     assert corrected_game.source_observation_id in after_season_fact.source_observation_ids
@@ -2173,7 +2219,7 @@ def test_correction_outside_l15_preserves_l15_publication(tmp_path):
         "87a9c816d1bc8d5371d0c8c7bba4948b2297c18c04754a8913dfedbf8d4335d9"
     )
     assert after_l15_fact.ledger_checksum == (
-        "c012e844ff5d8039c22e826365f5f61433afffad18c26292dff3554f6b8f5656"
+        "d9ed0d00cf47233e46815691cf231b928e5d8b25878c02a5b50e16dd6587c736"
     )
     assert after_l15_observation == before_l15_observation
     assert after_l15_metric == before_l15_metric
