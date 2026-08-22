@@ -44,6 +44,7 @@ from app.services.ledger_parity import (
     LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
     PER36_RAW_FIELDS,
     LedgerParityArtifactRepository,
+    LegacyMatchupDiagnosticCaptureRepository,
     matchup_parity_artifact_is_activatable,
     matchup_parity_cohort_is_activatable,
 )
@@ -224,6 +225,38 @@ def test_exact_parity_when_counts_game_sets_and_denominators_match():
     assert not report.adjudication_required
     assert report.status == "exact"
     assert report.compared_count == 30 * len(TRADITIONAL_STATS)
+
+
+def test_same_authority_retained_legacy_facts_satisfy_availability():
+    legacy = replace(
+        _materialization(),
+        observations=_observations(("traditional",), status="unavailable"),
+        retained_last_good=True,
+    )
+
+    report = _compare(legacy=legacy)
+
+    assert report.exact
+    assert not any(
+        item.classification == "availability_difference"
+        for item in report.differences
+    )
+
+
+def test_retained_marker_without_legacy_facts_does_not_satisfy_availability():
+    legacy = replace(
+        _materialization(),
+        facts=(),
+        observations=_observations(("traditional",), status="unavailable"),
+        retained_last_good=True,
+    )
+
+    report = _compare(legacy=legacy)
+
+    assert any(
+        item.classification == "availability_difference"
+        for item in report.differences
+    )
 
 
 def _ledger_with_served_derivations():
@@ -1231,6 +1264,59 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     assert set(materialization.game_ids_by_team) == set(TEAM_IDS)
     assert all(not ids for ids in materialization.game_ids_by_team.values())
 
+    current_identity = TeamMatchupRefreshService._surface_window_identities(
+        window="l15", game_ids_by_team=game_ids,
+        provider_game_ids_by_surface={"traditional": game_ids},
+        expected_counts={team_id: 15 for team_id in TEAM_IDS},
+        collect_before=governance.collect_before, aggregate_requests=requests,
+    )["traditional"]
+    current_traditional_facts = tuple(
+        replace(
+            fact,
+            cutoff=CUTOFF,
+            manifest_id=governance.manifest_id,
+            event_catalog_publication_id=governance.event_catalog_publication_id,
+            event_catalog_checksum=governance.event_catalog_checksum,
+            provider_window_identity=current_identity,
+        )
+        for fact in retained_traditional_facts
+    )
+
+    class CurrentSnapshotRepository:
+        def get_snapshot(self, scope, **kwargs):
+            return SimpleNamespace(
+                facts=current_traditional_facts,
+                observations=(observation,),
+            )
+
+    retained = StoredLegacyMatchupSource(CurrentSnapshotRepository()).produce(
+        season="2025-26", window="l15", cutoff=CUTOFF,
+        governance=governance, surface="traditional",
+    )
+
+    assert retained.facts == current_traditional_facts
+    assert retained.observations == (observation,)
+    assert retained.retained_last_good is True
+    assert retained.game_ids_by_team == {
+        team_id: frozenset(ids) for team_id, ids in game_ids.items()
+    }
+
+    class WrongAttemptAuthorityRepository:
+        def get_snapshot(self, scope, **kwargs):
+            return SimpleNamespace(
+                facts=current_traditional_facts,
+                observations=(replace(observation, manifest_id="wrong-manifest"),),
+            )
+
+    with pytest.raises(
+        MatchupParityError,
+        match="unavailable observation provenance mismatch",
+    ):
+        StoredLegacyMatchupSource(WrongAttemptAuthorityRepository()).produce(
+            season="2025-26", window="l15", cutoff=CUTOFF,
+            governance=governance, surface="traditional",
+        )
+
     invalid_identity = json.loads(identities["traditional"])
     invalid_identity["aggregate_requests"][f"traditional:{TEAM_IDS[0]}"][
         "parameters"
@@ -1256,6 +1342,7 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
             governance=governance, surface="traditional",
         )
 
+
     publications = {
         stream: _insert_runner_publication(
             engine, stream_key=stream,
@@ -1277,6 +1364,57 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     assert LedgerParityArtifactRepository(engine).latest(
         "assist_locations_l15", "2025-26"
     ).status == "exact"
+
+
+def test_retained_capture_preserves_failed_observation_window_identity(tmp_path):
+    engine, governance, binding = _runner_world(tmp_path)
+    game_ids = governance.expected_l15_game_ids
+    publication_id, _ = _insert_publication(
+        engine,
+        stream_key=matchup_stream_key("traditional", "l15"),
+        surface="traditional",
+        window="l15",
+        game_ids_by_team=game_ids,
+        binding=binding,
+    )
+    materialization = MatchupMaterialization(
+        season="2025-26",
+        window="l15",
+        cutoff=CUTOFF,
+        facts=_surface_facts(
+            TEAM_IDS,
+            surface="traditional",
+            provider="nba_stats",
+            game_ids_by_team=game_ids,
+        ),
+        observations=(TeamMatchupObservation(
+            surface="traditional",
+            status="unavailable",
+            unavailable_reason="provider_unavailable",
+            provider_window_identity="failed-attempt-identity",
+        ),),
+        game_ids_by_team=game_ids,
+        manifest_id=governance.manifest_id,
+        event_catalog_publication_id=governance.event_catalog_publication_id,
+        event_catalog_checksum=governance.event_catalog_checksum,
+        provider_window_identity="successful-retained-identity",
+        retained_last_good=True,
+    )
+
+    with create_session(engine) as session, session.begin():
+        capture = LegacyMatchupDiagnosticCaptureRepository(engine).record(
+            materialization,
+            surface="traditional",
+            publication_id=publication_id,
+            session=session,
+        )
+
+    assert capture.document["provider_window_identity"] == (
+        "successful-retained-identity"
+    )
+    assert capture.document["observations"][0]["provider_window_identity"] == (
+        "failed-attempt-identity"
+    )
 
 
 def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path):

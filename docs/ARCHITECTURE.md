@@ -1734,12 +1734,14 @@ and every row has finite raw numerators plus positive finite minutes or
 seconds. A substituted off-roster team becomes
 `unavailable/provider_roster_mismatch`; partial, non-finite, or mislabeled data
 becomes a fact-free unavailable observation and leaves prior valid facts
-intact. A provider transport,
-constraint, or transaction failure likewise leaves both prior snapshots
-intact; the Nightly Refresh retries the complete stats → schedule →
-athlete catalog → player game logs → player diets → team matchups unit once. A
-provider response that reaches its adapter but is
-malformed instead degrades only that surface as
+intact. A provider transport failure degrades only that provider-owned surface as
+`unavailable/provider_unavailable`, preserves its prior valid facts, and
+publishes independently successful surfaces. The team-matchup step returns a
+failed disposition after that atomic partial-success write, so Nightly Refresh
+still retries the complete stats → schedule → athlete catalog → player game
+logs → player diets → team matchups unit once and alerts if the retry also
+fails. A transaction failure leaves both prior snapshots intact. A provider
+response that reaches its adapter but is malformed instead degrades only that surface as
 `unavailable/provider_malformed_response`, preserves its prior valid facts,
 and allows other surfaces to publish. The query service defensively degrades only an
 affected incomplete legacy surface and derives allowed-per-48 from valid raw
@@ -1912,8 +1914,11 @@ those recomputed values; a missing or incorrect served value is a hard
 `served_rate_mismatch` or `served_rank_mismatch` failure. Deterministic
 competition ranks (`1, 1, 3` ties) are re-derived per metric from each side's
 per-48 values and compared, so a sub-tolerance near-tie flip that would change
-a ranking still fails. Independent per-surface availability is compared, and
-an unavailable or missing observation on either side is a real difference.
+a ranking still fails. Independent per-surface availability is compared. An
+unavailable or missing observation is a real difference unless legacy facts
+from the same immutable authority and cutoff are explicitly captured as
+retained last-good evidence; the failed observation remains recorded beside
+that marker.
 Every produced difference carries exactly one classification from the closed
 vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `game_set_mismatch`, `integer_count_difference`, `non_integer_count`,

@@ -159,8 +159,9 @@ retain exact legacy and ledger game-ID maps/checksums and both sides' manifest/
 Event Catalog identities;
 activation validates these fields against the candidate rather than trusting a
 boolean status, and recomputes the report game-set and candidate payload
-checksums before activation. A missing surface, a single missing
-metric, an unavailable observation, an authority/scope/cutoff mismatch, an
+checksums before activation. A missing surface, a single missing metric, an
+unavailable observation without same-authority retained last-good legacy
+facts, an authority/scope/cutoff mismatch, an
 integer or game-set failure, or a byte-contract failure is `failed` and cannot
 be approved. It remains `pending_adjudication` until an operator records an
 audited rejection; rejection records actor, timestamp, and reason. Required
