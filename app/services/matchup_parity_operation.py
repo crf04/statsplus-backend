@@ -522,6 +522,7 @@ def _compare_candidate_per36(
     governance,
     season: str,
     cutoff: datetime,
+    provider_end_date: str,
     capture_id: str,
     session: Session,
 ) -> tuple[dict[str, Any], str | None]:
@@ -569,7 +570,7 @@ def _compare_candidate_per36(
         or capture.provider_window_identity.get("game_ids") != expected_game_ids
         or capture.provider_window_identity.get("request_checksum") != capture.request_checksum
         or capture.provider_window_identity.get("provider_end_date")
-        != slate_date_for_instant(cutoff).isoformat()
+        != provider_end_date
         or capture.provider_window_identity.get("returned_game_count")
         != len(expected_game_ids)
         or set(
@@ -1055,6 +1056,7 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
             governance=governance,
             season=args.season,
             cutoff=cutoff,
+            provider_end_date=transaction_authority.provider_end_date,
             capture_id=args.per36_capture_id,
             session=session,
         )
