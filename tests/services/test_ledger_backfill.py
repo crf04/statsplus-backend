@@ -241,6 +241,53 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
     assert json.loads(accepted["scope"])["surface"] == "canonical_game_ledger"
 
 
+def test_backfill_uses_explicit_composite_after_primary_validation_fails(
+    tmp_path, monkeypatch
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fallback.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    _install_manifest(engine, cutoff)
+    invalid = _payload()
+    del invalid["team_results"]["Home"]["FullGame"]["Blocks"]
+    fallback_calls = []
+
+    class Fallback:
+        def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
+            fallback_calls.append((game_id, season, season_type))
+            return {"game": {"gameId": game_id}}
+
+    composite = _payload()
+    composite["_ledger_provenance"] = {
+        "provider": "pbp+nba_live_data",
+        "source_documents": {"pbp": invalid, "nba_live_data": {"game": {}}},
+    }
+    monkeypatch.setattr(
+        "app.services.ledger_backfill.compose_pbp_live_data_observation",
+        lambda primary, live, *, event: composite,
+    )
+    repository = CanonicalGameLedgerRepository(engine)
+    service = LedgerBackfillService(
+        provider=_Provider(invalid),
+        fallback_provider=Fallback(),
+        athlete_catalog=_Athletes(),
+        participant_catalog=_Participants(),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=_Recorder(),
+        repository=repository,
+        max_concurrency=1,
+        clock=lambda: cutoff,
+    )
+
+    result = service.refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert result.complete
+    assert fallback_calls == [("0022400001", "2024-25", "Regular Season")]
+    with engine.connect() as connection:
+        accepted = connection.execute(select(CollectionObservation)).mappings().one()
+    assert accepted["provider"] == "pbp+nba_live_data"
+
+
 def test_backfill_rejects_missing_governance_before_provider_io(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'ungoverned.sqlite3'}")
     run_migrations(engine)
