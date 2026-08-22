@@ -12,6 +12,7 @@ from app.services.ledger_derivations import (
     competition_ranks,
     derive_assist_location_facts,
     governed_assist_locations,
+    nominal_team_minutes,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_assist_location_window,
@@ -201,6 +202,93 @@ def test_window_materialization_counts_reconciled_sparse_locations():
     sparse = materialize_assist_location_window(sparse_games, **kwargs)
     assert sparse.complete and explicit.complete
     assert [team.counts for team in sparse.teams] == [team.counts for team in explicit.teams]
+
+
+def test_nominal_team_minutes_recovers_game_length_from_retained_drift():
+    # Production drift is seconds of PBP clock precision around 48 + 5k.
+    assert nominal_team_minutes(48.0) == 48.0
+    assert nominal_team_minutes(47.976666) == 48.0
+    assert nominal_team_minutes(53.02) == 53.0
+    assert nominal_team_minutes(58.0) == 58.0
+    assert nominal_team_minutes(48.05) == 48.0
+    assert nominal_team_minutes(47.95) == 48.0
+    for drifted in (48.06, 47.94, 43.2, 8.0, 50.5):
+        with pytest.raises(LedgerDerivationUnavailable):
+            nominal_team_minutes(drifted)
+    # No retained minutes keeps the count-per-game replay fallback.
+    assert nominal_team_minutes(0.0) == 0.0
+    assert nominal_team_minutes(-1.0) == 0.0
+
+
+def _drifted_games(drift_by_team):
+    """League games whose single player row and team fact carry valid drift."""
+
+    games = []
+    for game in _league_games():
+        player_facts = tuple(
+            replace(player, minutes=5 * (48.0 + drift_by_team.get(player.team_id, 0.0)))
+            for player in game.player_facts
+        )
+        minutes_by_team = {player.team_id: player.minutes / 5 for player in player_facts}
+        games.append(replace(
+            game,
+            player_facts=player_facts,
+            team_facts=tuple(
+                replace(fact, team_minutes=minutes_by_team[fact.team_id])
+                for fact in game.team_facts
+            ),
+        ))
+    return tuple(games)
+
+
+def _window_kwargs(games):
+    return dict(
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        window_games=15,
+        expected_game_ids=frozenset(game.game_id for game in games),
+        expected_team_game_ids={
+            team_id: frozenset(
+                game.game_id for game in games
+                if team_id in {game.home_team_id, game.away_team_id}
+            )
+            for team_id in range(1, 31)
+        },
+        team_ids=frozenset(range(1, 31)),
+    )
+
+
+def test_window_denominator_is_the_nominal_game_length():
+    # Team 1 drifts low and team 2 high; both are regulation games.
+    games = _drifted_games({1: -0.02, 2: 0.02})
+    window = materialize_team_window(games, **_window_kwargs(games))
+    assert window.complete
+    assert all(team.team_minutes == 15 * 48.0 for team in window.teams)
+    assist = materialize_assist_location_window(games, **_window_kwargs(games))
+    assert all(team.team_minutes == 15 * 48.0 for team in assist.teams)
+    # Identical opponent counts rank identically once drift is removed.
+    by_team = {team.team_id: team for team in window.teams}
+    for metric in ("rebounds", "turnovers", "steals", "blocks"):
+        ranks = {team_id: by_team[team_id].competition_rank[metric] for team_id in by_team}
+        per48 = {team_id: by_team[team_id].per48[metric] for team_id in by_team}
+        for left, right in ((1, 2), (4, 5)):
+            if by_team[left].counts[metric] == by_team[right].counts[metric]:
+                assert per48[left] == per48[right] and ranks[left] == ranks[right]
+
+
+def test_non_nominal_team_minutes_fail_closed_in_every_consumer():
+    games = _drifted_games({3: -0.2})
+    with pytest.raises(LedgerDerivationUnavailable):
+        materialize_team_window(games, **_window_kwargs(games))
+    with pytest.raises(LedgerDerivationUnavailable):
+        materialize_assist_location_window(games, **_window_kwargs(games))
+    from app.services.ledger_parity import compare_ledger_to_legacy
+
+    with pytest.raises(LedgerDerivationUnavailable):
+        compare_ledger_to_legacy(
+            games, (), season="2025-26",
+            legacy_traditional_rows=({"TEAM_ID": 1, "OPP_REB": 1.0},),
+        )
 
 
 def test_per36_aggregates_traded_player_counts_and_retains_game_teams():

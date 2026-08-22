@@ -1140,7 +1140,7 @@ from ledger count primitives. Traded players aggregate counts by canonical
 identity while retaining team-at-game evidence; provider percentages are never
 summed. Season and exact Regular Season L15 team windows require League
 Complete evidence for all 30 teams, normalize team count totals to per-48 from
-the retained effective team-minute denominator, use population sigma and deterministic
+the nominal game-length denominator, use population sigma and deterministic
 competition ranks, and stay unavailable before the L15 15-game floor. These
 streams persist complete derived payloads and inactive candidate publications
 with normalized provenance; they do not activate a public Matchups reader or
