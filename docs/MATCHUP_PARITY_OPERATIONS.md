@@ -172,8 +172,9 @@ Well-formed per-36 identity, raw-count, game-count, or minute differences are
 likewise durable blocking differences: the command persists them row by row as
 `pending_adjudication` and exits `2`. Three provider representation gaps are
 not differences because the provider cannot evidence them: minutes may drift
-by up to 0.01 minutes per governed ledger game (NBA sums two-decimal per-game
-minutes; the ledger sums exact PBP seconds), the provider's single roster
+by up to 0.01 minutes per governed ledger game (official and PBP-derived
+per-game minutes disagree by seconds; a provider-only `0:00` appearance with
+zero counts is indistinguishable inside this bound), the provider's single roster
 `TEAM_ID` is never compared with the ledger's participation team set, and a
 provider game count above the ledger's is accepted (NBA counts a `0:00`
 appearance as a game played; the PBP provider emits no row for it). A provider

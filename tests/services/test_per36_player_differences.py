@@ -82,6 +82,13 @@ def test_zero_minute_appearance_counted_by_provider_is_not_a_difference():
     assert per36_player_differences(2544, expected=_expected(), expected_raw=_raw(), actual=actual) == []
 
 
+def test_game_surplus_with_fewer_provider_minutes_is_hard():
+    actual = _actual(game_count=71, minutes=1988.9833333333333 - 0.2)
+    assert _classes(per36_player_differences(
+        2544, expected=_expected(), expected_raw=_raw(), actual=actual,
+    )) == [("game_count", "game_count_difference")]
+
+
 def test_provider_fewer_games_than_ledger_is_hard():
     actual = _actual(game_count=69)
     assert _classes(per36_player_differences(

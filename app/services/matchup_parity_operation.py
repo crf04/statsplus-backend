@@ -514,10 +514,12 @@ def _compose_candidate_set(
     return rows
 
 
-# The NBA provider reports each game's minutes as ``MM:SS`` rounded to two
-# decimal minutes before summing, while the ledger sums exact PBP seconds.
-# Bound that drift per governed game; anything larger is a real clock
-# difference and stays a hard ``minutes_difference``.
+# Official per-game minutes and PBP-derived per-game minutes disagree by a few
+# seconds per game (no rounding convention reconstructs the provider total from
+# ledger rows; production 2025-26: 523/525 players within 0.01 min/game, the
+# two outliers are single-game clock differences of over a minute).  Bound
+# that drift per governed game; anything larger stays a hard
+# ``minutes_difference``.
 PER36_MINUTES_TOLERANCE_PER_GAME = 0.01
 
 
@@ -548,7 +550,13 @@ def per36_player_differences(
                 ledger_value=value, legacy_value=actual[field],
                 classification="raw_count_difference",
             ))
-    if actual["game_count"] < expected.game_count:
+    if actual["game_count"] < expected.game_count or (
+        actual["game_count"] > expected.game_count
+        and float(actual["minutes"]) < expected.minutes
+    ):
+        # A provider-only appearance can only add provider minutes; a surplus
+        # alongside fewer provider minutes is not a ``0:00`` appearance.
+
         differences.append(SemanticDifference(
             identity=identity, field="game_count",
             ledger_value=expected.game_count, legacy_value=actual["game_count"],
