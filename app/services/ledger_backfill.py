@@ -329,8 +329,13 @@ class LedgerBackfillService:
             summaries=summaries,
             now=started_at,
             repair=historical_repair,
-            accepted_manifest_game_ids=self.repository.game_ids_from_manifest(
-                season, manifest_id
+            accepted_manifest_game_ids=(
+                self.repository.game_ids_from_manifest(season, manifest_id)
+                # A fallback-provenance game is accepted but incomplete for
+                # assist locations; historical repair keeps retrying PBP.
+                - self.repository.game_ids_with_fallback_provenance(
+                    season, manifest_id
+                )
             ),
             missing_raw_evidence=missing_raw_evidence,
         )

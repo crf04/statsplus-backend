@@ -37,7 +37,7 @@ from app.models.collection_control import (
     CompositionJob,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 
 class _Athletes:
@@ -1027,6 +1027,46 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
     assert len(observations) == 1
     assert stored is not None
     assert observations[0]["observation_id"] == stored.source_observation_id
+
+
+def test_historical_repair_retries_fallback_provenance_games(tmp_path):
+    """A LiveData-filled game stays a repair target until PBP replaces it."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'fallback-repair.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
+    _install_manifest(engine, cutoff)
+    provider = _Provider(_payload())
+
+    def service():
+        return LedgerBackfillService(
+            provider=provider, athlete_catalog=_Athletes(),
+            participant_catalog=_Participants(),
+            reconciliation_sink=lambda game_id, payload: None,
+            observation_recorder=_Recorder(), repository=repository,
+            max_concurrency=1, clock=lambda: cutoff,
+        )
+
+    first = service().refresh("2024-25", **_authorized(_event(), cutoff))
+    assert first.complete
+    with engine.begin() as connection:
+        connection.execute(
+            update(CollectionObservation).values(provider="nba_live_data")
+        )
+    assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == {
+        "0022400001"
+    }
+
+    provider.calls.clear()
+    replayed = service().refresh(
+        "2024-25", historical_repair=True, **_authorized(_event(), cutoff),
+    )
+
+    # The game was re-fetched from PBP (the manifest-skip no longer applies);
+    # identical content is a no-op write, a differing PBP observation replaces.
+    assert replayed.complete
+    assert provider.calls == [("0022400001", "2024-25", "Regular Season")]
+    assert replayed.games_replaced == 0 and replayed.games_skipped == 1
 
 
 def test_each_observation_records_its_own_retrieval_time(tmp_path):
