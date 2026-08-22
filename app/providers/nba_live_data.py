@@ -119,8 +119,13 @@ def compose_pbp_live_data_observation(
         "Home": (int(event["home_team_id"]), str(event["home_team_tricode"])),
         "Away": (int(event["away_team_id"]), str(event["away_team_tricode"])),
     }
+    usable_pbp = (
+        pbp_observation
+        if _pbp_identity_does_not_contradict(pbp_observation, expected)
+        else None
+    )
     live_teams = {"Home": game.get("homeTeam"), "Away": game.get("awayTeam")}
-    pbp_rows = _pbp_player_rows(pbp_observation)
+    pbp_rows = _pbp_player_rows(usable_pbp)
     stats: dict[str, dict[str, list[dict[str, Any]]]] = {}
     team_results: dict[str, dict[str, dict[str, Any]]] = {}
     participant_ids_by_team: dict[str, list[int]] = {}
@@ -145,11 +150,11 @@ def compose_pbp_live_data_observation(
             int(row["EntityId"]) for row in player_rows
         ]
         live_totals = _normalized_team_totals(totals)
-        pbp_summary = _pbp_team_summary(pbp_observation, side)
+        pbp_summary = _pbp_team_summary(usable_pbp, side)
         summary = dict(pbp_summary or {})
         summary.update({"EntityId": "0", "Name": "Team"})
         summary.setdefault("Minutes", "00:00")
-        pbp_team_total = _pbp_team_total(pbp_observation, side)
+        pbp_team_total = _pbp_team_total(usable_pbp, side)
         merged_totals = dict(pbp_team_total or {})
         merged_totals.update({
             "TeamId": team_id,
@@ -173,7 +178,7 @@ def compose_pbp_live_data_observation(
         team_results[side] = {"FullGame": merged_totals}
 
     pbp = dict(pbp_observation or {})
-    provider = "pbp+nba_live_data" if pbp_observation is not None else "nba_live_data"
+    provider = "pbp+nba_live_data" if usable_pbp is not None else "nba_live_data"
     return {
         "stats": stats,
         "team_results": team_results,
@@ -194,6 +199,25 @@ def compose_pbp_live_data_observation(
             },
         },
     }
+
+
+def _pbp_identity_does_not_contradict(
+    observation: Mapping[str, Any] | None,
+    expected: Mapping[str, tuple[int, str]],
+) -> bool:
+    if observation is None:
+        return False
+    fields = (
+        ("home_team_id", expected["Home"][0], int),
+        ("away_team_id", expected["Away"][0], int),
+        ("home_team_abbreviation", expected["Home"][1], str),
+        ("away_team_abbreviation", expected["Away"][1], str),
+    )
+    for key, expected_value, cast in fields:
+        value = observation.get(key)
+        if value is not None and cast(value) != expected_value:
+            return False
+    return True
 
 
 def _normalized_team_totals(totals: Mapping[str, Any]) -> dict[str, int]:
