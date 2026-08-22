@@ -1197,12 +1197,27 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
             game_ids_by_team=game_ids,
         )
     )
+    retained_traditional_facts = tuple(
+        replace(
+            fact,
+            cutoff=CUTOFF - timedelta(hours=1),
+            manifest_id="prior-manifest",
+            event_catalog_publication_id="prior-catalog",
+            event_catalog_checksum="f" * 64,
+            provider_window_identity="prior-window",
+            window_start_date=date(2024, 10, 31),
+        )
+        for fact in _surface_facts(
+            TEAM_IDS, surface="traditional", provider="nba_stats",
+            game_ids_by_team=game_ids,
+        )
+    )
 
     class SnapshotRepository:
         def get_snapshot(self, scope, **kwargs):
             assert scope.window_games == 15
             return SimpleNamespace(
-                facts=assist_facts,
+                facts=(*retained_traditional_facts, *assist_facts),
                 observations=(observation, assist_observation),
             )
 

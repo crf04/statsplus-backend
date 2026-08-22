@@ -1044,10 +1044,16 @@ class NBAStatsAdapter:
         frame = self.run_endpoint(
             "team_game_log",
             build,
-            required_columns=("GAME_ID",),
+            required_columns=(),
         )
         if frame is None:
             raise ProviderResponseError("NBA Stats returned no team game log.")
+        if "GAME_ID" not in frame.columns and "Game_ID" in frame.columns:
+            frame = frame.rename(columns={"Game_ID": "GAME_ID"})
+        if "GAME_ID" not in frame.columns:
+            raise ProviderResponseError(
+                "NBA Stats returned a team game log without GAME_ID."
+            )
         ids: list[str] = []
         for value in frame["GAME_ID"].tolist():
             if value is None or pd.isna(value):

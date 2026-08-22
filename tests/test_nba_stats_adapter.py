@@ -377,6 +377,24 @@ def test_team_game_log_rejects_missing_membership_ids():
         adapter.fetch_team_game_ids(1610612738, "2024-25")
 
 
+def test_team_game_log_accepts_live_mixed_case_game_id_column():
+    class TeamGameLogFixture:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_data_frames(self):
+            return [pd.DataFrame({"Game_ID": ["g-2", "g-1"]})]
+
+    adapter = NBAStatsAdapter(
+        settings=_settings(max_concurrency=1),
+        team_game_log_endpoint_factory=TeamGameLogFixture,
+    )
+
+    assert adapter.fetch_team_game_ids(
+        1610612738, "2024-25"
+    ) == ("g-1", "g-2")
+
+
 def test_adapter_propagates_provider_timeout(monkeypatch):
     import requests
 
