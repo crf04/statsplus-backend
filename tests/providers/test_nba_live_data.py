@@ -107,23 +107,59 @@ def _event():
     }
 
 
-def test_composite_uses_live_traditional_evidence_and_retains_pbp_advanced_fields():
-    pbp = _pbp_payload()
+def _pbp_from_live():
+    observation = compose_pbp_live_data_observation(
+        None, _live_payload(), event=_event()
+    )
+    observation.pop("_ledger_provenance")
+    return observation
+
+
+def test_composite_preserves_pbp_values_and_fills_only_missing_counts():
+    pbp = _pbp_from_live()
     del pbp["team_results"]["Home"]["FullGame"]["Blocks"]
+    for row in pbp["stats"]["Home"]["FullGame"]:
+        row.pop("Blocks", None)
     pbp["stats"]["Home"]["FullGame"][1]["Arc3Assists"] = 7
+    pbp["stats"]["Home"]["FullGame"][1]["Assists"] = 4
+    pbp["team_results"]["Home"]["FullGame"]["Assists"] = 4
 
     observation = compose_pbp_live_data_observation(pbp, _live_payload(), event=_event())
     game = canonical_game_from_pbp(observation, event=_event())
 
     assert game.team_facts[0].blocks == 3
-    assert next(player for player in game.player_facts if player.player_id == 2544).arc3_assists == 7
+    lebron = next(player for player in game.player_facts if player.player_id == 2544)
+    assert lebron.arc3_assists == 7
+    assert lebron.assists == 4
     assert observation["_ledger_provenance"]["provider"] == "pbp+nba_live_data"
     assert observation["_ledger_provenance"]["source_documents"]["pbp"] == pbp
     assert observation["_ledger_provenance"]["source_documents"]["nba_live_data"]["game"]["gameId"] == "0022400001"
 
 
+def test_composite_adds_separately_reported_team_rebounds_to_components():
+    live = _live_payload()
+    totals = live["game"]["homeTeam"]["statistics"]
+    totals.update({
+        "reboundsOffensive": 12,
+        "reboundsDefensive": 31,
+        "reboundsTotal": 51,
+        "reboundsTeamOffensive": 5,
+        "reboundsTeamDefensive": 3,
+    })
+
+    observation = compose_pbp_live_data_observation(
+        None, live, event=_event()
+    )
+    game = canonical_game_from_pbp(observation, event=_event())
+    home = next(fact for fact in game.team_facts if fact.team_id == 1610612747)
+
+    assert home.offensive_rebounds == 17
+    assert home.defensive_rebounds == 34
+    assert home.rebounds == 51
+
+
 def test_composite_uses_governed_live_home_away_and_complete_team_rows():
-    pbp = _pbp_payload()
+    pbp = _pbp_from_live()
     pbp["home_team_id"], pbp["away_team_id"] = pbp["away_team_id"], pbp["home_team_id"]
     pbp["home_team_abbreviation"], pbp["away_team_abbreviation"] = (
         pbp["away_team_abbreviation"],

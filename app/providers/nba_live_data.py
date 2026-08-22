@@ -107,7 +107,7 @@ def compose_pbp_live_data_observation(
     *,
     event: Mapping[str, object],
 ) -> dict[str, Any]:
-    """Build one explicit composite observation with LiveData as count authority."""
+    """Preserve PBP evidence and fill only its missing fields from LiveData."""
 
     game = live_observation.get("game")
     if not isinstance(game, Mapping) or game.get("gameStatus") != 3:
@@ -144,30 +144,33 @@ def compose_pbp_live_data_observation(
         participant_ids_by_team[str(team_id)] = [
             int(row["EntityId"]) for row in player_rows
         ]
-        summary = {"EntityId": "0", "Name": "Team", "Minutes": "00:00"}
+        live_totals = _normalized_team_totals(totals)
+        pbp_summary = _pbp_team_summary(pbp_observation, side)
+        summary = dict(pbp_summary or {})
+        summary.update({"EntityId": "0", "Name": "Team"})
+        summary.setdefault("Minutes", "00:00")
+        pbp_team_total = _pbp_team_total(pbp_observation, side)
+        merged_totals = dict(pbp_team_total or {})
+        merged_totals.update({
+            "TeamId": team_id,
+            "Name": str(team.get("teamName") or tricode),
+            "ShortName": tricode,
+        })
+        merged_totals.setdefault("Minutes", str(totals.get("minutes") or "00:00"))
         for wire_name, live_name in _PLAYER_FIELDS.items():
-            total = _count(totals, live_name)
+            if merged_totals.get(wire_name) is None:
+                merged_totals[wire_name] = live_totals[wire_name]
+            total = _count(merged_totals, wire_name)
             player_sum = sum(_count(row, wire_name) for row in player_rows)
             residual = total - player_sum
             if residual < 0:
                 raise ProviderResponseError(
                     f"NBA LiveData {live_name} total does not reconcile with players."
                 )
-            if residual:
+            if summary.get(wire_name) is None and residual:
                 summary[wire_name] = residual
         stats[side] = {"FullGame": [summary, *player_rows]}
-        team_results[side] = {
-            "FullGame": {
-                "TeamId": team_id,
-                "Name": str(team.get("teamName") or tricode),
-                "ShortName": tricode,
-                "Minutes": str(totals.get("minutes") or "00:00"),
-                **{
-                    wire_name: _count(totals, live_name)
-                    for wire_name, live_name in _PLAYER_FIELDS.items()
-                },
-            }
-        }
+        team_results[side] = {"FullGame": merged_totals}
 
     pbp = dict(pbp_observation or {})
     provider = "pbp+nba_live_data" if pbp_observation is not None else "nba_live_data"
@@ -193,6 +196,28 @@ def compose_pbp_live_data_observation(
     }
 
 
+def _normalized_team_totals(totals: Mapping[str, Any]) -> dict[str, int]:
+    """Include LiveData's separately reported team rebounds in OREB/DREB."""
+
+    normalized = {
+        wire_name: _count(totals, live_name)
+        for wire_name, live_name in _PLAYER_FIELDS.items()
+    }
+    normalized["OffRebounds"] += _optional_count(
+        totals, "reboundsTeamOffensive"
+    )
+    normalized["DefRebounds"] += _optional_count(
+        totals, "reboundsTeamDefensive"
+    )
+    if normalized["Rebounds"] != (
+        normalized["OffRebounds"] + normalized["DefRebounds"]
+    ):
+        raise ProviderResponseError(
+            "NBA LiveData team rebounds do not reconcile with the reported total."
+        )
+    return normalized
+
+
 def _pbp_player_rows(
     observation: Mapping[str, Any] | None,
 ) -> dict[int, Mapping[str, Any]]:
@@ -214,6 +239,29 @@ def _pbp_player_rows(
     return indexed
 
 
+def _pbp_team_summary(
+    observation: Mapping[str, Any] | None, side: str
+) -> Mapping[str, Any] | None:
+    stats = observation.get("stats") if isinstance(observation, Mapping) else None
+    side_value = stats.get(side) if isinstance(stats, Mapping) else None
+    rows = side_value.get("FullGame") if isinstance(side_value, Mapping) else None
+    if not isinstance(rows, list):
+        return None
+    return next(
+        (row for row in rows if isinstance(row, Mapping) and str(row.get("EntityId")) == "0"),
+        None,
+    )
+
+
+def _pbp_team_total(
+    observation: Mapping[str, Any] | None, side: str
+) -> Mapping[str, Any] | None:
+    results = observation.get("team_results") if isinstance(observation, Mapping) else None
+    side_value = results.get(side) if isinstance(results, Mapping) else None
+    total = side_value.get("FullGame") if isinstance(side_value, Mapping) else None
+    return total if isinstance(total, Mapping) else None
+
+
 def _player_row(
     player: Mapping[str, Any],
     pbp_row: Mapping[str, Any] | None,
@@ -228,12 +276,11 @@ def _player_row(
         "Name": str(player.get("name") or (
             f"{player.get('firstName', '')} {player.get('familyName', '')}".strip()
         )),
-        "Minutes": _pbp_minutes(statistics.get("minutes")),
-        **{
-            wire_name: _count(statistics, live_name)
-            for wire_name, live_name in _PLAYER_FIELDS.items()
-        },
     })
+    row.setdefault("Minutes", _pbp_minutes(statistics.get("minutes")))
+    for wire_name, live_name in _PLAYER_FIELDS.items():
+        if row.get(wire_name) is None:
+            row[wire_name] = _count(statistics, live_name)
     return row
 
 
@@ -248,6 +295,12 @@ def _count(values: Mapping[str, Any], key: str) -> int:
     if not numeric.is_finite() or numeric < 0 or numeric != numeric.to_integral_value():
         raise ProviderResponseError(f"NBA LiveData has a malformed {key} count.")
     return int(numeric)
+
+
+def _optional_count(values: Mapping[str, Any], key: str) -> int:
+    if key not in values:
+        return 0
+    return _count(values, key)
 
 
 def _pbp_minutes(value: object) -> str:
