@@ -269,14 +269,31 @@ def _route_ledger_games(governance):
         assist_total_by_team = {
             team_id: value * 5 for team_id, value in assist_value_by_team.items()
         }
+        # OPP_REB is player-credited: a team's rebounds live on its first
+        # player row, never on the team-only residual.
+        rebounds_by_team = {
+            team_fact.team_id: provider_values[team_map[team_fact.opponent_team_id]]
+            for team_fact in source.team_facts
+        }
+        first_player_by_team: dict[int, int] = {}
+        for fact in source.player_facts:
+            first_player_by_team.setdefault(fact.team_id, fact.player_id)
         player_facts = tuple(
             replace(
                 fact,
                 team_id=team_map[fact.team_id],
                 team_tricode=tricode_map[fact.team_id],
-                offensive_rebounds=0,
+                offensive_rebounds=(
+                    rebounds_by_team[fact.team_id]
+                    if first_player_by_team[fact.team_id] == fact.player_id
+                    else 0
+                ),
                 defensive_rebounds=0,
-                rebounds=0,
+                rebounds=(
+                    rebounds_by_team[fact.team_id]
+                    if first_player_by_team[fact.team_id] == fact.player_id
+                    else 0
+                ),
                 turnovers=0,
                 steals=0,
                 blocks=0,
