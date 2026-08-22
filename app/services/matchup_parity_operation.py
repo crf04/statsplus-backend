@@ -514,6 +514,69 @@ def _compose_candidate_set(
     return rows
 
 
+# Official per-game minutes and PBP-derived per-game minutes disagree by a few
+# seconds per game (no rounding convention reconstructs the provider total from
+# ledger rows; production 2025-26: 523/525 players within 0.01 min/game, the
+# two outliers are single-game clock differences of over a minute).  Bound
+# that drift per governed game; anything larger stays a hard
+# ``minutes_difference``.
+PER36_MINUTES_TOLERANCE_PER_GAME = 0.01
+
+
+def per36_player_differences(
+    player_id: int,
+    *,
+    expected: PlayerPer36Fact,
+    expected_raw: Mapping[str, int],
+    actual: Mapping[str, Any],
+) -> list[SemanticDifference]:
+    """Classify one player's governed ledger totals against provider evidence.
+
+    ``team_ids_at_game`` is deliberately not compared: the provider's single
+    ``TEAM_ID`` is the roster team at capture time, which for traded or
+    released players need not be a team the player played for in the window.
+    A provider game count above the ledger's is also not a difference because
+    the PBP provider never emits a row for a ``0:00`` appearance that the NBA
+    still counts as a game played; such a game cannot move any minute or
+    count, so the remaining fields already prove the totals.
+    """
+
+    identity = f"per36:{player_id}"
+    differences: list[SemanticDifference] = []
+    for field, value in expected_raw.items():
+        if actual[field] != value:
+            differences.append(SemanticDifference(
+                identity=identity, field=field,
+                ledger_value=value, legacy_value=actual[field],
+                classification="raw_count_difference",
+            ))
+    if actual["game_count"] < expected.game_count or (
+        actual["game_count"] > expected.game_count
+        and float(actual["minutes"]) < expected.minutes
+    ):
+        # A provider-only appearance can only add provider minutes; a surplus
+        # alongside fewer provider minutes is not a ``0:00`` appearance.
+
+        differences.append(SemanticDifference(
+            identity=identity, field="game_count",
+            ledger_value=expected.game_count, legacy_value=actual["game_count"],
+            classification="game_count_difference",
+        ))
+    if not math.isclose(
+        float(actual["minutes"]), expected.minutes,
+        rel_tol=0.0,
+        # The nominal bound is inclusive; 1e-9 absorbs binary-float error in
+        # the bound product itself, never a meaningful fraction of a second.
+        abs_tol=PER36_MINUTES_TOLERANCE_PER_GAME * expected.game_count + 1e-9,
+    ):
+        differences.append(SemanticDifference(
+            identity=identity, field="minutes",
+            ledger_value=expected.minutes, legacy_value=actual["minutes"],
+            classification="minutes_difference",
+        ))
+    return differences
+
+
 def _compare_candidate_per36(
     engine,
     *,
@@ -624,37 +687,12 @@ def _compare_candidate_per36(
             for field in PER36_RAW_FIELDS:
                 totals[field] += int(getattr(fact, field))
     for player_id in sorted(set(expected_by_id) & set(capture_by_id)):
-        expected = expected_by_id[player_id]
-        actual = capture_by_id[player_id]
-        expected_raw = raw_fields_by_player[player_id]
-        for field, value in expected_raw.items():
-            if actual[field] != value:
-                differences.append(SemanticDifference(
-                    identity=f"per36:{player_id}", field=field,
-                    ledger_value=value, legacy_value=actual[field],
-                    classification="raw_count_difference",
-                ))
-        if actual["game_count"] != expected.game_count:
-            differences.append(SemanticDifference(
-                identity=f"per36:{player_id}", field="game_count",
-                ledger_value=expected.game_count, legacy_value=actual["game_count"],
-                classification="game_count_difference",
-            ))
-        if actual["team_ids_at_game"] != list(expected.team_ids_at_game):
-            differences.append(SemanticDifference(
-                identity=f"per36:{player_id}", field="team_ids_at_game",
-                ledger_value=list(expected.team_ids_at_game),
-                legacy_value=actual["team_ids_at_game"],
-                classification="team_identity_difference",
-            ))
-        if not math.isclose(
-            float(actual["minutes"]), expected.minutes, rel_tol=1e-9, abs_tol=1e-9
-        ):
-            differences.append(SemanticDifference(
-                identity=f"per36:{player_id}", field="minutes",
-                ledger_value=expected.minutes, legacy_value=actual["minutes"],
-                classification="minutes_difference",
-            ))
+        differences.extend(per36_player_differences(
+            player_id,
+            expected=expected_by_id[player_id],
+            expected_raw=raw_fields_by_player[player_id],
+            actual=capture_by_id[player_id],
+        ))
     provider_rate_difference_count = sum(
         1
         for player_id in sorted(set(expected_by_id) & set(capture_by_id))
