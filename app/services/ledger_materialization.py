@@ -255,8 +255,13 @@ class LedgerMaterializationService:
                 as_of=as_of,
                 status=status,
                 checksum=_payload_checksum(payload),
-                game_count=len(season_window.governed_game_ids),
-                team_count=len(season_window.teams),
+                game_count=len(
+                    (l15_window if window_kind == "rolling_games" else season_window)
+                    .governed_game_ids
+                ),
+                team_count=len(
+                    (l15_window if window_kind == "rolling_games" else season_window).teams
+                ),
                 retrieved_at=retrieved_at,
                 reason=reason,
                 payload=_payload_json(payload),

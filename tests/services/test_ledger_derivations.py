@@ -857,6 +857,25 @@ def test_one_game_without_location_observation_leaves_l15_available(tmp_path):
     assert result.assist_location_season is None
     assert result.assist_location_l15 is not None
     assert len(result.assist_location_l15.teams) == 30
+    with engine.connect() as connection:
+        by_stream = {
+            row["stream_key"]: row
+            for row in connection.execute(
+                select(LedgerPublication.__table__).where(
+                    LedgerPublication.stream_key.in_((
+                        "assist_locations_season", "assist_locations_l15",
+                    ))
+                )
+            ).mappings().all()
+        }
+    assert by_stream["assist_locations_season"]["status"] == "unavailable"
+    assert by_stream["assist_locations_season"]["payload"] == "[]"
+    assert by_stream["assist_locations_l15"]["status"] == "complete"
+    assert by_stream["assist_locations_l15"]["payload"] != "[]"
+    assert by_stream["assist_locations_l15"]["game_count"] == len(
+        set().union(*expected_by_team.values())
+    )
+    assert by_stream["assist_locations_season"]["game_count"] == len(expected)
 
 
 def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():

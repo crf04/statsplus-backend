@@ -494,7 +494,8 @@ def _composition_failure_reason(
         return "governed_team_roster_incomplete"
     if stream_key in {"assist_locations_season", "assist_locations_l15"} and (
         materialization.assist_location_season is None
-        or materialization.assist_location_l15 is None
+        if stream_key == "assist_locations_season"
+        else materialization.assist_location_l15 is None
     ):
         return "assist_location_evidence_incomplete"
     window = (
@@ -522,14 +523,17 @@ def _succeeded_ledger_streams(
         }
     if materialization.l15_window.complete:
         succeeded.add("traditional_opponent_l15")
+    # Each assist window succeeds on its own materialization.
     if (
         materialization.assist_location_season is not None
-        and materialization.assist_location_l15 is not None
+        and materialization.season_window.complete
     ):
-        if materialization.season_window.complete:
-            succeeded.add("assist_locations_season")
-        if materialization.l15_window.complete:
-            succeeded.add("assist_locations_l15")
+        succeeded.add("assist_locations_season")
+    if (
+        materialization.assist_location_l15 is not None
+        and materialization.l15_window.complete
+    ):
+        succeeded.add("assist_locations_l15")
     return succeeded
 
 
@@ -916,23 +920,7 @@ class LedgerRuntime:
                         ),
                         session=session,
                     )
-                    succeeded = set()
-                    if materialized.season_window.complete:
-                        succeeded |= {
-                            "player_game_logs",
-                            "traditional_opponent_season",
-                            "player_per36",
-                        }
-                    if materialized.l15_window.complete:
-                        succeeded |= {"traditional_opponent_l15"}
-                    if (
-                        materialized.assist_location_season is not None
-                        and materialized.assist_location_l15 is not None
-                    ):
-                        if materialized.season_window.complete:
-                            succeeded |= {"assist_locations_season"}
-                        if materialized.l15_window.complete:
-                            succeeded |= {"assist_locations_l15"}
+                    succeeded = _succeeded_ledger_streams(materialized)
                     cas_failed = False
                     for job in slice_jobs:
                         if job["stream_key"] in NBA_PUBLICATION_STREAM_KEYS:
