@@ -622,6 +622,87 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
 
 
+def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'assist-jobs.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    base = _league_games()
+    extra_round = tuple(
+        replace(
+            game,
+            game_id=f"0022599{index:03d}",
+            game_date=game.game_date - timedelta(days=30),
+            checksum=None,
+        )
+        for index, game in enumerate(base[:15])
+    )
+    first = extra_round[0]
+    unobserved = replace(
+        first,
+        player_facts=tuple(replace(
+            player, assists=max(player.assists, 1),
+            two_point_assists=None, three_point_assists=None,
+            arc3_assists=None, corner3_assists=None, at_rim_assists=None,
+            short_mid_range_assists=None, long_mid_range_assists=None,
+        ) for player in first.player_facts),
+    )
+    games = tuple(
+        replace(game, raw_rows=raw_rows_from_facts(game)).with_checksum()
+        for game in (unobserved, *extra_round[1:], *base)
+    )
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    team_ids = frozenset(range(1, 31))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id
+            for game in sorted(
+                (game for game in games if team_id in {game.home_team_id, game.away_team_id}),
+                key=lambda game: (game.game_date, game.game_id),
+            )[-15:]
+        )
+        for team_id in team_ids
+    }
+    streams = ("assist_locations_season", "assist_locations_l15")
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert(), [{
+            "job_id": stream, "stream_key": stream, "manifest_id": None,
+            "season": "2025-26", "cutoff": cutoff, "status": "queued",
+            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
+        } for stream in streams])
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(season, governed_cutoff, expected, team_ids, expected_l15)
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=Governance(),
+        clock=lambda: cutoff,
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+        }
+    assert jobs["assist_locations_l15"]["status"] == "succeeded"
+    assert jobs["assist_locations_season"]["status"] == "failed"
+    assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
+
+
 def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
     tmp_path,
 ):
