@@ -186,6 +186,7 @@ MATCHUP_TRADITIONAL_KEYS = {
     "OPP_STL": "steals",
     "OPP_BLK": "blocks",
 }
+_PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds"})
 #: The contracted PBP assist surfaces and the ledger player count that supplies
 #: each.  ``Assists`` is the opponent total; every location key is one of the
 #: governed location counters.
@@ -510,7 +511,17 @@ def materialize_team_window(
             team_codes[team_id] = defense.team_tricode
             team_minutes += defense.team_minutes
             for metric in TEAM_METRICS:
-                totals[metric] += float(getattr(opponent, metric))
+                if metric in _PLAYER_CREDITED_MATCHUP_METRICS:
+                    # LeagueDashTeamStats' OPP_REB surface is player-credited.
+                    # Canonical team facts intentionally also retain team-only
+                    # rebounds, which must not leak into that legacy contract.
+                    totals[metric] += sum(
+                        float(getattr(player, metric))
+                        for player in game.player_facts
+                        if player.team_id == opponent.team_id
+                    )
+                else:
+                    totals[metric] += float(getattr(opponent, metric))
         counts_by_team[team_id] = totals
         minutes_by_team[team_id] = team_minutes
         # FullGame stores the effective team-game minute denominator (the
