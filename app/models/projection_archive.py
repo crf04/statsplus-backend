@@ -74,6 +74,7 @@ class ProviderPoll(Base):
     )
     generation_id = Column(String(72), nullable=True)
     observation_count = Column(Integer, nullable=False, default=0, server_default="0")
+    duration_ms = Column(Integer, nullable=True)
 
     __table_args__ = (
         CheckConstraint(

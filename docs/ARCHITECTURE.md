@@ -423,8 +423,32 @@ attempt timing. Query status filters are sorted exactly as the
 Provider Snapshot codec sorts them, so caller order cannot split one archive
 scope. `observation_count` always means the number of normalized observations
 present in that accepted snapshot, including unchanged attempts; it is not the
-number of newly inserted rows. Provider polling and scheduling remain outside
-this slice.
+number of newly inserted rows.
+
+Provider polling is coordinated by `ProjectionCollectionCoordinator`, which is
+constructed once in application dependencies for the dedicated collector
+process. It reads the canonical Event Catalog before taking the collector
+lease, so offseason/no-due runs do not call a provider. The default board-wide
+policy is every 30 minutes beginning 24 hours before the earliest non-postponed,
+non-started event and every five minutes in the final two hours. Both intervals
+and the horizon are configurable. A past scheduled timestamp does not stop the
+poll: only governed event status (live/final/postponed) closes that event's
+collection window. The one-shot `scripts/collect_projections.py` command uses
+this coordinator, not a second ingestion path or an admin refresh route.
+
+Migration 043 adds one singleton `projection_collection_leases` row and
+per-provider `projection_collection_provider_states`. PostgreSQL locks and
+fences the lease row; SQLite uses `BEGIN IMMEDIATE` for local tests but is not
+evidence for the production concurrency contract. A busy or overlapping run is
+a safe no-op. Provider outcomes are persisted independently through the
+existing archive recorder, with bounded exponential backoff/circuit-open state
+for failures and a bounded Provider Poll duration. A failure from one provider
+cannot suppress another provider's attempt. The coordinator's adaptive policy
+is intended to be woken by a dedicated Railway service every five minutes.
+Admin diagnostics expose only provider-safe last-poll/last-changed timestamps,
+bounded freshness, failure/backoff state, active/unresolved counts, and lease
+state; they never expose raw payloads or source identifiers. Request-time
+readers remain database-only and never invoke the coordinator or a provider.
 Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An

@@ -161,6 +161,7 @@ class _PreparedProjectionIngestion:
     observation_rows: list[dict[str, Any]]
     materialization_checksum: str
     poll_id: str
+    duration_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +178,7 @@ class _ProjectionPollWrite:
     snapshot_id: str
     generation_id: str
     observation_count: int
+    duration_ms: int | None
 
     @classmethod
     def from_ingestion(
@@ -201,6 +203,7 @@ class _ProjectionPollWrite:
             snapshot_id=snapshot_id,
             generation_id=generation_id,
             observation_count=prepared.observation_count,
+            duration_ms=prepared.duration_ms,
         )
 
 
@@ -379,6 +382,7 @@ class ProjectionArchive:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         if snapshot.status is not SnapshotStatus.COMPLETE:
             raise ValueError(
@@ -389,6 +393,7 @@ class ProjectionArchive:
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
         )
 
     def ingest_snapshot(
@@ -398,6 +403,7 @@ class ProjectionArchive:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         """Archive one Complete or Partial normalized provider observation."""
 
@@ -406,6 +412,7 @@ class ProjectionArchive:
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
         )
         return self._ingest_prepared(prepared)
 
@@ -416,6 +423,7 @@ class ProjectionArchive:
         query: NBAMarketQuery,
         accepted_at: datetime | None,
         poll_started_at: datetime | None,
+        duration_ms: int | None,
     ) -> _PreparedProjectionIngestion:
         """Validate and canonicalize one snapshot without touching the database."""
 
@@ -465,7 +473,16 @@ class ProjectionArchive:
             observation_rows=observation_rows,
             materialization_checksum=materialization_checksum,
             poll_id=poll_id,
+            duration_ms=self._normalize_duration_ms(duration_ms),
         )
+
+    @staticmethod
+    def _normalize_duration_ms(value: int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("projection poll duration_ms must be a non-negative integer")
+        return min(value, 7 * 24 * 60 * 60 * 1000)
 
     def _ingest_prepared(
         self,
@@ -805,6 +822,7 @@ class ProjectionArchive:
         completed_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         failure_reason: str,
+        duration_ms: int | None = None,
     ) -> ProjectionPollResult:
         """Record bounded provider failure health without changing evidence or Latest."""
 
@@ -830,6 +848,7 @@ class ProjectionArchive:
             completed.isoformat(),
         )
         table = ProviderPoll.__table__
+        normalized_duration_ms = self._normalize_duration_ms(duration_ms)
         with self._scope_transaction(
             normalized_provider, query.season, query_key
         ) as connection:
@@ -865,6 +884,7 @@ class ProjectionArchive:
                         snapshot_id=None,
                         generation_id=None,
                         observation_count=0,
+                        duration_ms=normalized_duration_ms,
                     )
                 )
             else:
@@ -1158,6 +1178,7 @@ class ProjectionArchive:
                 snapshot_id=request.snapshot_id,
                 generation_id=request.generation_id,
                 observation_count=request.observation_count,
+                duration_ms=request.duration_ms,
             )
         )
 
@@ -1882,12 +1903,14 @@ class ProjectionRecordingService:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         return self._record_snapshot(
             snapshot,
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
             require_complete=False,
         )
 
@@ -1898,6 +1921,7 @@ class ProjectionRecordingService:
         query: NBAMarketQuery,
         accepted_at: datetime | None,
         poll_started_at: datetime | None,
+        duration_ms: int | None,
         require_complete: bool,
     ) -> ProjectionArchiveResult:
         require_projection_archive_schema(self.archive.engine)
@@ -1911,6 +1935,7 @@ class ProjectionRecordingService:
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
         )
 
     def record_complete_snapshot(
@@ -1920,12 +1945,14 @@ class ProjectionRecordingService:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         return self._record_snapshot(
             snapshot,
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
             require_complete=True,
         )
 
@@ -1937,6 +1964,7 @@ class ProjectionRecordingService:
         completed_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         failure_reason: str,
+        duration_ms: int | None = None,
     ) -> ProjectionPollResult:
         require_projection_archive_schema(self.archive.engine)
         self._scope_for(provider, query)
@@ -1946,6 +1974,7 @@ class ProjectionRecordingService:
             completed_at=completed_at,
             poll_started_at=poll_started_at,
             failure_reason=failure_reason,
+            duration_ms=duration_ms,
         )
 
 

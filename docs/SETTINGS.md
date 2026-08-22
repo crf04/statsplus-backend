@@ -15,6 +15,7 @@ The model is intentionally grouped by responsibility:
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
 | `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
+| `ProjectionCollectionSettings` | Board-wide scheduler cadence, governed pregame horizon, lease duration, and bounded provider backoff | `PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES` (`30`), `PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES` (`5`), `PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS` (`24`), `PROJECTION_COLLECTION_FAST_WINDOW_HOURS` (`2`), `PROJECTION_COLLECTION_LEASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS` (`1800`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
@@ -93,7 +94,12 @@ normalized snapshot or bounded failure. The recorder authorizes exactly the
 providers in `DFS_ENABLED_PROVIDERS` for the reader's current-season canonical
 query; it rejects every provider when that set is empty and rejects a disabled
 provider or different query before writing. Provider polling and scheduling
-belong to later slices.
+are owned by the dedicated `ProjectionCollectionCoordinator`, invoked by
+`scripts/collect_projections.py` as a one-shot operator/Railway process. It
+uses one database-backed lease, reads the canonical Event Catalog before
+polling, and records outcomes through the same recorder seam; it never runs
+from a request route. Migration `043_projection_collection_control` adds its
+lease/state tables and the Provider Poll duration field.
 The reader retains scopes for every supported archive provider (`dabble`,
 `prizepicks`, and `underdog`) independently of the enabled registry. A provider
 removed from `DFS_ENABLED_PROVIDERS` therefore ages out through the 15-minute

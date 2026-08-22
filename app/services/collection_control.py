@@ -4495,6 +4495,7 @@ class CollectionOperationsService(_SessionService):
                  collector_tokens: "CollectorTokenService | None" = None,
                  alert_adapter: "EmailAlertAdapter | None" = None,
                  l15_expectation_resolver=None,
+                 projection_collection: Any | None = None,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
@@ -4502,6 +4503,12 @@ class CollectionOperationsService(_SessionService):
         self.collector_tokens = collector_tokens
         self.alert_adapter = alert_adapter or EmailAlertAdapter()
         self.l15_expectation_resolver = l15_expectation_resolver
+        self.projection_collection = projection_collection
+
+    def set_projection_collection(self, coordinator: Any | None) -> None:
+        """Attach the scheduled projection coordinator after graph assembly."""
+
+        self.projection_collection = coordinator
 
     @staticmethod
     def _validate_reason(actor: str, action: str, resource: str, reason: str) -> tuple[str, str, str, str]:
@@ -4991,7 +4998,7 @@ class CollectionOperationsService(_SessionService):
                 "retry_after_seconds": retry_after,
                 "concurrency_retry_after_seconds": concurrency_retry,
             }
-        return {
+        diagnostics = {
             "cycles": [{"cycle_id": row.cycle_id, "season": row.season, "status": row.status, "cutoff": row.cutoff.isoformat()} for row in cycles],
             "streams": [stream_diagnostic(row) for row in streams],
             "collectors": [{
@@ -5010,6 +5017,9 @@ class CollectionOperationsService(_SessionService):
                 "completed_at": _iso(row.completed_at), "error_code": row.error_code,
             } for row in jobs],
         }
+        if self.projection_collection is not None:
+            diagnostics["projections"] = self.projection_collection.diagnostics(limit=bounded)
+        return diagnostics
 
     def validate_completeness(self, *, cycle_id: str) -> dict[str, Any]:
         """Derive a validation summary from accepted evidence and governance.

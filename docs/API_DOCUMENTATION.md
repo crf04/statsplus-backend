@@ -1777,7 +1777,8 @@ transition, and observation receipt rather than asserted by the caller.
 
 `GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
 rows per category). Its additive stream, collector, and usage rows have this
-exact shape; absent evidence is JSON `null`:
+exact shape; projection collection diagnostics are also bounded and contain no
+raw payloads or source identifiers. Absent evidence is JSON `null`:
 
 ```json
 {
@@ -1819,9 +1820,30 @@ exact shape; absent evidence is JSON `null`:
     "window_resets_at": "2026-08-13T00:00:00+00:00",
     "retry_after_seconds": 3600,
     "concurrency_retry_after_seconds": 0
-  }]
+  }],
+  "projections": {
+    "providers": [{
+      "provider": "dabble",
+      "last_poll_at": "2026-08-12T00:00:00+00:00",
+      "last_changed_snapshot_at": "2026-08-12T00:00:00+00:00",
+      "freshness_seconds": 30,
+      "failure": {"last_at": null, "reason": null, "consecutive": 0},
+      "backoff": {"active": false, "until": null},
+      "active_count": 18,
+      "unresolved_count": 0
+    }],
+    "active_count": 18,
+    "unresolved_count": 0,
+    "lease": {"active": false, "fence": 4, "expires_at": null}
+  }
 }
 ```
+
+Projection collection is not an HTTP refresh operation. Railway wakes
+`scripts/collect_projections.py` every five minutes; its coordinator applies
+the configured 30-minute/5-minute adaptive cadence, governed event-status
+cutoff, database lease, provider backoff, and archive persistence path. API
+and browser reads remain database-only.
 
 `freshness_status` is closed to `fresh`, `stale`, `missing`, or
 `unavailable`. Age is the non-negative bounded age of the active publication;
