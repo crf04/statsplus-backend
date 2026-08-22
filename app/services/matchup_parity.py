@@ -146,6 +146,7 @@ class MatchupMaterialization:
     publication_id: str | None = None
     payload_checksum: str | None = None
     provider_window_identity: str | None = None
+    retained_last_good: bool = False
     served_per48: Mapping[tuple[int, str], float] = field(default_factory=dict)
     served_ranks: Mapping[tuple[int, str], int] = field(default_factory=dict)
 
@@ -661,6 +662,7 @@ class StoredLegacyMatchupSource:
             governance.event_catalog_publication_id,
             governance.event_catalog_checksum,
         )
+        retained_last_good = False
         if observations and all(
             observation.status == "unavailable" for observation in observations
         ):
@@ -695,20 +697,7 @@ class StoredLegacyMatchupSource:
                     and isinstance(identity, str)
                     and identity.strip()
                 ):
-                    observations = tuple(
-                        TeamMatchupObservation(
-                            surface=item,
-                            status="available",
-                            cutoff=fact_cutoff,
-                            manifest_id=manifest_id,
-                            event_catalog_publication_id=catalog_id,
-                            event_catalog_checksum=catalog_checksum,
-                            provider_window_identity=identity,
-                        )
-                        for item in (
-                            (surface,) if surface is not None else LEDGER_OWNED_SURFACES
-                        )
-                    )
+                    retained_last_good = True
                 else:
                     facts = ()
             else:
@@ -717,6 +706,7 @@ class StoredLegacyMatchupSource:
             not facts and not all(item.status == "unavailable" for item in observations)
         ):
             raise MatchupParityError("legacy materialization provenance unavailable")
+        provenance_items = facts if retained_last_good else (*facts, *observations)
         persisted_metadata = {
             (
                 item.cutoff,
@@ -725,7 +715,7 @@ class StoredLegacyMatchupSource:
                 item.event_catalog_checksum,
                 item.provider_window_identity,
             )
-            for item in (*facts, *observations)
+            for item in provenance_items
         }
         if len(persisted_metadata) != 1:
             raise MatchupParityError("legacy materialization provenance mismatch")
@@ -969,6 +959,7 @@ class StoredLegacyMatchupSource:
             event_catalog_publication_id=catalog_id,
             event_catalog_checksum=catalog_checksum,
             provider_window_identity=window_identity,
+            retained_last_good=retained_last_good,
         )
 
 
@@ -1413,7 +1404,11 @@ def compare_matchup_materializations(
     legacy_observation = _observation_for_surface(legacy.observations, surface=surface)
     ledger_observation = _observation_for_surface(ledger.observations, surface=surface)
     legacy_available = (
-        legacy_observation is not None and legacy_observation.status == "available"
+        legacy_observation is not None
+        and (
+            legacy_observation.status == "available"
+            or (legacy.retained_last_good and bool(legacy_facts))
+        )
     )
     ledger_available = (
         ledger_observation is not None and ledger_observation.status == "available"

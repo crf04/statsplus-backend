@@ -639,6 +639,7 @@ class LegacyMatchupDiagnosticCaptureRepository:
             "event_catalog_publication_id": materialization.event_catalog_publication_id,
             "event_catalog_checksum": materialization.event_catalog_checksum,
             "provider_window_identity": materialization.provider_window_identity,
+            "retained_last_good": bool(materialization.retained_last_good),
             "game_ids_by_team": game_ids_by_team,
             "game_set_checksum": game_set_checksum,
             "evidence_checksum": evidence_checksum,

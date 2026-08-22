@@ -1734,12 +1734,14 @@ and every row has finite raw numerators plus positive finite minutes or
 seconds. A substituted off-roster team becomes
 `unavailable/provider_roster_mismatch`; partial, non-finite, or mislabeled data
 becomes a fact-free unavailable observation and leaves prior valid facts
-intact. A provider transport,
-constraint, or transaction failure likewise leaves both prior snapshots
-intact; the Nightly Refresh retries the complete stats → schedule →
-athlete catalog → player game logs → player diets → team matchups unit once. A
-provider response that reaches its adapter but is
-malformed instead degrades only that surface as
+intact. A provider transport failure degrades only that provider-owned surface as
+`unavailable/provider_unavailable`, preserves its prior valid facts, and
+publishes independently successful surfaces. The team-matchup step returns a
+failed disposition after that atomic partial-success write, so Nightly Refresh
+still retries the complete stats → schedule → athlete catalog → player game
+logs → player diets → team matchups unit once and alerts if the retry also
+fails. A transaction failure leaves both prior snapshots intact. A provider
+response that reaches its adapter but is malformed instead degrades only that surface as
 `unavailable/provider_malformed_response`, preserves its prior valid facts,
 and allows other surfaces to publish. The query service defensively degrades only an
 affected incomplete legacy surface and derives allowed-per-48 from valid raw

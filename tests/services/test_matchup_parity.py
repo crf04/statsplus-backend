@@ -1262,7 +1262,8 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     )
 
     assert retained.facts == current_traditional_facts
-    assert retained.observations[0].status == "available"
+    assert retained.observations == (observation,)
+    assert retained.retained_last_good is True
     assert retained.game_ids_by_team == {
         team_id: frozenset(ids) for team_id, ids in game_ids.items()
     }

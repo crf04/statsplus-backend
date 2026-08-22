@@ -359,7 +359,7 @@ class TeamMatchupRefreshService:
         *,
         as_of: date | None = None,
         provenance: TeamMatchupProvenance | None = None,
-    ) -> None:
+    ) -> bool:
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(self._clock())
         current_date = retrieved_at.astimezone(EASTERN).date()
@@ -404,7 +404,7 @@ class TeamMatchupRefreshService:
                         retrieved_at=retrieved_at,
                         connection=connection,
                     )
-            return
+            return True
         boundaries = TeamWindowBoundaryResolver().last_n(
             events, as_of=snapshot_date, window_games=15
         )
@@ -462,6 +462,7 @@ class TeamMatchupRefreshService:
             season_observations, season_window_identities,
             provenance=provenance, cutoff=retrieved_at,
         )
+        rolling_failures: Mapping[str, tuple[str, str | None]] = {}
         if set(boundaries) != set(team_ids):
             rolling_facts = []
             rolling_observations = self._surface_observations(
@@ -477,7 +478,7 @@ class TeamMatchupRefreshService:
             )
         else:
             (
-                rolling_facts, window_overrides, rolling_provider_game_ids,
+                rolling_facts, rolling_failures, rolling_provider_game_ids,
                 rolling_aggregate_requests,
             ) = self._collect_last_15(
                 canonical_season,
@@ -504,7 +505,7 @@ class TeamMatchupRefreshService:
             rolling_observations = self._surface_observations(
                 overrides={
                     "play_types": ("unavailable", "provider_window_unsupported"),
-                    **window_overrides,
+                    **rolling_failures,
                 }
             )
             rolling_observations = self._bind_observation_evidence(
@@ -533,6 +534,13 @@ class TeamMatchupRefreshService:
                     retrieved_at=retrieved_at,
                     connection=connection,
                 )
+        failures = (
+            *season_failures.values(),
+            *rolling_failures.values(),
+        )
+        return not any(
+            reason == "provider_unavailable" for _, reason in failures
+        )
 
     def _provenance_for_snapshot(
         self, season: str, snapshot_date: date
@@ -730,7 +738,7 @@ class TeamMatchupRefreshService:
         if isinstance(error, ProviderResponseError):
             return "unavailable", "provider_malformed_response"
         if isinstance(error, requests.exceptions.RequestException):
-            return "unavailable", "provider_transport_error"
+            return "unavailable", "provider_unavailable"
         return "unavailable", "provider_invalid_response"
 
     @staticmethod
