@@ -150,6 +150,26 @@ def test_past_scheduled_time_does_not_stop_polling_until_governed_status_starts(
     assert [provider for provider, _ in recorder.snapshots] == ["dabble"]
 
 
+def test_adaptive_policy_switches_from_slow_to_fast_board_wide(tmp_path):
+    board = FakeBoard()
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[_event(scheduled_at=NOW + timedelta(hours=23))],
+        board=board,
+    )
+
+    slow = coordinator._schedule(NOW, ("dabble", "prizepicks"))
+    fast = coordinator._schedule(NOW + timedelta(hours=21), ("dabble", "prizepicks"))
+
+    assert slow is not None
+    assert slow.interval == timedelta(minutes=30)
+    assert slow.providers == ("dabble", "prizepicks")
+    assert fast is not None
+    assert fast.interval == timedelta(minutes=5)
+    assert fast.providers == ("dabble", "prizepicks")
+    assert board.calls == []
+
+
 def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(tmp_path):
     board = FakeBoard(
         {
@@ -182,6 +202,41 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
         ).mappings().one()
     assert state["consecutive_failures"] == 1
     assert state["backoff_until"].replace(tzinfo=timezone.utc) == NOW + timedelta(minutes=5)
+
+
+def test_diagnostics_are_bounded_and_exclude_raw_scope_identifiers(tmp_path):
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[_event(scheduled_at=NOW + timedelta(hours=1))],
+        board=FakeBoard(),
+    )
+    fence, _ = coordinator._acquire_lease(NOW)
+    coordinator._update_state(
+        provider="dabble",
+        now=NOW,
+        interval=timedelta(minutes=5),
+        success=True,
+        changed_at=NOW,
+        counts=(18, 2),
+    )
+
+    diagnostics = coordinator.diagnostics(limit=999)
+
+    assert diagnostics["active_count"] == 18
+    assert diagnostics["unresolved_count"] == 2
+    assert diagnostics["lease"] == {
+        "active": True,
+        "fence": fence,
+        "expires_at": (NOW + timedelta(minutes=1)).isoformat(),
+    }
+    provider = diagnostics["providers"][0]
+    assert provider["provider"] == "dabble"
+    assert provider["last_changed_snapshot_at"] == NOW.isoformat()
+    assert provider["active_count"] == 18
+    assert provider["unresolved_count"] == 2
+    assert "query_key" not in provider
+    assert "raw" not in str(diagnostics).casefold()
+    coordinator._release_lease(NOW, fence)
 
 
 def test_overlapping_runs_have_one_database_lease_winner(tmp_path):
