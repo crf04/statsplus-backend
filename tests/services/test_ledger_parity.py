@@ -1,6 +1,6 @@
 """Canonical ledger semantic-parity evidence contracts."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -68,6 +68,16 @@ def _candidate(engine, *, stream_key="player_per36", checksum="a" * 64):
             fence=0,
         ))
     return publication_id, checksum
+
+
+def _regulation_game():
+    """The shared fixture at a provable regulation game length."""
+
+    game = _game()
+    return replace(
+        game,
+        team_facts=tuple(replace(fact, team_minutes=48.0) for fact in game.team_facts),
+    )
 
 
 def _traditional_season_rows(game):
@@ -151,7 +161,7 @@ def test_per36_well_formed_differences_persist_pending_and_are_unapprovable(tmp_
 
 
 def test_traditional_opponent_and_per36_compare_derived_semantics():
-    game = _game()
+    game = _regulation_game()
     traditional = _traditional_season_rows(game)
     per36 = tuple(asdict(fact) for fact in derive_player_per36_facts((game,), season=game.season))
 
@@ -610,7 +620,7 @@ def test_parity_adjudication_decision_is_immutable(tmp_path, first, second):
 
 def test_traditional_parity_reads_general_opponent_stats_semantics(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite3'}")
-    game = _game()
+    game = _regulation_game()
     with engine.begin() as connection:
         connection.execute(text(
             "CREATE TABLE general_opponent_stats ("
@@ -632,7 +642,7 @@ def test_traditional_parity_reads_general_opponent_stats_semantics(tmp_path):
 
 
 def test_traditional_season_parity_reports_missing_team_and_semantic_difference():
-    game = _game()
+    game = _regulation_game()
     rows = list(_traditional_season_rows(game))
     rows.pop()
     rows[0] = {**rows[0], "OPP_PTS": 101.0}

@@ -1225,9 +1225,12 @@ canonical player while retaining every team-at-game identity. Season and
 exact L15 materialization selects governed game IDs only and refuses to call a
 window complete until all 30 governed teams are present (and L15 has 15
 eligible games for each). League averages use the population denominator;
-team values are normalized to per-48 from the retained effective team-minute
-denominator (player minutes divided by five, with count-per-game fallback for
-hand-built replay facts), and competition ranks are deterministic with ties
+team values are normalized to per-48 from the nominal game length each
+retained team-minute value proves (48 minutes plus 5 per overtime; the
+retained player-minutes-over-five drifts from it by seconds of PBP clock
+precision, and a value that does not prove a nominal length is unavailable;
+count-per-game fallback remains for hand-built replay facts without
+minutes), and competition ranks are deterministic with ties
 represented as `1, 1, 3`.
 `LedgerMaterializationService` stores the complete derived payloads and creates
 inactive control-plane candidate versions with normalized game-observation
@@ -1790,8 +1793,8 @@ instead of approximating a league window.
 Every contracted PBP-owned non-shot opponent fact is aggregated exclusively
 from typed ledger counts and denominators: the four traditional opponent
 surfaces (`OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK`) come from the opposing
-team's raw counts over the selected window with the retained effective
-team-minute denominator — `OPP_TOV`/`OPP_STL`/`OPP_BLK` from the opposing team
+team's raw counts over the selected window with the nominal game-length
+denominator — `OPP_TOV`/`OPP_STL`/`OPP_BLK` from the opposing team
 fact, `OPP_REB` from the opposing players' rows because the legacy
 `LeagueDashTeamStats` contract excludes team-only rebounds — and the six assist surfaces (`Assists` plus the five
 location counters) come from the opposing players' counts over the same

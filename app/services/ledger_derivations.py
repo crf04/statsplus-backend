@@ -192,6 +192,37 @@ MATCHUP_TRADITIONAL_KEYS = {
 _PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds"})
 
 
+#: A regulation NBA game is 48 minutes and every overtime adds 5.  The legacy
+#: ``LeagueDashTeamStats`` denominator is that nominal game length; the
+#: ledger's retained ``team_minutes`` is the player-minute sum over five,
+#: which drifts from nominal by seconds of PBP clock precision.
+REGULATION_MINUTES = 48.0
+OVERTIME_MINUTES = 5.0
+#: Largest drift from a nominal game length that still proves the length.
+NOMINAL_MINUTES_TOLERANCE = 0.5
+
+
+def nominal_team_minutes(team_minutes: float) -> float:
+    """Return the nominal game length the retained team minutes prove.
+
+    Raises ``LedgerDerivationUnavailable`` when the retained value is not
+    within ``NOMINAL_MINUTES_TOLERANCE`` of ``48 + 5k`` minutes, because the
+    denominator can then not be derived from evidence.
+    """
+
+    if float(team_minutes) <= 0:
+        # No minutes retained (hand-built replay facts): callers keep their
+        # count-per-game fallback rather than inventing a game length.
+        return 0.0
+    overtimes = round((float(team_minutes) - REGULATION_MINUTES) / OVERTIME_MINUTES)
+    nominal = REGULATION_MINUTES + OVERTIME_MINUTES * max(overtimes, 0)
+    if abs(float(team_minutes) - nominal) > NOMINAL_MINUTES_TOLERANCE:
+        raise LedgerDerivationUnavailable(
+            "team minutes do not prove a nominal game length"
+        )
+    return nominal
+
+
 def player_credited_count(game: CanonicalGame, team_id: int, metric: str) -> int:
     """Sum one count over a team's player rows, excluding the team residual."""
 
@@ -526,7 +557,7 @@ def materialize_team_window(
                 if fact.team_id == defense.opponent_team_id
             )
             team_codes[team_id] = defense.team_tricode
-            team_minutes += defense.team_minutes
+            team_minutes += nominal_team_minutes(defense.team_minutes)
             for metric in TEAM_METRICS:
                 if metric in _PLAYER_CREDITED_MATCHUP_METRICS:
                     # LeagueDashTeamStats' OPP_REB surface is player-credited.
@@ -638,7 +669,7 @@ def materialize_assist_location_window(
         for game_id in team.game_ids:
             game = game_by_id[game_id]
             defense = next(fact for fact in game.team_facts if fact.team_id == team.team_id)
-            denominator += defense.team_minutes
+            denominator += nominal_team_minutes(defense.team_minutes)
             opponent_id = defense.opponent_team_id
             opponent = next(
                 fact for fact in game.team_facts if fact.team_id == opponent_id
@@ -716,6 +747,7 @@ def materialize_assist_location_window(
 
 
 __all__ = [
+    "nominal_team_minutes",
     "ASSIST_DERIVED_METRICS",
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",

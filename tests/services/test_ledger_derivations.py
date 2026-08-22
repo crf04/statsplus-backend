@@ -12,6 +12,7 @@ from app.services.ledger_derivations import (
     competition_ranks,
     derive_assist_location_facts,
     governed_assist_locations,
+    nominal_team_minutes,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_assist_location_window,
@@ -201,6 +202,59 @@ def test_window_materialization_counts_reconciled_sparse_locations():
     sparse = materialize_assist_location_window(sparse_games, **kwargs)
     assert sparse.complete and explicit.complete
     assert [team.counts for team in sparse.teams] == [team.counts for team in explicit.teams]
+
+
+def test_nominal_team_minutes_recovers_game_length_from_retained_drift():
+    # Production drift is seconds of PBP clock precision around 48 + 5k.
+    assert nominal_team_minutes(48.0) == 48.0
+    assert nominal_team_minutes(47.976666) == 48.0
+    assert nominal_team_minutes(53.02) == 53.0
+    assert nominal_team_minutes(58.0) == 58.0
+    assert nominal_team_minutes(48.5) == 48.0
+    with pytest.raises(LedgerDerivationUnavailable):
+        nominal_team_minutes(48.51)
+    with pytest.raises(LedgerDerivationUnavailable):
+        nominal_team_minutes(8.0)
+    assert nominal_team_minutes(0.0) == 0.0
+
+
+def test_window_denominator_is_the_nominal_game_length():
+    games = tuple(
+        replace(
+            game,
+            team_facts=tuple(replace(fact, team_minutes=47.98) for fact in game.team_facts),
+        )
+        for game in _league_games()
+    )
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    window = materialize_team_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        window_games=15,
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert window.complete
+    assert all(team.team_minutes == 15 * 48.0 for team in window.teams)
+    assist = materialize_assist_location_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        window_games=15,
+        expected_game_ids=expected,
+        expected_team_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert all(team.team_minutes == 15 * 48.0 for team in assist.teams)
 
 
 def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
