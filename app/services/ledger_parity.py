@@ -594,11 +594,15 @@ class LegacyMatchupDiagnosticCaptureRepository:
     ) -> LegacyMatchupDiagnosticCapture:
         if not materialization.provider_window_identity:
             raise ValueError("legacy diagnostic capture requires provider window identity")
-        def normalize(value: object) -> Mapping[str, object]:
+        def normalize(
+            value: object, *, retain_window_identity: bool = False
+        ) -> Mapping[str, object]:
             row = asdict(value)
-            # The identical bounded identity is captured once above, not
-            # repeated in every canonical fact and observation row.
-            row.pop("provider_window_identity", None)
+            # The successful bounded identity is captured once above, not
+            # repeated in every canonical fact row. A retained-last-good
+            # capture keeps the failed observation's distinct identity.
+            if not retain_window_identity:
+                row.pop("provider_window_identity", None)
             return json.loads(json.dumps(row, sort_keys=True, default=str))
         facts = sorted(
             (normalize(fact) for fact in materialization.facts if fact.base == surface),
@@ -606,7 +610,10 @@ class LegacyMatchupDiagnosticCaptureRepository:
         )
         observations = sorted(
             (
-                normalize(observation)
+                normalize(
+                    observation,
+                    retain_window_identity=materialization.retained_last_good,
+                )
                 for observation in materialization.observations
                 if observation.surface == surface
             ),

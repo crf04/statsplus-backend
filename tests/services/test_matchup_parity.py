@@ -44,6 +44,7 @@ from app.services.ledger_parity import (
     LEGACY_MATCHUP_DIAGNOSTIC_CAPTURE_STREAM,
     PER36_RAW_FIELDS,
     LedgerParityArtifactRepository,
+    LegacyMatchupDiagnosticCaptureRepository,
     matchup_parity_artifact_is_activatable,
     matchup_parity_cohort_is_activatable,
 )
@@ -1341,6 +1342,7 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
             governance=governance, surface="traditional",
         )
 
+
     publications = {
         stream: _insert_runner_publication(
             engine, stream_key=stream,
@@ -1362,6 +1364,57 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     assert LedgerParityArtifactRepository(engine).latest(
         "assist_locations_l15", "2025-26"
     ).status == "exact"
+
+
+def test_retained_capture_preserves_failed_observation_window_identity(tmp_path):
+    engine, governance, binding = _runner_world(tmp_path)
+    game_ids = governance.expected_l15_game_ids
+    publication_id, _ = _insert_publication(
+        engine,
+        stream_key="traditional_opponent_l15",
+        surface="traditional",
+        window="l15",
+        game_ids_by_team=game_ids,
+        binding=binding,
+    )
+    materialization = MatchupMaterialization(
+        season="2025-26",
+        window="l15",
+        cutoff=CUTOFF,
+        facts=_surface_facts(
+            TEAM_IDS,
+            surface="traditional",
+            provider="nba_stats",
+            game_ids_by_team=game_ids,
+        ),
+        observations=(TeamMatchupObservation(
+            surface="traditional",
+            status="unavailable",
+            unavailable_reason="provider_unavailable",
+            provider_window_identity="failed-attempt-identity",
+        ),),
+        game_ids_by_team=game_ids,
+        manifest_id=governance.manifest_id,
+        event_catalog_publication_id=governance.event_catalog_publication_id,
+        event_catalog_checksum=governance.event_catalog_checksum,
+        provider_window_identity="successful-retained-identity",
+        retained_last_good=True,
+    )
+
+    with create_session(engine) as session, session.begin():
+        capture = LegacyMatchupDiagnosticCaptureRepository(engine).record(
+            materialization,
+            surface="traditional",
+            publication_id=publication_id,
+            session=session,
+        )
+
+    assert capture.document["provider_window_identity"] == (
+        "successful-retained-identity"
+    )
+    assert capture.document["observations"][0]["provider_window_identity"] == (
+        "failed-attempt-identity"
+    )
 
 
 def test_cohort_selects_latest_valid_reruns_and_rejects_mixed_authority(tmp_path):
