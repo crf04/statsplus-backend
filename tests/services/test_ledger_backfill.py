@@ -37,7 +37,7 @@ from app.models.collection_control import (
     CompositionJob,
 )
 from app.services.ledger_materialization import LedgerCorrectionQueue
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 
 class _Athletes:
