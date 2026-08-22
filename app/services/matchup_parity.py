@@ -656,6 +656,13 @@ class StoredLegacyMatchupSource:
             if observation.surface in LEDGER_OWNED_SURFACES
             and (surface is None or observation.surface == surface)
         )
+        if observations and all(
+            observation.status == "unavailable" for observation in observations
+        ):
+            # The serving repository retains last-good facts when a new
+            # provider attempt is unavailable. Those prior facts are not
+            # evidence for the current governed parity attempt.
+            facts = ()
         if not observations or (
             not facts and not all(item.status == "unavailable" for item in observations)
         ):
