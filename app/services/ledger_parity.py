@@ -1376,7 +1376,11 @@ class LedgerParityArtifactRepository:
             != report.legacy_event_catalog_publication_id
             or legacy_capture.event_catalog_checksum
             != report.legacy_event_catalog_checksum
-            or legacy_capture.game_set_checksum != report.legacy_game_set_checksum
+            or (
+                report.legacy_game_set_checksum is not None
+                and legacy_capture.game_set_checksum
+                != report.legacy_game_set_checksum
+            )
             or legacy_capture.document.get("game_ids_by_team") != expected_game_map
         ):
             raise ValueError("legacy diagnostic capture does not match parity report")
