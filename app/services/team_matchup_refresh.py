@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from sqlalchemy import select
 
 from app.domain.nba_events import (
@@ -42,6 +43,11 @@ from app.utils.telemetry import ProviderResponseError
 
 
 EASTERN = ZoneInfo("America/New_York")
+_PROVIDER_ERRORS = (
+    ProviderResponseError,
+    requests.exceptions.RequestException,
+    ValueError,
+)
 
 
 def governed_season_type(event: Mapping[str, Any]) -> str | None:
@@ -353,7 +359,7 @@ class TeamMatchupRefreshService:
         *,
         as_of: date | None = None,
         provenance: TeamMatchupProvenance | None = None,
-    ) -> None:
+    ) -> bool:
         canonical_season = validate_canonical_season(season)
         retrieved_at = assume_utc(self._clock())
         current_date = retrieved_at.astimezone(EASTERN).date()
@@ -398,7 +404,7 @@ class TeamMatchupRefreshService:
                         retrieved_at=retrieved_at,
                         connection=connection,
                     )
-            return
+            return True
         boundaries = TeamWindowBoundaryResolver().last_n(
             events, as_of=snapshot_date, window_games=15
         )
@@ -456,6 +462,7 @@ class TeamMatchupRefreshService:
             season_observations, season_window_identities,
             provenance=provenance, cutoff=retrieved_at,
         )
+        rolling_failures: Mapping[str, tuple[str, str | None]] = {}
         if set(boundaries) != set(team_ids):
             rolling_facts = []
             rolling_observations = self._surface_observations(
@@ -471,7 +478,7 @@ class TeamMatchupRefreshService:
             )
         else:
             (
-                rolling_facts, window_overrides, rolling_provider_game_ids,
+                rolling_facts, rolling_failures, rolling_provider_game_ids,
                 rolling_aggregate_requests,
             ) = self._collect_last_15(
                 canonical_season,
@@ -498,7 +505,7 @@ class TeamMatchupRefreshService:
             rolling_observations = self._surface_observations(
                 overrides={
                     "play_types": ("unavailable", "provider_window_unsupported"),
-                    **window_overrides,
+                    **rolling_failures,
                 }
             )
             rolling_observations = self._bind_observation_evidence(
@@ -527,6 +534,13 @@ class TeamMatchupRefreshService:
                     retrieved_at=retrieved_at,
                     connection=connection,
                 )
+        failures = (
+            *season_failures.values(),
+            *rolling_failures.values(),
+        )
+        return not any(
+            reason == "provider_unavailable" for _, reason in failures
+        )
 
     def _provenance_for_snapshot(
         self, season: str, snapshot_date: date
@@ -715,7 +729,7 @@ class TeamMatchupRefreshService:
 
     @staticmethod
     def _provider_failure(
-        error: ProviderResponseError | ValueError,
+        error: ProviderResponseError | requests.exceptions.RequestException | ValueError,
     ) -> tuple[str, str]:
         if isinstance(error, _ProviderWindowUnverified):
             return "unavailable", "provider_window_unverified"
@@ -723,6 +737,8 @@ class TeamMatchupRefreshService:
             return "unavailable", "provider_roster_mismatch"
         if isinstance(error, ProviderResponseError):
             return "unavailable", "provider_malformed_response"
+        if isinstance(error, requests.exceptions.RequestException):
+            return "unavailable", "provider_unavailable"
         return "unavailable", "provider_invalid_response"
 
     @staticmethod
@@ -1016,7 +1032,7 @@ class TeamMatchupRefreshService:
                         expected_game_ids_by_team=expected_game_ids_by_team,
                     )
                 )
-            except (ProviderResponseError, ValueError) as error:
+            except _PROVIDER_ERRORS as error:
                 failures["traditional"] = self._provider_failure(error)
         try:
             traditional_frame = self.nba_stats.fetch_opponent_team_stats(
@@ -1037,7 +1053,7 @@ class TeamMatchupRefreshService:
                     require_game_ids=False,
                 )
             minutes_by_team = self._minutes_by_team(traditional_frame)
-        except (ProviderResponseError, ValueError) as error:
+        except _PROVIDER_ERRORS as error:
             minutes_by_team = None
             dependent_surfaces = ["traditional", "shot_types", "shot_zones"]
             if include_play_types:
@@ -1050,7 +1066,7 @@ class TeamMatchupRefreshService:
                     facts_by_surface["traditional"] = self._require_governed_roster(
                         self._traditional_facts(traditional_frame), team_ids
                     )
-                except (ProviderResponseError, ValueError) as error:
+                except _PROVIDER_ERRORS as error:
                     failures["traditional"] = self._provider_failure(error)
             try:
                 for shooting_type in SHOOTING_TYPES:
@@ -1069,7 +1085,7 @@ class TeamMatchupRefreshService:
                 self._require_governed_roster(
                     facts_by_surface["shot_types"], team_ids
                 )
-            except (ProviderResponseError, ValueError) as error:
+            except _PROVIDER_ERRORS as error:
                 failures["shot_types"] = self._provider_failure(error)
             try:
                 facts_by_surface["shot_zones"] = self._require_governed_roster(
@@ -1081,7 +1097,7 @@ class TeamMatchupRefreshService:
                     ),
                     team_ids,
                 )
-            except (ProviderResponseError, ValueError) as error:
+            except _PROVIDER_ERRORS as error:
                 failures["shot_zones"] = self._provider_failure(error)
             if include_play_types:
                 try:
@@ -1102,7 +1118,7 @@ class TeamMatchupRefreshService:
                     self._require_governed_roster(
                         facts_by_surface["play_types"], team_ids
                     )
-                except (ProviderResponseError, ValueError) as error:
+                except _PROVIDER_ERRORS as error:
                     failures["play_types"] = self._provider_failure(error)
         try:
             if verify_window:
@@ -1140,7 +1156,7 @@ class TeamMatchupRefreshService:
                 self._assist_facts(assist_frame),
                 team_ids,
             )
-        except (ProviderResponseError, ValueError) as error:
+        except _PROVIDER_ERRORS as error:
             failures["assist_locations"] = self._provider_failure(error)
         for failed_surface in ("traditional", "assist_locations"):
             if failed_surface in failures:
@@ -1225,7 +1241,7 @@ class TeamMatchupRefreshService:
                             provider_ids[team_id]
                         )
                         membership_verified = True
-                    except (ProviderResponseError, ValueError) as error:
+                    except _PROVIDER_ERRORS as error:
                         failures.setdefault("traditional", self._provider_failure(error))
                 try:
                     traditional_frame = self.nba_stats.fetch_opponent_team_stats(
@@ -1254,7 +1270,7 @@ class TeamMatchupRefreshService:
                                 boundary.from_date,
                             )
                         )
-                except (ProviderResponseError, ValueError) as error:
+                except _PROVIDER_ERRORS as error:
                     failure = self._provider_failure(error)
                     failures.setdefault("traditional", failure)
                     if minutes_by_team is None:
@@ -1289,7 +1305,7 @@ class TeamMatchupRefreshService:
                     facts_by_surface["shot_types"].extend(
                         self._with_start(team_shot_type_facts, boundary.from_date)
                     )
-                except (ProviderResponseError, ValueError) as error:
+                except _PROVIDER_ERRORS as error:
                     failures.setdefault("shot_types", self._provider_failure(error))
 
             if minutes_by_team is not None and "shot_zones" not in failures:
@@ -1316,7 +1332,7 @@ class TeamMatchupRefreshService:
                             boundary.from_date,
                         )
                     )
-                except (ProviderResponseError, ValueError) as error:
+                except _PROVIDER_ERRORS as error:
                     failures.setdefault("shot_zones", self._provider_failure(error))
 
             if "assist_locations" not in failures:
@@ -1374,7 +1390,7 @@ class TeamMatchupRefreshService:
                             boundary.from_date,
                         )
                     )
-                except (ProviderResponseError, ValueError) as error:
+                except _PROVIDER_ERRORS as error:
                     failures.setdefault(
                         "assist_locations", self._provider_failure(error)
                     )

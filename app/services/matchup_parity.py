@@ -146,6 +146,7 @@ class MatchupMaterialization:
     publication_id: str | None = None
     payload_checksum: str | None = None
     provider_window_identity: str | None = None
+    retained_last_good: bool = False
     served_per48: Mapping[tuple[int, str], float] = field(default_factory=dict)
     served_ranks: Mapping[tuple[int, str], int] = field(default_factory=dict)
 
@@ -656,22 +657,79 @@ class StoredLegacyMatchupSource:
             if observation.surface in LEDGER_OWNED_SURFACES
             and (surface is None or observation.surface == surface)
         )
-        if observations and all(
-            observation.status == "unavailable" for observation in observations
-        ):
-            # The serving repository retains last-good facts when a new
-            # provider attempt is unavailable. Those prior facts are not
-            # evidence for the current governed parity attempt.
-            facts = ()
-        if not observations or (
-            not facts and not all(item.status == "unavailable" for item in observations)
-        ):
-            raise MatchupParityError("legacy materialization provenance unavailable")
         expected_authority = (
             governance.manifest_id,
             governance.event_catalog_publication_id,
             governance.event_catalog_checksum,
         )
+        retained_last_good = False
+        if observations and all(
+            observation.status == "unavailable" for observation in observations
+        ):
+            # The serving repository retains last-good facts when a new
+            # provider attempt is unavailable. Same-authority facts remain
+            # valid parity evidence; older-authority facts do not.
+            fact_metadata = {
+                (
+                    fact.cutoff,
+                    fact.manifest_id,
+                    fact.event_catalog_publication_id,
+                    fact.event_catalog_checksum,
+                    fact.provider_window_identity,
+                )
+                for fact in facts
+            }
+            if len(fact_metadata) == 1:
+                fact_cutoff, manifest_id, catalog_id, catalog_checksum, identity = (
+                    next(iter(fact_metadata))
+                )
+                try:
+                    same_cutoff = (
+                        fact_cutoff is not None
+                        and _aware(fact_cutoff) == _aware(cutoff)
+                    )
+                except MatchupParityError:
+                    same_cutoff = False
+                if (
+                    same_cutoff
+                    and (manifest_id, catalog_id, catalog_checksum)
+                    == expected_authority
+                    and isinstance(identity, str)
+                    and identity.strip()
+                ):
+                    retained_last_good = True
+                else:
+                    facts = ()
+            else:
+                facts = ()
+        if not observations or (
+            not facts and not all(item.status == "unavailable" for item in observations)
+        ):
+            raise MatchupParityError("legacy materialization provenance unavailable")
+        if retained_last_good:
+            for observation in observations:
+                try:
+                    observation_cutoff_matches = (
+                        observation.cutoff is not None
+                        and _aware(observation.cutoff) == _aware(cutoff)
+                    )
+                except MatchupParityError:
+                    observation_cutoff_matches = False
+                if (
+                    not observation_cutoff_matches
+                    or (
+                        observation.manifest_id,
+                        observation.event_catalog_publication_id,
+                        observation.event_catalog_checksum,
+                    )
+                    != expected_authority
+                    or not isinstance(observation.provider_window_identity, str)
+                    or not observation.provider_window_identity.strip()
+                ):
+                    raise MatchupParityError(
+                        "legacy unavailable observation provenance mismatch"
+                    )
+        provenance_items = facts if retained_last_good else (*facts, *observations)
         persisted_metadata = {
             (
                 item.cutoff,
@@ -680,7 +738,7 @@ class StoredLegacyMatchupSource:
                 item.event_catalog_checksum,
                 item.provider_window_identity,
             )
-            for item in (*facts, *observations)
+            for item in provenance_items
         }
         if len(persisted_metadata) != 1:
             raise MatchupParityError("legacy materialization provenance mismatch")
@@ -924,6 +982,7 @@ class StoredLegacyMatchupSource:
             event_catalog_publication_id=catalog_id,
             event_catalog_checksum=catalog_checksum,
             provider_window_identity=window_identity,
+            retained_last_good=retained_last_good,
         )
 
 
@@ -1021,8 +1080,9 @@ def compare_matchup_materializations(
     denominators and derived per-48 rates admit ``tolerance`` and become
     adjudicable semantic differences.  Both sides must cover exactly the
     governed 30-team roster with every contracted metric, no extra teams or
-    metrics, exact governed game sets (L15 exactly 15 games per team), and an
-    available observation on both sides.
+    metrics and exact governed game sets (L15 exactly 15 games per team).
+    Both observations must be available unless the legacy facts are explicitly
+    marked as same-authority retained last-good evidence.
     """
 
     if surface not in _SURFACE_COUNT_KEYS:
@@ -1364,11 +1424,16 @@ def compare_matchup_materializations(
                 CLASSIFICATION_RANKING_DIFFERENCE,
             ))
 
-    # Independent per-surface availability: BOTH sides must be available.
+    # Independent per-surface availability. Same-authority retained legacy
+    # facts remain valid while their latest failed attempt stays observable.
     legacy_observation = _observation_for_surface(legacy.observations, surface=surface)
     ledger_observation = _observation_for_surface(ledger.observations, surface=surface)
     legacy_available = (
-        legacy_observation is not None and legacy_observation.status == "available"
+        legacy_observation is not None
+        and (
+            legacy_observation.status == "available"
+            or (legacy.retained_last_good and bool(legacy_facts))
+        )
     )
     ledger_available = (
         ledger_observation is not None and ledger_observation.status == "available"

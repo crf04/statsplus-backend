@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import pandas as pd
+import requests
 from sqlalchemy import create_engine, delete, inspect, update
 from sqlalchemy.exc import IntegrityError
 
@@ -2077,6 +2078,79 @@ def test_refresh_never_substitutes_own_team_stats_for_opponent_stats(tmp_path):
         assert observation.status == "unavailable"
         assert observation.unavailable_reason == "provider_invalid_response"
         assert not any(fact.base == "traditional" for fact in snapshot.facts)
+
+
+def test_collection_isolates_nba_membership_timeout_from_pbp_surface(tmp_path):
+    team_ids = tuple(_fixture_team_ids())
+    game_ids = {
+        team_id: tuple(f"{team_id}-game-{index}" for index in range(82))
+        for team_id in team_ids
+    }
+
+    class TimedOutNBA(_FakeMatchupNBA):
+        def fetch_team_game_ids(self, *args, **kwargs):
+            raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'nba-timeout.sqlite3'}")
+    run_migrations(engine)
+    service = TeamMatchupRefreshService(
+        repository=TeamMatchupRepository(engine),
+        event_catalog=FakeEventCatalog([]),
+        nba_stats_provider=TimedOutNBA(team_ids),
+        pbp_stats_provider=_TeamLogPBP(team_ids, game_ids),
+    )
+    facts, failures, provider_ids, _ = service._collect_season(
+        "2024-25",
+        snapshot_date=date(2025, 4, 15),
+        include_play_types=True,
+        team_ids=team_ids,
+        expected_game_counts={team_id: 82 for team_id in team_ids},
+        expected_game_ids_by_team=game_ids,
+        verify_window=True,
+    )
+
+    assert failures["traditional"] == ("unavailable", "provider_unavailable")
+    assert "assist_locations" not in failures
+    assert "assist_locations" in provider_ids
+    assert any(fact.base == "assist_locations" for fact in facts)
+
+
+def test_refresh_persists_independent_success_and_requests_unit_retry(tmp_path):
+    team_ids = _fixture_team_ids()
+    events = [
+        _event(
+            game_day * 15 + pair_index // 2 + 1,
+            date(2025, 3, 1) + timedelta(days=game_day),
+            home_team_id=team_ids[pair_index],
+            away_team_id=team_ids[pair_index + 1],
+        )
+        for game_day in range(15)
+        for pair_index in range(0, 30, 2)
+    ]
+
+    class TimedOutNBA(_FakeMatchupNBA):
+        def fetch_opponent_team_stats(self, *args, **kwargs):
+            raise requests.exceptions.ReadTimeout("stats.nba.com timed out")
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'partial-retry.sqlite3'}")
+    run_migrations(engine)
+    repository = TeamMatchupRepository(engine)
+    completed = TeamMatchupRefreshService(
+        repository=repository,
+        event_catalog=FakeEventCatalog(events),
+        nba_stats_provider=TimedOutNBA(team_ids),
+        pbp_stats_provider=_FakeMatchupPBP(team_ids),
+        clock=lambda: datetime(2025, 4, 16, 10, tzinfo=timezone.utc),
+    ).refresh("2024-25", as_of=date(2025, 4, 15))
+
+    assert completed is False
+    season = repository.get_snapshot(
+        TeamMatchupSnapshotScope("2024-25", date(2025, 4, 15))
+    )
+    observations = {item.surface: item for item in season.observations}
+    assert observations["traditional"].unavailable_reason == "provider_unavailable"
+    assert observations["assist_locations"].status == "available"
+    assert any(fact.base == "assist_locations" for fact in season.facts)
 
 
 def test_refresh_degrades_zero_minute_dependent_surfaces_only(tmp_path):
