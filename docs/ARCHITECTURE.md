@@ -1920,7 +1920,8 @@ a single missing metric fails. Integer counts — the four traditional opponent
 counts and the six assist surfaces — compare exactly; the single documented
 tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-9`) applies only to floating
 denominators (the nominal game length derived from retained effective team
-minutes, with legacy seconds normalized to minutes) and
+minutes; the legacy window value, normalized from seconds, is likewise read
+as the nominal length it establishes when within 0.05 minutes) and
 to the per-48 rates recomputed from counts and denominators. The ledger
 publication's served per-48 and competition-rank fields are also bound to
 those recomputed values; a missing or incorrect served value is a hard

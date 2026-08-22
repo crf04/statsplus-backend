@@ -13,6 +13,7 @@ from app.services.ledger_derivations import (
     derive_assist_location_facts,
     governed_assist_locations,
     nominal_team_minutes,
+    nominal_window_minutes,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_assist_location_window,
@@ -218,6 +219,16 @@ def test_nominal_team_minutes_recovers_game_length_from_retained_drift():
     # No retained minutes keeps the count-per-game replay fallback.
     assert nominal_team_minutes(0.0) == 0.0
     assert nominal_team_minutes(-1.0) == 0.0
+
+
+def test_nominal_window_minutes_reads_legacy_window_drift():
+    # Production: the legacy PBP aggregate reported 719.995 for a 15-game window.
+    assert nominal_window_minutes(719.995, 15) == 720.0
+    assert nominal_window_minutes(725.0, 15) == 725.0
+    assert nominal_window_minutes(730.04, 15) == 730.0
+    assert nominal_window_minutes(719.9, 15) is None
+    assert nominal_window_minutes(720.0, 0) is None
+    assert nominal_window_minutes(0.0, 15) is None
 
 
 def _drifted_games(drift_by_team):

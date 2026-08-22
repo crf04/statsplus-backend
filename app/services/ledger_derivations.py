@@ -228,6 +228,25 @@ def nominal_team_minutes(team_minutes: float) -> float:
     return nominal
 
 
+def nominal_window_minutes(minutes: float, game_count: int) -> float | None:
+    """Return the nominal length of a ``game_count``-game window, or ``None``.
+
+    A window's legacy denominator is the sum of per-game lengths, so it is
+    ``48 * game_count + 5 * overtimes``.  ``None`` means the retained value is
+    not within ``NOMINAL_MINUTES_TOLERANCE`` of any such length and must be
+    compared as observed.
+    """
+
+    if game_count <= 0 or float(minutes) <= 0:
+        return None
+    regulation = REGULATION_MINUTES * game_count
+    overtimes = max(round((float(minutes) - regulation) / OVERTIME_MINUTES), 0)
+    nominal = regulation + OVERTIME_MINUTES * overtimes
+    if abs(float(minutes) - nominal) > NOMINAL_MINUTES_TOLERANCE:
+        return None
+    return nominal
+
+
 def player_credited_count(game: CanonicalGame, team_id: int, metric: str) -> int:
     """Sum one count over a team's player rows, excluding the team residual."""
 
@@ -753,6 +772,7 @@ def materialize_assist_location_window(
 
 __all__ = [
     "nominal_team_minutes",
+    "nominal_window_minutes",
     "ASSIST_DERIVED_METRICS",
     "ASSIST_METRICS",
     "ASSIST_TOTAL_METRIC",

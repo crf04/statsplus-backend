@@ -396,6 +396,43 @@ def test_matchup_tolerance_is_exactly_one_nanounit():
         _compare(tolerance=1e-6)
 
 
+def test_legacy_window_minutes_are_read_as_the_nominal_length():
+    # Two governed games per team: the nominal window is 96 minutes.  The
+    # legacy PBP aggregate reports summed player seconds at a tenth-second
+    # grain (production: 719.995 for a 15-game window).
+    ledger = _materialization(facts=(
+        *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+        *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+    ))
+    drifted = _materialization(facts=(
+        *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+        *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+    ))
+    drifted = _replace_fact(
+        drifted, surface="assist_locations", team_id=TEAM_A, stat="Assists",
+        denominator_value=95.995,
+    )
+    report = _compare(surface="assist_locations", legacy=drifted, ledger=ledger)
+    assert not report.hard_failure
+    assert not any(
+        difference.classification in (
+            "denominator_tolerance_exceeded", "derived_rate_difference",
+            "ranking_difference",
+        )
+        for difference in report.differences
+    )
+
+    beyond = _replace_fact(
+        drifted, surface="assist_locations", team_id=TEAM_A, stat="Assists",
+        denominator_value=95.9,
+    )
+    report = _compare(surface="assist_locations", legacy=beyond, ledger=ledger)
+    assert any(
+        difference.classification == "denominator_tolerance_exceeded"
+        for difference in report.differences
+    )
+
+
 def test_game_set_mismatch_is_a_hard_failure():
     legacy_ids = _game_ids_by_team(TEAM_IDS)
     legacy_ids[TEAM_A] = frozenset({"different-1", "different-2"})

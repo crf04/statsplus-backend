@@ -79,6 +79,7 @@ from app.services.ledger_derivations import (
     MATCHUP_ASSIST_KEYS,
     MATCHUP_TRADITIONAL_KEYS,
     competition_ranks,
+    nominal_window_minutes,
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.publication_authority import verify_publication_authority
@@ -1317,6 +1318,17 @@ def compare_matchup_materializations(
             legacy_minutes = _minutes(
                 legacy_fact.denominator_value, legacy_fact.denominator_unit
             )
+            if legacy_minutes is not None and legacy.producer != PRODUCER_LEDGER:
+                # The legacy PBP aggregate reports its window minutes from
+                # summed player seconds at a tenth-of-a-second grain; the
+                # contract denominator is the nominal game length, so read the
+                # legacy value as the nominal length it establishes.
+                nominal = nominal_window_minutes(
+                    legacy_minutes,
+                    len(legacy.game_ids_by_team.get(team_id, ())),
+                )
+                if nominal is not None:
+                    legacy_minutes = nominal
             if ledger_minutes is None or legacy_minutes is None:
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, "denominator_minutes",
