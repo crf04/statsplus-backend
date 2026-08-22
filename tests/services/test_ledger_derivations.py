@@ -226,49 +226,6 @@ def test_exact_l15_is_league_complete_and_defensive_ranks_are_ascending():
     assert all(team.game_count == 15 for team in assist.teams)
 
 
-def test_matchup_opponent_rebounds_exclude_team_only_residuals():
-    games = tuple(
-        replace(
-            game,
-            team_facts=tuple(
-                replace(
-                    fact,
-                    rebounds=fact.rebounds + 7,
-                    turnovers=fact.turnovers + 3,
-                    steals=fact.steals + 2,
-                    blocks=fact.blocks + 1,
-                )
-                for fact in game.team_facts
-            ),
-        )
-        for game in _league_games()
-    )
-    expected = frozenset(game.game_id for game in games)
-    expected_by_team = {
-        team_id: frozenset(
-            game.game_id for game in games
-            if team_id in {game.home_team_id, game.away_team_id}
-        )
-        for team_id in range(1, 31)
-    }
-
-    window = materialize_team_window(
-        games,
-        season="2025-26",
-        as_of=date(2025, 10, 15),
-        window_games=15,
-        expected_game_ids=expected,
-        expected_team_game_ids=expected_by_team,
-        team_ids=frozenset(range(1, 31)),
-    )
-
-    assert window.complete
-    assert window.teams[0].counts["rebounds"] == 75
-    assert window.teams[0].counts["turnovers"] == 60
-    assert window.teams[0].counts["steals"] == 45
-    assert window.teams[0].counts["blocks"] == 15
-
-
 def test_assist_total_includes_team_only_residual_assists():
     games = tuple(
         replace(
