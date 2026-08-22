@@ -656,22 +656,67 @@ class StoredLegacyMatchupSource:
             if observation.surface in LEDGER_OWNED_SURFACES
             and (surface is None or observation.surface == surface)
         )
-        if observations and all(
-            observation.status == "unavailable" for observation in observations
-        ):
-            # The serving repository retains last-good facts when a new
-            # provider attempt is unavailable. Those prior facts are not
-            # evidence for the current governed parity attempt.
-            facts = ()
-        if not observations or (
-            not facts and not all(item.status == "unavailable" for item in observations)
-        ):
-            raise MatchupParityError("legacy materialization provenance unavailable")
         expected_authority = (
             governance.manifest_id,
             governance.event_catalog_publication_id,
             governance.event_catalog_checksum,
         )
+        if observations and all(
+            observation.status == "unavailable" for observation in observations
+        ):
+            # The serving repository retains last-good facts when a new
+            # provider attempt is unavailable. Same-authority facts remain
+            # valid parity evidence; older-authority facts do not.
+            fact_metadata = {
+                (
+                    fact.cutoff,
+                    fact.manifest_id,
+                    fact.event_catalog_publication_id,
+                    fact.event_catalog_checksum,
+                    fact.provider_window_identity,
+                )
+                for fact in facts
+            }
+            if len(fact_metadata) == 1:
+                fact_cutoff, manifest_id, catalog_id, catalog_checksum, identity = (
+                    next(iter(fact_metadata))
+                )
+                try:
+                    same_cutoff = (
+                        fact_cutoff is not None
+                        and _aware(fact_cutoff) == _aware(cutoff)
+                    )
+                except MatchupParityError:
+                    same_cutoff = False
+                if (
+                    same_cutoff
+                    and (manifest_id, catalog_id, catalog_checksum)
+                    == expected_authority
+                    and isinstance(identity, str)
+                    and identity.strip()
+                ):
+                    observations = tuple(
+                        TeamMatchupObservation(
+                            surface=item,
+                            status="available",
+                            cutoff=fact_cutoff,
+                            manifest_id=manifest_id,
+                            event_catalog_publication_id=catalog_id,
+                            event_catalog_checksum=catalog_checksum,
+                            provider_window_identity=identity,
+                        )
+                        for item in (
+                            (surface,) if surface is not None else LEDGER_OWNED_SURFACES
+                        )
+                    )
+                else:
+                    facts = ()
+            else:
+                facts = ()
+        if not observations or (
+            not facts and not all(item.status == "unavailable" for item in observations)
+        ):
+            raise MatchupParityError("legacy materialization provenance unavailable")
         persisted_metadata = {
             (
                 item.cutoff,

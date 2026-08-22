@@ -1231,6 +1231,42 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     assert set(materialization.game_ids_by_team) == set(TEAM_IDS)
     assert all(not ids for ids in materialization.game_ids_by_team.values())
 
+    current_identity = TeamMatchupRefreshService._surface_window_identities(
+        window="l15", game_ids_by_team=game_ids,
+        provider_game_ids_by_surface={"traditional": game_ids},
+        expected_counts={team_id: 15 for team_id in TEAM_IDS},
+        collect_before=governance.collect_before, aggregate_requests=requests,
+    )["traditional"]
+    current_traditional_facts = tuple(
+        replace(
+            fact,
+            cutoff=CUTOFF,
+            manifest_id=governance.manifest_id,
+            event_catalog_publication_id=governance.event_catalog_publication_id,
+            event_catalog_checksum=governance.event_catalog_checksum,
+            provider_window_identity=current_identity,
+        )
+        for fact in retained_traditional_facts
+    )
+
+    class CurrentSnapshotRepository:
+        def get_snapshot(self, scope, **kwargs):
+            return SimpleNamespace(
+                facts=current_traditional_facts,
+                observations=(observation,),
+            )
+
+    retained = StoredLegacyMatchupSource(CurrentSnapshotRepository()).produce(
+        season="2025-26", window="l15", cutoff=CUTOFF,
+        governance=governance, surface="traditional",
+    )
+
+    assert retained.facts == current_traditional_facts
+    assert retained.observations[0].status == "available"
+    assert retained.game_ids_by_team == {
+        team_id: frozenset(ids) for team_id, ids in game_ids.items()
+    }
+
     invalid_identity = json.loads(identities["traditional"])
     invalid_identity["aggregate_requests"][f"traditional:{TEAM_IDS[0]}"][
         "parameters"
