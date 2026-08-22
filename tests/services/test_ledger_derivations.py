@@ -7,8 +7,11 @@ import json
 import pytest
 
 from app.services.ledger_derivations import (
+    ASSIST_METRICS,
+    LedgerDerivationUnavailable,
     competition_ranks,
     derive_assist_location_facts,
+    governed_assist_locations,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_assist_location_window,
@@ -81,6 +84,123 @@ def test_assist_locations_are_counted_without_provider_percentage_sums():
 
     assert len(facts) == 4
     assert facts[0].location_total == 2
+
+
+def test_sparse_assist_location_omissions_are_governed_zeros_when_reconciled():
+    # The PBP wire omits observed-zero counters: one short-mid-range assist
+    # arrives as TwoPtAssists=1, ShortMidRangeAssists=1 and nothing else.
+    game = _game()
+    sparse = replace(
+        game.player_facts[0],
+        assists=1,
+        two_point_assists=1,
+        three_point_assists=None,
+        arc3_assists=None,
+        corner3_assists=None,
+        at_rim_assists=None,
+        short_mid_range_assists=1,
+        long_mid_range_assists=None,
+    )
+    assert governed_assist_locations(sparse) == {
+        "two_point_assists": 1, "three_point_assists": 0, "arc3_assists": 0,
+        "corner3_assists": 0, "at_rim_assists": 0, "short_mid_range_assists": 1,
+        "long_mid_range_assists": 0,
+    }
+    fact = derive_assist_location_facts((replace(game, player_facts=(sparse,)),))[0]
+    assert fact.location_total == 1 and fact.short_mid_range_assists == 1
+
+
+def test_unreconciled_assist_location_omissions_stay_unavailable():
+    game = _game()
+    # Assists observed, but no location split at all: not provably zero.
+    unobserved = replace(
+        game.player_facts[0],
+        assists=3,
+        two_point_assists=None, three_point_assists=None, arc3_assists=None,
+        corner3_assists=None, at_rim_assists=None, short_mid_range_assists=None,
+        long_mid_range_assists=None,
+    )
+    assert governed_assist_locations(unobserved) is None
+    # Each identity failing in isolation is likewise unavailable.
+    explicit_two = dict(two_point_assists=3, at_rim_assists=3)
+    assert governed_assist_locations(replace(unobserved, two_point_assists=2, at_rim_assists=2)) is None
+    assert governed_assist_locations(replace(unobserved, **explicit_two, short_mid_range_assists=1)) is None
+    assert governed_assist_locations(replace(unobserved, assists=4, **explicit_two, three_point_assists=1)) is None
+    assert governed_assist_locations(replace(unobserved, assists=4, **explicit_two, three_point_assists=1, arc3_assists=1)) == {
+        "two_point_assists": 3, "three_point_assists": 1, "arc3_assists": 1,
+        "corner3_assists": 0, "at_rim_assists": 3, "short_mid_range_assists": 0,
+        "long_mid_range_assists": 0,
+    }
+    with pytest.raises(LedgerDerivationUnavailable):
+        derive_assist_location_facts((replace(game, player_facts=(unobserved,)),))
+    # A player with no assists and no location fields is a complete zero row.
+    none_at_all = replace(unobserved, assists=0)
+    assert governed_assist_locations(none_at_all) == {metric: 0 for metric in ASSIST_METRICS}
+
+
+def test_explicit_locations_exceeding_assists_are_unavailable_in_both_consumers():
+    game = _game()
+    overflow = replace(
+        game.player_facts[0],
+        assists=1,
+        two_point_assists=2, three_point_assists=0, arc3_assists=0,
+        corner3_assists=0, at_rim_assists=2, short_mid_range_assists=0,
+        long_mid_range_assists=0,
+    )
+    assert governed_assist_locations(overflow) is None
+    with pytest.raises(LedgerDerivationUnavailable):
+        derive_assist_location_facts((replace(game, player_facts=(overflow,)),))
+
+
+def test_window_materialization_counts_reconciled_sparse_locations():
+    reconciled = dict(
+        assists=3, two_point_assists=1, three_point_assists=2, arc3_assists=1,
+        corner3_assists=1, at_rim_assists=1, short_mid_range_assists=0,
+        long_mid_range_assists=0,
+    )
+    games = tuple(
+        replace(
+            game,
+            player_facts=tuple(replace(player, **reconciled) for player in game.player_facts),
+        )
+        for game in _league_games()
+    )
+    # Re-express every player's explicit location split as the sparse wire
+    # would: observed-zero counters omitted.
+    sparse_games = tuple(
+        replace(
+            game,
+            player_facts=tuple(
+                replace(
+                    player,
+                    **{
+                        metric: (None if getattr(player, metric) == 0 else getattr(player, metric))
+                        for metric in ASSIST_METRICS
+                    },
+                )
+                for player in game.player_facts
+            ),
+        )
+        for game in games
+    )
+    kwargs = dict(
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        window_games=15,
+        expected_game_ids=frozenset(game.game_id for game in games),
+        expected_team_game_ids={
+            team_id: frozenset(
+                game.game_id for game in games
+                if team_id in {game.home_team_id, game.away_team_id}
+            )
+            for team_id in range(1, 31)
+        },
+        team_ids=frozenset(range(1, 31)),
+    )
+    explicit = materialize_assist_location_window(games, **kwargs)
+    sparse = materialize_assist_location_window(sparse_games, **kwargs)
+    assert sparse.complete and explicit.complete
+    assert [team.counts for team in sparse.teams] == [team.counts for team in explicit.teams]
 
 
 def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
