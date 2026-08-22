@@ -557,7 +557,9 @@ def per36_player_differences(
     if not math.isclose(
         float(actual["minutes"]), expected.minutes,
         rel_tol=0.0,
-        abs_tol=PER36_MINUTES_TOLERANCE_PER_GAME * expected.game_count,
+        # The nominal bound is inclusive; 1e-9 absorbs binary-float error in
+        # the bound product itself, never a meaningful fraction of a second.
+        abs_tol=PER36_MINUTES_TOLERANCE_PER_GAME * expected.game_count + 1e-9,
     ):
         differences.append(SemanticDifference(
             identity=identity, field="minutes",

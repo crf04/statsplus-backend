@@ -43,6 +43,24 @@ def test_provider_minute_rounding_within_per_game_bound_is_not_a_difference():
     assert per36_player_differences(2544, expected=_expected(), expected_raw=_raw(), actual=actual) == []
 
 
+def test_minutes_drift_at_exact_bound_is_not_a_difference():
+    bound = PER36_MINUTES_TOLERANCE_PER_GAME * 70
+    for sign in (1, -1):
+        actual = _actual(minutes=1988.9833333333333 + sign * bound)
+        assert per36_player_differences(
+            2544, expected=_expected(), expected_raw=_raw(), actual=actual,
+        ) == []
+
+
+def test_minutes_drift_just_above_bound_stays_hard():
+    bound = PER36_MINUTES_TOLERANCE_PER_GAME * 70
+    for sign in (1, -1):
+        actual = _actual(minutes=1988.9833333333333 + sign * (bound + 1e-6))
+        assert _classes(per36_player_differences(
+            2544, expected=_expected(), expected_raw=_raw(), actual=actual,
+        )) == [("minutes", "minutes_difference")]
+
+
 def test_minutes_drift_above_bound_stays_hard():
     bound = PER36_MINUTES_TOLERANCE_PER_GAME * 70
     actual = _actual(minutes=1988.9833333333333 + bound + 0.5)

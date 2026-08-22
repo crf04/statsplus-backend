@@ -168,9 +168,17 @@ audited rejection; rejection records actor, timestamp, and reason. Required
 denominator/rate mismatches likewise cannot be approved; provider rounding is
 retained only as diagnostic context.
 Ranking differences are hard failures under deterministic #117 rankings.
-Well-formed per-36 identity, raw-count, game-count, team-identity, or minute
-differences are likewise durable blocking differences: the command persists
-them row by row as `pending_adjudication` and exits `2`. Malformed or unbound
+Well-formed per-36 identity, raw-count, game-count, or minute differences are
+likewise durable blocking differences: the command persists them row by row as
+`pending_adjudication` and exits `2`. Three provider representation gaps are
+not differences because the provider cannot evidence them: minutes may drift
+by up to 0.01 minutes per governed ledger game (NBA sums two-decimal per-game
+minutes; the ledger sums exact PBP seconds), the provider's single roster
+`TEAM_ID` is never compared with the ledger's participation team set, and a
+provider game count above the ledger's is accepted (NBA counts a `0:00`
+appearance as a game played; the PBP provider emits no row for it). A provider
+game count below the ledger's, and any minute drift above the bound, remain
+blocking. Malformed or unbound
 per-36 capture evidence is invalid input, is rolled back, and exits `3`.
 
 The artifact is bound to the report's own surface, window, exact aware cutoff,
