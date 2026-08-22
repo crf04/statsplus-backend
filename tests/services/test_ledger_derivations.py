@@ -796,6 +796,69 @@ def test_one_unavailable_assist_window_does_not_suppress_healthy_sibling(
     assert by_stream["assist_locations_l15"]["payload"] != "[]"
 
 
+def test_one_game_without_location_observation_leaves_l15_available(tmp_path):
+    """An early game with no location split makes Season unavailable, not L15."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'one-game.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    base = _league_games()
+    # 16 rounds: the first round falls outside every team's exact L15.
+    extra_round = tuple(
+        replace(
+            game,
+            game_id=f"0022599{index:03d}",
+            game_date=game.game_date - timedelta(days=30),
+            checksum=None,
+        )
+        for index, game in enumerate(base[:15])
+    )
+    first = extra_round[0]
+    unobserved = replace(
+        first,
+        player_facts=tuple(
+            replace(
+                player, assists=max(player.assists, 1),
+                two_point_assists=None, three_point_assists=None, arc3_assists=None,
+                corner3_assists=None, at_rim_assists=None, short_mid_range_assists=None,
+                long_mid_range_assists=None,
+            )
+            for player in first.player_facts
+        ),
+    )
+    games = tuple(
+        replace(game, raw_rows=raw_rows_from_facts(game)).with_checksum()
+        for game in (unobserved, *extra_round[1:], *base)
+    )
+    repository.replace_games_atomic(games)
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id
+            for game in sorted(
+                (game for game in games if team_id in {game.home_team_id, game.away_team_id}),
+                key=lambda game: (game.game_date, game.game_id),
+            )[-15:]
+        )
+        for team_id in range(1, 31)
+    }
+    result = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=_ParityReader(),
+    ).compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+    )
+    assert result.assist_locations == ()
+    assert result.assist_location_season is None
+    assert result.assist_location_l15 is not None
+    assert len(result.assist_location_l15.teams) == 30
+
+
 def test_parity_report_compares_shared_primitives_but_ignores_provider_rates():
     game = _game()
     player = game.player_facts[0]
