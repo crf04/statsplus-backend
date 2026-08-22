@@ -226,6 +226,38 @@ def test_exact_parity_when_counts_game_sets_and_denominators_match():
     assert report.compared_count == 30 * len(TRADITIONAL_STATS)
 
 
+def test_same_authority_retained_legacy_facts_satisfy_availability():
+    legacy = replace(
+        _materialization(),
+        observations=_observations(("traditional",), status="unavailable"),
+        retained_last_good=True,
+    )
+
+    report = _compare(legacy=legacy)
+
+    assert report.exact
+    assert not any(
+        item.classification == "availability_difference"
+        for item in report.differences
+    )
+
+
+def test_retained_marker_without_legacy_facts_does_not_satisfy_availability():
+    legacy = replace(
+        _materialization(),
+        facts=(),
+        observations=_observations(("traditional",), status="unavailable"),
+        retained_last_good=True,
+    )
+
+    report = _compare(legacy=legacy)
+
+    assert any(
+        item.classification == "availability_difference"
+        for item in report.differences
+    )
+
+
 def _ledger_with_served_derivations():
     base = _materialization()
     rates = {
@@ -1267,6 +1299,22 @@ def test_stored_source_accepts_authority_bound_unavailable_l15_surface(tmp_path)
     assert retained.game_ids_by_team == {
         team_id: frozenset(ids) for team_id, ids in game_ids.items()
     }
+
+    class WrongAttemptAuthorityRepository:
+        def get_snapshot(self, scope, **kwargs):
+            return SimpleNamespace(
+                facts=current_traditional_facts,
+                observations=(replace(observation, manifest_id="wrong-manifest"),),
+            )
+
+    with pytest.raises(
+        MatchupParityError,
+        match="unavailable observation provenance mismatch",
+    ):
+        StoredLegacyMatchupSource(WrongAttemptAuthorityRepository()).produce(
+            season="2025-26", window="l15", cutoff=CUTOFF,
+            governance=governance, surface="traditional",
+        )
 
     invalid_identity = json.loads(identities["traditional"])
     invalid_identity["aggregate_requests"][f"traditional:{TEAM_IDS[0]}"][

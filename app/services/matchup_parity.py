@@ -706,6 +706,29 @@ class StoredLegacyMatchupSource:
             not facts and not all(item.status == "unavailable" for item in observations)
         ):
             raise MatchupParityError("legacy materialization provenance unavailable")
+        if retained_last_good:
+            for observation in observations:
+                try:
+                    observation_cutoff_matches = (
+                        observation.cutoff is not None
+                        and _aware(observation.cutoff) == _aware(cutoff)
+                    )
+                except MatchupParityError:
+                    observation_cutoff_matches = False
+                if (
+                    not observation_cutoff_matches
+                    or (
+                        observation.manifest_id,
+                        observation.event_catalog_publication_id,
+                        observation.event_catalog_checksum,
+                    )
+                    != expected_authority
+                    or not isinstance(observation.provider_window_identity, str)
+                    or not observation.provider_window_identity.strip()
+                ):
+                    raise MatchupParityError(
+                        "legacy unavailable observation provenance mismatch"
+                    )
         provenance_items = facts if retained_last_good else (*facts, *observations)
         persisted_metadata = {
             (
@@ -1057,8 +1080,9 @@ def compare_matchup_materializations(
     denominators and derived per-48 rates admit ``tolerance`` and become
     adjudicable semantic differences.  Both sides must cover exactly the
     governed 30-team roster with every contracted metric, no extra teams or
-    metrics, exact governed game sets (L15 exactly 15 games per team), and an
-    available observation on both sides.
+    metrics and exact governed game sets (L15 exactly 15 games per team).
+    Both observations must be available unless the legacy facts are explicitly
+    marked as same-authority retained last-good evidence.
     """
 
     if surface not in _SURFACE_COUNT_KEYS:
@@ -1400,7 +1424,8 @@ def compare_matchup_materializations(
                 CLASSIFICATION_RANKING_DIFFERENCE,
             ))
 
-    # Independent per-surface availability: BOTH sides must be available.
+    # Independent per-surface availability. Same-authority retained legacy
+    # facts remain valid while their latest failed attempt stays observable.
     legacy_observation = _observation_for_surface(legacy.observations, surface=surface)
     ledger_observation = _observation_for_surface(ledger.observations, surface=surface)
     legacy_available = (

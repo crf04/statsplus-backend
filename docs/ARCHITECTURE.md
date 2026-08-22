@@ -1914,8 +1914,11 @@ those recomputed values; a missing or incorrect served value is a hard
 `served_rate_mismatch` or `served_rank_mismatch` failure. Deterministic
 competition ranks (`1, 1, 3` ties) are re-derived per metric from each side's
 per-48 values and compared, so a sub-tolerance near-tie flip that would change
-a ranking still fails. Independent per-surface availability is compared, and
-an unavailable or missing observation on either side is a real difference.
+a ranking still fails. Independent per-surface availability is compared. An
+unavailable or missing observation is a real difference unless legacy facts
+from the same immutable authority and cutoff are explicitly captured as
+retained last-good evidence; the failed observation remains recorded beside
+that marker.
 Every produced difference carries exactly one classification from the closed
 vocabulary (`league_incomplete`, `missing_legacy_team`, `missing_ledger_team`,
 `game_set_mismatch`, `integer_count_difference`, `non_integer_count`,
