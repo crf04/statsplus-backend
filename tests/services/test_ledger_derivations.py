@@ -7,8 +7,11 @@ import json
 import pytest
 
 from app.services.ledger_derivations import (
+    ASSIST_METRICS,
+    LedgerDerivationUnavailable,
     competition_ranks,
     derive_assist_location_facts,
+    governed_assist_locations,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_assist_location_window,
@@ -81,6 +84,51 @@ def test_assist_locations_are_counted_without_provider_percentage_sums():
 
     assert len(facts) == 4
     assert facts[0].location_total == 2
+
+
+def test_sparse_assist_location_omissions_are_governed_zeros_when_reconciled():
+    # The PBP wire omits observed-zero counters: one short-mid-range assist
+    # arrives as TwoPtAssists=1, ShortMidRangeAssists=1 and nothing else.
+    game = _game()
+    sparse = replace(
+        game.player_facts[0],
+        assists=1,
+        two_point_assists=1,
+        three_point_assists=None,
+        arc3_assists=None,
+        corner3_assists=None,
+        at_rim_assists=None,
+        short_mid_range_assists=1,
+        long_mid_range_assists=None,
+    )
+    assert governed_assist_locations(sparse) == {
+        "two_point_assists": 1, "three_point_assists": 0, "arc3_assists": 0,
+        "corner3_assists": 0, "at_rim_assists": 0, "short_mid_range_assists": 1,
+        "long_mid_range_assists": 0,
+    }
+    fact = derive_assist_location_facts((replace(game, player_facts=(sparse,)),))[0]
+    assert fact.location_total == 1 and fact.short_mid_range_assists == 1
+
+
+def test_unreconciled_assist_location_omissions_stay_unavailable():
+    game = _game()
+    # Assists observed, but no location split at all: not provably zero.
+    unobserved = replace(
+        game.player_facts[0],
+        assists=3,
+        two_point_assists=None, three_point_assists=None, arc3_assists=None,
+        corner3_assists=None, at_rim_assists=None, short_mid_range_assists=None,
+        long_mid_range_assists=None,
+    )
+    assert governed_assist_locations(unobserved) is None
+    # A retained split that contradicts the total is likewise unavailable.
+    contradictory = replace(unobserved, two_point_assists=2, at_rim_assists=1)
+    assert governed_assist_locations(contradictory) is None
+    with pytest.raises(LedgerDerivationUnavailable):
+        derive_assist_location_facts((replace(game, player_facts=(unobserved,)),))
+    # A player with no assists and no location fields is a complete zero row.
+    none_at_all = replace(unobserved, assists=0)
+    assert governed_assist_locations(none_at_all) == {metric: 0 for metric in ASSIST_METRICS}
 
 
 def test_per36_aggregates_traded_player_counts_and_retains_game_teams():

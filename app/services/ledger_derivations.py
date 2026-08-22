@@ -264,39 +264,57 @@ def derive_traditional_opponent_facts(games: Iterable[CanonicalGame]) -> tuple[T
     return tuple(output)
 
 
+def governed_assist_locations(player: PlayerGameFact) -> dict[str, int] | None:
+    """Return the player's seven assist-location counts, or ``None``.
+
+    The PBP wire omits observed-zero counters, so a missing location field is
+    a governed zero only when the retained fields prove it arithmetically:
+    two-point plus three-point assists must equal the player's assists, the
+    rim/short/long split must equal the two-point count, and the arc/corner
+    split must equal the three-point count.  A row that cannot be reconciled
+    (for example a provider fallback that never observed locations) stays an
+    incomplete observation.  Rows with every counter observed explicitly are
+    returned as observed; ``AssistLocationFact`` still bounds their total.
+    """
+
+    observed = {metric: getattr(player, metric) for metric in ASSIST_METRICS}
+    values = {
+        metric: (0 if value is None else int(value)) for metric, value in observed.items()
+    }
+    if all(value is not None for value in observed.values()):
+        # Every counter was observed explicitly; nothing needs proving here.
+        return values
+    if (
+        values["two_point_assists"] + values["three_point_assists"] != player.assists
+        or values["at_rim_assists"]
+        + values["short_mid_range_assists"]
+        + values["long_mid_range_assists"]
+        != values["two_point_assists"]
+        or values["arc3_assists"] + values["corner3_assists"]
+        != values["three_point_assists"]
+    ):
+        return None
+    return values
+
+
 def derive_assist_location_facts(games: Iterable[CanonicalGame]) -> tuple[AssistLocationFact, ...]:
     """Derive assist-location counts, refusing a partial location observation."""
 
     output: list[AssistLocationFact] = []
     for game in _regular_games(games):
         for player in game.player_facts:
-            fields = (
-                player.two_point_assists,
-                player.three_point_assists,
-                player.arc3_assists,
-                player.corner3_assists,
-                player.at_rim_assists,
-                player.short_mid_range_assists,
-                player.long_mid_range_assists,
-            )
-            if any(value is None for value in fields):
+            values = governed_assist_locations(player)
+            if values is None:
                 raise LedgerDerivationUnavailable(
                     "assist-location materialization requires a complete location observation"
                 )
-            values = tuple(int(value) for value in fields)
             fact = AssistLocationFact(
                 game_id=game.game_id,
                 game_date=game.game_date,
                 player_id=player.player_id,
                 team_id=player.team_id,
                 assists=player.assists,
-                two_point_assists=values[0],
-                three_point_assists=values[1],
-                arc3_assists=values[2],
-                corner3_assists=values[3],
-                at_rim_assists=values[4],
-                short_mid_range_assists=values[5],
-                long_mid_range_assists=values[6],
+                **values,
             )
             if fact.location_total > fact.assists:
                 raise LedgerDerivationUnavailable("assist locations exceed the player's assists")
@@ -598,13 +616,13 @@ def materialize_assist_location_window(
             for player in game.player_facts:
                 if player.team_id != opponent_id:
                     continue
+                values = governed_assist_locations(player)
+                if values is None:
+                    raise LedgerDerivationUnavailable(
+                        "assist-location materialization requires complete player counts"
+                    )
                 for metric in ASSIST_METRICS:
-                    value = getattr(player, metric)
-                    if value is None:
-                        raise LedgerDerivationUnavailable(
-                            "assist-location materialization requires complete player counts"
-                        )
-                    counts[metric] += value
+                    counts[metric] += values[metric]
         if denominator <= 0:
             raise LedgerDerivationUnavailable(
                 "assist-location materialization requires positive team minutes"
@@ -678,6 +696,7 @@ __all__ = [
     "TraditionalOpponentFact",
     "competition_ranks",
     "derive_assist_location_facts",
+    "governed_assist_locations",
     "derive_player_per36_facts",
     "derive_traditional_opponent_facts",
     "materialize_assist_location_window",

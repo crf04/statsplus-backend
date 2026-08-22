@@ -40,7 +40,6 @@ from app.services.canonical_game_ledger import (
 from app.services.collection_control import CollectionOperationsService
 from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_derivations import (
-    LedgerDerivationUnavailable,
     derive_assist_location_facts,
     derive_player_per36_facts,
 )
@@ -358,9 +357,9 @@ def test_recorded_game_stats_dataframe_preserves_assist_locations_for_ledger_der
 
     # The provider wire is sparse: observed-zero additive counters are omitted
     # from player rows, so present location evidence survives (typed facts are
-    # non-null) while an omitted location stays absent (null).  The location
-    # materialization therefore fails closed on an incomplete observation
-    # rather than fabricating a zero location.
+    # non-null) while an omitted location stays absent (null) in the ledger.
+    # The location derivation treats the omission as a governed zero only
+    # because the retained split proves it arithmetically.
     leon = next(fact for fact in game.player_facts if fact.player_id == 2544)
     assert leon.two_point_assists == 5
     assert leon.three_point_assists == 3
@@ -372,8 +371,9 @@ def test_recorded_game_stats_dataframe_preserves_assist_locations_for_ledger_der
     reaves = next(fact for fact in game.player_facts if fact.player_id == 203507)
     assert reaves.long_mid_range_assists is None
     assert reaves.at_rim_assists == 2
-    with pytest.raises(LedgerDerivationUnavailable):
-        derive_assist_location_facts((game,))
+    derived = {fact.player_id: fact for fact in derive_assist_location_facts((game,))}
+    assert derived[203507].long_mid_range_assists == 0
+    assert derived[203507].location_total == reaves.assists
     assert len(derive_player_per36_facts((game,))) == 3
 
 
