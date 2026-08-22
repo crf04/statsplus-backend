@@ -168,7 +168,11 @@ def test_inactive_ledger_rehearsal_persists_payload_and_normalized_provenance(co
                 "collector_id": "test",
                 "manifest_id": "ledger-manifest",
                 "environment": "testing",
-                "provider": "pbp",
+                "provider": (
+                    "pbp+nba_live_data"
+                    if observation_id == "pbp:game-1"
+                    else "nba_live_data"
+                ),
                 "observation_type": "canonical_game_ledger",
                 "scope": json.dumps({
                     "game_id": observation_id.removeprefix("pbp:"),

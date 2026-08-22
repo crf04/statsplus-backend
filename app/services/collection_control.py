@@ -4196,7 +4196,7 @@ class PublicationService(_SessionService):
             except (TypeError, ValueError) as error:
                 raise ControlPlaneError("ledger_provenance_scope_mismatch") from error
             if (
-                row.provider != "pbp"
+                row.provider not in {"pbp", "nba_live_data", "pbp+nba_live_data"}
                 or row.observation_type != "canonical_game_ledger"
                 or row.season != season
                 or _aware(row.cutoff) != _aware(cutoff)
