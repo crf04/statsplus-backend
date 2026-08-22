@@ -274,7 +274,9 @@ def governed_assist_locations(player: PlayerGameFact) -> dict[str, int] | None:
     split must equal the three-point count.  A row that cannot be reconciled
     (for example a provider fallback that never observed locations) stays an
     incomplete observation.  Rows with every counter observed explicitly are
-    returned as observed; ``AssistLocationFact`` still bounds their total.
+    returned as observed, bounded only by the leaf total never exceeding the
+    player's assists; both the fact derivation and the window materializer
+    consume this one seam.
     """
 
     observed = {metric: getattr(player, metric) for metric in ASSIST_METRICS}
@@ -282,8 +284,16 @@ def governed_assist_locations(player: PlayerGameFact) -> dict[str, int] | None:
         metric: (0 if value is None else int(value)) for metric, value in observed.items()
     }
     if all(value is not None for value in observed.values()):
-        # Every counter was observed explicitly; nothing needs proving here.
-        return values
+        # Every counter was observed explicitly; nothing needs proving, but
+        # the leaf locations can still never exceed the player's assists.
+        leaf_total = (
+            values["arc3_assists"]
+            + values["corner3_assists"]
+            + values["at_rim_assists"]
+            + values["short_mid_range_assists"]
+            + values["long_mid_range_assists"]
+        )
+        return values if leaf_total <= player.assists else None
     if (
         values["two_point_assists"] + values["three_point_assists"] != player.assists
         or values["at_rim_assists"]

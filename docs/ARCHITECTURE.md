@@ -1146,8 +1146,12 @@ envelope, a missing, null, or malformed diagnostic field, or a diagnostic count
 that does not reconcile with the declared team authority (player sums plus the
 `EntityId == 0` team-summary residual) rejects the candidate atomically rather
 than letting an unprovable omission pass as a zero. Missing optional expanded
-fields preserve the game and leave only the dependent typed facts (such as
-assist locations) null/unavailable.
+fields preserve the game and leave the dependent typed facts (such as assist
+locations) null in the ledger. A null assist-location counter becomes a
+governed zero at derivation time only when the retained split proves it
+(two-point plus three-point assists equal the player's assists, the
+rim/short/long split equals the two-point count, the arc/corner split equals
+the three-point count); otherwise the location surface is unavailable.
 
 The declared typed authority is per row type. Player-game typed facts come from
 the provider player rows; the real provider team-summary row (`EntityId == 0`)
@@ -1215,7 +1219,8 @@ bounded reconciliation sink rather than dropped.
 
 `app.services.ledger_derivations` owns all derived semantics: traditional
 opponent facts read the opposing team fact, assist locations require a
-complete location observation, and per-36 values aggregate count primitives by
+complete location observation (explicit counters, or sparse omissions proven
+zero by the retained split), and per-36 values aggregate count primitives by
 canonical player while retaining every team-at-game identity. Season and
 exact L15 materialization selects governed game IDs only and refuses to call a
 window complete until all 30 governed teams are present (and L15 has 15
@@ -1243,7 +1248,8 @@ an accepted `CollectionObservation`; its durable ID is the ledger source and
 the only provenance allowed on an inactive candidate. Candidate truth is
 independent for player game logs Season, traditional opponent Season/L15,
 assist locations Season/L15, and player per-36 Regular Season. Missing assist
-primitives retain only the assist last-good candidates.
+primitives that the retained split cannot prove zero retain only the assist
+last-good candidates.
 NBA-owned opponent play-type and shot publications use this same database-first
 read seam as independent surfaces: immutable rows are validated and composed
 alongside ledger-owned facts, never substituted from PBP or another NBA
