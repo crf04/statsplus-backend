@@ -1209,7 +1209,14 @@ cursor/completed/failed progress. Missing games have priority, games seven
 days old or newer are rechecked daily, games through day 30 are rechecked
 weekly, and older games require explicit historical repair; a stored game that
 lacks complete raw evidence (a pre-032 game) is re-fetched at missing-game
-priority regardless of age. Each provider response records its own timezone-aware
+priority regardless of age. Historical repair skips games whose accepted
+observation already belongs to the active manifest, except games accepted
+through the NBA LiveData fallback (`nba_live_data` or `pbp+nba_live_data`
+provenance): those carry no assist-location evidence and remain repair targets
+on every explicit repair run until a complete PBP observation replaces them.
+Repair is operator-invoked and bounded per run by `--max-games` and the
+provider retry cap; there is no persisted per-game attempt budget, so a game
+PBP keeps refusing is re-attempted on each run. Each provider response records its own timezone-aware
 retrieval time at the moment it returns, so every staged observation and
 archived row carries that response's retrieval time rather than the batch start.
 Any failed target keeps the previous valid publication and reports the season as

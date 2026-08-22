@@ -1029,44 +1029,75 @@ def test_historical_repair_resumes_after_current_manifest_evidence(tmp_path):
     assert observations[0]["observation_id"] == stored.source_observation_id
 
 
-def test_historical_repair_retries_fallback_provenance_games(tmp_path):
+def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monkeypatch):
     """A LiveData-filled game stays a repair target until PBP replaces it."""
     engine = create_engine(f"sqlite:///{tmp_path / 'fallback-repair.sqlite3'}")
     run_migrations(engine)
-    repository = CanonicalGameLedgerRepository(engine)
     cutoff = datetime(2024, 11, 16, tzinfo=timezone.utc)
     _install_manifest(engine, cutoff)
-    provider = _Provider(_payload())
+    repository = CanonicalGameLedgerRepository(engine)
 
-    def service():
+    invalid = _payload()
+    del invalid["team_results"]["Home"]["FullGame"]["Blocks"]
+    composite = _payload()
+    # The fallback composite carries no assist-location observation.
+    for side in ("Home", "Away"):
+        for row in composite["stats"][side]["FullGame"]:
+            for key in ("TwoPtAssists", "ThreePtAssists", "Arc3Assists",
+                        "Corner3Assists", "AtRimAssists", "ShortMidRangeAssists",
+                        "LongMidRangeAssists"):
+                row.pop(key, None)
+    composite["_ledger_provenance"] = {
+        "provider": "pbp+nba_live_data",
+        "source_documents": {"pbp": invalid, "nba_live_data": {"game": {}}},
+    }
+    monkeypatch.setattr(
+        "app.services.ledger_backfill.compose_pbp_live_data_observation",
+        lambda primary, live, *, event: composite,
+    )
+
+    class Fallback:
+        def fetch_game_stats(self, game_id, season, *, season_type="Regular Season"):
+            return {"game": {"gameId": game_id}}
+
+    clock = {"now": cutoff}
+
+    def service(provider):
         return LedgerBackfillService(
-            provider=provider, athlete_catalog=_Athletes(),
-            participant_catalog=_Participants(),
+            provider=provider, fallback_provider=Fallback(),
+            athlete_catalog=_Athletes(), participant_catalog=_Participants(),
             reconciliation_sink=lambda game_id, payload: None,
             observation_recorder=_Recorder(), repository=repository,
-            max_concurrency=1, clock=lambda: cutoff,
+            max_concurrency=1, clock=lambda: clock["now"],
         )
 
-    first = service().refresh("2024-25", **_authorized(_event(), cutoff))
+    first = service(_Provider(invalid)).refresh("2024-25", **_authorized(_event(), cutoff))
     assert first.complete
-    with engine.begin() as connection:
-        connection.execute(
-            update(CollectionObservation).values(provider="nba_live_data")
-        )
     assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == {
         "0022400001"
     }
+    assert repository.game_ids_from_manifest("2024-25", "ledger-manifest") == {"0022400001"}
 
-    provider.calls.clear()
-    replayed = service().refresh(
+    # PBP now serves a complete observation: repair must re-fetch and replace.
+    clock["now"] = cutoff + timedelta(hours=1)
+    healthy = _Provider(_payload())
+    replayed = service(healthy).refresh(
         "2024-25", historical_repair=True, **_authorized(_event(), cutoff),
     )
 
-    # The game was re-fetched from PBP (the manifest-skip no longer applies);
-    # identical content is a no-op write, a differing PBP observation replaces.
     assert replayed.complete
-    assert provider.calls == [("0022400001", "2024-25", "Regular Season")]
-    assert replayed.games_replaced == 0 and replayed.games_skipped == 1
+    assert healthy.calls == [("0022400001", "2024-25", "Regular Season")]
+    assert replayed.games_replaced == 1
+    assert repository.game_ids_with_fallback_provenance("2024-25", "ledger-manifest") == frozenset()
+    with engine.connect() as connection:
+        providers = [
+            row["provider"]
+            for row in connection.execute(select(CollectionObservation)).mappings()
+        ]
+    assert "pbp" in providers
+    stored = repository.get_game("0022400001")
+    assert stored is not None
+    assert any(player.at_rim_assists is not None for player in stored.player_facts)
 
 
 def test_each_observation_records_its_own_retrieval_time(tmp_path):
