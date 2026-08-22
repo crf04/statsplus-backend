@@ -25,6 +25,7 @@ from app.domain.nba_events import (
     player_game_log_season_type,
 )
 from app.errors import ProviderUnavailableError
+from app.providers.nba_live_data import compose_pbp_live_data_observation
 from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     LedgerBackfillProgress,
@@ -37,6 +38,10 @@ from app.utils.telemetry import ProviderResponseError
 class LedgerPBPProvider(Protocol):
     """Injected per-game PBP provider used by offline and Railway workers."""
 
+    def fetch_game_stats(self, game_id: str, season: str, *, season_type: str = "Regular Season") -> dict[str, object]: ...
+
+
+class LedgerFallbackProvider(Protocol):
     def fetch_game_stats(self, game_id: str, season: str, *, season_type: str = "Regular Season") -> dict[str, object]: ...
 
 
@@ -222,6 +227,7 @@ class LedgerBackfillService:
         self,
         *,
         provider: LedgerPBPProvider,
+        fallback_provider: LedgerFallbackProvider | None = None,
         repository: CanonicalGameLedgerRepository,
         athlete_catalog: LedgerAthleteCatalogReader,
         participant_catalog: LedgerParticipantCatalogReader,
@@ -237,6 +243,7 @@ class LedgerBackfillService:
         if daily_recheck_days < 0 or weekly_recheck_days < daily_recheck_days:
             raise ValueError("backfill recheck windows are invalid")
         self.provider = provider
+        self.fallback_provider = fallback_provider
         self.repository = repository
         self.athlete_catalog = athlete_catalog
         self.participant_catalog = participant_catalog
@@ -349,11 +356,15 @@ class LedgerBackfillService:
             observation_id: str | None = None
             committed = False
             validated = False
-            try:
-                observation = self.provider.fetch_game_stats(game_id, season, season_type="Regular Season")
-                # Provenance is per retrieval: capture the time this response
-                # was actually returned, not the batch start, so each staged
-                # observation and archived row records its own retrieval time.
+
+            def stage_and_normalize(observation, *, source_provider="pbp"):
+                nonlocal observation_id
+                if source_provider not in {
+                    "pbp",
+                    "nba_live_data",
+                    "pbp+nba_live_data",
+                }:
+                    raise LedgerValidationError("ledger provider provenance is invalid")
                 retrieved_at = _aware(self.clock())
                 observation_id, observation_values = self.observation_recorder.stage(
                     observation,
@@ -365,17 +376,59 @@ class LedgerBackfillService:
                     manifest_cutoff=through,
                     schema_version=schema_version,
                 )
+                observation_values = dict(observation_values)
+                observation_values["provider"] = source_provider
                 with lifecycle_lock:
                     active_staged.add(observation_id)
-                participants = self.participant_catalog.get_participants(observation_id, game_id=game_id)
-                game = canonical_game_from_pbp(
-                    observation,
-                    event=event,
-                    season=season,
-                    source_observation_id=observation_id,
-                    retrieved_at=retrieved_at,
-                    participant_ids_by_team=participants,
-                )
+                try:
+                    participants = self.participant_catalog.get_participants(
+                        observation_id, game_id=game_id
+                    )
+                    game = canonical_game_from_pbp(
+                        observation,
+                        event=event,
+                        season=season,
+                        source_observation_id=observation_id,
+                        retrieved_at=retrieved_at,
+                        participant_ids_by_team=participants,
+                    )
+                except Exception:
+                    self.observation_recorder.discard(observation_id)
+                    with lifecycle_lock:
+                        active_staged.discard(observation_id)
+                    observation_id = None
+                    raise
+                return game, observation_values
+
+            try:
+                primary = None
+                try:
+                    primary = self.provider.fetch_game_stats(
+                        game_id, season, season_type="Regular Season"
+                    )
+                    game, observation_values = stage_and_normalize(primary)
+                except (
+                    LedgerValidationError,
+                    ProviderResponseError,
+                    ProviderUnavailableError,
+                    OSError,
+                ):
+                    if self.fallback_provider is None:
+                        raise
+                    live_data = self.fallback_provider.fetch_game_stats(
+                        game_id, season, season_type="Regular Season"
+                    )
+                    composite = compose_pbp_live_data_observation(
+                        primary, live_data, event=event
+                    )
+                    game, observation_values = stage_and_normalize(
+                        composite,
+                        source_provider=(
+                            "pbp+nba_live_data"
+                            if primary is not None
+                            else "nba_live_data"
+                        ),
+                    )
                 if athlete_ids is not None:
                     unknown = [player.player_id for player in game.player_facts if player.player_id not in athlete_ids]
                     if unknown:

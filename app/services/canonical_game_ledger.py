@@ -2050,7 +2050,8 @@ class CanonicalGameLedgerRepository:
             candidate = by_observation[observation_id]
             if (
                 row.get("environment") != "server"
-                or row.get("provider") != "pbp"
+                or row.get("provider")
+                not in {"pbp", "nba_live_data", "pbp+nba_live_data"}
                 or row.get("observation_type") != "canonical_game_ledger"
                 or not isinstance(scope, Mapping)
                 or scope.get("surface") != "canonical_game_ledger"

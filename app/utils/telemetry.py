@@ -37,6 +37,7 @@ from app.utils.request_id import is_valid_request_id
 logger = logging.getLogger(__name__)
 
 PROVIDER_NBA_STATS = "nba_stats"
+PROVIDER_NBA_LIVE_DATA = "nba_live_data"
 PROVIDER_PBP_STATS = "pbp_stats"
 PROVIDER_DABBLE = "dabble"
 PROVIDER_PRIZEPICKS = "prizepicks"
@@ -72,6 +73,7 @@ NBA_STATS_OPERATIONS = frozenset(
         "schedule_whole_season",
     }
 )
+NBA_LIVE_DATA_OPERATIONS = frozenset({"game_boxscore"})
 PBP_STATS_OPERATIONS = frozenset(
     {
         "get_totals_player",
@@ -100,6 +102,7 @@ UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 ROTOWIRE_OPERATIONS = frozenset({"get_injuries"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
+    PROVIDER_NBA_LIVE_DATA: NBA_LIVE_DATA_OPERATIONS,
     PROVIDER_PBP_STATS: PBP_STATS_OPERATIONS,
     PROVIDER_DABBLE: DABBLE_OPERATIONS,
     PROVIDER_PRIZEPICKS: PRIZEPICKS_OPERATIONS,
@@ -1046,6 +1049,7 @@ __all__ = [
     "OUTCOME_SUCCESS",
     "OUTCOME_TIMEOUT",
     "PROVIDER_NBA_STATS",
+    "PROVIDER_NBA_LIVE_DATA",
     "PROVIDER_PBP_STATS",
     "PROVIDER_DABBLE",
     "DABBLE_OPERATIONS",
@@ -1055,6 +1059,7 @@ __all__ = [
     "PROVIDER_UNDERDOG",
     "PROVIDER_ROTOWIRE",
     "NBA_STATS_OPERATIONS",
+    "NBA_LIVE_DATA_OPERATIONS",
     "PBP_STATS_OPERATIONS",
     "PRIZEPICKS_OPERATIONS",
     "UNDERDOG_OPERATIONS",

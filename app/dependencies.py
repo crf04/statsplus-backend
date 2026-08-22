@@ -49,6 +49,7 @@ class ApplicationDependencies:
     event_resolver: Any | None = None
     player_diet_service: Any | None = None
     pbp_game_logs_provider: Any | None = None
+    nba_live_data_provider: Any | None = None
     game_logs_source: Any | None = None
     collector_tokens: Any | None = None
     collection_control: Any | None = None
@@ -75,6 +76,7 @@ def build_dependencies(
 
     from app.providers.dabble import DabbleAdapter
     from app.providers.nba_stats import NBAStatsAdapter
+    from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.providers.prizepicks import PrizePicksAdapter
@@ -208,6 +210,7 @@ def build_dependencies(
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
     pbp_game_logs_provider = PBPGameLogAdapter(settings=settings)
+    nba_live_data_provider = NBALiveDataBoxscoreAdapter(settings=settings)
     injury_provider = (
         RotoWireInjuryProvider(settings=settings)
         if settings.features.injury_report_enabled
@@ -394,6 +397,7 @@ def build_dependencies(
             ledger_observation_recorder = CollectionObservationLedgerRecorder(engine)
             ledger_backfill_service = LedgerBackfillService(
                 provider=pbp_game_logs_provider,
+                fallback_provider=nba_live_data_provider,
                 athlete_catalog=athlete_catalog_service,
                 participant_catalog=AcceptedObservationParticipantCatalog(
                     engine, ledger_observation_recorder
@@ -605,6 +609,7 @@ def build_dependencies(
         dfs_board_response_service=dfs_board_response_service,
         player_diet_service=player_diet_service,
         pbp_game_logs_provider=pbp_game_logs_provider,
+        nba_live_data_provider=nba_live_data_provider,
         game_logs_source=game_logs_source,
         collector_tokens=collector_tokens,
         collection_control=collection_control,
