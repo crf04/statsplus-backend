@@ -1790,8 +1790,10 @@ instead of approximating a league window.
 Every contracted PBP-owned non-shot opponent fact is aggregated exclusively
 from typed ledger counts and denominators: the four traditional opponent
 surfaces (`OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK`) come from the opposing
-team fact's raw counts over the selected window with the retained effective
-team-minute denominator, and the six assist surfaces (`Assists` plus the five
+team's raw counts over the selected window with the retained effective
+team-minute denominator — `OPP_TOV`/`OPP_STL`/`OPP_BLK` from the opposing team
+fact, `OPP_REB` from the opposing players' rows because the legacy
+`LeagueDashTeamStats` contract excludes team-only rebounds — and the six assist surfaces (`Assists` plus the five
 location counters) come from the opposing players' counts over the same
 denominator. No PBP or NBA traditional/assist aggregate endpoint is called;
 the service has no provider collaborators at all, so it cannot trigger one.

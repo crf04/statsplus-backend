@@ -177,9 +177,12 @@ ASSIST_TOTAL_METRIC = "assists"
 #: residual-inclusive opponent total that carries into per48, league averages,
 #: sigma, and competition ranks.
 ASSIST_DERIVED_METRICS = (*ASSIST_METRICS, ASSIST_TOTAL_METRIC)
-#: The four contracted NBA-traditional opponent surfaces and the ledger team
+#: The four contracted NBA-traditional opponent surfaces and the ledger
 #: metric that supplies each count.  ``materialize_team_window`` aggregates the
-#: opposing team fact's metric; the Matchups surface stores the same raw count.
+#: opposing team fact's metric, except that ``OPP_REB`` is player-credited:
+#: LeagueDashTeamStats excludes team-only rebounds, so the opposing players'
+#: rebounds are summed instead.  The Matchups surface stores the same raw
+#: count.
 MATCHUP_TRADITIONAL_KEYS = {
     "OPP_REB": "rebounds",
     "OPP_TOV": "turnovers",
@@ -187,6 +190,16 @@ MATCHUP_TRADITIONAL_KEYS = {
     "OPP_BLK": "blocks",
 }
 _PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds"})
+
+
+def player_credited_count(game: CanonicalGame, team_id: int, metric: str) -> int:
+    """Sum one count over a team's player rows, excluding the team residual."""
+
+    return sum(
+        int(getattr(player, metric))
+        for player in game.player_facts
+        if player.team_id == team_id
+    )
 #: The contracted PBP assist surfaces and the ledger player count that supplies
 #: each.  ``Assists`` is the opponent total; every location key is one of the
 #: governed location counters.
@@ -230,7 +243,11 @@ def _regular_games(games: Iterable[CanonicalGame], *, cutoff: date | None = None
 
 
 def derive_traditional_opponent_facts(games: Iterable[CanonicalGame]) -> tuple[TraditionalOpponentFact, ...]:
-    """Derive opponent count facts from the opposing team fact in each game."""
+    """Derive opponent count facts from the opposing team fact in each game.
+
+    ``opponent_rebounds`` is the player-credited sum, matching the legacy
+    ``OPP_REB`` contract; every other count is the opposing team fact's.
+    """
 
     output: list[TraditionalOpponentFact] = []
     for game in _regular_games(games):
@@ -248,7 +265,7 @@ def derive_traditional_opponent_facts(games: Iterable[CanonicalGame]) -> tuple[T
                     team_id=team.team_id,
                     opponent_team_id=opponent.team_id,
                     opponent_points=opponent.points,
-                    opponent_rebounds=opponent.rebounds,
+                    opponent_rebounds=player_credited_count(game, opponent.team_id, "rebounds"),
                     opponent_assists=opponent.assists,
                     opponent_field_goals_made=opponent.field_goals_made,
                     opponent_field_goals_attempted=opponent.field_goals_attempted,
@@ -515,10 +532,8 @@ def materialize_team_window(
                     # LeagueDashTeamStats' OPP_REB surface is player-credited.
                     # Canonical team facts intentionally also retain team-only
                     # rebounds, which must not leak into that legacy contract.
-                    totals[metric] += sum(
-                        float(getattr(player, metric))
-                        for player in game.player_facts
-                        if player.team_id == opponent.team_id
+                    totals[metric] += float(
+                        player_credited_count(game, opponent.team_id, metric)
                     )
                 else:
                     totals[metric] += float(getattr(opponent, metric))
