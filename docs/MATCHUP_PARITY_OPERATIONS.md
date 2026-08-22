@@ -150,8 +150,10 @@ and exact governed game sets match (proven by byte-identical game-set
 checksums), whether the two cutoffs align, whether deterministic rankings
 (`1, 1, 3` ties) match per metric, and each surface's independent availability.
 Integer counts compare exactly. Only floating denominators (the nominal game
-length derived from retained effective team minutes, with legacy seconds
-normalized to minutes) and the per-48 rates recomputed
+length derived from retained effective team minutes; the legacy PBP assist
+window value, normalized from seconds, is likewise read as the nominal length
+it establishes when within the separate 0.05-minute evidence band, while the
+NBA traditional legacy denominator is compared as reported) and the per-48 rates recomputed
 from counts and denominators use the single documented tolerance
 (`MATCHUP_PARITY_TOLERANCE`, `1e-9`). The ledger payload's served per-48 and
 competition-rank values must also match the values recomputed from its counts

@@ -396,6 +396,86 @@ def test_matchup_tolerance_is_exactly_one_nanounit():
         _compare(tolerance=1e-6)
 
 
+def test_legacy_window_minutes_are_read_as_the_nominal_length():
+    # Two governed games per team: the nominal window is 96 minutes.  The
+    # legacy PBP aggregate reports summed player seconds at a tenth-second
+    # grain (production: 719.995 for a 15-game window).
+    ledger = _materialization(facts=(
+        *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+        *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+    ))
+    drifted = _materialization(facts=(
+        *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+        *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+    ))
+    drifted = _replace_fact(
+        drifted, surface="assist_locations", team_id=TEAM_A, stat="Assists",
+        denominator_value=95.995,
+    )
+    report = _compare(surface="assist_locations", legacy=drifted, ledger=ledger)
+    assert not report.hard_failure
+    assert not any(
+        difference.classification in (
+            "denominator_tolerance_exceeded", "derived_rate_difference",
+            "ranking_difference",
+        )
+        for difference in report.differences
+    )
+
+    beyond = _replace_fact(
+        drifted, surface="assist_locations", team_id=TEAM_A, stat="Assists",
+        denominator_value=95.9,
+    )
+    report = _compare(surface="assist_locations", legacy=beyond, ledger=ledger)
+    assert any(
+        difference.classification == "denominator_tolerance_exceeded"
+        for difference in report.differences
+    )
+
+    # The NBA traditional legacy reports integer nominal minutes and stays
+    # strict: the same drift is a difference there.
+    traditional = _replace_fact(
+        _materialization(facts=(
+            *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+            *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+        )),
+        surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        denominator_value=95.995,
+    )
+    report = _compare(surface="traditional", legacy=traditional, ledger=ledger)
+    assert any(
+        difference.classification == "denominator_tolerance_exceeded"
+        for difference in report.differences
+    )
+
+
+def test_legacy_nominal_denominator_removes_representation_rank_flips():
+    # TEAM_A and TEAM_B carry equal counts; the legacy PBP aggregate's
+    # tenth-second drift on TEAM_A alone would break their tie.
+    ledger = _materialization(facts=(
+        *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+        *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+    ))
+    ledger = _replace_fact(
+        ledger, surface="assist_locations", team_id=TEAM_B, stat="Assists",
+        raw_value=float(TEAM_A),
+    )
+    legacy = _replace_fact(
+        ledger, surface="assist_locations", team_id=TEAM_A, stat="Assists",
+        denominator_value=95.995,
+    )
+    report = _compare(surface="assist_locations", legacy=legacy, ledger=ledger)
+    assert not any(
+        difference.classification == "ranking_difference"
+        for difference in report.differences
+    )
+    # Without normalization the drifted denominator breaks the tie.
+    tied = {TEAM_A: float(TEAM_A) * 48.0 / 96.0, TEAM_B: float(TEAM_A) * 48.0 / 96.0}
+    drifted = {**tied, TEAM_A: float(TEAM_A) * 48.0 / 95.995}
+    assert competition_ranks(tied, descending=False)[TEAM_A] == competition_ranks(tied, descending=False)[TEAM_B]
+    assert competition_ranks(drifted, descending=False)[TEAM_A] != competition_ranks(drifted, descending=False)[TEAM_B]
+
+
 def test_game_set_mismatch_is_a_hard_failure():
     legacy_ids = _game_ids_by_team(TEAM_IDS)
     legacy_ids[TEAM_A] = frozenset({"different-1", "different-2"})

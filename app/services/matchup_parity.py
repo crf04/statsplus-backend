@@ -79,6 +79,7 @@ from app.services.ledger_derivations import (
     MATCHUP_ASSIST_KEYS,
     MATCHUP_TRADITIONAL_KEYS,
     competition_ranks,
+    nominal_window_minutes,
 )
 from app.services.ledger_lineage import LedgerLineage
 from app.services.publication_authority import verify_publication_authority
@@ -93,10 +94,12 @@ from app.services.team_matchup_refresh import (
     _pbp_totals_request_descriptor,
 )
 
-#: The single documented tolerance for floating denominators and derived
-#: per-48 rates.  Integer counts compare exactly; only denominators (effective
-#: team minutes) and the per-48 values recomputed from them admit this relative
-#: tolerance.
+#: The single documented comparison tolerance for floating denominators and
+#: derived per-48 rates.  Integer counts compare exactly; only denominators
+#: (nominal game length) and the per-48 values recomputed from them admit this
+#: relative tolerance.  Separately, ``NOMINAL_MINUTES_TOLERANCE`` is the
+#: evidence band within which a retained or legacy PBP minute value is read
+#: as the nominal game length before this comparison runs.
 MATCHUP_PARITY_TOLERANCE = 1e-9
 
 #: Ledger-owned surfaces that participate in the dual-run (re-exported from the
@@ -1317,6 +1320,23 @@ def compare_matchup_materializations(
             legacy_minutes = _minutes(
                 legacy_fact.denominator_value, legacy_fact.denominator_unit
             )
+            if (
+                legacy_minutes is not None
+                and legacy.producer != PRODUCER_LEDGER
+                and surface == "assist_locations"
+            ):
+                # The legacy PBP assist aggregate reports its window minutes
+                # from summed player seconds at a tenth-of-a-second grain; the
+                # contract denominator is the nominal game length, so read the
+                # legacy value as the nominal length it establishes.  The NBA
+                # traditional legacy already reports integer nominal minutes
+                # and stays strict.
+                nominal = nominal_window_minutes(
+                    legacy_minutes,
+                    len(legacy.game_ids_by_team.get(team_id, ())),
+                )
+                if nominal is not None:
+                    legacy_minutes = nominal
             if ledger_minutes is None or legacy_minutes is None:
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, "denominator_minutes",
