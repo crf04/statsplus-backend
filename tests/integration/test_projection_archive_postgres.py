@@ -24,6 +24,8 @@ from app.dependencies import build_dependencies
 from app.models import Base
 from app.migrations import run_migrations
 from app.models.projection_archive import (
+    ClosingProjectionMembership,
+    ClosingProjectionSet,
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
@@ -72,10 +74,125 @@ def projection_pg_engine():
         pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
     engine = create_engine(url)
     Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
+    run_migrations(engine)
     yield engine
     Base.metadata.drop_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
     engine.dispose()
+
+
+def test_concurrent_postgres_close_and_late_materialization_keep_one_fenced_set(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    initial = _snapshot(catalog, OBSERVED_AT, "20.5")
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    initial_result = archive.ingest_snapshot(
+        initial,
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    barrier = Barrier(2)
+
+    def close_set():
+        worker_engine = create_engine(database_url)
+        try:
+            barrier.wait(timeout=10)
+            return ProjectionArchive(worker_engine, catalog).freeze_closing_projection_set(
+                provider="dabble",
+                query=query,
+                canonical_game_id=GAME_ID,
+                started_at=start_at,
+                created_at=start_at,
+            )
+        finally:
+            worker_engine.dispose()
+
+    def late_materialization():
+        worker_engine = create_engine(database_url)
+        try:
+            barrier.wait(timeout=10)
+            return ProjectionArchive(worker_engine, catalog).ingest_snapshot(
+                _snapshot(catalog, start_at - timedelta(minutes=1), "21.5"),
+                query=query,
+                accepted_at=start_at + timedelta(minutes=1),
+            )
+        finally:
+            worker_engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        close_result, late_result = tuple(
+            executor.map(lambda task: task(), (close_set, late_materialization))
+        )
+
+    with projection_pg_engine.connect() as connection:
+        sets = connection.execute(select(ClosingProjectionSet)).all()
+        memberships = connection.execute(select(ClosingProjectionMembership)).all()
+        observations = connection.execute(
+            select(ProjectionObservation.observation_id, ProjectionObservation.observed_at)
+        ).all()
+    assert close_result.observation_count == 1
+    assert late_result.materialization_outcome == "advanced"
+    assert len(sets) == 1
+    assert len(memberships) == 1
+    initial_observation_id = next(
+        observation_id
+        for observation_id, observed_at in observations
+        if observed_at == initial.retrieved_at
+    )
+    assert memberships[0].observation_id == initial_observation_id
+    assert initial_result.snapshot_id != late_result.snapshot_id
+
+
+def test_two_concurrent_postgres_closers_share_one_immutable_set(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    barrier = Barrier(2)
+
+    def close_set(_worker):
+        worker_engine = create_engine(database_url)
+        try:
+            barrier.wait(timeout=10)
+            return ProjectionArchive(
+                worker_engine, catalog
+            ).freeze_closing_projection_set(
+                provider="dabble",
+                query=query,
+                canonical_game_id=GAME_ID,
+                started_at=start_at,
+                created_at=start_at,
+            )
+        finally:
+            worker_engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(close_set, range(2)))
+
+    assert len({result.closing_set_id for result in results}) == 1
+    assert sorted(result.created for result in results) == [False, True]
+    with projection_pg_engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ClosingProjectionSet)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ClosingProjectionMembership)
+        ).scalar_one() == 1
 
 
 def _snapshot(catalog, retrieved_at, threshold):

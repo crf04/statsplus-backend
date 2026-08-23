@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event, Thread
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select, update
@@ -12,11 +13,23 @@ from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
+from app.models.projection_archive import ClosingProjectionSet
+from app.providers.dfs import (
+    CoverageEvidence,
+    NBAMarketQuery,
+    ProviderSnapshot,
+    SnapshotStatus,
+)
 from app.services.projection_collection import (
     ProjectionCollectionCoordinator,
     ProjectionCollectionSettings,
 )
+from app.services.projection_archive import (
+    ProjectionArchive,
+    ProjectionArchiveReadScope,
+    ProjectionRecordingService,
+)
+from app.services.statistic_catalog import StatisticCatalog
 
 
 SEASON = "2025-26"
@@ -84,6 +97,7 @@ class FakeRecorder:
     def __init__(self):
         self.snapshots = []
         self.failures = []
+        self.closing_events = []
 
     def record_snapshot(self, snapshot, **kwargs):
         self.snapshots.append((snapshot.provider, kwargs))
@@ -92,6 +106,10 @@ class FakeRecorder:
     def record_failed_poll(self, **kwargs):
         self.failures.append(kwargs)
         return SimpleNamespace(poll_id="internal", outcome="failed")
+
+    def freeze_closing_projection_sets(self, **kwargs):
+        self.closing_events.append(kwargs)
+        return ()
 
 
 class BrokenBoard:
@@ -157,6 +175,78 @@ def test_no_work_never_calls_a_provider_for_offseason_or_terminal_events(tmp_pat
     )
     assert stale.run(providers=("dabble",)).status == "no_work"
     assert stale_board.calls == []
+
+
+def test_terminal_event_is_closed_by_collector_without_a_provider_poll(tmp_path):
+    board = FakeBoard()
+    recorder = FakeRecorder()
+    started_at = NOW - timedelta(hours=1)
+    event = _event(
+        scheduled_at=NOW - timedelta(hours=1),
+        status_text="Final",
+        status_code=3,
+    )
+    event["first_observed_started_at"] = started_at.isoformat()
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[event],
+        board=board,
+        recorder=recorder,
+    )
+
+    result = coordinator.run(providers=("dabble",))
+
+    assert result.status == "no_work"
+    assert board.calls == []
+    assert recorder.closing_events == [
+        {
+            "events": (event,),
+            "query": NBAMarketQuery(season=SEASON),
+            "created_at": NOW,
+        }
+    ]
+
+
+def test_collector_closes_a_game_observed_started_during_the_poll(tmp_path):
+    event = _event(scheduled_at=NOW + timedelta(hours=1))
+
+    class TransitionBoard(FakeBoard):
+        def get_board(self, query, *, providers):
+            event.update(
+                status_text="Q1",
+                status_code=2,
+                first_observed_started_at=NOW.isoformat(),
+            )
+            return super().get_board(query, providers=providers)
+
+    board = TransitionBoard(
+        {
+            "dabble": SimpleNamespace(
+                provider="dabble",
+                status="complete",
+                snapshot=_snapshot("dabble"),
+                reason=None,
+            )
+        }
+    )
+    recorder = FakeRecorder()
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[event],
+        board=board,
+        recorder=recorder,
+    )
+
+    result = coordinator.run(providers=("dabble",))
+
+    assert result.status == "complete"
+    assert recorder.closing_events == [
+        {
+            "events": (event,),
+            "query": NBAMarketQuery(season=SEASON),
+            "created_at": NOW,
+        }
+    ]
 
 
 def test_past_scheduled_time_does_not_stop_polling_until_governed_status_starts(tmp_path):
@@ -304,6 +394,7 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
     assert board.calls == [("dabble", "prizepicks")]
     assert [provider for provider, _ in recorder.snapshots] == ["dabble"]
     assert [item["provider"] for item in recorder.failures] == ["prizepicks"]
+    assert recorder.closing_events == []
     with engine.connect() as connection:
         state = connection.execute(
             select(ProjectionCollectionProviderState.__table__).where(
@@ -422,6 +513,54 @@ def test_board_defect_records_bounded_failure_for_every_due_provider(tmp_path):
     assert {
         provider["failure"]["reason"] for provider in diagnostics["providers"]
     } == {"upstream_error"}
+    assert recorder.closing_events == []
+
+
+def test_second_run_with_all_started_games_closed_skips_freeze_transactions(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-collection-closed.sqlite3'}")
+    run_migrations(engine)
+    query = NBAMarketQuery(season=SEASON)
+    archive = ProjectionArchive(engine, StatisticCatalog.load_default())
+    recorder = ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    )
+    event = _event(
+        scheduled_at=NOW - timedelta(minutes=5),
+        status_text="Q1",
+        status_code=2,
+    )
+    event["first_observed_started_at"] = NOW.isoformat()
+    coordinator = ProjectionCollectionCoordinator(
+        engine,
+        board_service=FakeBoard(),
+        recording_service=recorder,
+        event_reader=lambda _season: (event,),
+        season=SEASON,
+        settings=_settings(),
+        providers=("dabble",),
+        clock=lambda: NOW,
+        owner="closed-game-collector",
+    )
+
+    first = coordinator.run()
+    assert first.status == "no_work"
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(ClosingProjectionSet).where(
+                ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
+            )
+        ).scalar_one_or_none() is not None
+
+    with patch.object(
+        recorder,
+        "freeze_closing_projection_sets",
+        wraps=recorder.freeze_closing_projection_sets,
+    ) as freeze:
+        second = coordinator.run()
+
+    assert second == first
+    freeze.assert_not_called()
 
 
 def test_missing_board_outcome_records_bounded_provider_failure(tmp_path):

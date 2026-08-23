@@ -559,21 +559,61 @@ at provider level but cannot lift missing required coverage to aggregate live.
 With no required providers, eligible empty evidence may remain live only
 through the same inclusive 15-minute disabled-provider window. Mixed or
 incomplete provider coverage remains missing.
-Mixed
-provider states omit aggregate `status`; `partial` remains
-reserved for a multi-game archive read containing both live and missing game
-states.
+Mixed provider states omit aggregate `status`; `partial` remains reserved for
+a multi-game live read containing both live and missing game states. For a
+multi-game read spanning live, closing, and missing phases, live evidence
+controls aggregate and provider freshness. Closing timestamps never age the
+live aggregate, and aggregate `status` is omitted because it does not describe
+one uniform phase. If no live evidence exists, a non-empty closing pool takes
+precedence over missing games.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
 is enabled, dependency assembly gives the same archive reader to Slate and
-Matchup. Matchup Selection uses a thin adapter over that reader which translates
-a single game's explicit missing state to its established stored-pool
-unavailable contract; it does not select or call a legacy source. One request
-never combines archive and legacy facts. The gate is refused when the
+Matchup. Matchup Selection uses a thin adapter over that reader; scheduled
+missing state retains its stored-pool unavailable contract, while a started
+game's explicit empty closing set is a valid empty pool and an outside player
+is a resource-not-found selection. It does not select or call a legacy source.
+One request never combines archive and legacy facts. The gate is refused when the
 configured database is the read-only demo
 fixture, which cannot contain the archive schema. The legacy collection/reader
-behavior above remains selected while the gate is off. Scheduled collection,
-mapping replay, closing sets, and final cutover remain later slices of the
-projection-archive parent contract.
+behavior above remains selected while the gate is off.
+
+`ClosingProjectionSet` and `ClosingProjectionMembership` are the post-start
+read seam. `EventCatalogRepository.publish` persists
+`first_observed_started_at` exactly once when governed status first becomes
+in-progress or final. `ProjectionCollectionCoordinator.run` is the sole normal
+closing-set writer: after a poll, and also when a newly started slate leaves no
+provider poll due, it asks `ProjectionRecordingService` to close every enabled
+provider scope. The durable observed transition is the start fence. Legacy
+started rows without that value fall back to `scheduled_at`; request time is
+never used as a fence.
+
+A closing set is unique by provider, season, exact projection `query_key`, and
+canonical game, including an explicit empty set. The writer acquires the same
+provider/query scope fence used by materialization. Membership rows contain
+only foreign-key pointers to immutable `ProjectionObservation` rows; they
+never copy, delete, or replace source snapshots. Closing materialization starts
+at the newest promoted Complete generation whose provider poll completed no
+later than the start fence, then replays its promoted suffix with observations
+joined by canonical game ID. Thus replay is bounded in the normal case, never
+builds a season-sized generation-ID parameter list, and a delayed provider
+delivery can remain immutable archive evidence without entering a set after
+the game-start boundary. Repeating a close returns the original set and cannot
+move its start time.
+Enabling a provider after a game has closed does not backfill its closing set;
+that provider reads `missing` for the game permanently.
+
+The archive reader performs a game-ID-scoped Event Catalog lookup before
+choosing a pool; it neither scans a season nor writes archive state. Scheduled
+games use the existing live Latest reader and its 15-minute/six-hour
+eligibility windows. Started or final games use only immutable closing
+pointers, report `state: closing` and provider status `closing`, and do not age
+or refresh those pointers. A started game whose collector has not created a
+set yet, or whose explicit set has no members, reports `state: missing` with
+zero targetable players. Slate and Matchup still return 200, while Selection
+keeps scheduled missing-pool behavior and returns `resource_not_found` for a
+player outside a started game's derived empty pool. No request path calls a
+projection provider, takes an ingestion scope write lock, or creates a closing
+set.
 
 ### Matchup injury snapshots
 
