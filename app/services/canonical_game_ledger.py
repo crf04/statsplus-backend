@@ -2316,6 +2316,36 @@ class CanonicalGameLedgerRepository:
         with self.engine.connect() as connection:
             return frozenset(str(game_id) for game_id in connection.scalars(statement))
 
+    def game_ids_with_fallback_provenance(
+        self,
+        season: str,
+        manifest_id: str,
+    ) -> frozenset[str]:
+        """Return manifest games whose accepted observation used the fallback.
+
+        A ``nba_live_data`` or ``pbp+nba_live_data`` observation carries no
+        assist-location evidence, so the game stays a repair target until a
+        complete PBP observation replaces it.
+        """
+
+        canonical_season = validate_canonical_season(season)
+        games = CanonicalGameLedgerGame.__table__
+        observations = CollectionObservation.__table__
+        statement = (
+            select(games.c.game_id)
+            .join(
+                observations,
+                observations.c.observation_id == games.c.source_observation_id,
+            )
+            .where(
+                games.c.season == canonical_season,
+                observations.c.manifest_id == manifest_id,
+                observations.c.provider.in_(("nba_live_data", "pbp+nba_live_data")),
+            )
+        )
+        with self.engine.connect() as connection:
+            return frozenset(str(game_id) for game_id in connection.scalars(statement))
+
     def game_ids_without_raw_evidence(
         self,
         season: str,
