@@ -1142,10 +1142,15 @@ an accepted raw observation must carry the `team_results` Home and Away
 `FullGame` envelopes and every governed diagnostic count inside them — `Points`,
 `FG2M`/`FG2A`, `FG3M`/`FG3A`, `FtPoints`/`FTA`, offensive, defensive, and total
 rebounds, `Assists`, `Turnovers`, `Steals`, `Blocks`, and `Fouls`. A missing
-envelope, a missing, null, or malformed diagnostic field, or a diagnostic count
-that does not reconcile with the declared team authority (player sums plus the
+envelope, a null or malformed diagnostic field, or a diagnostic count that
+does not reconcile with the declared team authority (player sums plus the
 `EntityId == 0` team-summary residual) rejects the candidate atomically rather
-than letting an unprovable omission pass as a zero. Missing optional expanded
+than letting an unprovable omission pass as a zero. The `team_results`
+envelope is as sparse as every other PBP row: a governed diagnostic key that is
+omitted is accepted as the observed zero only when the declared authority for
+that count is itself zero (a team with no blocks has no `Blocks` key on any of
+its rows); an omission against a nonzero authority, and an explicit `null`
+under any authority, still reject. Missing optional expanded
 fields preserve the game and leave the dependent typed facts (such as assist
 locations) null in the ledger. A null assist-location counter becomes a
 governed zero at derivation time only when the retained split proves it
@@ -1168,10 +1173,11 @@ team-summary fields such as possessions remain team authority and are never
 compared against summed player possessions. The `team_results` envelope is
 required diagnostic/parity evidence for every accepted raw game, not an
 optional extra: both Home and Away `FullGame` envelopes must exist with every
-governed diagnostic count present and well-formed, each must reconcile with the
-declared authority, and a missing envelope, a missing/null/malformed diagnostic
-field, or a reconciliation failure rejects the candidate atomically. It never
-populates persisted facts.
+governed diagnostic count present and well-formed (or omitted only where the
+declared authority for that count is zero), each must reconcile with the
+declared authority, and a missing envelope, a null/malformed diagnostic field,
+an omission against a nonzero authority, or a reconciliation failure rejects
+the candidate atomically. It never populates persisted facts.
 
 The repository boundary repeats these invariants for direct callers.
 `validate_complete_game` re-checks the strict evidence on every archived row —
