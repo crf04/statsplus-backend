@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event, Thread
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select, update
@@ -12,6 +13,7 @@ from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
+from app.models.projection_archive import ClosingProjectionSet
 from app.providers.dfs import (
     CoverageEvidence,
     NBAMarketQuery,
@@ -22,6 +24,12 @@ from app.services.projection_collection import (
     ProjectionCollectionCoordinator,
     ProjectionCollectionSettings,
 )
+from app.services.projection_archive import (
+    ProjectionArchive,
+    ProjectionArchiveReadScope,
+    ProjectionRecordingService,
+)
+from app.services.statistic_catalog import StatisticCatalog
 
 
 SEASON = "2025-26"
@@ -386,6 +394,7 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
     assert board.calls == [("dabble", "prizepicks")]
     assert [provider for provider, _ in recorder.snapshots] == ["dabble"]
     assert [item["provider"] for item in recorder.failures] == ["prizepicks"]
+    assert recorder.closing_events == []
     with engine.connect() as connection:
         state = connection.execute(
             select(ProjectionCollectionProviderState.__table__).where(
@@ -504,6 +513,54 @@ def test_board_defect_records_bounded_failure_for_every_due_provider(tmp_path):
     assert {
         provider["failure"]["reason"] for provider in diagnostics["providers"]
     } == {"upstream_error"}
+    assert recorder.closing_events == []
+
+
+def test_second_run_with_all_started_games_closed_skips_freeze_transactions(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-collection-closed.sqlite3'}")
+    run_migrations(engine)
+    query = NBAMarketQuery(season=SEASON)
+    archive = ProjectionArchive(engine, StatisticCatalog.load_default())
+    recorder = ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    )
+    event = _event(
+        scheduled_at=NOW - timedelta(minutes=5),
+        status_text="Q1",
+        status_code=2,
+    )
+    event["first_observed_started_at"] = NOW.isoformat()
+    coordinator = ProjectionCollectionCoordinator(
+        engine,
+        board_service=FakeBoard(),
+        recording_service=recorder,
+        event_reader=lambda _season: (event,),
+        season=SEASON,
+        settings=_settings(),
+        providers=("dabble",),
+        clock=lambda: NOW,
+        owner="closed-game-collector",
+    )
+
+    first = coordinator.run()
+    assert first.status == "no_work"
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(ClosingProjectionSet).where(
+                ClosingProjectionSet.canonical_game_id == event["nba_game_id"]
+            )
+        ).scalar_one_or_none() is not None
+
+    with patch.object(
+        recorder,
+        "freeze_closing_projection_sets",
+        wraps=recorder.freeze_closing_projection_sets,
+    ) as freeze:
+        second = coordinator.run()
+
+    assert second == first
+    freeze.assert_not_called()
 
 
 def test_missing_board_outcome_records_bounded_provider_failure(tmp_path):

@@ -22,6 +22,7 @@ from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
+from app.models.projection_archive import ClosingProjectionSet
 from app.providers.dfs import NBAMarketQuery, ProviderSnapshot
 from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.projection_archive import projection_query_key
@@ -191,6 +192,49 @@ class ProjectionCollectionCoordinator:
             events=started,
             query=NBAMarketQuery(season=self.season),
             created_at=created_at,
+        )
+
+    def _closing_providers(self, selected: tuple[str, ...]) -> tuple[str, ...]:
+        scopes = getattr(self.recording_service, "scopes", None)
+        if isinstance(scopes, Mapping):
+            configured = self._normalize_providers(scopes)
+            if configured:
+                return configured
+        return selected
+
+    def _has_unclosed_started_events(
+        self,
+        events: Iterable[Mapping[str, Any]],
+        providers: tuple[str, ...],
+    ) -> bool:
+        started = tuple(
+            event
+            for event in events
+            if is_started_event(event) and str(event.get("nba_game_id", "")).strip()
+        )
+        if not started or not providers:
+            return False
+        game_ids = tuple(
+            dict.fromkeys(str(event["nba_game_id"]).strip() for event in started)
+        )
+        query_key = projection_query_key(NBAMarketQuery(season=self.season))
+        table = ClosingProjectionSet.__table__
+        with self.engine.connect() as connection:
+            existing = {
+                (str(row["provider"]), str(row["canonical_game_id"]))
+                for row in connection.execute(
+                    select(table.c.provider, table.c.canonical_game_id).where(
+                        table.c.season == self.season,
+                        table.c.query_key == query_key,
+                        table.c.provider.in_(providers),
+                        table.c.canonical_game_id.in_(game_ids),
+                    )
+                ).mappings()
+            }
+        return any(
+            (provider, str(event["nba_game_id"]).strip()) not in existing
+            for event in started
+            for provider in providers
         )
 
     @contextmanager
@@ -424,7 +468,10 @@ class ProjectionCollectionCoordinator:
         selected = self._normalize_providers(providers or self.providers)
         events = tuple(self.event_reader(self.season))
         decision = self._schedule(now, selected, events)
-        has_started_events = any(is_started_event(event) for event in events)
+        closing_providers = self._closing_providers(selected)
+        has_started_events = self._has_unclosed_started_events(
+            events, closing_providers
+        )
         if decision is None and not has_started_events:
             return CollectionRunResult("no_work", "not_due")
         lease = self._acquire_lease(now)
@@ -479,7 +526,7 @@ class ProjectionCollectionCoordinator:
                         duration_ms=duration_ms,
                     )
                 self._freeze_started_events(
-                    tuple(self.event_reader(self.season)),
+                    events,
                     created_at=self._utc(self.clock()),
                 )
                 return CollectionRunResult(
@@ -598,7 +645,7 @@ class ProjectionCollectionCoordinator:
                     duration_ms=duration_ms,
                 )
             self._freeze_started_events(
-                tuple(self.event_reader(self.season)),
+                events,
                 created_at=self._utc(self.clock()),
             )
             status = "complete" if failures == 0 and successes == len(decision.providers) else "partial"

@@ -21,6 +21,7 @@ from app.config.settings import (
 from app.migrations import run_migrations
 from app.models.event_catalog import EventCatalogEntry
 from app.services.event_catalog_service import EventCatalogService
+from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.nba_stats_adapter import normalize_whole_season_schedule
 from app.services.slate_service import SlateService
 
@@ -236,6 +237,24 @@ def test_refresh_persists_the_first_governed_started_observation(tmp_path):
         if event["nba_game_id"] == "0022500001"
     )
     assert final["first_observed_started_at"] == first_observed_started_at.isoformat()
+
+
+@pytest.mark.parametrize("evidence", ({}, []))
+def test_empty_postponement_evidence_does_not_suppress_started_transition(
+    tmp_path, evidence
+):
+    engine = _engine(tmp_path)
+    frame = normalize_whole_season_schedule(_frame(), season="2025-26").iloc[[0]].copy()
+    frame.loc[:, "status_code"] = 2
+    frame.loc[:, "status_text"] = "Q1"
+    frame.at[frame.index[0], "postponement_evidence"] = evidence
+    refreshed_at = datetime(2025, 10, 23, 1, tzinfo=timezone.utc)
+
+    EventCatalogRepository(engine).publish("2025-26", frame, refreshed_at)
+
+    event = EventCatalogRepository(engine).list_events("2025-26")[0]
+    assert event["postponement_evidence"] == evidence
+    assert event["first_observed_started_at"] == refreshed_at.isoformat()
 
 
 def test_replacement_game_id_is_a_new_event_without_heuristic_transfer(tmp_path):

@@ -46,11 +46,6 @@ class EventCatalogRepository:
             for record in frame.to_dict(orient="records"):
                 game_id = str(record["nba_game_id"])
                 values = {column: record[column] for column in provider_columns}
-                if isinstance(values["postponement_evidence"], (dict, list)):
-                    values["postponement_evidence"] = json.dumps(
-                        values["postponement_evidence"], sort_keys=True
-                    )
-                values["last_seen_at"] = refreshed_at
                 existing = connection.execute(
                     select(
                         table.c.nba_game_id,
@@ -62,6 +57,11 @@ class EventCatalogRepository:
                     if is_started_event({"nba_game_id": game_id, **values})
                     else None
                 )
+                if isinstance(values["postponement_evidence"], (dict, list)):
+                    values["postponement_evidence"] = json.dumps(
+                        values["postponement_evidence"], sort_keys=True
+                    )
+                values["last_seen_at"] = refreshed_at
                 if existing is None:
                     connection.execute(insert(table).values(
                         nba_game_id=game_id,

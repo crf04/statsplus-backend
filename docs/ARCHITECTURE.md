@@ -599,6 +599,8 @@ builds a season-sized generation-ID parameter list, and a delayed provider
 delivery can remain immutable archive evidence without entering a set after
 the game-start boundary. Repeating a close returns the original set and cannot
 move its start time.
+Enabling a provider after a game has closed does not backfill its closing set;
+that provider reads `missing` for the game permanently.
 
 The archive reader performs a game-ID-scoped Event Catalog lookup before
 choosing a pool; it neither scans a season nor writes archive state. Scheduled

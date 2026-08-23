@@ -1211,6 +1211,12 @@ def test_started_reader_is_read_only_and_uses_scoped_event_lookup(tmp_path):
             select(func.count()).select_from(ClosingProjectionSet)
         ).scalar_one() == 0
 
+    reader.event_reader.calls.clear()
+    assert ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    ) is not None
+    assert reader.event_reader.calls == [(SEASON, (GAME_ID,))]
+
 
 def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-mixed-state.sqlite3'}")

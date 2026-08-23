@@ -1807,7 +1807,26 @@ class LatestProjectionPlayerPoolReader:
         self.event_reader = event_reader
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
-        return self.get_pool(season=season, game_ids=(game_id,))
+        pool, _is_closing = self.get_pool_for_game_with_closing_state(
+            season=season, game_id=game_id
+        )
+        return pool
+
+    def get_pool_for_game_with_closing_state(
+        self, *, season: str, game_id: str
+    ) -> tuple[PlayerPool, bool]:
+        if season != self.scope.query.season:
+            raise ValueError("projection archive read season is outside its scope")
+        requested_games = (str(game_id),)
+        started_games = self._started_games(season, requested_games)
+        return (
+            self._pool_for_requested_games(
+                season=season,
+                requested_games=requested_games,
+                started_games=started_games,
+            ),
+            bool(started_games),
+        )
 
     def is_closing_game(self, *, season: str, game_id: str) -> bool:
         """Return whether the governed event has crossed its start fence."""
@@ -1821,6 +1840,19 @@ class LatestProjectionPlayerPoolReader:
         if not requested_games:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
         started_games = self._started_games(season, requested_games)
+        return self._pool_for_requested_games(
+            season=season,
+            requested_games=requested_games,
+            started_games=started_games,
+        )
+
+    def _pool_for_requested_games(
+        self,
+        *,
+        season: str,
+        requested_games: tuple[str, ...],
+        started_games: dict[str, datetime],
+    ) -> PlayerPool:
         if started_games:
             return self._get_pool_with_closing_sets(
                 season=season,
@@ -2419,10 +2451,10 @@ class ProjectionSelectionPlayerPoolReader:
         season: str,
         game_id: str,
     ) -> PlayerPool | None:
-        pool = self.reader.get_pool_for_game(season=season, game_id=game_id)
-        if pool.freshness.get("state") == "missing" and not self.reader.is_closing_game(
+        pool, is_closing = self.reader.get_pool_for_game_with_closing_state(
             season=season, game_id=game_id
-        ):
+        )
+        if pool.freshness.get("state") == "missing" and not is_closing:
             return None
         return pool
 
@@ -2553,14 +2585,44 @@ class ProjectionRecordingService:
 
         require_projection_archive_schema(self.archive.engine)
         created = assume_utc(created_at)
+        query_key = projection_query_key(query)
+        scopes = {
+            provider: self._scope_for(provider, query)
+            for provider in sorted(self.scopes)
+        }
+        started_events = tuple(
+            event
+            for event in events
+            if str(event.get("nba_game_id", "")).strip()
+            and _projection_closing_start_fence(event) is not None
+        )
+        game_ids = tuple(
+            dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events)
+        )
+        existing: set[tuple[str, str]] = set()
+        if game_ids and scopes:
+            table = ClosingProjectionSet.__table__
+            with self.archive.engine.connect() as connection:
+                existing = {
+                    (str(row["provider"]), str(row["canonical_game_id"]))
+                    for row in connection.execute(
+                        select(table.c.provider, table.c.canonical_game_id).where(
+                            table.c.season == query.season,
+                            table.c.query_key == query_key,
+                            table.c.provider.in_(tuple(scopes)),
+                            table.c.canonical_game_id.in_(game_ids),
+                        )
+                    ).mappings()
+                }
         results: list[ClosingProjectionSetResult] = []
-        for event in events:
+        for event in started_events:
             game_id = str(event.get("nba_game_id", "")).strip()
             fence = _projection_closing_start_fence(event)
             if not game_id or fence is None:
                 continue
-            for provider in sorted(self.scopes):
-                scope = self._scope_for(provider, query)
+            for provider, scope in scopes.items():
+                if (provider, game_id) in existing:
+                    continue
                 results.append(
                     self.archive.freeze_closing_projection_set(
                         provider=provider,
