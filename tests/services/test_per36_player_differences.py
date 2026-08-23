@@ -119,7 +119,7 @@ def test_rule_classifies_in_bound_corrections_as_semantic_and_non_blocking():
 
 
 def test_rule_leaves_out_of_bound_differences_hard():
-    actual = _actual(points=12, minutes=1988.9833333333333 + 2.5)
+    actual = _actual(points=17, minutes=1988.9833333333333 + 2.5)
     found = per36_player_differences(
         2544, expected=_expected(), expected_raw=_raw(), actual=actual, semantic_rule=RULE,
     )

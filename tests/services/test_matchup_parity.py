@@ -507,7 +507,7 @@ def test_scorekeeper_rule_makes_in_bound_count_and_rank_differences_adjudicable(
 def test_scorekeeper_rule_leaves_out_of_bound_counts_and_their_ranks_hard():
     legacy = _replace_fact(
         _materialization(), surface="traditional", team_id=TEAM_A, stat="OPP_REB",
-        raw_value=float(TEAM_A) + 2,
+        raw_value=float(TEAM_A) + 7,
     )
     report = _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
     assert report.hard_failure
