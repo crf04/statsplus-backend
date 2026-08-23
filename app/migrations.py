@@ -2046,6 +2046,18 @@ def _add_projection_observation_prices(connection: Connection) -> None:
         )
 
 
+def _create_saved_filter_sets_table(connection: Connection) -> None:
+    """Create account-private saved Log Workspace filter sets (#194).
+
+    The table carries its own indexes: a newest-first listing index and a
+    per-account functional unique index on ``lower(name)``.  Both SQLite and
+    PostgreSQL support the expression index, so no dialect branch is needed.
+    """
+    from app.models.saved_filter_set import SavedFilterSet
+
+    SavedFilterSet.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2143,6 +2155,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         46,
         "046_projection_observation_prices",
         _add_projection_observation_prices,
+    ),
+    Migration(
+        47,
+        "047_create_saved_filter_sets",
+        _create_saved_filter_sets_table,
     ),
 )
 
