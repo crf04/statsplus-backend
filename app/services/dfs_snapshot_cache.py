@@ -42,6 +42,8 @@ from app.providers.dfs import (
     MarketThreshold,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
     ProviderSnapshotProvider,
     RetrievalContext,
@@ -58,7 +60,17 @@ from app.utils.telemetry import ProviderResponseError
 
 
 SNAPSHOT_SCHEMA = "statsplus.provider_snapshot"
-SNAPSHOT_SCHEMA_VERSION = 1
+#: Version 2 added the canonical price triple to every selection.  A document
+#: is read back in the version it declares and re-encoded in that same version,
+#: so every snapshot archived before this change keeps the exact bytes -- and
+#: therefore the exact checksum -- it was stored under.  Bump this constant, and
+#: extend the per-version key sets below, whenever the canonical form changes.
+SNAPSHOT_SCHEMA_VERSION = 2
+SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS = (1, 2)
+#: The selection keys each schema version writes.  A reader that finds version 1
+#: lets the shared contract derive the price triple from the fields it does
+#: carry, which is exactly what version 1 documents meant.
+_SELECTION_PRICE_KEYS = ("price_kind", "price_value", "price_scope")
 DEFAULT_FRESH_SECONDS = 5 * 60
 DEFAULT_STALE_IF_ERROR_SECONDS = 30 * 60
 
@@ -66,6 +78,8 @@ _SCORING_PERIOD_VALUES = frozenset(period.value for period in ScoringPeriod)
 _SELECTION_DIRECTION_VALUES = frozenset(
     direction.value for direction in SelectionDirection
 )
+_PRICE_KIND_VALUES = frozenset(kind.value for kind in PriceKind)
+_PRICE_SCOPE_VALUES = frozenset(scope.value for scope in PriceScope)
 
 #: Delete one key only while it still holds the exact value this worker knows.
 COMPARE_AND_DELETE_SCRIPT = (
@@ -319,7 +333,7 @@ def _modifier(value: Any) -> SelectionModifier:
     return result
 
 
-def _selection(value: Any) -> Selection:
+def _selection(value: Any, *, schema_version: int) -> Selection:
     data = _mapping(value, label="selection")
     expected = {
         "selection_id",
@@ -331,6 +345,8 @@ def _selection(value: Any) -> Selection:
         "american_price",
         "decimal_price",
     }
+    if schema_version >= 2:
+        expected |= set(_SELECTION_PRICE_KEYS)
     _keys(data, expected, label="selection")
     modifiers = data["modifiers"]
     if not isinstance(modifiers, list):
@@ -344,6 +360,12 @@ def _selection(value: Any) -> Selection:
     direction = decoded["direction"]
     if isinstance(direction, str) and direction in _SELECTION_DIRECTION_VALUES:
         decoded["direction"] = SelectionDirection(direction)
+    kind = decoded.get("price_kind")
+    if isinstance(kind, str) and kind in _PRICE_KIND_VALUES:
+        decoded["price_kind"] = PriceKind(kind)
+    scope = decoded.get("price_scope")
+    if isinstance(scope, str) and scope in _PRICE_SCOPE_VALUES:
+        decoded["price_scope"] = PriceScope(scope)
     result = _nested(
         decoded,
         Selection,
@@ -355,7 +377,7 @@ def _selection(value: Any) -> Selection:
     return result
 
 
-def _market(value: Any) -> PlayerProjectionMarket:
+def _market(value: Any, *, schema_version: int) -> PlayerProjectionMarket:
     data = _mapping(value, label="market")
     expected = {
         "provider",
@@ -405,7 +427,9 @@ def _market(value: Any) -> PlayerProjectionMarket:
     selections = data["selections"]
     if not isinstance(selections, list):
         raise SnapshotCacheError("snapshot market selections schema is invalid")
-    decoded["selections"] = tuple(_selection(item) for item in selections)
+    decoded["selections"] = tuple(
+        _selection(item, schema_version=schema_version) for item in selections
+    )
     decoded["appearance"] = _appearance(data["appearance"])
     result = _nested(
         decoded,
@@ -455,13 +479,40 @@ def _query_payload(query: NBAMarketQuery) -> dict[str, Any]:
     }
 
 
+def _encoded_markets(
+    markets: tuple[PlayerProjectionMarket, ...],
+    *,
+    schema_version: int,
+) -> Any:
+    """Encode markets in the shape the requested schema version defines."""
+
+    encoded = _encoded(markets)
+    if schema_version >= 2:
+        return encoded
+    for market in encoded:
+        for selection in market["selections"]:
+            for key in _SELECTION_PRICE_KEYS:
+                selection.pop(key, None)
+    return encoded
+
+
 def serialize_provider_snapshot(
     snapshot: ProviderSnapshot,
     query: NBAMarketQuery | None = None,
     *,
     allow_partial: bool = False,
+    schema_version: int = SNAPSHOT_SCHEMA_VERSION,
 ) -> str:
-    """Serialize one immutable snapshot using a strict versioned schema."""
+    """Serialize one immutable snapshot using a strict versioned schema.
+
+    ``schema_version`` exists so an archived document can be re-encoded in the
+    version it was written under and still compare byte-for-byte against the
+    stored text.  New documents are always written at
+    :data:`SNAPSHOT_SCHEMA_VERSION`.
+    """
+
+    if schema_version not in SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS:
+        raise ValueError("snapshot schema version is unsupported")
 
     if not isinstance(snapshot, ProviderSnapshot):
         raise TypeError("snapshot must be ProviderSnapshot")
@@ -476,11 +527,13 @@ def serialize_provider_snapshot(
         raise TypeError("query must be NBAMarketQuery")
     payload = {
         "schema": SNAPSHOT_SCHEMA,
-        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "contract_version": snapshot.contract_version,
         "provider": snapshot.provider,
         "status": snapshot.status.value,
-        "markets": _encoded(snapshot.markets),
+        "markets": _encoded_markets(
+            snapshot.markets, schema_version=schema_version
+        ),
         "coverage": _encoded(snapshot.coverage),
         "retrieved_at": _encoded(snapshot.retrieved_at),
         "query": _query_payload(query),
@@ -549,7 +602,7 @@ def deserialize_provider_snapshot(
     if (
         isinstance(schema_version, bool)
         or not isinstance(schema_version, int)
-        or schema_version != SNAPSHOT_SCHEMA_VERSION
+        or schema_version not in SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS
     ):
         raise SnapshotCacheError("snapshot schema version is incompatible")
     contract_version = data["contract_version"]
@@ -592,7 +645,9 @@ def deserialize_provider_snapshot(
     decoded = {
         "provider": provider,
         "status": data["status"],
-        "markets": tuple(_market(item) for item in markets),
+        "markets": tuple(
+            _market(item, schema_version=schema_version) for item in markets
+        ),
         "coverage": _coverage(data["coverage"]),
         "retrieved_at": data["retrieved_at"],
         "contract_version": contract_version,
@@ -613,6 +668,7 @@ def deserialize_provider_snapshot(
             snapshot,
             encoded_query,
             allow_partial=allow_partial,
+            schema_version=schema_version,
         )
     except ValueError as error:
         # A decoded value the canonical encoder refuses -- a nonfinite float

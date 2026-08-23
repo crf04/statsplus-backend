@@ -26,6 +26,8 @@ from app.providers.dfs import (
     MarketThreshold,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
     RetrievalContext,
     Selection,
@@ -37,6 +39,7 @@ from app.providers.dfs import (
 )
 from app.services.dfs_snapshot_cache import (
     COMPARE_AND_DELETE_SCRIPT,
+    SNAPSHOT_SCHEMA_VERSION,
     deserialize_provider_snapshot,
     ProviderSnapshotCache,
     ProviderSnapshotCacheCoordinator,
@@ -2509,3 +2512,86 @@ def test_a_fresh_window_equal_to_its_stale_ceiling_is_accepted() -> None:
     clock.advance(0.000001)
     with pytest.raises(TimeoutError):
         cache.get_snapshot(NBAMarketQuery(), _context())
+
+
+def test_the_canonical_price_triple_survives_the_document_round_trip() -> None:
+    priced = replace(
+        _market_payload_snapshot(),
+        markets=(
+            replace(
+                _market_payload_snapshot().markets[0],
+                selections=(
+                    Selection(
+                        selection_id="selection-1",
+                        direction="higher",
+                        american_price=-112,
+                        decimal_price="1.900",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    document = serialize_provider_snapshot(priced, NBAMarketQuery())
+    payload = json.loads(document)
+    decoded = deserialize_provider_snapshot(document, expected_query=NBAMarketQuery())
+    selection = decoded.markets[0].selections[0]
+
+    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION
+    assert payload["markets"][0]["selections"][0]["price_kind"] == "american"
+    assert payload["markets"][0]["selections"][0]["price_value"] == "-112"
+    assert payload["markets"][0]["selections"][0]["price_scope"] == "selection"
+    assert (selection.price_kind, selection.price_value, selection.price_scope) == (
+        PriceKind.AMERICAN,
+        Decimal("-112"),
+        PriceScope.SELECTION,
+    )
+    assert serialize_provider_snapshot(decoded, NBAMarketQuery()) == document
+
+
+def test_a_document_is_read_and_re_encoded_in_the_version_it_declares() -> None:
+    snapshot = replace(
+        _market_payload_snapshot(),
+        markets=(
+            replace(
+                _market_payload_snapshot().markets[0],
+                selections=(
+                    Selection(
+                        selection_id="selection-1",
+                        direction="higher",
+                        modifiers=(
+                            SelectionModifier("1.5", "multiplier", "selection"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    archived = serialize_provider_snapshot(snapshot, NBAMarketQuery(), schema_version=1)
+    payload = json.loads(archived)
+
+    assert payload["schema_version"] == 1
+    assert "price_kind" not in payload["markets"][0]["selections"][0]
+
+    # An archived document keeps its exact bytes, so its checksum keeps its
+    # meaning, while the triple is still available to every reader.
+    decoded = deserialize_provider_snapshot(archived, expected_query=NBAMarketQuery())
+    selection = decoded.markets[0].selections[0]
+
+    assert (selection.price_kind, selection.price_value, selection.price_scope) == (
+        PriceKind.MULTIPLIER,
+        Decimal("1.5"),
+        PriceScope.ENTRY,
+    )
+    assert (
+        serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=1)
+        == archived
+    )
+    with pytest.raises(ValueError, match="schema version is unsupported"):
+        serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=3)
+    with pytest.raises(SnapshotCacheError, match="schema version is incompatible"):
+        deserialize_provider_snapshot(
+            _canonical({**payload, "schema_version": 3}),
+            expected_query=NBAMarketQuery(),
+        )

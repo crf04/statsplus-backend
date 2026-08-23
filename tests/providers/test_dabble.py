@@ -110,7 +110,7 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     ]
     assert first.selections[0].selection_id == "selection-over"
     assert first.selections[0].modifiers[0].value == Decimal("1.5")
-    assert first.selections[0].modifiers[0].kind == "multiplier"
+    assert first.selections[0].modifiers[0].kind == "payout_multiplier"
     assert first.selections[0].modifiers[0].scope == "selection"
     assert first.selections[0].modifiers[0].label is None
     assert first.variant.value == "unknown"
