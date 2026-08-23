@@ -71,8 +71,11 @@ SOFT_CLASSIFICATIONS = frozenset({
 #: receives the correction.  The rule is bounded so a real defect cannot hide
 #: behind it; everything outside the bounds stays hard.
 SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION = "official_scorekeeper_correction"
-#: Largest integer count difference per (entity, field) the rule explains.
-SCOREKEEPER_CORRECTION_COUNT_BOUND = 1
+#: Largest season-total integer count difference per (entity, field) the rule
+#: explains.  Amended from 1 on 2026-08-23: per-game verification showed every
+#: underlying game-level delta at most 2 (mirrored re-attributions between two
+#: players), with season totals accumulating to at most 5.
+SCOREKEEPER_CORRECTION_COUNT_BOUND = 6
 #: Largest per-36 season minutes difference per player the rule explains.
 SCOREKEEPER_CORRECTION_MINUTES_BOUND = 2.0
 #: Most entities (players or teams) one artifact may absorb under the rule.

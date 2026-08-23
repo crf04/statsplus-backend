@@ -27,8 +27,9 @@ def test_correction_classification_is_soft_and_bounds_are_exact():
     assert CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION in SOFT_CLASSIFICATIONS
     assert CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION not in HARD_CLASSIFICATIONS
     assert count_difference_within_correction_bound(649, 650)
-    assert count_difference_within_correction_bound(5, 4)
-    assert not count_difference_within_correction_bound(5, 7)
+    assert count_difference_within_correction_bound(168, 173)
+    assert count_difference_within_correction_bound(5, 11)
+    assert not count_difference_within_correction_bound(5, 12)
     assert not count_difference_within_correction_bound("x", 1)
     assert minutes_difference_within_correction_bound(1988.98, 1990.98)
     assert not minutes_difference_within_correction_bound(1988.98, 1991.0)

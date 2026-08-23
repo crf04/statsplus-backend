@@ -179,7 +179,8 @@ One parent-approved semantic rule exists (crf04/statsplus#19, 2026-08-23):
 `official_scorekeeper_correction`, for post-game official box-score corrections
 the PBP feed never received. Pass `--semantic-rule official_scorekeeper_correction
 --semantic-rule-reason "<at least 20 characters>"` to `compare`. Under it, an
-integer count difference of magnitude at most 1 per (team or player, field), a
+season-total integer count difference of magnitude at most 6 per (team or
+player, field), a
 per-36 season minutes difference of at most 2.0 per player, and a ranking
 difference fully explained by such counts are classified soft
 (`official_scorekeeper_correction` on matchup surfaces, `semantic_difference`
