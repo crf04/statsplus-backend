@@ -1601,13 +1601,20 @@ league denominator. Player Diets remain raw and Season-only, while Matchup
 Scores cross that Season evidence with each independently stored team window.
 The score implementation remains inside `MatchupService`, beside the stored
 inputs it serializes; it has no provider boundary and performs no request-time
-fallback. Request-local indexes traverse each stored window's league/team
+fallback. The play-types crossing is the one exception: it lives in
+`app.domain.play_type_matchup` so the Log Workspace rating scores the same
+definition instead of a second copy of it. Request-local indexes traverse each stored window's league/team
 metrics once, and a per-player/window memo shares primitive scores across a
 posted primitive row and every combo that consumes it. Components unavailable
 from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
 score applies each raw observed share to the slice's fractional matchup
 difference, so the unobserved residual in an admitted rounded partition has a
-neutral baseline without share normalization or fabricated evidence. A slice
+neutral baseline without share normalization or fabricated evidence. Every
+Base except play types must arrive as a whole partition; Synergy publishes a
+player's play-type row only where the sample is large enough to rate, so a
+play-type Diet is complete when every observed slice is governed, and its
+cell is marked thin when the observed shares cover less than 0.85 of the
+player's possessions. A slice
 with exact league/opponent `0/0` is likewise a neutral structural zero; nonzero
 opponent evidence against a non-positive league denominator fails closed, and
 an all-structural-zero component remains absent. A
@@ -1781,7 +1788,12 @@ identities degrade only their Base as
 `unavailable/provider_invalid_response`; validation is repeated at repository
 publication as a direct-caller guard. Play types store provider possession
 share and possession volume directly; they never reuse the legacy
-percentage-of-points transform. Shot
+percentage-of-points transform. Synergy repeats a traded player once per team
+stint, so the collector combines a player's stints for a play type into the one
+fact its identity allows: volume and games played add, and the share is total
+possessions over the team possessions each stint's own share recovers. A stint
+whose share is not positive has no recoverable denominator and degrades the
+Base rather than being dropped. Shot
 types store provider FGA frequency and FGA. Shot zones store five nonoverlapping
 display slices, using the provider's aggregate `Corner 3` and excluding its
 duplicating left/right children and Backcourt. Assist-location volume uses the

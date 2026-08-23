@@ -860,7 +860,9 @@ def test_unobserved_rounded_diet_residual_is_neutral_for_primitives_and_combos()
     }
 
 
-def test_missing_diet_slices_fail_closed_with_empty_components_and_null_blend():
+def test_missing_diet_slices_fail_closed_except_for_the_partial_play_type_partition():
+    # Synergy omits a play type a player rarely runs, so ten observed slices
+    # are a complete play-type Diet; a shot-type Diet missing a slice is not.
     player = _service(
         markets=("PTS", "FGA"),
         facts=(
@@ -886,13 +888,37 @@ def test_missing_diet_slices_fail_closed_with_empty_components_and_null_blend():
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
     assert player["scores"]["PTS"]["season"] == {
-        "components": {},
-        "blend": None,
+        "components": {"play_types": {"value": 0.1, "thin": False}},
+        "blend": {"value": 0.1, "thin": False},
     }
     assert player["scores"]["FGA"]["season"] == {
         "components": {},
         "blend": None,
     }
+
+
+def test_play_type_coverage_below_the_floor_scores_but_is_thin():
+    def score(shares):
+        return _service(
+            markets=("PTS",),
+            facts=tuple(
+                _fact("play_types", slice_key, share, 100)
+                for slice_key, share in shares
+            ),
+            season_metrics=(
+                ("play_types", "Transition", "PTS", 10.0, 12.0),
+                ("play_types", "Isolation", "PTS", 20.0, 18.0),
+            ),
+        ).get_matchup(game_id=GAME_ID)["players"][0]["scores"]["PTS"]["season"]
+
+    # 0.85 observed is the floor, not thin; the unobserved residual is neutral.
+    at_floor = score((("Transition", 0.25), ("Isolation", 0.6)))
+    assert at_floor["components"]["play_types"]["thin"] is False
+    assert at_floor["components"]["play_types"]["value"] == -0.01
+
+    below = score((("Transition", 0.25), ("Isolation", 0.5)))
+    assert below["components"]["play_types"] == {"value": 0.0, "thin": True}
+    assert below["blend"] == {"value": 0.0, "thin": True}
 
 
 def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_row():

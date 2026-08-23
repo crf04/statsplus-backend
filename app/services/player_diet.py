@@ -58,6 +58,15 @@ _PROVIDERS = {
 
 
 @dataclass(frozen=True, slots=True)
+class _PlayTypeStint:
+    """One team stint of a player's Synergy row for a single play type."""
+
+    share: float
+    possessions: float
+    games_played: int
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerDietFact:
     player_id: int
     base: str
@@ -719,24 +728,64 @@ class PlayerDietService:
             )
             if frame.empty:
                 raise ValueError("one configured Synergy play type was not observed")
+            stints: dict[int, list[_PlayTypeStint]] = defaultdict(list)
             for row in self._flat_frame(frame).to_dict(orient="records"):
                 self._require_fields(
                     row, "PLAYER_ID", "PLAY_TYPE", "TYPE_GROUPING", "GP", "POSS_PCT", "POSS"
                 )
                 if row["PLAY_TYPE"] != play_type or row["TYPE_GROUPING"] != "Offensive":
                     raise ValueError("Synergy player play-type identity is inconsistent")
+                stints[self._joined_player_id(row["PLAYER_ID"], canonical_ids)].append(
+                    _PlayTypeStint(
+                        share=self._number(row["POSS_PCT"]),
+                        possessions=self._number(row["POSS"]),
+                        games_played=self._positive_int(row["GP"]),
+                    )
+                )
+            for player_id, player_stints in stints.items():
+                share, possessions, games_played = self._combine_play_type_stints(
+                    player_stints
+                )
                 facts.append(
-                    self._fact(
-                        row,
-                        canonical_ids,
+                    PlayerDietFact(
+                        player_id=player_id,
                         base="play_types",
                         slice_key=play_type,
-                        share=row["POSS_PCT"],
-                        volume=row["POSS"],
-                        games_played=row["GP"],
+                        share=share,
+                        volume=possessions,
+                        games_played=games_played,
+                        volume_unit=_VOLUME_UNITS["play_types"],
+                        provider=_PROVIDERS["play_types"],
                     )
                 )
         return facts
+
+    @staticmethod
+    def _combine_play_type_stints(
+        stints: Sequence[_PlayTypeStint],
+    ) -> tuple[float, float, int]:
+        """Combine a traded player's per-team Synergy rows into one Diet fact.
+
+        Synergy reports a player once per team stint, and each stint's share is
+        a fraction of that stint's team possessions, so the shares are not
+        commensurable until each is re-expanded to its own denominator. A stint
+        whose share is not positive carries no recoverable denominator, so it
+        fails the whole Base closed rather than being dropped or divided by. A
+        lone stint keeps its provider share verbatim: dividing it out and back
+        again could perturb the value for no gain.
+        """
+        possessions = sum(stint.possessions for stint in stints)
+        games_played = sum(stint.games_played for stint in stints)
+        if len(stints) == 1:
+            return stints[0].share, possessions, games_played
+        team_possessions = 0.0
+        for stint in stints:
+            if stint.share <= 0:
+                raise ValueError("a Synergy play-type stint share must be positive")
+            team_possessions += stint.possessions / stint.share
+        if team_possessions <= 0:
+            raise ValueError("Synergy play-type stint possessions must be positive")
+        return possessions / team_possessions, possessions, games_played
 
     def _collect_shot_types(
         self,
