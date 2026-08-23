@@ -5,7 +5,7 @@ import json
 import hashlib
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
@@ -799,3 +799,132 @@ def test_benchmark_rejects_unplanned_governed_full_scan():
     )
 
     assert not _plans_are_indexed(evidence, measured_statements=statements)
+
+
+def _seed_player_game_log_publication(engine, *, points: int = 25):
+    """Compose one active player-log publication and its indexed projection."""
+
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "player_game_logs",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    return service.compose(
+        "player_game_logs",
+        season="2025-26",
+        cutoff=NOW,
+        payload={
+            "rows": [
+                {
+                    "season": "2025-26",
+                    "season_type": "Regular Season",
+                    "player_id": 2544,
+                    "game_id": "0022500001",
+                    "player_name": "Player 2544",
+                    "game_date": "2026-01-02",
+                    "team_id": 1,
+                    "team_tricode": "AAA",
+                    "opponent_team_id": 2,
+                    "opponent_team_tricode": "BBB",
+                    "is_home": True,
+                    "minutes": 32.5,
+                    "points": points,
+                    "rebounds": 8,
+                    "assists": 7,
+                    "field_goals_made": 9,
+                    "field_goals_attempted": 18,
+                    "three_pointers_made": 3,
+                    "three_pointers_attempted": 7,
+                    "free_throws_made": 4,
+                    "free_throws_attempted": 5,
+                    "offensive_rebounds": 2,
+                    "defensive_rebounds": 6,
+                    "turnovers": 4,
+                    "steals": 2,
+                    "blocks": 1,
+                    "personal_fouls": 2,
+                }
+            ]
+        },
+    )
+
+
+def test_snapshot_defers_only_the_requested_projection_stream(tmp_path):
+    """One generation mixes a projected stream with hydrated neighbours."""
+
+    engine = _db(tmp_path)
+    _seed_player_game_log_publication(engine)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "neighbour_stream_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    service.compose(
+        "neighbour_stream_test",
+        season="2025-26",
+        cutoff=NOW,
+        payload={"value": 1},
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    snapshot = reader.snapshot(
+        ("player_game_logs", "neighbour_stream_test"),
+        season="2025-26",
+        projection_only_keys=frozenset({"player_game_logs"}),
+    )
+
+    logs = snapshot.read("player_game_logs")
+    assert logs.payload is None
+    assert logs.projection_ready is True
+    assert logs.available is True
+    assert logs.decoded is None
+    neighbour = snapshot.read("neighbour_stream_test")
+    assert neighbour.payload == {"value": 1}
+    assert neighbour.projection_ready is False
+
+
+def test_snapshot_without_projection_keys_still_hydrates_player_logs(tmp_path):
+    engine = _db(tmp_path)
+    _seed_player_game_log_publication(engine, points=31)
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    read = reader.snapshot(("player_game_logs",), season="2025-26").read(
+        "player_game_logs"
+    )
+
+    assert read.payload is not None
+    assert read.decoded[0].points == 31
+
+
+def test_snapshot_projection_stream_without_projected_rows_fails_closed(tmp_path):
+    engine = _db(tmp_path)
+    publication = _seed_player_game_log_publication(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM publication_player_game_logs "
+                "WHERE publication_id = :publication_id"
+            ),
+            {"publication_id": publication.publication_id},
+        )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    read = reader.snapshot(
+        ("player_game_logs",),
+        season="2025-26",
+        projection_only_keys=frozenset({"player_game_logs"}),
+    ).read("player_game_logs")
+
+    assert read.status == "unavailable"
+    assert read.unavailable_reason == "publication_projection_missing"
+    assert read.available is False

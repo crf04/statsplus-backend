@@ -64,6 +64,7 @@ class ApplicationDependencies:
     projection_archive: Any | None = None
     projection_recorder: Any | None = None
     projection_player_pool_reader: Any | None = None
+    projection_collection_coordinator: Any | None = None
 
 
 def build_dependencies(
@@ -460,6 +461,15 @@ def build_dependencies(
             max_markets=settings.providers.projection_archive_max_markets,
         )
     )
+    if projection_archive is not None:
+        if athlete_mapping_repository is not None:
+            athlete_mapping_repository.set_projection_replay(
+                projection_archive.replay_athlete_decision
+            )
+        if event_mapping_repository is not None:
+            event_mapping_repository.set_projection_replay(
+                projection_archive.replay_event_decision
+            )
     projection_query = NBAMarketQuery(season=settings.nba.current_season)
     projection_read_scopes = tuple(
         ProjectionArchiveReadScope(
@@ -492,10 +502,32 @@ def build_dependencies(
             engine,
             projection_read_scopes,
             required_providers=settings.providers.dfs_enabled_providers,
+            event_reader=event_catalog_service,
         )
         if settings.features.projection_archive_read_enabled
         else None
     )
+    projection_collection_coordinator = None
+    if projection_recorder is not None:
+        from app.services.projection_collection import ProjectionCollectionCoordinator
+
+        projection_collection_coordinator = ProjectionCollectionCoordinator(
+            engine,
+            board_service=dfs_board_service,
+            recording_service=projection_recorder,
+            event_reader=(
+                event_catalog_service.get_events
+                if event_catalog_service is not None
+                else None
+            ),
+            season=settings.nba.current_season,
+            settings=settings.projection_collection,
+            providers=settings.providers.dfs_enabled_providers,
+        )
+        if collection_operations is not None:
+            collection_operations.set_projection_collection(
+                projection_collection_coordinator
+            )
     slate_player_pool = projection_player_pool_reader or player_pool_service
     slate_service = SlateService(
         event_catalog_service,
@@ -626,6 +658,7 @@ def build_dependencies(
         projection_archive=projection_archive,
         projection_recorder=projection_recorder,
         projection_player_pool_reader=projection_player_pool_reader,
+        projection_collection_coordinator=projection_collection_coordinator,
     )
 
 

@@ -432,17 +432,27 @@ def test_legacy_window_minutes_are_read_as_the_nominal_length():
         for difference in report.differences
     )
 
-    # The NBA traditional legacy reports integer nominal minutes and stays
-    # strict: the same drift is a difference there.
+    # The NBA traditional Season aggregate is seconds-grained too
+    # (production: 3960.971667 against a nominal 3961), so the same band
+    # applies there; beyond it the drift is still a difference.
     traditional = _replace_fact(
         _materialization(facts=(
             *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
             *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
         )),
         surface="traditional", team_id=TEAM_A, stat="OPP_REB",
-        denominator_value=95.995,
+        denominator_value=95.971667,
     )
     report = _compare(surface="traditional", legacy=traditional, ledger=ledger)
+    assert not any(
+        difference.classification == "denominator_tolerance_exceeded"
+        for difference in report.differences
+    )
+    beyond = _replace_fact(
+        traditional, surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        denominator_value=95.9,
+    )
+    report = _compare(surface="traditional", legacy=beyond, ledger=ledger)
     assert any(
         difference.classification == "denominator_tolerance_exceeded"
         for difference in report.differences
@@ -474,6 +484,84 @@ def test_legacy_nominal_denominator_removes_representation_rank_flips():
     drifted = {**tied, TEAM_A: float(TEAM_A) * 48.0 / 95.995}
     assert competition_ranks(tied, descending=False)[TEAM_A] == competition_ranks(tied, descending=False)[TEAM_B]
     assert competition_ranks(drifted, descending=False)[TEAM_A] != competition_ranks(drifted, descending=False)[TEAM_B]
+
+
+RULE = "official_scorekeeper_correction"
+RULE_REASON = "Official box-score corrections the PBP feed never received."
+
+
+def test_scorekeeper_rule_makes_in_bound_count_and_rank_differences_adjudicable():
+    legacy = _replace_fact(
+        _materialization(), surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        raw_value=float(TEAM_A) + 1,
+    )
+    # Without the rule: hard count difference and the rank flip it causes.
+    report = _compare(legacy=legacy)
+    assert report.hard_failure and report.status == "failed"
+    assert {d.classification for d in report.differences} >= {
+        "integer_count_difference", "ranking_difference",
+    }
+
+    # Under the approved rule: both are soft, the report is adjudicable.
+    report = _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    assert not report.hard_failure
+    assert report.status == "adjudication_required"
+    assert report.rankings_deterministic
+    assert {d.classification for d in report.differences} == {"official_scorekeeper_correction"}
+    assert all(d.to_dict()["blocks_approval"] is False for d in report.differences)
+
+    # The rule without a recorded reason authorizes nothing.
+    assert _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason="x").hard_failure
+
+
+def test_scorekeeper_rule_leaves_out_of_bound_counts_and_their_ranks_hard():
+    legacy = _replace_fact(
+        _materialization(), surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        raw_value=float(TEAM_A) + 7,
+    )
+    report = _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    assert report.hard_failure
+    assert not report.rankings_deterministic
+    assert {d.classification for d in report.differences} >= {
+        "integer_count_difference", "ranking_difference",
+    }
+
+    # One out-of-bound difference also keeps a sibling in-bound one from
+    # explaining the rank differences.
+    mixed = _replace_fact(
+        legacy, surface="traditional", team_id=TEAM_B, stat="OPP_REB",
+        raw_value=float(TEAM_B) + 1,
+    )
+    report = _compare(legacy=mixed, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    assert report.hard_failure
+    assert "ranking_difference" in {d.classification for d in report.differences}
+
+
+def test_scorekeeper_rule_never_explains_a_rank_flip_on_another_metric():
+    # A legitimate ±1 on OPP_REB must not launder an OPP_TOV rank flip that a
+    # denominator representation difference produced on a different team.
+    ledger = _materialization(facts=(
+        *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
+        *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
+    ))
+    ledger = _replace_fact(
+        ledger, surface="traditional", team_id=TEAM_B, stat="OPP_TOV",
+        raw_value=float(TEAM_A),
+    )
+    legacy = _replace_fact(
+        ledger, surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        raw_value=float(TEAM_A) + 1,
+    )
+    legacy = _replace_fact(
+        legacy, surface="traditional", team_id=TEAM_A, stat="OPP_TOV",
+        denominator_value=95.5,
+    )
+    report = _compare(legacy=legacy, ledger=ledger, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    by_field = {d.field: d.classification for d in report.differences}
+    assert by_field["OPP_REB"] == "official_scorekeeper_correction"
+    assert by_field["competition_rank.OPP_TOV"] == "ranking_difference"
+    assert not report.rankings_deterministic
+    assert report.hard_failure
 
 
 def test_game_set_mismatch_is_a_hard_failure():

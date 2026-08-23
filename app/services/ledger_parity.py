@@ -708,38 +708,19 @@ def matchup_parity_artifact_is_activatable(
         differences = document.get("differences", ())
         if not isinstance(differences, list):
             return False
+        if artifact.stream_key == "player_per36" and not _per36_lineage_bound(
+            artifact, document, session=session
+        ):
+            # Exact or adjudicated, a per-36 artifact authorizes nothing
+            # without its immutable capture lineage.
+            return False
         if not differences:
-            if document.get("status") != "exact":
-                return False
-            if artifact.stream_key != "player_per36":
-                return True
-            lineage = document.get("lineage")
-            if not isinstance(lineage, Mapping) or session is None:
-                return False
-            required = (
-                "capture_id", "capture_checksum", "request_checksum",
-                "source_observation_id",
-            )
-            if any(not isinstance(lineage.get(key), str) for key in required):
-                return False
-            try:
-                capture = Per36DiagnosticCaptureRepository(
-                    session.get_bind()
-                ).read(str(lineage["capture_id"]), session=session)
-            except ValueError:
-                return False
-            return (
-                capture.publication_id == artifact.publication_id
-                and capture.payload_checksum == artifact.payload_checksum
-                and capture.capture_checksum == lineage["capture_checksum"]
-                and capture.request_checksum == lineage["request_checksum"]
-                and capture.source_observation_id
-                == lineage["source_observation_id"]
-            )
+            return document.get("status") == "exact"
         if any(
             not isinstance(difference, Mapping)
             or not _difference_evidence_valid(difference)
             or difference.get("classification") != "semantic_difference"
+            or difference.get("blocks_approval") is not False
             for difference in differences
         ):
             return False
@@ -922,6 +903,38 @@ def matchup_parity_artifact_is_activatable(
     return semantic_rule_is_approved(
         document.get("semantic_rule"),
         document.get("semantic_rule_reason"),
+    )
+
+
+def _per36_lineage_bound(
+    artifact: LedgerParityArtifact,
+    document: Mapping[str, object],
+    *,
+    session: Session | None,
+) -> bool:
+    """Prove a per-36 artifact's capture lineage against the stored capture."""
+
+    lineage = document.get("lineage")
+    if not isinstance(lineage, Mapping) or session is None:
+        return False
+    required = (
+        "capture_id", "capture_checksum", "request_checksum",
+        "source_observation_id",
+    )
+    if any(not isinstance(lineage.get(key), str) for key in required):
+        return False
+    try:
+        capture = Per36DiagnosticCaptureRepository(
+            session.get_bind()
+        ).read(str(lineage["capture_id"]), session=session)
+    except ValueError:
+        return False
+    return (
+        capture.publication_id == artifact.publication_id
+        and capture.payload_checksum == artifact.payload_checksum
+        and capture.capture_checksum == lineage["capture_checksum"]
+        and capture.request_checksum == lineage["request_checksum"]
+        and capture.source_observation_id == lineage["source_observation_id"]
     )
 
 
@@ -1239,7 +1252,7 @@ class SemanticDifference:
     classification: str
     ledger_checksum: str = dataclass_field(init=False)
     legacy_checksum: str = dataclass_field(init=False)
-    blocks_approval: bool = dataclass_field(default=True, init=False)
+    blocks_approval: bool = True
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -1584,7 +1597,7 @@ class LedgerParityArtifactRepository:
                 raise ValueError("parity artifact decision is immutable")
             if decision == "approved" and (
                 len(reason.strip()) < 20
-                or not matchup_parity_artifact_is_activatable(row)
+                or not matchup_parity_artifact_is_activatable(row, session=session)
             ):
                 raise ValueError("hard matchup parity failures cannot be approved")
             row.decision = decision

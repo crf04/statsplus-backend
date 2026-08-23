@@ -36,6 +36,7 @@ class EventCatalogEntry(Base):
     classification = Column(String(128), nullable=False)
 
     first_seen_at = Column(DateTime(timezone=True), nullable=False)
+    first_observed_started_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

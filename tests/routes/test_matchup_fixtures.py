@@ -29,6 +29,7 @@ from app.models.collection_control import (
     PublicationObservation,
     PublicationVersion,
 )
+from app.models.event_catalog import EventCatalogEntry
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
     LedgerObservationEvidence,
@@ -2198,6 +2199,33 @@ def projection_route_context(tmp_path, monkeypatch):
         "app.providers.pbp_game_logs.PBPGameLogAdapter",
         lambda **_kwargs: _NoProvider(),
     )
+    projection_provider_calls = {
+        "dabble": 0,
+        "prizepicks": 0,
+        "underdog": 0,
+    }
+
+    class ProjectionProviderGuard:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def get_snapshot(self, *_args, **_kwargs):
+            projection_provider_calls[self.provider] += 1
+            raise AssertionError(
+                f"database-first route called {self.provider} projection provider"
+            )
+
+    for adapter, provider in (
+        ("app.providers.dabble.DabbleAdapter", "dabble"),
+        ("app.providers.prizepicks.PrizePicksAdapter", "prizepicks"),
+        ("app.providers.underdog.UnderdogAdapter", "underdog"),
+    ):
+        monkeypatch.setattr(
+            adapter,
+            lambda *args, _provider=provider, **kwargs: ProjectionProviderGuard(
+                _provider
+            ),
+        )
     assembled = build_dependencies(settings)
     assert isinstance(
         assembled.projection_player_pool_reader,
@@ -2224,6 +2252,7 @@ def projection_route_context(tmp_path, monkeypatch):
             template.scopes,
             clock=lambda: route_now[0],
             required_providers=template.required_providers,
+            event_reader=template.event_reader,
         )
         route_settings = dependencies.settings
         route_dependencies = replace(
@@ -2279,6 +2308,7 @@ def projection_route_context(tmp_path, monkeypatch):
         route_client=route_client,
         client=client,
         pool=pool,
+        projection_provider_calls=projection_provider_calls,
     )
 
 
@@ -2401,6 +2431,25 @@ def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
     assert expired_empty_slate.get_json()["games"][0]["projection_state"] == {
         "state": "missing",
         "observed_at": None,
+    }
+
+
+def test_database_first_projection_routes_never_call_dfs_providers(
+    projection_route_context,
+):
+    context = projection_route_context
+
+    slate = context.client.get("/api/games/slate?date=2026-01-15")
+    selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    assert slate.status_code == 200
+    assert selection.status_code == 503
+    assert context.projection_provider_calls == {
+        "dabble": 0,
+        "prizepicks": 0,
+        "underdog": 0,
     }
 
 
@@ -2712,6 +2761,130 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     )
     assert empty_selection.status_code == 404
     assert empty_selection.get_json()["error"]["code"] == "resource_not_found"
+
+
+def test_authenticated_projection_routes_use_immutable_closing_state_after_start(
+    projection_route_context,
+):
+    context = projection_route_context
+    assembled = context.assembled
+    query = NBAMarketQuery(season=SEASON)
+    assembled.projection_recorder.record_complete_snapshot(
+        _recorded_projection_snapshot(context.catalog),
+        query=query,
+        accepted_at=NOW,
+    )
+
+    live = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert live.status_code == 200
+    assert live.get_json()["freshness"]["pool"]["state"] == "live"
+
+    start_seen_at = NOW + timedelta(minutes=1)
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(
+                status_text="Q1",
+                status_code=2,
+                first_observed_started_at=start_seen_at,
+            )
+        )
+    assembled.projection_recorder.freeze_closing_projection_sets(
+        events=assembled.event_catalog_service.get_events_by_ids(
+            SEASON, (GAME_ID,)
+        ),
+        query=query,
+        created_at=start_seen_at,
+    )
+    context.route_now[0] = start_seen_at
+    started = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    started_selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert started.status_code == started_selection.status_code == 200
+    assert started.get_json()["freshness"]["pool"]["state"] == "closing"
+    assert started.get_json()["freshness"]["pool"]["providers"] == {
+        "dabble": {"status": "closing", "retrieved_at": NOW.isoformat()},
+        "prizepicks": {"status": "missing", "retrieved_at": None},
+        "underdog": {"status": "missing", "retrieved_at": None},
+    }
+    assert started_selection.get_json()["freshness"]["player_pool"]["state"] == "closing"
+    assert started.get_json()["players"]
+
+    late = replace(
+        _recorded_projection_snapshot(context.catalog),
+        retrieved_at=start_seen_at + timedelta(minutes=1),
+        markets=(
+            replace(
+                _recorded_projection_snapshot(context.catalog).markets[0],
+                market_id="late-closing-market",
+            ),
+        ),
+    )
+    assembled.projection_recorder.record_complete_snapshot(
+        late,
+        query=query,
+        accepted_at=start_seen_at + timedelta(minutes=2),
+    )
+    context.route_now[0] = start_seen_at + timedelta(hours=8)
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Final", status_code=3)
+        )
+    final = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert final.status_code == 200
+    assert final.get_json()["freshness"]["pool"]["state"] == "closing"
+    assert final.get_json()["freshness"]["pool"]["observed_at"] == NOW.isoformat()
+    assert [player["canonical_id"] for player in final.get_json()["players"]] == [2544]
+
+
+def test_authenticated_started_selection_outside_empty_closing_pool_is_404(
+    projection_route_context,
+):
+    context = projection_route_context
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Final", status_code=3)
+        )
+
+    response = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "resource_not_found"
+
+
+def test_authenticated_started_routes_keep_empty_closing_pool_successful(
+    projection_route_context,
+):
+    context = projection_route_context
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Final", status_code=3)
+        )
+
+    slate = context.client.get("/api/games/slate?date=2026-01-15")
+    matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert slate.status_code == matchup.status_code == 200
+    assert slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+    assert matchup.get_json()["players"] == []
+    assert matchup.get_json()["freshness"]["pool"]["state"] == "missing"
 
 
 def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(

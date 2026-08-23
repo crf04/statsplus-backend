@@ -370,18 +370,59 @@ class PlayerGameLogRepository:
         if publication_id is None:
             return ()
         projection = PublicationPlayerGameLog.__table__
+        return self._decode_projection(
+            select(projection.c.row_payload)
+            .where(
+                projection.c.publication_id == publication_id,
+                projection.c.player_id == player_id,
+            )
+            .order_by(
+                projection.c.game_date.desc(),
+                projection.c.game_id.desc(),
+            ),
+            season=season,
+        )
+
+    def _projected_summary_rows(
+        self,
+        season: str,
+        player_ids: tuple[int, ...],
+        *,
+        publication_snapshot: Any | None,
+    ) -> tuple[PlayerGameLogRecord, ...] | None:
+        """Read one game's player pool from the active projection.
+
+        ``None`` means this snapshot carries no projection, so the caller keeps
+        its existing payload or legacy path.
+        """
+
+        if publication_snapshot is None:
+            return None
+        read = publication_snapshot.read("player_game_logs")
+        if not getattr(read, "projection_ready", False):
+            return None
+        if read.publication_id is None:
+            return ()
+        projection = PublicationPlayerGameLog.__table__
+        return self._decode_projection(
+            select(projection.c.row_payload)
+            .where(
+                projection.c.publication_id == read.publication_id,
+                projection.c.player_id.in_(player_ids),
+            )
+            .order_by(
+                projection.c.player_id.asc(),
+                projection.c.game_date.asc(),
+                projection.c.game_id.asc(),
+            ),
+            season=season,
+        )
+
+    def _decode_projection(
+        self, statement, *, season: str
+    ) -> tuple[PlayerGameLogRecord, ...]:
         with self.engine.connect() as connection:
-            payloads = connection.execute(
-                select(projection.c.row_payload)
-                .where(
-                    projection.c.publication_id == publication_id,
-                    projection.c.player_id == player_id,
-                )
-                .order_by(
-                    projection.c.game_date.desc(),
-                    projection.c.game_id.desc(),
-                )
-            ).scalars().all()
+            payloads = connection.execute(statement).scalars().all()
         try:
             return tuple(
                 decode_player_game_log_projection(payloads, season=season)
@@ -814,10 +855,22 @@ class PlayerGameLogRepository:
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {
             player_id: [] for player_id in canonical_ids
         }
-        publication_rows = self._publication_rows(
-            canonical_season, publication_snapshot=publication_snapshot
+        projected_rows = self._projected_summary_rows(
+            canonical_season,
+            canonical_ids,
+            publication_snapshot=publication_snapshot,
         )
-        if publication_rows is not None:
+        publication_rows = (
+            self._publication_rows(
+                canonical_season, publication_snapshot=publication_snapshot
+            )
+            if projected_rows is None
+            else None
+        )
+        if projected_rows is not None:
+            for record in projected_rows:
+                rows_by_player[record.player_id].append(record)
+        elif publication_rows is not None:
             for record in publication_rows:
                 if record.player_id in rows_by_player:
                     rows_by_player[record.player_id].append(record)

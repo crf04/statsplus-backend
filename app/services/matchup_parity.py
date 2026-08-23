@@ -31,7 +31,7 @@ import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -43,6 +43,10 @@ from app.domain.publication_integrity import publication_payload_matches_checksu
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.matchup_parity_contract import (
     CLASSIFICATION_AUTHORITY_MISMATCH,
+    CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
+    SCOREKEEPER_CORRECTION_MAX_ENTITIES,
+    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
+    count_difference_within_correction_bound,
     CLASSIFICATION_AVAILABILITY_DIFFERENCE,
     CLASSIFICATION_CUTOFF_MISMATCH,
     CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
@@ -1285,6 +1289,13 @@ def compare_matchup_materializations(
         "ledger": {},
         "legacy": {},
     }
+    # Scorekeeper-rule bookkeeping is per stat key: a rank difference on one
+    # metric can only be explained by in-bound count corrections on that same
+    # metric, and never when that metric also carries a denominator or rate
+    # difference.
+    corrected_by_stat: dict[str, set[int]] = {key: set() for key in stat_to_metric}
+    out_of_rule_by_stat: dict[str, bool] = {key: False for key in stat_to_metric}
+    other_difference_by_stat: dict[str, bool] = {key: False for key in stat_to_metric}
     shared_teams = sorted(ledger_teams & legacy_teams)
     for stat_key in stat_to_metric:
         for team_id in shared_teams:
@@ -1309,10 +1320,19 @@ def compare_matchup_materializations(
                     CLASSIFICATION_NON_INTEGER_COUNT,
                 ))
             elif ledger_count != legacy_count:
+                classification = CLASSIFICATION_INTEGER_COUNT_DIFFERENCE
+                if (
+                    semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
+                    and count_difference_within_correction_bound(ledger_count, legacy_count)
+                ):
+                    classification = CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
+                    corrected_by_stat[stat_key].add(team_id)
+                else:
+                    out_of_rule_by_stat[stat_key] = True
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, stat_key,
                     ledger_count, legacy_count,
-                    CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
+                    classification,
                 ))
             ledger_minutes = _minutes(
                 ledger_fact.denominator_value, ledger_fact.denominator_unit
@@ -1320,17 +1340,14 @@ def compare_matchup_materializations(
             legacy_minutes = _minutes(
                 legacy_fact.denominator_value, legacy_fact.denominator_unit
             )
-            if (
-                legacy_minutes is not None
-                and legacy.producer != PRODUCER_LEDGER
-                and surface == "assist_locations"
-            ):
-                # The legacy PBP assist aggregate reports its window minutes
-                # from summed player seconds at a tenth-of-a-second grain; the
-                # contract denominator is the nominal game length, so read the
-                # legacy value as the nominal length it establishes.  The NBA
-                # traditional legacy already reports integer nominal minutes
-                # and stays strict.
+            if legacy_minutes is not None and legacy.producer != PRODUCER_LEDGER:
+                # Both legacy aggregates report window minutes from summed
+                # seconds (PBP at a tenth-second grain; NBA LeagueDashTeamStats
+                # Season totals likewise, e.g. 3960.971667 against a nominal
+                # 3961); the contract denominator is the nominal game length,
+                # so read the legacy value as the nominal length it
+                # establishes.  Outside the evidence band it is compared as
+                # reported.
                 nominal = nominal_window_minutes(
                     legacy_minutes,
                     len(legacy.game_ids_by_team.get(team_id, ())),
@@ -1350,6 +1367,7 @@ def compare_matchup_materializations(
                     rel_tol=tolerance, abs_tol=tolerance,
                 )
                 if not denominator_matches:
+                    other_difference_by_stat[stat_key] = True
                     differences.append(MatchupParityDifference(
                         window, surface, team_id, "denominator_minutes",
                         ledger_minutes, legacy_minutes,
@@ -1385,6 +1403,13 @@ def compare_matchup_materializations(
             if ledger_rate is not None and legacy_rate is not None and not math.isclose(
                 ledger_rate, legacy_rate, rel_tol=tolerance, abs_tol=tolerance
             ):
+                if not (
+                    semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
+                    and team_id in corrected_by_stat[stat_key]
+                ):
+                    # A rate difference not produced by this team's own
+                    # in-bound count correction is another cause.
+                    other_difference_by_stat[stat_key] = True
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, f"per48.{stat_key}",
                     ledger_rate, legacy_rate,
@@ -1409,6 +1434,7 @@ def compare_matchup_materializations(
                 CLASSIFICATION_EXTRA_METRIC,
             ))
 
+    corrected_entities = set().union(*corrected_by_stat.values())
     # Deterministic rankings per metric (ascending, ties 1, 1, 3).
     rankings_deterministic = True
     for stat_key in stat_to_metric:
@@ -1437,12 +1463,34 @@ def compare_matchup_materializations(
                     CLASSIFICATION_SERVED_RANK_MISMATCH,
                 ))
         if ledger_ranks != legacy_ranks:
-            rankings_deterministic = False
+            # Both rankings are deterministic functions of the rates; when
+            # the only count differences are in-bound corrections, the rank
+            # difference is explained by them and stays soft under the rule.
+            explained = (
+                semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
+                and bool(corrected_by_stat[stat_key])
+                and not out_of_rule_by_stat[stat_key]
+                and not other_difference_by_stat[stat_key]
+                and len(corrected_entities) <= SCOREKEEPER_CORRECTION_MAX_ENTITIES
+            )
+            if not explained:
+                rankings_deterministic = False
             differences.append(MatchupParityDifference(
                 window, surface, None, f"competition_rank.{stat_key}",
                 ledger_ranks, legacy_ranks,
-                CLASSIFICATION_RANKING_DIFFERENCE,
+                CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
+                if explained else CLASSIFICATION_RANKING_DIFFERENCE,
             ))
+    if len(corrected_entities) > SCOREKEEPER_CORRECTION_MAX_ENTITIES:
+        # Too many entities for a correction pattern: restore the hard
+        # classification so the artifact cannot be adjudicated.
+        differences = [
+            replace(difference, classification=CLASSIFICATION_INTEGER_COUNT_DIFFERENCE)
+            if difference.classification == CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
+            and difference.team_id is not None
+            else difference
+            for difference in differences
+        ]
 
     # Independent per-surface availability. Same-authority retained legacy
     # facts remain valid while their latest failed attempt stays observable.

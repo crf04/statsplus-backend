@@ -1885,6 +1885,63 @@ def test_a_manual_decision_records_the_provider_canonical_claim(event_db):
     assert approved.decision.provider_canonical_event_id == "ud-evt-1"
 
 
+def test_manual_event_mapping_replays_projection_after_commit(event_db):
+    engine, now = event_db
+    replay_calls = []
+
+    def replay(result):
+        assert EventMappingRepository(engine).get_mapping(
+            "underdog", "ud-1"
+        ).canonical_event_id == "0022500001"
+        replay_calls.append(result)
+
+    repository = EventMappingRepository(
+        engine,
+        clock=lambda: now,
+        projection_replay=replay,
+    )
+    result = repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(canonical_id="ud-evt-1"),
+    )
+
+    assert replay_calls == [result]
+
+
+def test_projection_replay_failure_does_not_change_event_approval(event_db, caplog):
+    engine, now = event_db
+
+    def replay(_result):
+        raise RuntimeError("archive unavailable")
+
+    repository = EventMappingRepository(
+        engine,
+        clock=lambda: now,
+        projection_replay=replay,
+    )
+
+    result = repository.approve(
+        "underdog",
+        "ud-1",
+        "0022500001",
+        season=SEASON,
+        operator_id="ops",
+        reason="reviewed",
+        provider_evidence=_evidence(canonical_id="ud-evt-1"),
+    )
+
+    assert result.persisted is True
+    assert repository.get_mapping(
+        "underdog", "ud-1"
+    ).canonical_event_id == "0022500001"
+    assert "projection replay failed after event mapping commit" in caplog.text
+
+
 def test_a_governed_identity_claiming_another_canonical_event_fails_closed(event_db):
     """The reviewed claim is provider identity, so a new one is unreviewed.
 

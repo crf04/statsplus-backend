@@ -13,6 +13,7 @@ import json
 from typing import Callable, Final
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Integer,
@@ -1228,6 +1229,29 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     LatestPlayerProjection.__table__.create(connection, checkfirst=True)
 
 
+def _create_projection_collection_tables(connection: Connection) -> None:
+    """Create the fenced projection collector lease and provider state."""
+
+    from app.models.projection_archive import ProviderPoll
+    from app.models.projection_collection import (
+        ProjectionCollectionLease,
+        ProjectionCollectionProviderState,
+    )
+
+    ProjectionCollectionLease.__table__.create(connection, checkfirst=True)
+    ProjectionCollectionProviderState.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns(ProviderPoll.__tablename__)}
+    if "duration_ms" not in existing:
+        preparer = connection.dialect.identifier_preparer
+        type_sql = "INTEGER"
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(ProviderPoll.__tablename__)} "
+                f"ADD COLUMN {preparer.quote('duration_ms')} {type_sql}"
+            )
+        )
+
+
 def _v40_projection_poll_promoted_predicate(
     *,
     poll_ref: str,
@@ -1369,6 +1393,42 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
         ))
 
 
+def _create_projection_closing_sets(connection: Connection) -> None:
+    """Create the durable start fence and immutable closing membership tables."""
+
+    from app.models.event_catalog import EventCatalogEntry
+    from app.models.projection_archive import (
+        ClosingProjectionMembership,
+        ClosingProjectionSet,
+    )
+
+    event_table = EventCatalogEntry.__table__
+    inspector = inspect(connection)
+    event_columns = (
+        {
+            column["name"]
+            for column in inspector.get_columns(event_table.name)
+        }
+        if inspector.has_table(event_table.name)
+        else set()
+    )
+    if event_columns and "first_observed_started_at" not in event_columns:
+        timestamp_type = (
+            "TIMESTAMP WITH TIME ZONE"
+            if connection.dialect.name == "postgresql"
+            else "DATETIME"
+        )
+        preparer = connection.dialect.identifier_preparer
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(event_table.name)} ADD COLUMN "
+                f"{preparer.quote('first_observed_started_at')} {timestamp_type}"
+            )
+        )
+    ClosingProjectionSet.__table__.create(connection, checkfirst=True)
+    ClosingProjectionMembership.__table__.create(connection, checkfirst=True)
+
+
 def _rebuild_projection_transition_tables_sqlite(
     connection: Connection,
     tables: tuple[Table, ...],
@@ -1430,6 +1490,31 @@ def _rebuild_projection_transition_tables_sqlite(
                 )
             elif column == "failure_reason":
                 expressions.append("NULL AS failure_reason")
+            elif column == "duration_ms":
+                expressions.append("NULL AS duration_ms")
+            elif column == "source_observation_id":
+                expressions.append("observation_id AS source_observation_id")
+            elif column == "source_ordinal":
+                expressions.append("ordinal AS source_ordinal")
+            elif column in {
+                "athlete_provider_id",
+                "event_provider_id",
+                "statistic_provider_id",
+                "statistic_provider_label",
+            }:
+                expressions.append(f"NULL AS {column}")
+            elif column == "resolution_state":
+                expressions.append(
+                    "CASE WHEN canonical_player_id IS NULL "
+                    "OR canonical_player_name IS NULL "
+                    "OR canonical_game_id IS NULL "
+                    "OR canonical_statistic_id IS NULL "
+                    "THEN 'unresolved' ELSE 'resolved' END AS resolution_state"
+                )
+            elif column == "unresolved_identities":
+                expressions.append("'' AS unresolved_identities")
+            elif column == "is_replay":
+                expressions.append("0 AS is_replay")
             else:
                 raise RuntimeError(
                     f"migration 041 cannot backfill projection column {column}"
@@ -1453,6 +1538,246 @@ def _rebuild_projection_transition_tables_sqlite(
     violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     if violations:
         raise RuntimeError("migration 041 left invalid projection foreign keys")
+
+
+def _projection_source_poll_is_unique(connection: Connection) -> bool:
+    """Return whether old projection generations forbid replay generations."""
+
+    if connection.dialect.name == "sqlite":
+        indexes = connection.exec_driver_sql(
+            "PRAGMA index_list('projection_materialization_generations')"
+        ).mappings().all()
+        for index in indexes:
+            if not index["unique"]:
+                continue
+            columns = connection.exec_driver_sql(
+                f"PRAGMA index_info('{index['name']}')"
+            ).mappings().all()
+            if [column["name"] for column in columns] == ["source_poll_id"]:
+                return True
+        return False
+    return any(
+        tuple(constraint.get("column_names") or ()) == ("source_poll_id",)
+        for constraint in inspect(connection).get_unique_constraints(
+            "projection_materialization_generations"
+        )
+    )
+
+
+def _upgrade_projection_mapping_replay(connection: Connection) -> None:
+    """Add typed identity evidence and permit generations to reuse one poll."""
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionArchiveScopeLock,
+        ProjectionMaterializationGeneration,
+        ProjectionObservation,
+        ProviderPoll,
+    )
+
+    generation_name = connection.dialect.identifier_preparer.quote(
+        ProjectionMaterializationGeneration.__tablename__
+    )
+    generation_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionMaterializationGeneration.__tablename__
+        )
+    }
+    if "is_replay" not in generation_columns:
+        boolean_type = Boolean().compile(dialect=connection.dialect)
+        default = "FALSE" if connection.dialect.name == "postgresql" else "0"
+        connection.execute(text(
+            f"ALTER TABLE {generation_name} ADD COLUMN is_replay "
+            f"{boolean_type} NOT NULL DEFAULT {default}"
+        ))
+
+    lock_name = connection.dialect.identifier_preparer.quote(
+        ProjectionArchiveScopeLock.__tablename__
+    )
+    lock_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionArchiveScopeLock.__tablename__
+        )
+    }
+    if "active_generation_id" not in lock_columns:
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN active_generation_id VARCHAR(72)"
+        ))
+    if "mapping_replayed_at" not in lock_columns:
+        timestamp_type = DateTime(timezone=True).compile(
+            dialect=connection.dialect
+        )
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_at {timestamp_type}"
+        ))
+    if "mapping_replayed_retrieved_at" not in lock_columns:
+        timestamp_type = DateTime(timezone=True).compile(
+            dialect=connection.dialect
+        )
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_retrieved_at {timestamp_type}"
+        ))
+
+    observation_name = connection.dialect.identifier_preparer.quote(
+        ProjectionObservation.__tablename__
+    )
+    observation_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionObservation.__tablename__
+        )
+    }
+    additions = (
+        ("source_observation_id", "VARCHAR(72) NOT NULL DEFAULT ''"),
+        ("source_ordinal", "INTEGER NOT NULL DEFAULT 0"),
+        ("athlete_provider_id", "VARCHAR(255)"),
+        ("event_provider_id", "VARCHAR(255)"),
+        ("statistic_provider_id", "VARCHAR(255)"),
+        ("statistic_provider_label", "VARCHAR(255)"),
+        ("resolution_state", "VARCHAR(32) NOT NULL DEFAULT 'resolved'"),
+        ("unresolved_identities", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    )
+    for name, definition in additions:
+        if name not in observation_columns:
+            connection.execute(text(
+                f"ALTER TABLE {observation_name} ADD COLUMN {name} {definition}"
+            ))
+
+    connection.execute(text(
+        f"UPDATE {observation_name} SET source_ordinal = ordinal "
+        "WHERE source_observation_id = ''"
+    ))
+    connection.execute(text(
+        f"UPDATE {observation_name} SET source_observation_id = observation_id "
+        "WHERE source_observation_id = ''"
+    ))
+
+    connection.execute(text(
+        f"UPDATE {observation_name} SET resolution_state = CASE "
+        "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
+        "OR canonical_game_id IS NULL OR canonical_statistic_id IS NULL "
+        "THEN 'unresolved' ELSE 'resolved' END, "
+        "unresolved_identities = CASE "
+        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+        "AND canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
+        "THEN 'athlete,event,statistic' "
+        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+        "AND canonical_game_id IS NULL THEN 'athlete,event' "
+        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+        "AND canonical_statistic_id IS NULL THEN 'athlete,statistic' "
+        "WHEN canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
+        "THEN 'event,statistic' "
+        "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
+        "THEN 'athlete' "
+        "WHEN canonical_game_id IS NULL THEN 'event' "
+        "WHEN canonical_statistic_id IS NULL THEN 'statistic' ELSE '' END"
+    ))
+
+    snapshot_rows = connection.execute(text(
+        "SELECT snapshot_id, evidence_document "
+        "FROM projection_provider_snapshots"
+    )).mappings()
+    for snapshot in snapshot_rows:
+        try:
+            markets = json.loads(snapshot["evidence_document"])["markets"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(markets, list):
+            continue
+        for ordinal, market in enumerate(markets):
+            if not isinstance(market, dict):
+                continue
+            athlete = market.get("athlete") or {}
+            event = market.get("event") or {}
+            statistic = market.get("statistic") or {}
+            values = {
+                "athlete_provider_id": athlete.get("provider_id"),
+                "event_provider_id": event.get("provider_id"),
+                "statistic_provider_id": statistic.get("provider_id"),
+                "statistic_provider_label": statistic.get("label"),
+            }
+            connection.execute(
+                text(
+                    f"UPDATE {observation_name} SET "
+                    "athlete_provider_id = :athlete_provider_id, "
+                    "event_provider_id = :event_provider_id, "
+                    "statistic_provider_id = :statistic_provider_id, "
+                    "statistic_provider_label = :statistic_provider_label "
+                    "WHERE snapshot_id = :snapshot_id AND ordinal = :ordinal"
+                ),
+                {**values, "snapshot_id": snapshot["snapshot_id"], "ordinal": ordinal},
+            )
+
+    replay_index_names = {
+        "ix_projection_observations_provider_athlete",
+        "ix_projection_observations_provider_event",
+        "ix_projection_observations_provider_statistic_id",
+        "ix_projection_observations_provider_statistic_label",
+        "ix_projection_observations_provider_statistic_label_lower",
+        "ix_projection_observations_snapshot_id",
+    }
+    if connection.dialect.name == "sqlite":
+        existing_indexes = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA index_list('projection_observations')"
+            )
+        }
+    else:
+        existing_indexes = {
+            index["name"]
+            for index in inspect(connection).get_indexes(
+                ProjectionObservation.__tablename__
+            )
+        }
+    if "ix_projection_observations_source_identity" in existing_indexes:
+        index_name = connection.dialect.identifier_preparer.quote(
+            "ix_projection_observations_source_identity"
+        )
+        connection.execute(text(
+            f"DROP INDEX {index_name}"
+        ))
+    for index in ProjectionObservation.__table__.indexes:
+        if index.name in replay_index_names:
+            ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
+            connection.exec_driver_sql(
+                ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+            )
+
+    if not _projection_source_poll_is_unique(connection):
+        return
+    if connection.dialect.name == "sqlite":
+        _rebuild_projection_transition_tables_sqlite(
+            connection,
+            (
+                # The helper preserves the foreign-key-connected cluster while
+                # using the current model, whose generation source poll is not
+                # unique after this migration.
+                ProviderPoll.__table__,
+                ProjectionMaterializationGeneration.__table__,
+                ProjectionObservation.__table__,
+                LatestPlayerProjection.__table__,
+            ),
+        )
+        return
+    for constraint in inspect(connection).get_unique_constraints(
+        ProjectionMaterializationGeneration.__tablename__
+    ):
+        if tuple(constraint.get("column_names") or ()) != ("source_poll_id",):
+            continue
+        constraint_name = constraint.get("name")
+        if not constraint_name:
+            raise RuntimeError(
+                "projection generation source poll uniqueness has no constraint name"
+            )
+        name = connection.dialect.identifier_preparer.quote(constraint_name)
+        connection.execute(text(
+            f"ALTER TABLE {generation_name} DROP CONSTRAINT {name}"
+        ))
+
+
 def _bind_manifests_to_event_catalog_publications(
     connection: Connection,
 ) -> None:
@@ -1751,6 +2076,21 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         42,
         "042_team_matchup_provider_provenance",
         _add_team_matchup_provider_provenance,
+    ),
+    Migration(
+        43,
+        "043_projection_collection_control",
+        _create_projection_collection_tables,
+    ),
+    Migration(
+        44,
+        "044_projection_closing_sets",
+        _create_projection_closing_sets,
+    ),
+    Migration(
+        45,
+        "045_projection_mapping_replay",
+        _upgrade_projection_mapping_replay,
     ),
 )
 

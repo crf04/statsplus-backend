@@ -101,3 +101,35 @@ def test_raw_count_difference_stays_hard():
     assert _classes(per36_player_differences(
         2544, expected=_expected(), expected_raw=_raw(), actual=actual,
     )) == [("personal_fouls", "raw_count_difference")]
+
+
+RULE = "official_scorekeeper_correction"
+
+
+def test_rule_classifies_in_bound_corrections_as_semantic_and_non_blocking():
+    actual = _actual(personal_fouls=11, rebounds=9, minutes=1988.9833333333333 + 1.5)
+    found = per36_player_differences(
+        2544, expected=_expected(), expected_raw=_raw(), actual=actual, semantic_rule=RULE,
+    )
+    assert {(d.field, d.classification, d.blocks_approval) for d in found} == {
+        ("personal_fouls", "semantic_difference", False),
+        ("rebounds", "semantic_difference", False),
+        ("minutes", "semantic_difference", False),
+    }
+
+
+def test_rule_leaves_out_of_bound_differences_hard():
+    actual = _actual(points=17, minutes=1988.9833333333333 + 2.5)
+    found = per36_player_differences(
+        2544, expected=_expected(), expected_raw=_raw(), actual=actual, semantic_rule=RULE,
+    )
+    assert {(d.field, d.classification, d.blocks_approval) for d in found} == {
+        ("points", "raw_count_difference", True),
+        ("minutes", "minutes_difference", True),
+    }
+
+
+def test_without_the_rule_in_bound_differences_stay_hard():
+    actual = _actual(personal_fouls=11)
+    found = per36_player_differences(2544, expected=_expected(), expected_raw=_raw(), actual=actual)
+    assert [(d.classification, d.blocks_approval) for d in found] == [("raw_count_difference", True)]

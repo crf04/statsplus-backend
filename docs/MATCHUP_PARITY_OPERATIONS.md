@@ -150,10 +150,10 @@ and exact governed game sets match (proven by byte-identical game-set
 checksums), whether the two cutoffs align, whether deterministic rankings
 (`1, 1, 3` ties) match per metric, and each surface's independent availability.
 Integer counts compare exactly. Only floating denominators (the nominal game
-length derived from retained effective team minutes; the legacy PBP assist
-window value, normalized from seconds, is likewise read as the nominal length
-it establishes when within the separate 0.05-minute evidence band, while the
-NBA traditional legacy denominator is compared as reported) and the per-48 rates recomputed
+length derived from retained effective team minutes; the legacy window value
+from either aggregate provider, normalized from seconds, is likewise read as
+the nominal length it establishes when within the separate 0.05-minute
+evidence band) and the per-48 rates recomputed
 from counts and denominators use the single documented tolerance
 (`MATCHUP_PARITY_TOLERANCE`, `1e-9`). The ledger payload's served per-48 and
 competition-rank values must also match the values recomputed from its counts
@@ -173,7 +173,24 @@ retained only as diagnostic context.
 Ranking differences are hard failures under deterministic #117 rankings.
 Well-formed per-36 identity, raw-count, game-count, or minute differences are
 likewise durable blocking differences: the command persists them row by row as
-`pending_adjudication` and exits `2`. Three provider representation gaps are
+`pending_adjudication` and exits `2`.
+
+One parent-approved semantic rule exists (crf04/statsplus#19, 2026-08-23):
+`official_scorekeeper_correction`, for post-game official box-score corrections
+the PBP feed never received. Pass `--semantic-rule official_scorekeeper_correction
+--semantic-rule-reason "<at least 20 characters>"` to `compare`. Under it, an
+season-total integer count difference of magnitude at most 6 per (team or
+player, field), a
+per-36 season minutes difference of at most 2.0 per player, and a ranking
+difference fully explained by such counts are classified soft
+(`official_scorekeeper_correction` on matchup surfaces, `semantic_difference`
+with `blocks_approval: false` on per-36) and the artifact is adjudicable. The
+rule never covers identity, game-set, availability, cutoff/scope/authority,
+a provider game count below the ledger's, or any magnitude above the bounds,
+and it does not apply when more than 400 entities differ in one artifact. The
+rule id and reason are recorded on the artifact; approval still requires the
+audited `adjudicate … approved` step below and is bound to the candidate's
+checksum, so a recomposed candidate needs a fresh run and adjudication. Three provider representation gaps are
 not differences because the provider cannot evidence them: minutes may drift
 by up to 0.01 minutes per governed ledger game (official and PBP-derived
 per-game minutes disagree by seconds; a provider-only `0:00` appearance with

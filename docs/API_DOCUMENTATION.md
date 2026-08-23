@@ -304,10 +304,23 @@ never understates any provider observation included in the union.
 
 During projection-archive expansion, `PROJECTION_ARCHIVE_READ_ENABLED=true`
 selects one database-only reader for Slate, Matchup, and Matchup Selection.
-Each Slate game then adds `projection_state` with `state: live | missing` and a
+Each Slate game then adds `projection_state` with `state: live | closing | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce
 `live` while their per-offering confirmation is no more than 15 minutes old.
+When governed Event Catalog status first says a game is in progress or final,
+the Event Catalog persists that observation time. The scheduled projection
+collector—not a GET request—uses it to freeze one immutable Closing Projection
+Set per provider, exact query, and game from the materialized pre-start state.
+Legacy started events without an observed transition time use `scheduled_at`
+as the fence. Slate and Matchup then report `closing` with the oldest
+observation time in that set; a contributing provider reports status
+`closing`, never live `fresh`. Closing membership points at immutable
+Projection Observations, is never aged by the live 15-minute or six-hour
+windows, and is not changed by a late-arriving pregame poll. A started or final
+game whose collector has not created a set yet, or whose set has no members,
+reports `missing` and zero targetable players. Reads use only the requested
+game IDs and never create or freeze a set.
 After a failed provider poll, prior confirmed offerings may be served as
 `stale-served` only through the inclusive six-hour fallback. Partial polls
 update and confirm only included references; omissions retain their prior
@@ -325,20 +338,40 @@ existing `404 resource_not_found`; never-polled or failed-without-successful-
 evidence scopes remain missing and keep the documented `503 provider_unavailable`.
 Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
-duplicating unchanged provider evidence. The response `observed_at` comes from
-the accepted poll linked to that generation, not necessarily the older
-representative content snapshot retained for checksum verification. Only absent current evidence produces `missing` with zero
+duplicating unchanged provider evidence. The response `observed_at` and
+provider `retrieved_at` come from each selected Latest row's `observed_at`, never
+from its replay/promotion `confirmed_at`; an ordinary newer promoted poll
+advances that read-model timestamp, while replay retains the source observation
+time. Aggregate times are the oldest included source observations. Only absent current evidence produces `missing` with zero
 targetable players. For a multi-game request with both live and missing games,
 `freshness.pool.status` is explicitly `partial`, and each game's
 `projection_state` remains authoritative; the pool retains `state: live`
 because it contains live rows. Aggregate and per-provider observation times
 are the oldest included times, so neither understates the age of evidence in
-the union.
+that live union. When a request spans live, closing, and missing phases, live
+evidence alone controls aggregate and provider freshness, closing time never
+ages that live aggregate, and aggregate `status` is omitted. Without live
+evidence, a non-empty closing pool takes precedence over missing games.
 An unchanged provider poll is recognized from canonical market, coverage, and
 query content even though its retrieval time is newer; it confirms existing
 Latest references without duplicating observations while the immutable snapshot
 remains the content authority. Enabled providers are unioned; an unpolled or
 disabled provider expires independently and cannot erase another contribution.
+An approved athlete, event, or statistic mapping may replay matching unresolved
+observations into a deterministic materialization generation, or reactivate an
+existing generation when a decision returns to an earlier materialized state.
+This is an internal database operation: it does not add a route, change any
+Slate, Matchup, or Matchup Selection payload, call a provider, or rewrite the
+source snapshot and its observations. It preserves the provider-reported player
+name, recomputes an ID-less market reference from the rematerialized identities,
+and retains the source `observed_at`/`retrieved_at` for public freshness. Replay
+does not grant a new live window: affected rows expire with the provider board,
+while `confirmed_at` remains an internal eligibility clock. A snapshot fetched
+before that decision whose observations still carry the pre-decision unresolved
+identity cannot promote after replay and erase the recovered state; evidence
+with a newer source retrieval identity may promote normally. Until replay
+succeeds, unresolved observations remain archive evidence only and do not
+contribute to Latest or Player Pool.
 Late valid polls remain archived but do not refresh eligibility or mask a newer
 failure; the failure attempt's actual start time (or its completion time when
 the start is unavailable) fences evidence retrieved earlier, even when that
@@ -351,10 +384,12 @@ The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and
 legacy reader remain unchanged during expansion.
-Matchup Selection retains its existing missing stored-pool error contract under
-the gate: when its single game has no archive evidence, it returns
-`503 provider_unavailable`. Slate and Matchup still expose the explicit missing
-projection state described above.
+Matchup Selection uses the Closing Projection Set for an in-progress or final
+game and keeps the market categories from that set without applying live
+freshness. A selected player outside the derived closing pool returns the
+existing `404 resource_not_found`; a scheduled game with no usable stored pool
+retains the existing `503 provider_unavailable` contract. Slate and Matchup
+still expose the explicit missing projection state described above.
 
 A stale but populated schedule remains a `200` with
 `freshness.schedule.status: "stale"`. Stored
@@ -746,10 +781,15 @@ matchup freshness timestamp byte-for-byte where the compatibility contract
 requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
 Pool freshness and per-provider status are passed through from the selected
-stored snapshot.
+stored snapshot. Under the projection archive gate, `freshness.player_pool`
+also carries `state: live | closing | missing` and `observed_at`. For a started
+or final game, `closing` is historical evidence and does not expire under the
+live freshness windows. A request for a player outside that closing pool is
+`404 resource_not_found`; a scheduled game without a usable stored pool remains
+`503 provider_unavailable`.
 When the projection-archive reader is activated, this block additionally
-contains `state: live | missing` and `observed_at`; the Matchup `game` header
-does not duplicate the Slate-only `projection_state` block.
+contains `state: live | closing | missing` and `observed_at`; the Matchup
+`game` header does not duplicate the Slate-only `projection_state` block.
 The stats-table surface is `stale` when its last successful publication
 predates the newest completed, non-postponed stored game; it is `missing` when
 no successful publication exists. Team facts for a started or past game are
@@ -1789,7 +1829,8 @@ transition, and observation receipt rather than asserted by the caller.
 
 `GET /api/admin/collection/diagnostics` returns bounded arrays (at most 50
 rows per category). Its additive stream, collector, and usage rows have this
-exact shape; absent evidence is JSON `null`:
+exact shape; projection collection diagnostics are also bounded and contain no
+raw payloads or source identifiers. Absent evidence is JSON `null`:
 
 ```json
 {
@@ -1831,9 +1872,35 @@ exact shape; absent evidence is JSON `null`:
     "window_resets_at": "2026-08-13T00:00:00+00:00",
     "retry_after_seconds": 3600,
     "concurrency_retry_after_seconds": 0
-  }]
+  }],
+  "projections": {
+    "providers": [{
+      "provider": "dabble",
+      "last_poll_at": "2026-08-12T00:00:00+00:00",
+      "last_changed_snapshot_at": "2026-08-12T00:00:00+00:00",
+      "freshness_seconds": 30,
+      "failure": {"last_at": null, "reason": null, "consecutive": 0},
+      "backoff": {"active": false, "until": null},
+      "active_count": 18,
+      "unresolved_count": 0
+    }],
+    "active_count": 18,
+    "unresolved_count": 0,
+    "lease": {"active": false, "fence": 4, "expires_at": null}
+  }
 }
 ```
+
+Projection collection is not an HTTP refresh operation. The dedicated Railway
+service constructs settings, dependencies, provider executors, and Redis/cache
+clients once, then wakes the same coordinator every five minutes. The
+coordinator applies the configured 30-minute/5-minute adaptive cadence,
+governed event-status cutoff, database-time lease/renewal and provider-state
+timestamps, provider backoff, and archive persistence path. The one-shot
+`scripts/collect_projections.py` command uses the same run-once path and exits
+nonzero when every due provider fails at board collection. Stale cache fallback,
+omitted outcomes, and collector defects are health failures rather than
+successful polls. API and browser reads remain database-only.
 
 `freshness_status` is closed to `fresh`, `stale`, `missing`, or
 `unavailable`. Age is the non-negative bounded age of the active publication;

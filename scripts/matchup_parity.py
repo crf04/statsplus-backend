@@ -70,6 +70,12 @@ def main() -> int:
     compare.add_argument("--output", required=True)
     compare.add_argument("--target", choices=("isolated", "candidate"), required=True)
     compare.add_argument("--per36-capture-id", required=True)
+    compare.add_argument(
+        "--semantic-rule",
+        choices=("official_scorekeeper_correction",),
+        help="parent-approved semantic rule under which in-bound differences are adjudicable",
+    )
+    compare.add_argument("--semantic-rule-reason")
 
     adjudicate = subparsers.add_parser("adjudicate")
     adjudicate.add_argument("artifact_id")
