@@ -1984,6 +1984,27 @@ def test_missing_player_name_evidence_rejects_the_complete_game_atomically(tmp_p
         assert connection.execute(select(LedgerGameRowEvidence)).all() == []
 
 
+def test_omitted_team_diagnostic_is_the_zero_the_authority_proves():
+    """A team with no blocks has no ``Blocks`` key anywhere on the sparse wire."""
+    payload = _raw_observation_with_unknown_fields()
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+    participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
+    # Remove every Home block: player rows, team-summary residual, diagnostic.
+    for row in payload["stats"]["Home"]["FullGame"]:
+        row.pop("Blocks", None)
+    del payload["team_results"]["Home"]["FullGame"]["Blocks"]
+    game = canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants)
+    home = next(fact for fact in game.team_facts if fact.team_id == 1610612747)
+    assert home.blocks == 0
+    assert all(player.blocks == 0 for player in game.player_facts if player.team_id == 1610612747)
+
+    # The same omission with a player still credited a block is not provable.
+    contradictory = _raw_observation_with_unknown_fields()
+    del contradictory["team_results"]["Home"]["FullGame"]["Blocks"]
+    with pytest.raises(LedgerValidationError, match="missing the Blocks count"):
+        canonical_game_from_pbp(contradictory, event=event, participant_ids_by_team=participants)
+
+
 def test_explicit_zero_required_count_remains_valid(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'explicit_zero.sqlite3'}")
     run_migrations(engine)

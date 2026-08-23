@@ -1136,8 +1136,19 @@ def _sum_team_facts(
     # and reconcile with that authority; a missing, null, or malformed field
     # cannot prove a sparse omission and rejects the candidate atomically.
     if provider_total is not None:
+        field_by_wire_name = {
+            names[0]: field_name for field_name, names in _TEAM_ROW_ALIASES.items()
+        }
         for wire_name in LEDGER_GOVERNED_DIAGNOSTIC_COUNTS:
             if total.get(wire_name) is None:
+                # The team_results envelope is sparse like every other PBP
+                # row: an omitted diagnostic is the observed zero when, and
+                # only when, the declared authority for that count is itself
+                # zero (no participating player and no residual carries it).
+                # A nonzero authority cannot be proven by an omission.
+                field_name = field_by_wire_name.get(wire_name)
+                if field_name is not None and values.get(field_name) == 0:
+                    continue
                 raise LedgerValidationError(
                     f"team_results diagnostics are missing the {wire_name} count"
                 )
