@@ -210,6 +210,50 @@ def test_underdog_unrecognized_present_label_stays_unknown_not_full_game() -> No
     assert market.scoring_period_label == "overtime"
 
 
+def test_underdog_present_non_textual_period_stays_unknown_not_full_game() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    # A present but non-textual value is present evidence, not absence.
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = 2
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
+
+
+def test_underdog_whitespace_only_period_stays_unknown_not_full_game() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = "   "
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
+
+
+def test_underdog_null_scoring_period_falls_through_to_present_period_label() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    # A null scoring_period is not absence when a legacy period label is present.
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = None
+    rows[0]["over_under"]["appearance_stat"]["period"] = "first_half"
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.scoring_period is ScoringPeriod.FIRST_HALF
+    assert market.scoring_period_label == "first_half"
+
+
 def test_underdog_excludes_team_non_nba_and_closed_markets_with_coverage() -> None:
     payload = _payload()
     players = payload["players"]

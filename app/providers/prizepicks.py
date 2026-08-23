@@ -418,12 +418,20 @@ class PrizePicksAdapter:
         variant_label = optional_text(attributes.get("odds_type"))
         variant = normalize_market_variant(variant_label)
         # PrizePicks omits any scoring-period field on its standard full-game
-        # markets, so the absent label is resolved to FULL_GAME at the market
-        # seam (:func:`resolve_scoring_period`); a present label is normalized
-        # and an unrecognized one stays UNKNOWN.  The raw label (``None`` when
-        # absent) is retained verbatim as evidence.
-        period_label = optional_text(
-            attributes.get("scoring_period", attributes.get("period"))
+        # markets, so a truly-absent label is resolved to FULL_GAME at the
+        # market seam (:func:`resolve_scoring_period`); a present label is
+        # normalized and an unrecognized one stays UNKNOWN.  The read is
+        # presence-aware: only a missing/null scoring_period falls through to
+        # the legacy ``period`` key, and a value that is present but not textual
+        # (a number, a blank string) is present evidence -- it resolves UNKNOWN,
+        # never absence.  The raw label (``None`` when absent) is retained
+        # verbatim as evidence.
+        raw_period = attributes.get("scoring_period")
+        if raw_period is None:
+            raw_period = attributes.get("period")
+        period_label = optional_text(raw_period)
+        scoring_period = (
+            None if raw_period is None else (period_label or str(raw_period))
         )
 
         try:
@@ -450,7 +458,7 @@ class PrizePicksAdapter:
                 status_label=raw_status,
                 variant=variant.value,
                 variant_label=variant_label,
-                scoring_period=period_label,
+                scoring_period=scoring_period,
                 scoring_period_label=period_label,
                 starts_at=start_value,
                 updated_at=updated_value,

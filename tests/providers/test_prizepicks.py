@@ -278,6 +278,49 @@ def test_prizepicks_unrecognized_present_label_stays_unknown_not_full_game() -> 
     assert market.scoring_period_label == "overtime"
 
 
+def test_prizepicks_present_non_textual_period_stays_unknown_not_full_game() -> None:
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+    # A present but non-textual value is present evidence, not absence: it must
+    # not collapse to the absent-label full-game default.
+    payload["data"][0]["attributes"]["scoring_period"] = 2
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
+
+
+def test_prizepicks_whitespace_only_period_stays_unknown_not_full_game() -> None:
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+    payload["data"][0]["attributes"]["scoring_period"] = "   "
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
+
+
+def test_prizepicks_null_scoring_period_falls_through_to_present_period_label() -> None:
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"] = {"current_page": 1, "total_pages": 1}
+    # A null scoring_period is not absence when a legacy period label is present:
+    # a recognized period-scoped label must win, never leak to full game.
+    payload["data"][0]["attributes"]["scoring_period"] = None
+    payload["data"][0]["attributes"]["period"] = "first_half"
+
+    snapshot = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)])
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.scoring_period is ScoringPeriod.FIRST_HALF
+    assert market.scoring_period_label == "first_half"
+
+
 def test_prizepicks_shrinking_total_pages_is_partial_with_incomplete_pagination() -> None:
     page_one = _payload("projections.page1.valid.json")
     page_one["meta"] = {"current_page": 1, "total_pages": 3}

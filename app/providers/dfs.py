@@ -868,6 +868,11 @@ class PlayerProjectionMarket:
     status_label: str | None = None
     variant: MarketVariant | str = MarketVariant.STANDARD
     variant_label: str | None = None
+    # The default is UNKNOWN, not None: a market constructed without period
+    # evidence is unresolved, not full game.  An adapter signals a provider's
+    # absent period label by passing None explicitly -- that, and only that,
+    # resolves to FULL_GAME (see resolve_scoring_period).  A caller that means
+    # "don't know" must pass UNKNOWN, never None.
     scoring_period: ScoringPeriod | str | None = ScoringPeriod.UNKNOWN
     scoring_period_label: str | None = None
     starts_at: datetime | str | None = None
