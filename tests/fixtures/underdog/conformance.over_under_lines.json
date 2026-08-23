@@ -47,8 +47,7 @@
       "over_under": {
         "appearance_stat": {
           "appearance_id": "appearance-1",
-          "display_stat": "Points",
-          "scoring_period": "full_game"
+          "display_stat": "Points"
         }
       },
       "options": [
@@ -62,6 +61,38 @@
         },
         {
           "id": "selection-lower",
+          "choice": "lower",
+          "status": "active",
+          "american_price": "+100",
+          "decimal_price": "2.000",
+          "payout_multiplier": "1.000"
+        }
+      ]
+    },
+    {
+      "id": "line-2",
+      "stat_value": "8.500",
+      "status": "active",
+      "updated_at": "2026-08-09T19:00:00-05:00",
+      "line_type": "balanced",
+      "over_under": {
+        "appearance_stat": {
+          "appearance_id": "appearance-1",
+          "display_stat": "Rebounds",
+          "scoring_period": "first_half"
+        }
+      },
+      "options": [
+        {
+          "id": "selection-2-higher",
+          "choice": "higher",
+          "status": "active",
+          "american_price": "-112",
+          "decimal_price": "1.900",
+          "payout_multiplier": "1.000"
+        },
+        {
+          "id": "selection-2-lower",
           "choice": "lower",
           "status": "active",
           "american_price": "+100",

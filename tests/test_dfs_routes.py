@@ -69,11 +69,25 @@ def board_settings(*, enabled=True, providers=("dabble", "prizepicks")):
 
 
 def complete_snapshots():
+    # Dabble and PrizePicks send no scoring-period label on their standard
+    # full-game markets, so these fixtures carry the real no-label shape and
+    # rely on the resolved FULL_GAME default; the retained label stays null,
+    # exactly as the live boards produce it.
     return [
-        _snapshot("dabble", (_market(market_id="m-1", threshold="25.5"),)),
+        _snapshot(
+            "dabble",
+            (_market(market_id="m-1", threshold="25.5", scoring_period=None),),
+        ),
         _snapshot(
             "prizepicks",
-            (_market(provider="prizepicks", market_id="m-2", threshold="26.0"),),
+            (
+                _market(
+                    provider="prizepicks",
+                    market_id="m-2",
+                    threshold="26.0",
+                    scoring_period=None,
+                ),
+            ),
         ),
     ]
 
@@ -287,10 +301,19 @@ def test_a_complete_board_is_served_exactly(make_board_client):
 
 
 def test_a_mixed_partial_and_stale_board_is_served(make_board_client):
+    # Both markets carry the real no-label shape (no provider scoring-period
+    # field), so they resolve to FULL_GAME with a null retained label.
     partial = ProviderSnapshot(
         provider="prizepicks",
         status=SnapshotStatus.PARTIAL,
-        markets=(_market(provider="prizepicks", market_id="m-2", threshold="26.0"),),
+        markets=(
+            _market(
+                provider="prizepicks",
+                market_id="m-2",
+                threshold="26.0",
+                scoring_period=None,
+            ),
+        ),
         coverage=CoverageEvidence(
             fetched_count=1,
             eligible_count=1,
@@ -301,7 +324,7 @@ def test_a_mixed_partial_and_stale_board_is_served(make_board_client):
     )
     stale = _snapshot(
         "dabble",
-        (_market(market_id="m-1", threshold="25.5"),),
+        (_market(market_id="m-1", threshold="25.5", scoring_period=None),),
         retrieved_at=RETRIEVED_AT.replace(hour=19, minute=45),
     )
     client, _ = make_board_client([stale, partial])

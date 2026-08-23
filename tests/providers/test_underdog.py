@@ -116,7 +116,10 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert market.updated_at == datetime(2026, 8, 10, 0, tzinfo=timezone.utc)
     assert market.statistic is not None
     assert market.statistic.label == "Rebounds"
-    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    # Underdog sends no scoring-period label on its standard markets, so the
+    # absent label resolves to a full-game prop while the raw evidence (no
+    # label) is retained as None.
+    assert market.scoring_period is ScoringPeriod.FULL_GAME
     assert market.scoring_period_label is None
     assert market.threshold is not None
     assert str(market.threshold.value) == "12.500"
@@ -170,6 +173,85 @@ def test_underdog_canonical_scoring_period_resolves_with_label_evidence() -> Non
     market = snapshot.markets[0]
     assert market.scoring_period is ScoringPeriod.FULL_GAME
     assert market.scoring_period_label == "full_game"
+
+
+def test_underdog_period_scoped_label_resolves_to_its_specific_period() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = "first_half"
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    # A genuinely period-scoped label keeps its specific period -- it is never
+    # promoted to full game -- and stays non-targetable.
+    assert market.scoring_period is ScoringPeriod.FIRST_HALF
+    assert market.scoring_period_label == "first_half"
+
+
+def test_underdog_unrecognized_present_label_stays_unknown_not_full_game() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = "overtime"
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    # An unrecognized present label is NOT an absent label: it stays UNKNOWN
+    # (non-targetable) and never defaults to full game, and the raw label is
+    # retained verbatim as evidence.
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.scoring_period_label == "overtime"
+
+
+def test_underdog_present_non_textual_period_stays_unknown_not_full_game() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    # A present but non-textual value is present evidence, not absence.
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = 2
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
+
+
+def test_underdog_whitespace_only_period_stays_unknown_not_full_game() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = "   "
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    assert snapshot.markets[0].scoring_period is ScoringPeriod.UNKNOWN
+
+
+def test_underdog_null_scoring_period_falls_through_to_present_period_label() -> None:
+    payload = _payload()
+    rows = payload["over_under_lines"]
+    assert isinstance(rows, list)
+    # A null scoring_period is not absence when a legacy period label is present.
+    rows[0]["over_under"]["appearance_stat"]["scoring_period"] = None
+    rows[0]["over_under"]["appearance_stat"]["period"] = "first_half"
+
+    snapshot = UnderdogAdapter(
+        session=FakeSession(FakeResponse(payload))
+    ).get_snapshot(_query(), _context())
+
+    market = snapshot.markets[0]
+    assert market.scoring_period is ScoringPeriod.FIRST_HALF
+    assert market.scoring_period_label == "first_half"
 
 
 def test_underdog_excludes_team_non_nba_and_closed_markets_with_coverage() -> None:

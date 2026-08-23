@@ -24,7 +24,6 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     ProviderSnapshot,
     RetrievalContext,
-    ScoringPeriod,
     Selection,
     SelectionModifier,
     _SnapshotMarketCollector,
@@ -307,11 +306,21 @@ class UnderdogAdapter:
         updated_at = row.get("updated_at")
         validate_timestamp(updated_at, "updated_at")
         starts_at = event.starts_at if event is not None else None
-        period_label = optional_text(
-            appearance_stat.get("scoring_period", appearance_stat.get("period"))
-        )
+        # Underdog omits any scoring-period field on its standard full-game
+        # markets, so a truly-absent label is resolved to FULL_GAME at the
+        # market seam (:func:`resolve_scoring_period`); a present label is
+        # normalized and an unrecognized one stays UNKNOWN.  The read is
+        # presence-aware: only a missing/null scoring_period falls through to
+        # the legacy ``period`` key, and a value that is present but not textual
+        # (a number, a blank string) is present evidence -- it resolves UNKNOWN,
+        # never absence.  The raw label (``None`` when absent) is retained
+        # verbatim as evidence.
+        raw_period = appearance_stat.get("scoring_period")
+        if raw_period is None:
+            raw_period = appearance_stat.get("period")
+        period_label = optional_text(raw_period)
         scoring_period = (
-            period_label if period_label is not None else ScoringPeriod.UNKNOWN
+            None if raw_period is None else (period_label or str(raw_period))
         )
 
         try:

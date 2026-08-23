@@ -372,10 +372,23 @@ the reviewed component order (`PRA` is points, rebounds, assists) regardless of
 the source label order. Dabble, PrizePicks, and Underdog labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
 case-insensitively and preserves presentation evidence but does not infer
-meaning. Omitted period evidence
-stays `ScoringPeriod.UNKNOWN` rather than being guessed as full game, so a
-canonical identity always requires explicit full-game evidence. Unknown labels,
-unknown or period-specific scoring periods, unit mismatches, and provider
+meaning. Scoring periods are resolved in one place — the provider adapter seam
+(`resolve_scoring_period` in `app/providers/dfs.py`, applied by
+`PlayerProjectionMarket`) — where a per-provider normalization rule governs the
+period without rewriting the payload: an **absent** period label resolves to
+`ScoringPeriod.FULL_GAME`, because PrizePicks and Underdog send no period field
+on their standard full-game props (Dabble derives the same default from a
+full-game stat composition); a **present** label maps to its specific period
+(e.g. a first half stays first half, never silently full game); and a present
+but **unrecognized** label stays `ScoringPeriod.UNKNOWN`. Only absence defaults
+to full game — an unrecognized label is never promoted to it. The raw
+`scoring_period_label` (including `None` for an absent label) is retained
+verbatim as immutable evidence and is never synthesized from the resolved
+period, so a resolved market is stable under `replace()` and the archive
+round-trip. The catalog never guesses on top of this: a market that arrives as
+`ScoringPeriod.UNKNOWN` stays `MatchState.UNMAPPED` with
+`MatchReason.UNKNOWN_SCORING_PERIOD` and is not targetable. Unknown labels,
+period-specific scoring periods, unit mismatches, and provider
 fantasy labels return `MatchState.UNMAPPED` with a closed `MatchReason`, retain
 the original provider evidence, and are not included in the board's
 canonical-market view. This slice does not create
