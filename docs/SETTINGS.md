@@ -258,6 +258,19 @@ when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase
 credentials are absent/invalid, `CORS_ALLOWED_ORIGINS` is not explicitly set,
 `DFS_ENABLED_PROVIDERS` is omitted, or the local bypass is enabled. This prevents the process from starting with a
 configuration that cannot enforce its security contract.
+
+Production and staging startup also fail closed when the live database schema
+is behind the code. `create_app()` compares the applied migration head in
+`schema_migrations` against the head the code expects and raises
+`SchemaBehindError` when the database is behind, so a release that ships ahead
+of an un-applied migration cannot serve traffic (see the Schema maintenance
+section in `docs/ARCHITECTURE.md`). This guard is not part of the typed
+settings model: it reads the one operational escape hatch `ALLOW_SCHEMA_DRIFT`
+straight from the environment. `ALLOW_SCHEMA_DRIFT` defaults to enforcing;
+setting it to a truthy value downgrades the fatal drift error to a loud warning
+for emergencies only and should be removed once `python scripts/migrate.py` has
+migrated the database. The guard is inert for local/testing environments, the
+read-only demo fixture, and databases that record no migration head.
 Firebase may use a service-account file, hosted JSON, or the complete
 three-field credential set. A configured file path must exist when it is the
 only credential source; valid JSON or all three fields take precedence when a

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime as PythonDateTime, timezone
 import json
+import logging
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -26,8 +27,11 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.sql import func
+
+logger = logging.getLogger(__name__)
 
 
 MIGRATION_TABLE_NAME: Final[str] = "schema_migrations"
@@ -2247,6 +2251,41 @@ def run_migrations(engine: Engine) -> MigrationResult:
         applied=tuple(applied_names),
         current_version=max(applied_versions, default=0),
     )
+
+
+def expected_schema_version() -> int:
+    """The migration head the current application code expects to be applied."""
+    return max((migration.version for migration in MIGRATIONS), default=0)
+
+
+def current_schema_version(engine: Engine) -> int | None:
+    """Return the highest applied migration version recorded in ``engine``.
+
+    Returns ``None`` when the database has never recorded a migration -- the
+    ``schema_migrations`` table is absent, or the object is not a real engine
+    that can be inspected -- so callers can treat such a database as "not a
+    migrated deployment target" rather than as a database behind version zero.
+    The offline suite builds applications with mock engines; those record no
+    head and must not read as behind.
+    """
+    if not isinstance(engine, Engine):
+        return None
+    try:
+        if not inspect(engine).has_table(MIGRATION_TABLE_NAME):
+            return None
+        with engine.connect() as connection:
+            return connection.execute(
+                select(func.max(_schema_migrations.c.version))
+            ).scalar()
+    except SQLAlchemyError:
+        logger.warning(
+            "Could not read the applied schema version from %s; treating the "
+            "database as an unmigrated target and skipping the schema-drift "
+            "guard for this boot.",
+            MIGRATION_TABLE_NAME,
+            exc_info=True,
+        )
+        return None
 
 
 def _validate_migration_order() -> None:

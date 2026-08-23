@@ -440,6 +440,32 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     } == {"11/01/2025"}
 
 
+def test_synergy_window_binds_team_minutes_and_tolerates_partial_play_type_games():
+    # Synergy counts only games with at least one possession of the play
+    # type, so its GP sits below the team's games for rarer play types.
+    synergy = pd.DataFrame([
+        {"TEAM_ID": 1610612737, "GP": 77, "POSS": 1415, "PTS": 1437},
+        {"TEAM_ID": 1610612738, "GP": 80, "POSS": 1300, "PTS": 1290},
+    ])
+    minutes = pd.DataFrame([
+        {"TEAM_ID": 1610612737, "GP": 82, "MIN": 3971},
+        {"TEAM_ID": 1610612738, "GP": 82, "MIN": 3966},
+    ])
+    bound = _StandaloneNBAProvider._bind_synergy_window(synergy, minutes)
+    assert bound["GP"].tolist() == [82, 82]
+    assert bound["MIN"].tolist() == [3971, 3966]
+    assert "WINDOW_GP" not in bound.columns
+
+    # More Synergy games than the team played proves the wrong window.
+    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+        _StandaloneNBAProvider._bind_synergy_window(
+            synergy.assign(GP=[83, 80]), minutes
+        )
+    # A team missing from the minutes evidence cannot be bound.
+    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+        _StandaloneNBAProvider._bind_synergy_window(synergy, minutes.iloc[:1])
+
+
 @pytest.mark.parametrize(
     ("evidence_mode", "expected_composed"),
     (

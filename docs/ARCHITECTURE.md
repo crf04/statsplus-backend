@@ -3357,6 +3357,45 @@ initialization for their disposable databases. Migration 031 idempotently
 recreates the five Canonical Game Ledger tables from migration 024, repairing
 the production drift caused by the former concurrent worker-startup path.
 
+The pre-deploy command must run in the built deploy image so bare `python`
+resolves to the interpreter that already has SQLAlchemy and psycopg2 installed,
+and `DATABASE_URL` must be present in the pre-deploy context; otherwise
+`scripts/migrate.py` cannot import `app.migrations`' dependencies or resolve a
+target and exits non-zero. `scripts/migrate.py` is fail-closed by construction:
+`argparse` exits 2 when no target is supplied, and any exception from
+`run_migrations` propagates out of `main` (never a zero status), so a failed
+migration exits non-zero and Railway does not promote the release. Its output
+is the retrievable deploy-log record of the outcome — either
+`Applied N migration(s) to <url>: ...` or `Database is already up to date at
+version N: <url>` with the password redacted.
+
+Because a pre-deploy step can still be skipped, misconfigured, or edited after
+a release (the exact 45-vs-046 drift that motivated issue #189, whose root
+cause is not confirmable from the repository and remains the operator's to
+read from a real pre-deploy log), `create_app()` runs a boot-time schema-drift
+guard (`app.startup_schema_guard.verify_schema_is_current`) as a fail-closed
+backstop. Before serving, it compares the live schema head (max `version` in
+`schema_migrations`) with the code's expected head
+(`max(m.version for m in MIGRATIONS)`): if the database is strictly behind, it
+raises `SchemaBehindError` so the worker fails to boot, the Railway healthcheck
+fails, and the behind-schema release is not promoted. A database at or ahead of
+the expected head boots normally, so a mid-rollout worker running older code
+against a newer schema is never blocked. The guard is deliberately narrow — it
+is inert for the local/testing environments, the read-only demo fixture, and
+any database that records no migration head (the offline test suite's
+mock-engine app factories) — so it engages only for a real, non-demo,
+non-testing deployment database. The emergency override `ALLOW_SCHEMA_DRIFT=true`
+downgrades the fatal error to a loud warning; it defaults to enforcing and
+should be removed once the schema is migrated.
+
+Recovery from drift: run `python scripts/migrate.py` with `DATABASE_URL` set to
+the affected database (or pass `--database-url`); it applies the pending
+migrations idempotently and prints the resulting head. Then redeploy so the
+boot guard passes. The Railway service settings cannot be changed from this
+repository; the operator must confirm the `statsplus-backend` production deploy
+manifest keeps `preDeployCommand: "python scripts/migrate.py"` (asserted by
+`tests/test_railway_config.py`) running fail-closed in the built environment.
+
 Migration 005 creates the writable `event_catalog` and
 `event_catalog_refreshes` tables. Migrations are applied in order. Event
 refreshes upsert by NBA game ID in one transaction without replacing the

@@ -356,6 +356,21 @@ class _StandaloneNBAProvider:
             league_id_nullable="00",
             timeout=self.timeout,
         ))
+        return self._bind_synergy_window(frame, minutes)
+
+    @staticmethod
+    def _bind_synergy_window(frame: Any, minutes: Any) -> Any:
+        """Bind each team's Season minutes and games to its Synergy row.
+
+        Synergy's own ``GP`` counts only the games in which the team faced at
+        least one possession of the play type, so it is legitimately below the
+        team's games played for every rarer play type.  The window is proven
+        by the team-stats evidence: every Synergy team must have minutes and
+        games there, and a Synergy count can never exceed the games actually
+        played.  The bound ``GP`` is the window's games, matching the shot
+        surfaces' ``_bind_window_gp``; the per-48 denominator is the minutes.
+        """
+
         try:
             minute_rows = minutes[["TEAM_ID", "MIN", "GP"]].rename(
                 columns={"GP": "WINDOW_GP"}
@@ -363,7 +378,7 @@ class _StandaloneNBAProvider:
             merged = frame.merge(minute_rows, on="TEAM_ID", how="left")
             if merged[["MIN", "WINDOW_GP"]].isna().any().any():
                 raise ProviderContractError("provider_window_unverified")
-            if "GP" in merged and not (merged["GP"] == merged["WINDOW_GP"]).all():
+            if "GP" in merged and not (merged["GP"] <= merged["WINDOW_GP"]).all():
                 raise ProviderContractError("provider_window_unverified")
             merged["GP"] = merged["WINDOW_GP"]
             return merged.drop(columns=["WINDOW_GP"])
