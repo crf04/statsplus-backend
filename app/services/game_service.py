@@ -18,6 +18,7 @@ import pandas as pd
 from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.play_type_matchup import play_type_matchup
 from app.models.catalogs import (
     ASSIST_LOCATION_FILTERS,
     CATCH_SHOOT_FILTERS,
@@ -36,6 +37,14 @@ from .nba_cache import NBAGameCache
 from .nba_stats_adapter import NBAStatsAdapter
 
 logger = logging.getLogger(__name__)
+
+# The Log Workspace rating crosses the player's Season play-type Diet with the
+# opponent's Season play-type window.  Synergy publishes a single scoring stat
+# per play type, so the crossing reads exactly the ``PTS`` metric the Matchup
+# page reads.
+_PLAY_TYPE_BASE = "play_types"
+_PLAY_TYPE_STAT_KEY = "PTS"
+_DEFAULT_PLAYSTYLE_RANGE = (0.0, 200.0)
 
 
 def _records(frame: pd.DataFrame):
@@ -151,6 +160,8 @@ class GameService:
         settings: RuntimeSettings | None = None,
         nba_stats_adapter: NBAStatsProvider | None = None,
         game_logs_source=None,
+        player_diets=None,
+        team_matchups=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -164,6 +175,11 @@ class GameService:
         # database-first source; tests may leave it unset to exercise the
         # legacy NBA fallback path.
         self.game_logs_source = game_logs_source
+
+        # Governed rating inputs.  Both are absent against the read-only demo
+        # database, which leaves PLAYTYPE_RTG null rather than failing.
+        self.player_diets = player_diets
+        self.team_matchups = team_matchups
 
         # Initialize cache
         if redis_client is None:
@@ -428,11 +444,12 @@ class GameService:
             opponents = df['MATCHUP'].astype(str).str.extract(r'(?:vs\.|@)\s*([A-Z]{2,3})')[0]
             df = df[opponents.isin(teams_against)]
 
-        # Apply playstyle filter
-        if query.playstyle_range != (0.0, 200.0):
+        # Apply playstyle filter.  A rating-less row (no play-type facts for
+        # the player or the opponent) is NaN, so a non-default range excludes
+        # it rather than scoring it as neutral.
+        if query.playstyle_range != _DEFAULT_PLAYSTYLE_RANGE:
             min_rating, max_rating = query.playstyle_range
-            if 'PLAYTYPE_RTG' in df.columns:
-                df = df[(df['PLAYTYPE_RTG'] >= min_rating) & (df['PLAYTYPE_RTG'] <= max_rating)]
+            df = df[(df['PLAYTYPE_RTG'] >= min_rating) & (df['PLAYTYPE_RTG'] <= max_rating)]
 
         # Apply players on/off filter
         if query.players_on or query.players_off:
@@ -455,9 +472,84 @@ class GameService:
 
         return df
 
+    def _with_playtype_rating(self, df, player_name, season):
+        """Return a copy of the frame carrying one PLAYTYPE_RTG per row.
+
+        The rating depends only on (player, opponent), so the governed facts
+        are read once per request and every row is scored from that map.
+        """
+        df = df.copy()
+        ratings = self._playtype_ratings(player_name, season)
+        if not ratings or 'MATCHUP' not in df.columns:
+            df['PLAYTYPE_RTG'] = pd.Series(
+                float('nan'), index=df.index, dtype='float64'
+            )
+            return df
+
+        by_abbreviation = {
+            team['abbreviation']: ratings[team['id']]
+            for team in self.all_teams
+            if team['id'] in ratings
+        }
+        opponents = df['MATCHUP'].astype(str).str.extract(
+            r'(?:vs\.|@)\s*([A-Z]{2,3})'
+        )[0]
+        df['PLAYTYPE_RTG'] = pd.to_numeric(
+            opponents.map(by_abbreviation), errors='coerce'
+        )
+        return df
+
+    def _playtype_ratings(self, player_name, season):
+        """Map every opponent team id to its PLAYTYPE_RTG for this player.
+
+        One Diet read plus one team-window read; ``100`` is a league-average
+        matchup.  A team whose crossing cannot be evidenced is simply absent.
+        """
+        if self.player_diets is None or self.team_matchups is None:
+            return {}
+
+        player_id = int(self.get_player_id(player_name))
+        diets = self.player_diets.get_for_players(season, (player_id,))
+        shares = {
+            fact.slice_key: fact.share
+            for fact in diets.players.get(player_id, ())
+            if fact.base == _PLAY_TYPE_BASE
+        }
+        if not shares:
+            return {}
+
+        window = self.team_matchups.get_latest_window(season)
+        if window is None:
+            return {}
+        league_allowed = self._play_type_allowed(
+            window.league_metrics, 'average_allowed_per_48'
+        )
+        ratings = {}
+        for team_id, metrics in window.team_metrics.items():
+            matchup = play_type_matchup(
+                shares,
+                self._play_type_allowed(metrics, 'allowed_per_48'),
+                league_allowed,
+            )
+            if matchup is not None:
+                ratings[team_id] = round(100 * (1 + matchup), 1)
+        return ratings
+
+    @staticmethod
+    def _play_type_allowed(metrics, attribute):
+        return {
+            metric.slice_key: getattr(metric, attribute)
+            for metric in metrics
+            if metric.base == _PLAY_TYPE_BASE
+            and metric.stat_key == _PLAY_TYPE_STAT_KEY
+        }
+
     def get_filtered_logs(self, player_name, query: GameLogQuery):
         """Get filtered game logs based on one typed :class:`GameLogQuery`."""
         full_game_logs, next_team = self._get_game_logs(player_name, query.season_filter)
+        full_game_logs = self._with_playtype_rating(
+            full_game_logs, player_name, query.season_filter
+        )
 
         # Resolve opponent filters into one intersecting team set.
         resolved_teams = None
@@ -712,33 +804,3 @@ class GameService:
             if team['id'] == team_id:
                 return team['full_name']
         return None
-
-    #Rating functions: currently unused
-    """def calculate_matchup_rating(self, player_name, team):
-        teams_df = self._fetch_data_from_table('team_play_types')
-        players_df = self._fetch_data_from_table('player_play_types')
-
-        playtypes = ['Cut', 'Isolation', 'PRRollMan', 'PRBallHandler', 'OffRebound',
-                    'Spotup', 'Handoff', 'OffScreen', 'Misc', 'Postup', 'Transition']
-
-        player_columns = [playtype + '%' for playtype in playtypes]
-        team_columns = playtypes
-
-        player_data = players_df.loc[players_df['PLAYER_NAME'] == player_name, player_columns]
-        team_data = teams_df.loc[teams_df['team'] == team, team_columns]
-
-        matchupRTG = (player_data.values * team_data.values).sum()
-        return round(matchupRTG, 2)
-
-    def calculate_assist_location_rating(self, player_name, team):
-        teams_df = self._fetch_data_from_table('processed_team_assists')
-        players_df = self._fetch_data_from_table('processed_player_assists')
-
-        cats = ["Arc3Assists", "Corner3Assists", "AtRimAssists",
-               "ShortMidRangeAssists", "LongMidRangeAssists"]
-
-        player_data = players_df.loc[players_df['Name'] == player_name, cats]
-        team_data = teams_df.loc[teams_df['Name'] == team, cats]
-
-        matchupRTG = (player_data.values * team_data.values).sum()
-        return round(matchupRTG, 2)"""

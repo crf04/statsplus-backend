@@ -542,6 +542,8 @@ def build_dependencies(
         settings=settings,
         nba_stats_adapter=nba_stats_provider,
         game_logs_source=game_logs_source,
+        player_diets=player_diet_service,
+        team_matchups=team_matchup_query_service,
     )
     stored_player_pool_reader = (
         StoredPlayerPoolReader(player_pool_snapshot_repository)

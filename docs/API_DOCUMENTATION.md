@@ -892,6 +892,18 @@ Both paths
 return the same whole-minute presentation and the same composite/fantasy
 averages, and any season cut over to the database must satisfy strict parity.
 
+Play-type matchup rating (#37): every `game_logs` row carries `PLAYTYPE_RTG`,
+the play-type matchup between the player's Season Synergy Diet Share and that
+game's opponent's Season play-type window, rounded to one decimal place. The
+scale is centered on the league: `100` is a league-average matchup, above `100`
+is a favorable one, and below `100` an unfavorable one. It uses the same
+definition as the Matchup page's play-types `PTS` score, so
+`PLAYTYPE_RTG = 100 x (1 + m)` for that score `m`. A row whose player or
+opponent has no usable play-type facts carries `null`; the read-only demo
+database has none, so every row carries `null` there. `playstyle_RTG_min` /
+`playstyle_RTG_max` filter on this column, and a non-default range excludes
+`null` rows rather than treating them as neutral.
+
 Explicit contract amendment (#66): plus/minus is removed from the game-log
 contract. `PLUS_MINUS` is no longer a supported `self_filters[STAT]`, the
 averages no longer include a `PLUS_MINUS` cell, and response rows carry no
@@ -928,8 +940,8 @@ Query parameters:
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
-| `playstyle_RTG_min` | No | Finite numeric lower bound. Default `0` |
-| `playstyle_RTG_max` | No | Finite numeric upper bound. Default `200` |
+| `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
+| `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
 | `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
