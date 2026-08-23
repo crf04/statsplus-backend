@@ -652,11 +652,51 @@ def _ledger_raw_rows(
         if row.row_type == "team":
             team_rows_by_side[row.side] += 1
     for side, count in team_rows_by_side.items():
+        if count == 0 and _side_residual_is_proven_zero(observation, side, output):
+            # The sparse wire omits the whole team-summary row when a side has
+            # no team-only residual; the diagnostics prove it (every governed
+            # count equals the participating-player sum).
+            continue
         if count != 1:
             raise LedgerValidationError(
                 f"PBP FullGame requires exactly one team-summary row for {side} evidence"
             )
     return tuple(output)
+
+
+def _side_residual_is_proven_zero(
+    observation: Mapping[str, Any],
+    side: str,
+    rows: Sequence[LedgerGameRow],
+) -> bool:
+    """Return whether ``side`` provably has no team-only residual.
+
+    True only when the ``team_results`` ``FullGame`` diagnostic envelope for
+    the side exists and every governed diagnostic count (an omitted key being
+    the sparse zero) equals the sum of that side's player rows.
+    """
+
+    team_results = observation.get("team_results")
+    envelope = team_results.get(side) if isinstance(team_results, Mapping) else None
+    diagnostics = envelope.get("FullGame") if isinstance(envelope, Mapping) else None
+    if not isinstance(diagnostics, Mapping):
+        return False
+    players = [row.payload for row in rows if row.side == side and row.row_type == "player"]
+    if not players:
+        return False
+    for wire_name in LEDGER_GOVERNED_DIAGNOSTIC_COUNTS:
+        if wire_name in diagnostics and diagnostics[wire_name] is None:
+            return False
+        try:
+            diagnostic = _integer(diagnostics.get(wire_name), wire_name) or 0
+            player_sum = sum(
+                _integer(row.get(wire_name), wire_name) or 0 for row in players
+            )
+        except LedgerValidationError:
+            return False
+        if diagnostic != player_sum:
+            return False
+    return True
 
 
 def _verify_observation_binding(
@@ -1106,11 +1146,13 @@ def _sum_team_facts(
     where the declared authority is zero), well-formed, and reconciling with
     the declared team authority, and the
     diagnostics never populate a typed fact.  ``require_team_row`` is set for
-    accepted raw observations: a complete game may never omit a side's
-    team-summary row.
+    accepted raw observations: a side may omit its team-summary row only when
+    the diagnostics are present to prove a zero team-only residual.
     """
 
-    if require_team_row and team_row is None:
+    if require_team_row and team_row is None and provider_total is None:
+        # Without a team-summary row the diagnostics are the only proof that
+        # the team-only residual is zero; the reconciliation below enforces it.
         raise LedgerValidationError(
             "accepted PBP evidence requires a team-summary row for every governed side"
         )
@@ -1776,9 +1818,9 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
             if row.entity_id is None or row.entity_id in raw_player_rows:
                 raise LedgerValidationError("raw player evidence has an invalid entity identity")
             raw_player_rows[row.entity_id] = row.team_id
-    if team_rows_by_side != {"Home": 1, "Away": 1}:
+    if any(count > 1 for count in team_rows_by_side.values()):
         raise LedgerValidationError(
-            "raw evidence must contain exactly one team-summary row per side"
+            "raw evidence must contain at most one team-summary row per side"
         )
     for side, indices in row_indices_by_side.items():
         if set(indices) != set(range(len(indices))):
@@ -1800,10 +1842,15 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
         for team_id in observed_by_team
     }
     _reconcile_raw_and_typed_evidence(game, players_by_team)
+    # A side without an archived team-summary row has a proven-zero residual,
+    # so its typed counts must equal the participating-player sums exactly.
     team_row_payload = {
         team_id: next(
-            row.payload for row in game.raw_rows
-            if row.row_type == "team" and row.team_id == team_id
+            (
+                row.payload for row in game.raw_rows
+                if row.row_type == "team" and row.team_id == team_id
+            ),
+            {},
         )
         for team_id in observed_by_team
     }
@@ -1824,6 +1871,10 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
                 raise LedgerValidationError(
                     f"team_fact.{field_name} must reconcile with player primitives and team-only evidence"
                 )
+        if not team_row_payload[team_fact.team_id] and team_fact.possessions is not None:
+            raise LedgerValidationError(
+                "team_fact.possessions requires a team-summary row"
+            )
         expected_minutes = sum(player.minutes for player in team_players) / 5.0
         if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
             raise LedgerValidationError(
@@ -2119,11 +2170,14 @@ class CanonicalGameLedgerRepository:
         raw_rows = connection.execute(select(
             tables["raw"].c.side,
             tables["raw"].c.row_type,
-            tables["raw"].c.row_index,
+            tables["raw"].c.entity_id,
             tables["raw"].c.observed_fields,
         ).where(tables["raw"].c.game_id == candidate.game_id)).mappings().all()
+        # Rows correspond by identity (side, type, entity), never by provider
+        # index: a correction that adds or omits a row shifts every later
+        # index without changing which player a row describes.
         candidate_fields = {
-            (row.side, row.row_type, row.row_index): frozenset(row.observed_fields)
+            (row.side, row.row_type, row.entity_id): frozenset(row.observed_fields)
             for row in candidate.raw_rows
         }
         if existing is None or not raw_rows:
@@ -2145,7 +2199,7 @@ class CanonicalGameLedgerRepository:
             }
 
         def row_key(row: Any) -> tuple[Any, Any, Any]:
-            return (row["side"], row["row_type"], row["row_index"])
+            return (row["side"], row["row_type"], row["entity_id"])
 
         existing_fields = {
             row_key(row): frozenset(json.loads(row["observed_fields"] or "[]"))
