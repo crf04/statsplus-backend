@@ -49,6 +49,7 @@ from app.services.projection_archive import (
     _digest,
 )
 from app.services.statistic_catalog import StatisticCatalog
+from app.services.dfs_snapshot_cache import SnapshotCacheError
 
 
 OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
@@ -2826,3 +2827,205 @@ def test_replay_decodes_a_legacy_v1_document_with_an_unreviewed_modifier(tmp_pat
     )
     pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert [player.canonical_player_id for player in pool.players] == [7]
+
+
+def _mixed_form_document(document: dict, *, schema_version: int) -> dict:
+    """Rewrite an ingested document into a mixed-form shape.
+
+    One side prices in American odds, the other only in an entry payout
+    multiplier -- a market shape that was legal to archive before this branch
+    but that new normalization now rejects.  A version-2 document additionally
+    carries the price triple on each selection, as new-format data must.
+    """
+
+    higher = {
+        "selection_id": "higher",
+        "label": None,
+        "direction": "higher",
+        "direction_label": None,
+        "status": None,
+        "modifiers": [],
+        "american_price": "-112",
+        "decimal_price": None,
+    }
+    lower = {
+        "selection_id": "lower",
+        "label": None,
+        "direction": "lower",
+        "direction_label": None,
+        "status": None,
+        "modifiers": [
+            {
+                "value": "2.0",
+                "kind": "payout_multiplier",
+                "scope": "selection",
+                "label": None,
+            }
+        ],
+        "american_price": None,
+        "decimal_price": None,
+    }
+    if schema_version >= 2:
+        higher.update(
+            price_kind="american", price_value="-112", price_scope="selection"
+        )
+        lower.update(price_kind="multiplier", price_value="2.0", price_scope="entry")
+
+    document = dict(document)
+    document["schema_version"] = schema_version
+    document["markets"] = [
+        {**dict(market), "selections": [higher, lower]}
+        for market in document["markets"]
+    ]
+    return document
+
+
+def _ingest_unresolved_underdog_row(engine, catalog):
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    market = PlayerProjectionMarket(
+        provider="underdog",
+        market_id="legacy-mixed-line",
+        athlete=AthleteEvidence(
+            provider_id="athlete-unresolved",
+            name="Provider Player",
+            team=TeamEvidence(canonical_id=None),
+        ),
+        event=EventEvidence(provider_id="event-1", canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="underdog",
+        ),
+        threshold=MarketThreshold("20.5", "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+        selections=(
+            Selection(
+                selection_id="higher",
+                direction=SelectionDirection.HIGHER,
+                american_price=-112,
+            ),
+        ),
+    )
+    snapshot = ProviderSnapshot(
+        provider="underdog",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1
+        ),
+        retrieved_at=OBSERVED_AT,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    ingested = archive.ingest_snapshot(
+        snapshot, query=NBAMarketQuery(season=SEASON), accepted_at=OBSERVED_AT
+    )
+    return archive, ingested
+
+
+def test_replay_reconstructs_a_legacy_v1_mixed_form_market_without_hard_failing(
+    tmp_path,
+):
+    """A mixed-form market that only exists in a schema-v1 archive must replay:
+    the replay-side reconstruction re-runs the market constructor, which now
+    enforces one price form per market, so it must honour the legacy leniency."""
+
+    import json as _json
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-mixed-replay.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive, ingested = _ingest_unresolved_underdog_row(engine, catalog)
+
+    snapshots = ProjectionProviderSnapshot.__table__
+    with engine.connect() as connection:
+        document = _json.loads(
+            connection.execute(
+                select(snapshots.c.evidence_document).where(
+                    snapshots.c.snapshot_id == ingested.snapshot_id
+                )
+            ).scalar_one()
+        )
+    legacy = _mixed_form_document(document, schema_version=1)
+    with engine.begin() as connection:
+        connection.execute(
+            snapshots.update()
+            .where(snapshots.c.snapshot_id == ingested.snapshot_id)
+            .values(
+                evidence_document=_json.dumps(
+                    legacy, separators=(",", ":"), sort_keys=True
+                )
+            )
+        )
+
+    replayed = archive.replay_athlete_mapping(
+        provider="underdog",
+        provider_athlete_id="athlete-unresolved",
+        canonical_player_id=7,
+        canonical_player_name="Mapped Player",
+        canonical_team_id=10,
+        replayed_at=OBSERVED_AT - timedelta(minutes=1),
+    )
+
+    assert replayed.changed is True
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(
+            provider="underdog", query=NBAMarketQuery(season=SEASON)
+        ),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+    )
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert [player.canonical_player_id for player in pool.players] == [7]
+
+
+def test_replay_still_rejects_a_v2_mixed_form_document(tmp_path):
+    """The same mixed-form shape at schema version 2 is new-format data, which
+    the constructors reject: a v2 document can never legally hold it."""
+
+    import json as _json
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'v2-mixed-replay.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive, ingested = _ingest_unresolved_underdog_row(engine, catalog)
+
+    snapshots = ProjectionProviderSnapshot.__table__
+    with engine.connect() as connection:
+        document = _json.loads(
+            connection.execute(
+                select(snapshots.c.evidence_document).where(
+                    snapshots.c.snapshot_id == ingested.snapshot_id
+                )
+            ).scalar_one()
+        )
+    mixed = _mixed_form_document(document, schema_version=2)
+    with engine.begin() as connection:
+        connection.execute(
+            snapshots.update()
+            .where(snapshots.c.snapshot_id == ingested.snapshot_id)
+            .values(
+                evidence_document=_json.dumps(
+                    mixed, separators=(",", ":"), sort_keys=True
+                )
+            )
+        )
+
+    # The v2 market carries a well-formed price triple, so it reaches the
+    # market constructor and is rejected there for the one-price-form rule --
+    # not at the selection-schema check -- confirming new data stays strict.
+    with pytest.raises(SnapshotCacheError, match="market value is invalid"):
+        archive.replay_athlete_mapping(
+            provider="underdog",
+            provider_athlete_id="athlete-unresolved",
+            canonical_player_id=7,
+            canonical_player_name="Mapped Player",
+            canonical_team_id=10,
+            replayed_at=OBSERVED_AT - timedelta(minutes=1),
+        )
