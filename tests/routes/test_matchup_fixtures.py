@@ -2848,6 +2848,30 @@ def test_authenticated_started_selection_outside_empty_closing_pool_is_404(
     assert response.get_json()["error"]["code"] == "resource_not_found"
 
 
+def test_authenticated_started_routes_keep_empty_closing_pool_successful(
+    projection_route_context,
+):
+    context = projection_route_context
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Final", status_code=3)
+        )
+
+    slate = context.client.get("/api/games/slate?date=2026-01-15")
+    matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert slate.status_code == matchup.status_code == 200
+    assert slate.get_json()["games"][0]["projection_state"] == {
+        "state": "missing",
+        "observed_at": None,
+    }
+    assert matchup.get_json()["players"] == []
+    assert matchup.get_json()["freshness"]["pool"]["state"] == "missing"
+
+
 def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     projection_route_context,
 ):
