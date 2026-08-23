@@ -308,13 +308,19 @@ Each Slate game then adds `projection_state` with `state: live | closing | missi
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce
 `live` while their per-offering confirmation is no more than 15 minutes old.
-When governed Event Catalog status says a game is in progress or final, one
-immutable Closing Projection Set is frozen per provider and game from the
-materialized pre-start state. Slate and Matchup then report `closing` with the
-oldest observation time in that set. Closing membership points at immutable
+When governed Event Catalog status first says a game is in progress or final,
+the Event Catalog persists that observation time. The scheduled projection
+collector—not a GET request—uses it to freeze one immutable Closing Projection
+Set per provider, exact query, and game from the materialized pre-start state.
+Legacy started events without an observed transition time use `scheduled_at`
+as the fence. Slate and Matchup then report `closing` with the oldest
+observation time in that set; a contributing provider reports status
+`closing`, never live `fresh`. Closing membership points at immutable
 Projection Observations, is never aged by the live 15-minute or six-hour
 windows, and is not changed by a late-arriving pregame poll. A started or final
-game without closing members reports `missing` and zero targetable players.
+game whose collector has not created a set yet, or whose set has no members,
+reports `missing` and zero targetable players. Reads use only the requested
+game IDs and never create or freeze a set.
 After a failed provider poll, prior confirmed offerings may be served as
 `stale-served` only through the inclusive six-hour fallback. Partial polls
 update and confirm only included references; omissions retain their prior
@@ -335,12 +341,15 @@ resolution or category authority can retire or add eligible Latest rows without
 duplicating unchanged provider evidence. The response `observed_at` comes from
 the accepted poll linked to that generation, not necessarily the older
 representative content snapshot retained for checksum verification. Only absent current evidence produces `missing` with zero
-targetable players. For a multi-game request with both live and missing games,
+targetable players. For a multi-game live request with both live and missing games,
 `freshness.pool.status` is explicitly `partial`, and each game's
 `projection_state` remains authoritative; the pool retains `state: live`
 because it contains live rows. Aggregate and per-provider observation times
 are the oldest included times, so neither understates the age of evidence in
-the union.
+that live union. When a request spans live, closing, and missing phases, live
+evidence alone controls aggregate and provider freshness, closing time never
+ages that live aggregate, and aggregate `status` is omitted. Without live
+evidence, a non-empty closing pool takes precedence over missing games.
 An unchanged provider poll is recognized from canonical market, coverage, and
 query content even though its retrieval time is newer; it confirms existing
 Latest references without duplicating observations while the immutable snapshot

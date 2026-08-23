@@ -98,8 +98,15 @@ are owned by the dedicated `ProjectionCollectionCoordinator`, invoked by
 `scripts/collect_projections.py` as a one-shot operator/Railway process. It
 uses one database-backed lease, reads the canonical Event Catalog before
 polling, and records outcomes through the same recorder seam; it never runs
-from a request route. Migration `043_projection_collection_control` adds its
-lease/state tables and the Provider Poll duration field.
+from a request route. After each poll, and on a run where newly started games
+make a provider poll unnecessary, it is also the sole normal writer of
+immutable closing sets. The Event Catalog's first observed started timestamp
+is the fence; legacy started rows fall back to their schedule. Closing identity
+includes the exact normalized projection `query_key`, so a set cannot cross
+query contracts. Migration `043_projection_collection_control` adds the
+collector lease/state tables and Provider Poll duration field; migration
+`044_projection_closing_sets` adds the durable event start field and closing
+tables.
 The reader retains scopes for every supported archive provider (`dabble`,
 `prizepicks`, and `underdog`) independently of the enabled registry. A provider
 removed from `DFS_ENABLED_PROVIDERS` therefore ages out through the 15-minute
