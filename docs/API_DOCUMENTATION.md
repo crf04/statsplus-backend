@@ -290,20 +290,23 @@ partial/degraded presentation from the provider entries. The union uses every
 usable observation. Every configured provider required by the archive reader
 is represented; one with no eligible current row is emitted as
 `{ "status": "missing", "retrieved_at": null }` rather than omitted.
-Player Pool snapshots are persisted by season and exact Slate game set. A
-snapshot no more than 15 minutes old is reused without another board fetch and
-retains each provider's actual `retrieved_at`. This is an inclusive reuse
-maximum age, not the provider cache's exclusive fresh window. The first later
-request refreshes the pool lazily. A partial refresh replaces the prior union with only usable
-providers and marks failures `missing`. On total board failure, the last pool
-is served through six hours with aggregate and contributing-provider status
+The Player Pool is read entirely from stored projection evidence; a request
+never fetches a provider board or refreshes a legacy snapshot. A confirmed
+offering no more than 15 minutes old is served as `fresh` and retains each
+provider's actual `retrieved_at`. This is an inclusive reuse maximum age, not
+the provider cache's exclusive fresh window. Partial coverage marks absent
+providers `missing`. On total failure, the last confirmed evidence is served
+through six hours with aggregate and contributing-provider status
 `stale-served`; beyond six hours the pool is empty and `unavailable`. No
 synthetic pool is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union.
 
-During projection-archive expansion, `PROJECTION_ARCHIVE_READ_ENABLED=true`
+`PROJECTION_ARCHIVE_READ_ENABLED` is enabled in production and
 selects one database-only reader for Slate, Matchup, and Matchup Selection.
+The #110 cutover removed the legacy request-time reader, so this reader is the
+sole source with no per-request fallback and the empty legacy
+`player_pool_snapshots` table is write-fenced pending its #111 removal.
 Each Slate game then adds `projection_state` with `state: live | closing | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce

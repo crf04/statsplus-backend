@@ -96,7 +96,9 @@ failure writes. `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` only as
 a deprecated compatibility/default recorder identity; it does not authorize
 recording, make that provider required, enable its read contribution, or grant
 six-hour failure fallback. When enabled on an application database, one
-database-only reader is used by Slate, Matchup, and Matchup Selection.
+database-only reader is the sole source used by Slate, Matchup, and Matchup
+Selection; the #110 cutover removed the legacy request-time reader, so there is
+no per-request fallback and legacy `player_pool_snapshots` writes are fenced.
 Dependency assembly also exposes the named projection recording service on
 application databases so an operator-owned collector can submit an already
 retrieved Complete or Partial
