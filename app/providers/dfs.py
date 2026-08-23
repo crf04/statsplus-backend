@@ -308,6 +308,28 @@ def normalize_scoring_period(
     return NormalizedLabel(values.get(normalized, ScoringPeriod.UNKNOWN), label)
 
 
+def resolve_scoring_period(
+    label: str | ScoringPeriod | None,
+) -> NormalizedLabel[ScoringPeriod]:
+    """Resolve a projection market's scoring period, defaulting an absent label
+    to a full-game prop.
+
+    A projection market that carries no period label at all is the provider
+    asserting a full-game prop: PrizePicks and Underdog omit the field entirely
+    on their standard markets, so an absent label (``None``) resolves to
+    ``FULL_GAME`` and retains no label as evidence.  A label that is present —
+    even one outside the reviewed vocabulary — is normalized and never silently
+    promoted to full game: an unrecognized present label stays ``UNKNOWN`` so it
+    remains non-targetable with an explicit ``unknown_scoring_period`` reason.
+    Only absence defaults to full game; a genuinely period-scoped label (e.g. a
+    first half) still resolves to its specific period.
+    """
+
+    if label is None:
+        return NormalizedLabel(ScoringPeriod.FULL_GAME, None)
+    return normalize_scoring_period(label)
+
+
 def _decimal_value(value: Decimal | int | str | float, *, field: str) -> Decimal:
     """Convert an upstream numeric value without introducing float arithmetic.
 
@@ -899,12 +921,19 @@ class PlayerProjectionMarket:
         variant = normalize_market_variant(self.variant)
         variant_label = self.variant_label if self.variant_label is not None else variant.original_label
         period_input = self.scoring_period
-        period = normalize_scoring_period(period_input)
-        period_label = (
-            self.scoring_period_label
-            if self.scoring_period_label is not None
-            else period.original_label
-        )
+        period = resolve_scoring_period(period_input)
+        # The scoring-period label is immutable provider evidence, so it is
+        # never synthesized from the resolved period: only a textual provider
+        # label is retained.  A resolved enum (or an absent label) carries no
+        # textual evidence and stays None -- which keeps a FULL_GAME market with
+        # no label (the PrizePicks/Underdog default) stable under replace() and
+        # the archive round-trip instead of manufacturing a "full_game" label.
+        if self.scoring_period_label is not None:
+            period_label = self.scoring_period_label
+        elif isinstance(period_input, str) and not isinstance(period_input, ScoringPeriod):
+            period_label = period.original_label
+        else:
+            period_label = None
         selections = tuple(self.selections)
         if any(not isinstance(selection, Selection) for selection in selections):
             raise ValueError("market selections must be Selection values")
@@ -1700,5 +1729,6 @@ __all__ = [
     "normalize_coverage_code",
     "normalize_selection_direction",
     "normalize_scoring_period",
+    "resolve_scoring_period",
     "normalize_timestamp",
 ]

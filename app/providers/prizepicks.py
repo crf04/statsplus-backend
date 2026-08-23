@@ -29,7 +29,6 @@ from app.providers.dfs import (
     PriceScope,
     ProviderSnapshot,
     RetrievalContext,
-    ScoringPeriod,
     Selection,
     SelectionDirection,
     _SnapshotMarketCollector,
@@ -418,11 +417,13 @@ class PrizePicksAdapter:
         event = cls._event_from_projection(attributes, relationships, resources)
         variant_label = optional_text(attributes.get("odds_type"))
         variant = normalize_market_variant(variant_label)
+        # PrizePicks omits any scoring-period field on its standard full-game
+        # markets, so the absent label is resolved to FULL_GAME at the market
+        # seam (:func:`resolve_scoring_period`); a present label is normalized
+        # and an unrecognized one stays UNKNOWN.  The raw label (``None`` when
+        # absent) is retained verbatim as evidence.
         period_label = optional_text(
             attributes.get("scoring_period", attributes.get("period"))
-        )
-        scoring_period = (
-            period_label if period_label is not None else ScoringPeriod.UNKNOWN
         )
 
         try:
@@ -449,7 +450,7 @@ class PrizePicksAdapter:
                 status_label=raw_status,
                 variant=variant.value,
                 variant_label=variant_label,
-                scoring_period=scoring_period,
+                scoring_period=period_label,
                 scoring_period_label=period_label,
                 starts_at=start_value,
                 updated_at=updated_value,

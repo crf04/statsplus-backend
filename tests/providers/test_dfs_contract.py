@@ -42,6 +42,7 @@ from app.providers.dfs import (
     normalize_modifier_kind,
     normalize_selection_direction,
     normalize_scoring_period,
+    resolve_scoring_period,
 )
 from app.domain.market_content import (
     NORMALIZED_DECIMAL_PLACE_LIMIT,
@@ -391,6 +392,39 @@ def test_normalize_scoring_period_keeps_unreviewed_labels_unknown(label):
     assert normalized.original_label == label
 
 
+def test_resolve_scoring_period_defaults_absent_label_to_full_game():
+    resolved = resolve_scoring_period(None)
+
+    assert resolved.value is ScoringPeriod.FULL_GAME
+    # Absence retains no label: the provider asserted nothing.
+    assert resolved.original_label is None
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("full_game", ScoringPeriod.FULL_GAME),
+        ("first_half", ScoringPeriod.FIRST_HALF),
+        ("second_quarter", ScoringPeriod.SECOND_QUARTER),
+    ],
+)
+def test_resolve_scoring_period_maps_present_labels_to_their_period(label, expected):
+    resolved = resolve_scoring_period(label)
+
+    assert resolved.value is expected
+    assert resolved.original_label == label
+
+
+@pytest.mark.parametrize("label", ["overtime", "", "third_quarter"])
+def test_resolve_scoring_period_keeps_unrecognized_present_labels_unknown(label):
+    # A present label is never defaulted to full game; only an absent (None)
+    # label is.  An unrecognized present label stays UNKNOWN with its evidence.
+    resolved = resolve_scoring_period(label)
+
+    assert resolved.value is ScoringPeriod.UNKNOWN
+    assert resolved.original_label == label
+
+
 def test_player_projection_market_accepts_canonical_scoring_period_string():
     market = PlayerProjectionMarket(
         provider="prizepicks",
@@ -412,10 +446,36 @@ def test_player_projection_market_omitted_scoring_period_stays_unknown():
 
     assert market.scoring_period is ScoringPeriod.UNKNOWN
     assert market.scoring_period_label is None
-    assert (
-        PlayerProjectionMarket(provider="prizepicks", scoring_period=None).scoring_period
-        is ScoringPeriod.UNKNOWN
+
+
+def test_player_projection_market_absent_provider_label_resolves_to_full_game():
+    # An adapter that reads a provider that carries no period label passes the
+    # raw absent label (``None``) through: absence is the provider asserting a
+    # full-game prop, so it resolves to FULL_GAME while the raw label (None)
+    # stays retained as evidence.
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="market-1",
+        statistic=StatisticEvidence(label="Points"),
+        scoring_period=None,
     )
+
+    assert market.scoring_period is ScoringPeriod.FULL_GAME
+    assert market.scoring_period_label is None
+
+
+def test_player_projection_market_unrecognized_label_stays_unknown_not_full_game():
+    # A present-but-unrecognized label is not absence: it must not default to
+    # full game.  It stays UNKNOWN (non-targetable) with the raw label retained.
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="market-1",
+        statistic=StatisticEvidence(label="Points"),
+        scoring_period="overtime",
+    )
+
+    assert market.scoring_period is ScoringPeriod.UNKNOWN
+    assert market.scoring_period_label == "overtime"
 
 
 @pytest.mark.parametrize(
@@ -974,6 +1034,7 @@ def test_dfs_module_exports_only_contract_symbols():
         "normalize_market_variant",
         "normalize_modifier_kind",
         "normalize_scoring_period",
+        "resolve_scoring_period",
         "normalize_selection_direction",
         "normalize_timestamp",
     }

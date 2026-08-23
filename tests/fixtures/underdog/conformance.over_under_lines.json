@@ -47,8 +47,7 @@
       "over_under": {
         "appearance_stat": {
           "appearance_id": "appearance-1",
-          "display_stat": "Points",
-          "scoring_period": "full_game"
+          "display_stat": "Points"
         }
       },
       "options": [

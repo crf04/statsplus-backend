@@ -10,7 +10,6 @@
         "start_time": "2026-08-10T00:00:00-05:00",
         "updated_at": "2026-08-09T18:00:00-05:00",
         "odds_type": "standard",
-        "scoring_period": "full_game",
         "description": "LAL vs. CHI"
       },
       "relationships": {
@@ -29,7 +28,6 @@
         "updated_at": "2026-08-09T18:00:00-05:00",
         "odds_type": "demon",
         "payout_multiplier": "1.250",
-        "scoring_period": "full_game",
         "description": "LAL vs. CHI"
       },
       "relationships": {
