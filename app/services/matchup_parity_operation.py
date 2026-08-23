@@ -41,6 +41,12 @@ from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 from app.domain.publication_integrity import (  # noqa: E402
     publication_payload_matches_checksum,
 )
+from app.domain.matchup_parity_contract import (  # noqa: E402
+    SCOREKEEPER_CORRECTION_MAX_ENTITIES,
+    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
+    count_difference_within_correction_bound,
+    minutes_difference_within_correction_bound,
+)
 from app.domain.utc import assume_utc  # noqa: E402
 from app.errors import ProviderUnavailableError  # noqa: E402
 from app.domain.slate_time import slate_date_for_instant  # noqa: E402
@@ -529,6 +535,7 @@ def per36_player_differences(
     expected: PlayerPer36Fact,
     expected_raw: Mapping[str, int],
     actual: Mapping[str, Any],
+    semantic_rule: str | None = None,
 ) -> list[SemanticDifference]:
     """Classify one player's governed ledger totals against provider evidence.
 
@@ -542,9 +549,17 @@ def per36_player_differences(
     """
 
     identity = f"per36:{player_id}"
+    corrections = semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
     differences: list[SemanticDifference] = []
     for field, value in expected_raw.items():
         if actual[field] != value:
+            if corrections and count_difference_within_correction_bound(value, actual[field]):
+                differences.append(SemanticDifference(
+                    identity=identity, field=field,
+                    ledger_value=value, legacy_value=actual[field],
+                    classification="semantic_difference", blocks_approval=False,
+                ))
+                continue
             differences.append(SemanticDifference(
                 identity=identity, field=field,
                 ledger_value=value, legacy_value=actual[field],
@@ -569,10 +584,14 @@ def per36_player_differences(
         # the bound product itself, never a meaningful fraction of a second.
         abs_tol=PER36_MINUTES_TOLERANCE_PER_GAME * expected.game_count + 1e-9,
     ):
+        explained = corrections and minutes_difference_within_correction_bound(
+            expected.minutes, actual["minutes"]
+        )
         differences.append(SemanticDifference(
             identity=identity, field="minutes",
             ledger_value=expected.minutes, legacy_value=actual["minutes"],
-            classification="minutes_difference",
+            classification="semantic_difference" if explained else "minutes_difference",
+            blocks_approval=not explained,
         ))
     return differences
 
@@ -588,6 +607,8 @@ def _compare_candidate_per36(
     provider_end_date: str,
     capture_id: str,
     session: Session,
+    semantic_rule: str | None = None,
+    semantic_rule_reason: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Compare a candidate against scoped immutable per-36 evidence."""
 
@@ -686,13 +707,29 @@ def _compare_candidate_per36(
             )
             for field in PER36_RAW_FIELDS:
                 totals[field] += int(getattr(fact, field))
-    for player_id in sorted(set(expected_by_id) & set(capture_by_id)):
-        differences.extend(per36_player_differences(
-            player_id,
-            expected=expected_by_id[player_id],
-            expected_raw=raw_fields_by_player[player_id],
-            actual=capture_by_id[player_id],
-        ))
+    shared_players = sorted(set(expected_by_id) & set(capture_by_id))
+
+    def classify(rule: str | None) -> list[SemanticDifference]:
+        found: list[SemanticDifference] = []
+        for player_id in shared_players:
+            found.extend(per36_player_differences(
+                player_id,
+                expected=expected_by_id[player_id],
+                expected_raw=raw_fields_by_player[player_id],
+                actual=capture_by_id[player_id],
+                semantic_rule=rule,
+            ))
+        return found
+
+    player_differences = classify(semantic_rule)
+    corrected_players = {
+        difference.identity for difference in player_differences
+        if difference.classification == "semantic_difference"
+    }
+    if len(corrected_players) > SCOREKEEPER_CORRECTION_MAX_ENTITIES:
+        # Too many players for a correction pattern: the rule does not apply.
+        player_differences = classify(None)
+    differences.extend(player_differences)
     provider_rate_difference_count = sum(
         1
         for player_id in sorted(set(expected_by_id) & set(capture_by_id))
@@ -715,6 +752,8 @@ def _compare_candidate_per36(
             compared_count=len(expected_rows),
             differences=tuple(differences),
             adjudication_required=bool(differences),
+            semantic_rule=semantic_rule,
+            semantic_rule_reason=semantic_rule_reason,
         ),
         publication_id=publication.publication_id,
         payload_checksum=publication.checksum,
@@ -738,6 +777,7 @@ def _compare_candidate_per36(
         "publication_id": publication.publication_id,
         "payload_checksum": publication.checksum,
         "provider_rate_difference_count": provider_rate_difference_count,
+        "semantic_rule": semantic_rule,
     }, artifact.artifact_id
 
 
@@ -1081,6 +1121,8 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
                 cutoff=cutoff,
                 publications=matchup_publications,
                 session=session,
+                semantic_rule=getattr(args, "semantic_rule", None),
+                semantic_rule_reason=getattr(args, "semantic_rule_reason", None),
             )
             if {report.surface for report in window_reports} != {
                 "traditional", "assist_locations"
@@ -1097,6 +1139,8 @@ def _bounded_compare(args, engine, *, before: Mapping[str, Any]) -> int:
             provider_end_date=transaction_authority.provider_end_date,
             capture_id=args.per36_capture_id,
             session=session,
+            semantic_rule=getattr(args, "semantic_rule", None),
+            semantic_rule_reason=getattr(args, "semantic_rule_reason", None),
         )
         sanitized_reports = [
             {

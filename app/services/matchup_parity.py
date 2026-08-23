@@ -31,7 +31,7 @@ import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -43,6 +43,10 @@ from app.domain.publication_integrity import publication_payload_matches_checksu
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.matchup_parity_contract import (
     CLASSIFICATION_AUTHORITY_MISMATCH,
+    CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
+    SCOREKEEPER_CORRECTION_MAX_ENTITIES,
+    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
+    count_difference_within_correction_bound,
     CLASSIFICATION_AVAILABILITY_DIFFERENCE,
     CLASSIFICATION_CUTOFF_MISMATCH,
     CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
@@ -1285,6 +1289,8 @@ def compare_matchup_materializations(
         "ledger": {},
         "legacy": {},
     }
+    corrected_entities: set[int] = set()
+    out_of_rule_count_difference = False
     shared_teams = sorted(ledger_teams & legacy_teams)
     for stat_key in stat_to_metric:
         for team_id in shared_teams:
@@ -1309,10 +1315,19 @@ def compare_matchup_materializations(
                     CLASSIFICATION_NON_INTEGER_COUNT,
                 ))
             elif ledger_count != legacy_count:
+                classification = CLASSIFICATION_INTEGER_COUNT_DIFFERENCE
+                if (
+                    semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
+                    and count_difference_within_correction_bound(ledger_count, legacy_count)
+                ):
+                    classification = CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
+                    corrected_entities.add(team_id)
+                else:
+                    out_of_rule_count_difference = True
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, stat_key,
                     ledger_count, legacy_count,
-                    CLASSIFICATION_INTEGER_COUNT_DIFFERENCE,
+                    classification,
                 ))
             ledger_minutes = _minutes(
                 ledger_fact.denominator_value, ledger_fact.denominator_unit
@@ -1437,12 +1452,33 @@ def compare_matchup_materializations(
                     CLASSIFICATION_SERVED_RANK_MISMATCH,
                 ))
         if ledger_ranks != legacy_ranks:
-            rankings_deterministic = False
+            # Both rankings are deterministic functions of the rates; when
+            # the only count differences are in-bound corrections, the rank
+            # difference is explained by them and stays soft under the rule.
+            explained = (
+                semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
+                and corrected_entities
+                and not out_of_rule_count_difference
+                and len(corrected_entities) <= SCOREKEEPER_CORRECTION_MAX_ENTITIES
+            )
+            if not explained:
+                rankings_deterministic = False
             differences.append(MatchupParityDifference(
                 window, surface, None, f"competition_rank.{stat_key}",
                 ledger_ranks, legacy_ranks,
-                CLASSIFICATION_RANKING_DIFFERENCE,
+                CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
+                if explained else CLASSIFICATION_RANKING_DIFFERENCE,
             ))
+    if len(corrected_entities) > SCOREKEEPER_CORRECTION_MAX_ENTITIES:
+        # Too many entities for a correction pattern: restore the hard
+        # classification so the artifact cannot be adjudicated.
+        differences = [
+            replace(difference, classification=CLASSIFICATION_INTEGER_COUNT_DIFFERENCE)
+            if difference.classification == CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
+            and difference.team_id is not None
+            else difference
+            for difference in differences
+        ]
 
     # Independent per-surface availability. Same-authority retained legacy
     # facts remain valid while their latest failed attempt stays observable.

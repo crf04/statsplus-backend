@@ -384,6 +384,62 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
         assert connection.execute(
             text("SELECT stream_key FROM canonical_game_ledger_parity_artifacts WHERE artifact_id = 'capture-per36'")
         ).scalar_one() == PER36_DIAGNOSTIC_CAPTURE_STREAM
+
+    # An in-bound scorekeeper correction under the approved rule, with the
+    # same bound lineage, is adjudicable; without the rule, the reason, the
+    # lineage, or with a hard classification it is not.
+    lineage = {
+        "capture_id": capture.capture_id,
+        "capture_checksum": capture.capture_checksum,
+        "request_checksum": capture.request_checksum,
+        "source_observation_id": capture.source_observation_id,
+    }
+    correction = SemanticDifference(
+        identity="per36:2544", field="personal_fouls", ledger_value=80,
+        legacy_value=81, classification="semantic_difference", blocks_approval=False,
+    )
+
+    def artifact_with(differences, *, rule, reason, with_lineage=True):
+        return LedgerParityArtifactRepository(engine).record(
+            "player_per36", cutoff=cutoff,
+            report=LedgerParityReport(
+                season=game.season, game_count=1, compared_count=1,
+                differences=differences, adjudication_required=True,
+                semantic_rule=rule, semantic_rule_reason=reason,
+            ),
+            publication_id=publication_id, payload_checksum=payload_checksum,
+            lineage=lineage if with_lineage else None,
+        )
+
+    reason = "Official box-score corrections the PBP feed never received."
+    with Session(engine) as session:
+        assert matchup_parity_artifact_is_activatable(
+            artifact_with((correction,), rule="official_scorekeeper_correction", reason=reason),
+            stream_key="player_per36", session=session,
+        )
+        assert not matchup_parity_artifact_is_activatable(
+            artifact_with((correction,), rule=None, reason=reason),
+            stream_key="player_per36", session=session,
+        )
+        assert not matchup_parity_artifact_is_activatable(
+            artifact_with((correction,), rule="official_scorekeeper_correction", reason="short"),
+            stream_key="player_per36", session=session,
+        )
+        assert not matchup_parity_artifact_is_activatable(
+            artifact_with(
+                (correction,), rule="official_scorekeeper_correction", reason=reason,
+                with_lineage=False,
+            ),
+            stream_key="player_per36", session=session,
+        )
+        hard = SemanticDifference(
+            identity="per36:2544", field="points", ledger_value=80,
+            legacy_value=84, classification="raw_count_difference",
+        )
+        assert not matchup_parity_artifact_is_activatable(
+            artifact_with((correction, hard), rule="official_scorekeeper_correction", reason=reason),
+            stream_key="player_per36", session=session,
+        )
     with pytest.raises(ValueError, match="source observation|window identity"):
         repository.record(
             publication_id=publication_id,

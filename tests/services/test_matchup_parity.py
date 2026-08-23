@@ -476,6 +476,57 @@ def test_legacy_nominal_denominator_removes_representation_rank_flips():
     assert competition_ranks(drifted, descending=False)[TEAM_A] != competition_ranks(drifted, descending=False)[TEAM_B]
 
 
+RULE = "official_scorekeeper_correction"
+RULE_REASON = "Official box-score corrections the PBP feed never received."
+
+
+def test_scorekeeper_rule_makes_in_bound_count_and_rank_differences_adjudicable():
+    legacy = _replace_fact(
+        _materialization(), surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        raw_value=float(TEAM_A) + 1,
+    )
+    # Without the rule: hard count difference and the rank flip it causes.
+    report = _compare(legacy=legacy)
+    assert report.hard_failure and report.status == "failed"
+    assert {d.classification for d in report.differences} >= {
+        "integer_count_difference", "ranking_difference",
+    }
+
+    # Under the approved rule: both are soft, the report is adjudicable.
+    report = _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    assert not report.hard_failure
+    assert report.status == "adjudication_required"
+    assert report.rankings_deterministic
+    assert {d.classification for d in report.differences} == {"official_scorekeeper_correction"}
+    assert all(d.to_dict()["blocks_approval"] is False for d in report.differences)
+
+    # The rule without a recorded reason authorizes nothing.
+    assert _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason="x").hard_failure
+
+
+def test_scorekeeper_rule_leaves_out_of_bound_counts_and_their_ranks_hard():
+    legacy = _replace_fact(
+        _materialization(), surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        raw_value=float(TEAM_A) + 2,
+    )
+    report = _compare(legacy=legacy, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    assert report.hard_failure
+    assert not report.rankings_deterministic
+    assert {d.classification for d in report.differences} >= {
+        "integer_count_difference", "ranking_difference",
+    }
+
+    # One out-of-bound difference also keeps a sibling in-bound one from
+    # explaining the rank differences.
+    mixed = _replace_fact(
+        legacy, surface="traditional", team_id=TEAM_B, stat="OPP_REB",
+        raw_value=float(TEAM_B) + 1,
+    )
+    report = _compare(legacy=mixed, semantic_rule=RULE, semantic_rule_reason=RULE_REASON)
+    assert report.hard_failure
+    assert "ranking_difference" in {d.classification for d in report.differences}
+
+
 def test_game_set_mismatch_is_a_hard_failure():
     legacy_ids = _game_ids_by_team(TEAM_IDS)
     legacy_ids[TEAM_A] = frozenset({"different-1", "different-2"})
