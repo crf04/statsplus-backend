@@ -1949,8 +1949,8 @@ def test_migration_cli_propagates_failures_as_a_nonzero_exit(monkeypatch):
     ``scripts/migrate.py`` runs as the Railway pre-deploy command; the deploy is
     fail-closed only if a failed migration exits non-zero.  ``main`` returns 0
     solely on success, so an exception from ``run_migrations`` propagates out of
-    ``main`` (the module wraps it in ``SystemExit`` at import-as-script time),
-    never a zero status.
+    ``main`` and, run as a script (``raise SystemExit(main())``), aborts the
+    process with a non-zero status and a traceback, never a zero status.
     """
 
     def _boom(_url):

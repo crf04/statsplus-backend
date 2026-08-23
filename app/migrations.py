@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime as PythonDateTime, timezone
 import json
+import logging
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -29,6 +30,8 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.sql import func
+
+logger = logging.getLogger(__name__)
 
 
 MIGRATION_TABLE_NAME: Final[str] = "schema_migrations"
@@ -2275,6 +2278,13 @@ def current_schema_version(engine: Engine) -> int | None:
                 select(func.max(_schema_migrations.c.version))
             ).scalar()
     except SQLAlchemyError:
+        logger.warning(
+            "Could not read the applied schema version from %s; treating the "
+            "database as an unmigrated target and skipping the schema-drift "
+            "guard for this boot.",
+            MIGRATION_TABLE_NAME,
+            exc_info=True,
+        )
         return None
 
 
