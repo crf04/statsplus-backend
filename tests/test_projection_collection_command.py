@@ -109,3 +109,29 @@ def test_cli_rejects_a_non_current_season_before_dependency_or_provider_work(
         )
 
     assert error.value.code == 2
+
+
+def test_one_shot_cli_exits_nonzero_when_every_provider_collection_fails(
+    monkeypatch,
+):
+    coordinator = SimpleNamespace(
+        run=lambda: SimpleNamespace(
+            status="partial",
+            reason="provider_collection_failed",
+        )
+    )
+    settings = SimpleNamespace(nba=SimpleNamespace(current_season="2025-26"))
+    monkeypatch.setattr(collect_projections, "load_settings", lambda **_kwargs: settings)
+    monkeypatch.setattr(
+        collect_projections,
+        "build_dependencies",
+        lambda _settings: SimpleNamespace(
+            projection_collection_coordinator=coordinator
+        ),
+    )
+
+    exit_code = collect_projections.main(
+        ["--database-url", "postgresql://collector.example/statsplus"]
+    )
+
+    assert exit_code == 1

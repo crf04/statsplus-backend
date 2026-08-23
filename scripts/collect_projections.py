@@ -23,6 +23,8 @@ def run_once(coordinator) -> int:
         return 0
     result = coordinator.run()
     print(f"{result.status}: {result.reason}")
+    if result.reason == "provider_collection_failed":
+        return 1
     return 0 if result.status in {"complete", "partial", "no_work", "busy"} else 1
 
 
