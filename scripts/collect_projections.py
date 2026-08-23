@@ -15,6 +15,17 @@ from app.dependencies import build_dependencies  # noqa: E402
 from app.utils.db import is_demo_database_url  # noqa: E402
 
 
+def run_once(coordinator) -> int:
+    """Run one attempt through an already-constructed coordinator."""
+
+    if coordinator is None:
+        print("no_work: projection collection is unavailable")
+        return 0
+    result = coordinator.run()
+    print(f"{result.status}: {result.reason}")
+    return 0 if result.status in {"complete", "partial", "no_work", "busy"} else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", required=True)
@@ -27,13 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.season is not None and args.season != settings.nba.current_season:
         parser.error("--season must match the configured current NBA season")
     dependencies = build_dependencies(settings)
-    coordinator = dependencies.projection_collection_coordinator
-    if coordinator is None:
-        print("no_work: projection collection is unavailable")
-        return 0
-    result = coordinator.run()
-    print(f"{result.status}: {result.reason}")
-    return 0 if result.status in {"complete", "partial", "no_work", "busy"} else 1
+    return run_once(dependencies.projection_collection_coordinator)
 
 
 if __name__ == "__main__":

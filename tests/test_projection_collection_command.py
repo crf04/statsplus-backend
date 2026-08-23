@@ -37,22 +37,22 @@ def test_railway_service_script_imports_when_executed_by_file_path(tmp_path):
 
 
 def test_one_shot_cli_and_railway_loop_share_one_coordinator_path(monkeypatch, capsys):
-    calls: list[tuple[str, ...]] = []
+    dependency_builds = []
+    coordinator_runs = []
 
     class Coordinator:
         def run(self):
-            calls.append(("coordinator",))
+            coordinator_runs.append("run")
             return SimpleNamespace(status="complete", reason="collected")
 
     settings = SimpleNamespace(nba=SimpleNamespace(current_season="2025-26"))
     monkeypatch.setattr(collect_projections, "load_settings", lambda **_kwargs: settings)
-    monkeypatch.setattr(
-        collect_projections,
-        "build_dependencies",
-        lambda _settings: SimpleNamespace(
-            projection_collection_coordinator=Coordinator()
-        ),
-    )
+
+    def build_dependencies(candidate_settings):
+        dependency_builds.append(candidate_settings)
+        return SimpleNamespace(projection_collection_coordinator=Coordinator())
+
+    monkeypatch.setattr(collect_projections, "build_dependencies", build_dependencies)
 
     assert (
         collect_projections.main(
@@ -62,30 +62,27 @@ def test_one_shot_cli_and_railway_loop_share_one_coordinator_path(monkeypatch, c
     )
     assert capsys.readouterr().out == "complete: collected\n"
 
-    class LoopComplete(Exception):
+    class TwoLoopsComplete(Exception):
         pass
 
     monkeypatch.setenv(
         "DATABASE_URL", "postgresql://collector.example/statsplus"
     )
-    monkeypatch.setattr(
-        projection_collection_service,
-        "main",
-        lambda argv: calls.append(tuple(argv)) or 0,
-    )
-    monkeypatch.setattr(
-        projection_collection_service.time,
-        "sleep",
-        lambda _seconds: (_ for _ in ()).throw(LoopComplete),
-    )
+    sleeps = []
 
-    with pytest.raises(LoopComplete):
+    def sleep(_seconds):
+        sleeps.append(_seconds)
+        if len(sleeps) == 2:
+            raise TwoLoopsComplete
+
+    monkeypatch.setattr(projection_collection_service.time, "sleep", sleep)
+
+    with pytest.raises(TwoLoopsComplete):
         projection_collection_service.run()
 
-    assert calls == [
-        ("coordinator",),
-        ("--database-url", "postgresql://collector.example/statsplus"),
-    ]
+    assert dependency_builds == [settings, settings]
+    assert coordinator_runs == ["run", "run", "run"]
+    assert sleeps == [300, 300]
 
 
 def test_cli_rejects_a_non_current_season_before_dependency_or_provider_work(

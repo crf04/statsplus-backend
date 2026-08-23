@@ -11,16 +11,23 @@ import time
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.collect_projections import main
+from scripts import collect_projections
 
 
 def run() -> None:
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if not database_url:
         raise RuntimeError("DATABASE_URL is required for projection collection")
+    if collect_projections.is_demo_database_url(database_url):
+        raise RuntimeError("the read-only demo database cannot collect projections")
+    settings = collect_projections.load_settings(
+        overrides={"DATABASE_URL": database_url}
+    )
+    dependencies = collect_projections.build_dependencies(settings)
+    coordinator = dependencies.projection_collection_coordinator
     while True:
         try:
-            main(["--database-url", database_url])
+            collect_projections.run_once(coordinator)
         except Exception as error:
             print(f"projection collector attempt failed: {error}")
         time.sleep(300)
