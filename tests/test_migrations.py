@@ -2168,3 +2168,27 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
     }
     assert "next_poll_at" not in columns
     assert "ix_projection_collection_provider_state_next_poll" not in indexes
+
+
+def test_projection_closing_migration_adds_durable_event_start_fence(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing-schema.sqlite3'}")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE projection_closing_memberships")
+        connection.exec_driver_sql("DROP TABLE projection_closing_sets")
+        connection.exec_driver_sql(
+            "ALTER TABLE event_catalog DROP COLUMN first_observed_started_at"
+        )
+        connection.execute(
+            text("DELETE FROM schema_migrations WHERE version = 44")
+        )
+
+    result = run_migrations(engine)
+
+    assert result.applied == ("044_projection_closing_sets",)
+    inspector = inspect(engine)
+    assert "first_observed_started_at" in {
+        column["name"] for column in inspector.get_columns("event_catalog")
+    }
+    assert inspector.has_table("projection_closing_sets")
+    assert inspector.has_table("projection_closing_memberships")

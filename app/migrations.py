@@ -1393,13 +1393,37 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
 
 
 def _create_projection_closing_sets(connection: Connection) -> None:
-    """Create immutable post-start projection membership tables."""
+    """Create the durable start fence and immutable closing membership tables."""
 
+    from app.models.event_catalog import EventCatalogEntry
     from app.models.projection_archive import (
         ClosingProjectionMembership,
         ClosingProjectionSet,
     )
 
+    event_table = EventCatalogEntry.__table__
+    inspector = inspect(connection)
+    event_columns = (
+        {
+            column["name"]
+            for column in inspector.get_columns(event_table.name)
+        }
+        if inspector.has_table(event_table.name)
+        else set()
+    )
+    if event_columns and "first_observed_started_at" not in event_columns:
+        timestamp_type = (
+            "TIMESTAMP WITH TIME ZONE"
+            if connection.dialect.name == "postgresql"
+            else "DATETIME"
+        )
+        preparer = connection.dialect.identifier_preparer
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(event_table.name)} ADD COLUMN "
+                f"{preparer.quote('first_observed_started_at')} {timestamp_type}"
+            )
+        )
     ClosingProjectionSet.__table__.create(connection, checkfirst=True)
     ClosingProjectionMembership.__table__.create(connection, checkfirst=True)
 

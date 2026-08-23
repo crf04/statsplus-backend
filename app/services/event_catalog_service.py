@@ -138,6 +138,13 @@ class EventCatalogService:
     def get_events(self, season: str) -> list[dict[str, Any]]:
         return self.repository.list_events(validate_canonical_season(season))
 
+    def get_events_by_ids(
+        self, season: str, game_ids: Iterable[str]
+    ) -> list[dict[str, Any]]:
+        return self.repository.list_events_by_ids(
+            validate_canonical_season(season), game_ids
+        )
+
     def count_events(self, season: str) -> int:
         return self.repository.count_events(validate_canonical_season(season))
 
