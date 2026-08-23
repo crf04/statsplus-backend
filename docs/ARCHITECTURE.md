@@ -387,8 +387,10 @@ comparison groups or a public route.
 > `PlayerPoolService`/`StoredPlayerPoolReader` request-time reader and its
 > `player_pool_snapshots` writer are no longer wired into `build_dependencies`.
 > The database-only projection reader below is the sole Slate/Matchup/Selection
-> source, and legacy snapshot writes are fenced. The description here is
-> retained for history until the table is dropped in #111.
+> source; because nothing constructs the writer, no request refreshes the
+> `player_pool_snapshots` table (an injected `LegacyWriteFence` adds defense in
+> depth). The description here is retained for history until the table is
+> dropped in #111.
 
 `PlayerPoolService` consumes one `DFSBoardService` result for the current
 season and the exact canonical game IDs on an ET Slate. It admits only
@@ -658,25 +660,28 @@ controls aggregate and provider freshness. Closing timestamps never age the
 live aggregate, and aggregate `status` is omitted because it does not describe
 one uniform phase. If no live evidence exists, a non-empty closing pool takes
 precedence over missing games.
-`PROJECTION_ARCHIVE_READ_ENABLED` gates the sole reader and production enables
-it. When it is enabled, dependency assembly gives the same archive reader to
-Slate and Matchup. Matchup Selection uses a thin adapter over that reader;
-scheduled missing state retains its unavailable contract, while a started
-game's explicit empty closing set is a valid empty pool and an outside player
-is a resource-not-found selection. It does not select or call a legacy source.
-One request never combines archive and legacy facts. The gate is refused when the
-configured database is the read-only demo
-fixture, which cannot contain the archive schema.
+`PROJECTION_ARCHIVE_READ_ENABLED` is the operator-controlled activation switch
+for the sole reader; it defaults off and an operator flips it on at cutover (see
+the rollout step in `docs/SETTINGS.md`). When it is enabled, dependency assembly
+gives the same archive reader to Slate and Matchup. Matchup Selection uses a
+thin adapter over that reader; scheduled missing state retains its unavailable
+contract, while a started game's explicit empty closing set is a valid empty
+pool and an outside player is a resource-not-found selection. It does not select
+or call a legacy source. One request never combines archive and legacy facts.
+The gate is refused when the configured database is the read-only demo fixture,
+which cannot contain the archive schema. While the gate is off, an application
+database still boots and every read route is honest: Slate and Matchup return
+zero targetable players with no `projection_state`, and Matchup Selection
+returns `503 provider_unavailable` — never a legacy fallback.
 
 The #110 cutover removed the legacy request-time reader/writer wiring entirely:
 `build_dependencies` no longer constructs `PlayerPoolService`,
 `StoredPlayerPoolReader`, or `PlayerPoolSnapshotRepository`, so no request can
-build a Player Pool or call a projection provider. With the gate off there is no
-per-request fallback — Slate, Matchup, and Matchup Selection simply expose no
-pool rather than reverting to the legacy path. Writes to the empty legacy
-`player_pool_snapshots` table are additionally fenced by construction: the
-repository refuses every persistence method once the `dfs_boards` publication
-stream is activated, so no production path can refresh the retired payload. The
+build a Player Pool or call a projection provider. That construction-removal is
+the primary guarantee that no production path writes the empty legacy
+`player_pool_snapshots` table. As defense in depth, `PlayerPoolSnapshotRepository`
+also accepts an injected `LegacyWriteFence` and, when one is wired, refuses every
+persistence method once the `dfs_boards` publication stream is activated. The
 table itself is dropped later in #111.
 
 `ClosingProjectionSet` and `ClosingProjectionMembership` are the post-start

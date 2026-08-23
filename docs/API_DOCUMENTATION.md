@@ -302,11 +302,14 @@ synthetic pool is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
 never understates any provider observation included in the union.
 
-`PROJECTION_ARCHIVE_READ_ENABLED` is enabled in production and
-selects one database-only reader for Slate, Matchup, and Matchup Selection.
-The #110 cutover removed the legacy request-time reader, so this reader is the
-sole source with no per-request fallback and the empty legacy
-`player_pool_snapshots` table is write-fenced pending its #111 removal.
+`PROJECTION_ARCHIVE_READ_ENABLED` is the operator-controlled activation switch
+that selects one database-only reader for Slate, Matchup, and Matchup Selection.
+The #110 cutover removed the legacy request-time reader, so when the operator
+enables the gate this reader is the sole source with no per-request fallback.
+While the gate is off, Slate and Matchup return zero targetable players with no
+`projection_state` and Matchup Selection returns `503 provider_unavailable`. The
+empty legacy `player_pool_snapshots` table is retired by construction — nothing
+writes it — pending its #111 removal.
 Each Slate game then adds `projection_state` with `state: live | closing | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce

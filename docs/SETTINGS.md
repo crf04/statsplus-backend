@@ -98,7 +98,25 @@ recording, make that provider required, enable its read contribution, or grant
 six-hour failure fallback. When enabled on an application database, one
 database-only reader is the sole source used by Slate, Matchup, and Matchup
 Selection; the #110 cutover removed the legacy request-time reader, so there is
-no per-request fallback and legacy `player_pool_snapshots` writes are fenced.
+no per-request fallback and, because nothing constructs the legacy writer, no
+production path refreshes `player_pool_snapshots`.
+
+**#110 cutover rollout step (required manual action).** The code cutover ships
+the database-only read path but leaves `PROJECTION_ARCHIVE_READ_ENABLED`
+defaulting `false`, so the reader is dormant until an operator flips it. To
+activate:
+
+1. Confirm the application database has the projection archive schema
+   (migrations `040`–`046`) and that the scheduled collector has recorded at
+   least one Complete provider snapshot.
+2. Set `PROJECTION_ARCHIVE_READ_ENABLED=true` in the Railway environment and
+   redeploy. Until this flip, Slate/Matchup return honest-empty (zero
+   targetable, no `projection_state`) and Matchup Selection returns
+   `503 provider_unavailable`.
+3. Verify with the authenticated production smoke: a Slate request returns
+   non-empty targetable counts and `projection_state`, matching the AC7 smoke.
+4. Legacy `player_pool_snapshots` removal is deferred to #111; there is no
+   pre-flip data migration.
 Dependency assembly also exposes the named projection recording service on
 application databases so an operator-owned collector can submit an already
 retrieved Complete or Partial
