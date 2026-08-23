@@ -651,3 +651,25 @@ def test_the_recorded_fourth_provider_proves_both_price_scopes_and_an_unpriced_s
     assert PriceKind.UNPRICED in kinds
     # Nothing in the application names this provider; one registration does.
     assert dfs_provider_registration(FOURTH_PROVIDER_NAME).name == FOURTH_PROVIDER_NAME
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_the_default_compliance_run_opens_no_socket_and_reads_no_credential(
+    monkeypatch, provider: str
+):
+    def refuse_session(*args: object, **kwargs: object):
+        raise AssertionError("the compliance suite must not create a session")
+
+    monkeypatch.setattr(requests, "Session", refuse_session)
+    monkeypatch.delenv("COLLECTOR_SIGNING_SECRET", raising=False)
+
+    for case in ("complete", "empty", "partial"):
+        snapshot = _snapshot(provider, case)
+        assert snapshot.provider == provider
+
+
+def test_live_provider_contracts_stay_opt_in():
+    config = (Path(__file__).parents[2] / "pytest.ini").read_text(encoding="utf-8")
+
+    assert '-m "not live and not integration"' in config
+    assert "live: live provider contract tests" in config

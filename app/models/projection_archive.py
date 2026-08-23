@@ -189,7 +189,11 @@ class ProjectionObservation(Base):
     price_kind = Column(
         String(16), nullable=False, default="unpriced", server_default="unpriced"
     )
-    price_value = Column(String(32), nullable=True)
+    #: Wide enough for every price the normalized numeric domain admits: a
+    #: value may occupy base-ten places from 1E+128 down to 1E-128, so its
+    #: exact decimal text is at most 259 characters including a sign and a
+    #: decimal point.
+    price_value = Column(String(260), nullable=True)
     price_scope = Column(
         String(16), nullable=False, default="selection", server_default="selection"
     )

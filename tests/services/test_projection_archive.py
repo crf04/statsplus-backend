@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from threading import Event
 from types import SimpleNamespace
@@ -2599,6 +2600,10 @@ def test_archived_observations_carry_the_canonical_price_and_gate_targetability(
         rows["unpriced"]["price_value"],
         rows["unpriced"]["price_scope"],
     ) == ("unpriced", None, "selection")
+    # Every price the normalized numeric domain admits fits the column it is
+    # archived in, so no exact provider number is ever silently truncated.
+    widest = Decimal("9" * 129 + "." + "9" * 128)
+    assert len(str(-widest)) <= ProjectionObservation.__table__.c.price_value.type.length
     assert rows["entry"]["targetable"] is True
     assert rows["selection"]["targetable"] is True
     assert rows["unpriced"]["targetable"] is False

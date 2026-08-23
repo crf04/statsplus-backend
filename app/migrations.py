@@ -2029,7 +2029,7 @@ def _add_projection_observation_prices(connection: Connection) -> None:
     }
     additions = (
         ("price_kind", "VARCHAR(16) NOT NULL DEFAULT 'unpriced'"),
-        ("price_value", "VARCHAR(32)"),
+        ("price_value", "VARCHAR(260)"),
         ("price_scope", "VARCHAR(16) NOT NULL DEFAULT 'selection'"),
     )
     for column, definition in additions:
