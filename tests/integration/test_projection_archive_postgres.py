@@ -1123,7 +1123,7 @@ def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
     assert recovered_slate.get_json()["games"][0]["away_team"][
         "targetable_player_count"
     ] == 1
-    assert recovered_matchup.get_json()["players"][0]["player_id"] == 7
+    assert recovered_matchup.get_json()["players"][0]["canonical_id"] == 7
     assert recovered_selection.get_json()["player_id"] == 7
 
 
