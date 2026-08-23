@@ -4109,6 +4109,38 @@ def test_manual_athlete_mapping_replays_projection_after_commit(mapping_db):
     assert replay_calls == [result]
 
 
+def test_projection_replay_failure_does_not_change_athlete_approval(
+    mapping_db,
+    caplog,
+):
+    engine, now = mapping_db
+
+    def replay(_result):
+        raise RuntimeError("archive unavailable")
+
+    repository = AthleteMappingRepository(
+        engine,
+        clock=lambda: now,
+        projection_replay=replay,
+    )
+
+    result = repository.approve(
+        "prizepicks",
+        "pp-15",
+        15,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="verified source identity",
+        provider_evidence=_approved_evidence(),
+    )
+
+    assert result.persisted is True
+    assert repository.get_mapping(
+        "prizepicks", "pp-15"
+    ).canonical_player_id == 15
+    assert "projection replay failed after athlete mapping commit" in caplog.text
+
+
 def _agreeing_manual_observation(
     repository: AthleteMappingRepository, *, observed_at: datetime | None = None
 ):

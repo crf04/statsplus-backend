@@ -68,6 +68,7 @@ PROJECTION_ARCHIVE_REQUIRED_TABLES = (
     "projection_closing_memberships",
 )
 PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
+    "projection_archive_scope_locks": ("active_generation_id",),
     "projection_provider_polls": ("failure_reason", "promoted"),
     "projection_observations": (
         "athlete_provider_id",
@@ -807,6 +808,13 @@ class ProjectionArchive:
                     query_key=prepared.query_key,
                     generation_id=write.generation_id,
                 )
+            self._activate_generation(
+                connection,
+                provider=prepared.snapshot.provider,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                generation_id=write.generation_id,
+            )
 
     @staticmethod
     def _transition_result(
@@ -1254,6 +1262,8 @@ class ProjectionArchive:
         mapping = getattr(result, "mapping", None)
         if mapping is None or not getattr(result, "persisted", False):
             return None
+        if mapping.canonical_name is None or mapping.canonical_team_id is None:
+            return None
         return self.replay_athlete_mapping(
             provider=mapping.provider,
             provider_athlete_id=mapping.provider_athlete_id,
@@ -1480,49 +1490,6 @@ class ProjectionArchive:
                     str(row["observation_id"]),
                 )
             )
-            replay_fingerprint = json.dumps(
-                {
-                    "kind": kind,
-                    "provider": provider,
-                    "identity": identity,
-                    "canonical": canonical,
-                    "observations": [
-                        {
-                            "observation_id": row["observation_id"],
-                            "fields": self._replay_fields(row),
-                        }
-                        for row in changed_rows
-                    ],
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            generation_id = _digest(
-                "gen_replay",
-                provider,
-                season,
-                query_key,
-                current["generation_id"],
-                replay_fingerprint,
-            )
-            existing_generation = connection.execute(
-                select(
-                    ProjectionMaterializationGeneration.generation_id,
-                    ProjectionMaterializationGeneration.outcome,
-                ).where(
-                    ProjectionMaterializationGeneration.generation_id == generation_id
-                )
-            ).mappings().one_or_none()
-            if existing_generation is not None:
-                return ProjectionReplayResult(
-                    generation_id=str(existing_generation["generation_id"]),
-                    changed=True,
-                    observation_count=len(changed_rows),
-                    materialization_outcome=MaterializationOutcome(
-                        str(existing_generation["outcome"])
-                    ),
-                )
-
             latest_state = [dict(row) for row in latest_rows]
             changed_by_reference: dict[str, dict[str, Any]] = {}
             for row in changed_rows:
@@ -1571,6 +1538,23 @@ class ProjectionArchive:
                 }
                 for index, row in enumerate(latest_state)
             ]
+            materialization_checksum = _materialization_checksum(checksum_rows)
+            generation_id = _digest(
+                "gen_replay",
+                current["snapshot_id"],
+                materialization_checksum,
+                assume_utc(current["retrieved_at"]).isoformat(),
+            )
+            existing_generation_id = connection.execute(
+                select(ProjectionMaterializationGeneration.generation_id).where(
+                    ProjectionMaterializationGeneration.snapshot_id
+                    == current["snapshot_id"],
+                    ProjectionMaterializationGeneration.materialization_checksum
+                    == materialization_checksum,
+                    ProjectionMaterializationGeneration.retrieved_at
+                    == current["retrieved_at"],
+                )
+            ).scalar_one_or_none()
             requested_created_at = assume_utc(
                 replayed_at or datetime.now(timezone.utc)
             )
@@ -1578,32 +1562,58 @@ class ProjectionArchive:
                 requested_created_at,
                 assume_utc(current["created_at"]) + timedelta(microseconds=1),
             )
-            new_rows: list[dict[str, Any]] = []
-            for row in changed_rows:
-                new_row = dict(row)
-                new_row.update(
-                    generation_id=generation_id,
-                    ordinal=row["ordinal"],
-                    observation_id=_digest(
-                        "obs_replay", generation_id, row["observation_id"]
-                    ),
+            new_rows: list[dict[str, Any]]
+            if existing_generation_id is None:
+                new_rows = []
+                for ordinal, row in enumerate(changed_rows):
+                    new_row = dict(row)
+                    new_row.update(
+                        generation_id=generation_id,
+                        ordinal=ordinal,
+                        observation_id=_digest(
+                            "obs_replay", generation_id, row["observation_id"]
+                        ),
+                    )
+                    new_rows.append(new_row)
+                connection.execute(
+                    insert(ProjectionMaterializationGeneration.__table__).values(
+                        generation_id=generation_id,
+                        provider=provider,
+                        season=season,
+                        query_key=query_key,
+                        snapshot_id=current["snapshot_id"],
+                        source_poll_id=current["source_poll_id"],
+                        created_at=created_at,
+                        retrieved_at=current["retrieved_at"],
+                        materialization_checksum=materialization_checksum,
+                        outcome=MaterializationOutcome.ADVANCED.value,
+                    )
                 )
-                new_rows.append(new_row)
-            connection.execute(
-                insert(ProjectionMaterializationGeneration.__table__).values(
-                    generation_id=generation_id,
-                    provider=provider,
-                    season=season,
-                    query_key=query_key,
-                    snapshot_id=current["snapshot_id"],
-                    source_poll_id=current["source_poll_id"],
-                    created_at=created_at,
-                    retrieved_at=current["retrieved_at"],
-                    materialization_checksum=_materialization_checksum(checksum_rows),
-                    outcome=MaterializationOutcome.ADVANCED.value,
-                )
-            )
-            connection.execute(insert(observation_table), new_rows)
+                connection.execute(insert(observation_table), new_rows)
+            else:
+                generation_id = str(existing_generation_id)
+                existing_rows = connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.generation_id == generation_id
+                    )
+                ).mappings().all()
+                desired = {
+                    (str(row["market_reference"]), self._replay_fields(row))
+                    for row in changed_by_reference.values()
+                }
+                new_rows = [
+                    dict(row)
+                    for row in existing_rows
+                    if (
+                        str(row["market_reference"]),
+                        self._replay_fields(row),
+                    )
+                    in desired
+                ]
+                if len(new_rows) != len(desired):
+                    raise RuntimeError(
+                        "existing projection materialization lacks replay observations"
+                    )
             for row in changed_rows:
                 reference = str(row["market_reference"])
                 connection.execute(
@@ -1618,9 +1628,7 @@ class ProjectionArchive:
                 if not row["targetable"]:
                     continue
                 selected = changed_by_reference[str(row["market_reference"])]
-                if row["observation_id"] != _digest(
-                    "obs_replay", generation_id, selected["observation_id"]
-                ):
+                if self._replay_fields(row) != self._replay_fields(selected):
                     continue
                 self._insert_latest_row(
                     connection,
@@ -1629,6 +1637,13 @@ class ProjectionArchive:
                     query_key=query_key,
                     generation_id=generation_id,
                 )
+            self._activate_generation(
+                connection,
+                provider=provider,
+                season=season,
+                query_key=query_key,
+                generation_id=generation_id,
+            )
             return ProjectionReplayResult(
                 generation_id=generation_id,
                 changed=True,
@@ -1892,38 +1907,73 @@ class ProjectionArchive:
     ) -> Any | None:
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
+        lock_table = ProjectionArchiveScopeLock.__table__
+        active_generation_id = connection.execute(
+            select(lock_table.c.active_generation_id).where(
+                lock_table.c.provider == provider,
+                lock_table.c.season == season,
+                lock_table.c.query_key == query_key,
+            )
+        ).scalar_one_or_none()
+        statement = (
+            select(
+                generation_table.c.generation_id,
+                snapshot_table.c.snapshot_id,
+                generation_table.c.source_poll_id,
+                generation_table.c.created_at,
+                generation_table.c.retrieved_at,
+                generation_table.c.materialization_checksum,
+                snapshot_table.c.content_checksum,
+            )
+            .select_from(
+                generation_table.join(
+                    snapshot_table,
+                    generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                )
+            )
+            .where(
+                generation_table.c.provider == provider,
+                generation_table.c.season == season,
+                generation_table.c.query_key == query_key,
+                generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
+            )
+        )
+        if active_generation_id is not None:
+            statement = statement.where(
+                generation_table.c.generation_id == active_generation_id
+            )
+        else:
+            statement = statement.order_by(
+                generation_table.c.retrieved_at.desc(),
+                generation_table.c.created_at.desc(),
+                generation_table.c.generation_id.desc(),
+            )
         return (
             connection.execute(
-                select(
-                    generation_table.c.generation_id,
-                    snapshot_table.c.snapshot_id,
-                    generation_table.c.source_poll_id,
-                    generation_table.c.created_at,
-                    generation_table.c.retrieved_at,
-                    generation_table.c.materialization_checksum,
-                    snapshot_table.c.content_checksum,
-                )
-                .select_from(
-                    generation_table.join(
-                        snapshot_table,
-                        generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
-                    )
-                )
-                .where(
-                    generation_table.c.provider == provider,
-                    generation_table.c.season == season,
-                    generation_table.c.query_key == query_key,
-                    generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
-                )
-                .order_by(
-                    generation_table.c.retrieved_at.desc(),
-                    generation_table.c.created_at.desc(),
-                    generation_table.c.generation_id.desc(),
-                )
-                .limit(1)
+                statement.limit(1)
             )
             .mappings()
             .one_or_none()
+        )
+
+    @staticmethod
+    def _activate_generation(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        generation_id: str,
+    ) -> None:
+        table = ProjectionArchiveScopeLock.__table__
+        connection.execute(
+            update(table)
+            .where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+            )
+            .values(active_generation_id=generation_id)
         )
 
     @staticmethod

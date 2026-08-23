@@ -1282,10 +1282,25 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
 
     from app.models.projection_archive import (
         LatestPlayerProjection,
+        ProjectionArchiveScopeLock,
         ProjectionMaterializationGeneration,
         ProjectionObservation,
         ProviderPoll,
     )
+
+    lock_name = connection.dialect.identifier_preparer.quote(
+        ProjectionArchiveScopeLock.__tablename__
+    )
+    lock_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionArchiveScopeLock.__tablename__
+        )
+    }
+    if "active_generation_id" not in lock_columns:
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN active_generation_id VARCHAR(72)"
+        ))
 
     inspector = inspect(connection)
     poll_columns = {

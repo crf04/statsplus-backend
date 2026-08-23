@@ -50,6 +50,7 @@ class ProjectionArchiveScopeLock(Base):
     provider = Column(String(64), primary_key=True)
     season = Column(String(7), primary_key=True)
     query_key = Column(String(72), primary_key=True)
+    active_generation_id = Column(String(72), nullable=True)
 
 
 class ProviderPoll(Base):

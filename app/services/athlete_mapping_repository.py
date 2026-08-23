@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 from contextlib import contextmanager
 from collections.abc import Mapping
@@ -41,6 +42,9 @@ from app.services.athlete_resolver import (
     MappingResolutionState,
 )
 from app.utils.db import is_demo_database_url
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 #: Unresolved outcomes retained as durable, typed observations.  They never
@@ -1445,7 +1449,16 @@ class AthleteMappingRepository:
                 decision=self._decision_result(connection, decision),
             )
         if self._projection_replay is not None:
-            self._projection_replay(result)
+            try:
+                self._projection_replay(result)
+            except Exception:
+                LOGGER.exception(
+                    "projection replay failed after athlete mapping commit",
+                    extra={
+                        "provider": provider,
+                        "provider_athlete_id": provider_id,
+                    },
+                )
         return result
 
     # -- SQL helpers -------------------------------------------------------
