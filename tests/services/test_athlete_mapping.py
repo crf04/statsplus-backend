@@ -36,6 +36,8 @@ from app.providers.dfs import (
     MarketStatus,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    Selection,
+    SelectionDirection,
     ProviderSnapshot,
     SnapshotStatus,
     StatisticEvidence,
@@ -55,6 +57,18 @@ from app.services.athlete_resolver import (
 from app.services.dfs_board import DFSBoardService
 from app.services.projection_archive import ProjectionArchive
 from app.services.statistic_catalog import StatisticCatalog
+
+
+#: A market must offer a priced side to be targetable, and what that price is
+#: is not what these tests are about, so every market here offers one.
+_PRICED_SELECTIONS = (
+    Selection(
+        selection_id="higher",
+        direction=SelectionDirection.HIGHER,
+        american_price=-110,
+    ),
+)
+
 
 
 #: Fixed clearing timestamp for direct-insert constraint cases.
@@ -2315,6 +2329,7 @@ def _market(
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
         status=MarketStatus.AVAILABLE,
+            selections=_PRICED_SELECTIONS,
     )
 
 
@@ -3099,6 +3114,7 @@ def _identified_market(
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
         status=MarketStatus.AVAILABLE,
+            selections=_PRICED_SELECTIONS,
     )
 
 
@@ -4149,6 +4165,7 @@ def test_manual_athlete_mapping_recovers_projection_through_real_replay_seam(
                     threshold=MarketThreshold("20.5", "count"),
                     status=MarketStatus.AVAILABLE,
                     scoring_period=ScoringPeriod.FULL_GAME,
+                                    selections=_PRICED_SELECTIONS,
                 ),
             ),
             coverage=CoverageEvidence(
@@ -5086,6 +5103,7 @@ def _nameless_market(*, team: TeamEvidence | None = None) -> PlayerProjectionMar
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
         status=MarketStatus.AVAILABLE,
+            selections=_PRICED_SELECTIONS,
     )
 
 

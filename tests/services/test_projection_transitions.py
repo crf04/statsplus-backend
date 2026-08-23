@@ -30,6 +30,8 @@ from app.providers.dfs import (
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
+    Selection,
+    SelectionDirection,
     SnapshotStatus,
     StatisticEvidence,
     TeamEvidence,
@@ -41,6 +43,14 @@ from app.services.projection_archive import (
     ProjectionSelectionPlayerPoolReader,
 )
 from app.services.statistic_catalog import StatisticCatalog
+
+
+#: A market must offer a priced side to be targetable, and what that price is
+#: is not what these tests are about, so every market here offers one.
+_PRICED_SELECTIONS = (
+    Selection(selection_id="higher", direction=SelectionDirection.HIGHER, american_price=-110),
+)
+
 
 
 SEASON = "2025-26"
@@ -86,6 +96,7 @@ def _market(
         status=status,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
 
 

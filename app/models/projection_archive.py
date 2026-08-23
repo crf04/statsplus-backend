@@ -182,6 +182,17 @@ class ProjectionObservation(Base):
     market_status = Column(String(32), nullable=False)
     market_variant = Column(String(32), nullable=False)
     scoring_period = Column(String(32), nullable=False)
+    #: The canonical comparable price of this market's selections.  The exact
+    #: published number is kept as text so no dialect rounds a provider's own
+    #: scale away, and it is null whenever each side states its own number --
+    #: those stay on the selections in the archived source document.
+    price_kind = Column(
+        String(16), nullable=False, default="unpriced", server_default="unpriced"
+    )
+    price_value = Column(String(32), nullable=True)
+    price_scope = Column(
+        String(16), nullable=False, default="selection", server_default="selection"
+    )
     targetable = Column(Boolean, nullable=False, default=False, server_default="0")
     resolution_state = Column(
         String(32), nullable=False, default="resolved", server_default="resolved"

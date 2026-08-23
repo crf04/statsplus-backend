@@ -44,6 +44,7 @@ from app.models.projection_archive import (
 from app.providers.dfs import (
     MarketStatus,
     MarketVariant,
+    PriceKind,
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
@@ -84,6 +85,9 @@ PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
         "statistic_provider_label",
         "resolution_state",
         "unresolved_identities",
+        "price_kind",
+        "price_value",
+        "price_scope",
     ),
     "projection_materialization_generations": ("is_replay",),
     "latest_player_projections": ("confirmed_at",),
@@ -145,7 +149,8 @@ def require_projection_archive_schema(engine: Engine) -> None:
         raise ConfigurationError(
             "Projection archive dependencies require migrations "
             "040_projection_archive, 041_projection_archive_transitions, "
-            "044_projection_closing_sets, and 045_projection_mapping_replay; missing: "
+            "044_projection_closing_sets, 045_projection_mapping_replay, and "
+            "046_projection_observation_prices; missing: "
             + ", ".join(missing)
         )
 
@@ -1817,6 +1822,7 @@ class ProjectionArchive:
             rematerialized["market_status"] == MarketStatus.AVAILABLE.value
             and rematerialized["market_variant"] == MarketVariant.STANDARD.value
             and rematerialized["scoring_period"] == ScoringPeriod.FULL_GAME.value
+            and rematerialized["price_kind"] != PriceKind.UNPRICED.value
             and not unresolved
             and rematerialized["canonical_team_id"] is not None
             and rematerialized["market_category"] is not None
@@ -2378,6 +2384,9 @@ class ProjectionArchive:
                 market.status is MarketStatus.AVAILABLE
                 and market.variant is MarketVariant.STANDARD
                 and market.scoring_period is ScoringPeriod.FULL_GAME
+                # A market nobody published a price for is evidence, not an
+                # offering something can be selected from.
+                and market.is_priced
                 and canonical_player_id is not None
                 and canonical_player_name is not None
                 and canonical_game_id is not None
@@ -2416,6 +2425,13 @@ class ProjectionArchive:
                     "market_status": market.status.value,
                     "market_variant": market.variant.value,
                     "scoring_period": market.scoring_period.value,
+                    "price_kind": market.price_kind.value,
+                    "price_value": (
+                        None
+                        if market.price_value is None
+                        else str(market.price_value)
+                    ),
+                    "price_scope": market.price_scope.value,
                     "targetable": targetable,
                     "resolution_state": (
                         "resolved" if not unresolved_identities else "unresolved"

@@ -55,6 +55,13 @@ SEASON = "2025-26"
 GAME_ID = "0022500501"
 
 
+#: A market must offer a priced side to be targetable, and what that price is
+#: is not what these tests are about, so every market here offers one.
+_PRICED_SELECTIONS = (
+    Selection(selection_id="higher", direction=SelectionDirection.HIGHER, american_price=-110),
+)
+
+
 def test_generated_projection_identifiers_fit_their_schema_columns():
     identifier_families = (
         (
@@ -171,6 +178,7 @@ def _closing_snapshot(catalog, retrieved_at, threshold="27.5"):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     return ProviderSnapshot(
         provider="dabble",
@@ -598,6 +606,7 @@ def test_non_targetable_normalized_evidence_is_archived_but_not_published(tmp_pa
         status=MarketStatus.SUSPENDED,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     snapshot = ProviderSnapshot(
         provider="underdog",
@@ -656,6 +665,7 @@ def test_new_complete_snapshot_replaces_the_provider_latest_set(tmp_path):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     query = NBAMarketQuery(season=SEASON)
@@ -829,6 +839,7 @@ def test_duplicate_content_market_reference_keeps_all_evidence_and_first_latest(
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     result = ProjectionArchive(engine, catalog).ingest_complete_snapshot(
         ProviderSnapshot(
@@ -896,6 +907,7 @@ def test_multi_game_pool_reports_partial_status_when_any_game_is_missing(tmp_pat
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     ProjectionArchive(engine, catalog).ingest_complete_snapshot(
         ProviderSnapshot(
@@ -1516,6 +1528,7 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     snapshot = ProviderSnapshot(
         provider="dabble",
@@ -1655,6 +1668,7 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
+                    selections=_PRICED_SELECTIONS,
         )
 
     snapshot = ProviderSnapshot(
@@ -1745,6 +1759,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     archive.ingest_snapshot(
@@ -1833,6 +1848,7 @@ def test_replay_densely_numbers_affected_rows_carried_across_snapshots(tmp_path)
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
+                    selections=_PRICED_SELECTIONS,
         )
 
     archive = ProjectionArchive(engine, catalog)
@@ -1956,6 +1972,7 @@ def test_replay_uses_the_mapping_name_when_provider_reported_name_is_missing():
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(create_engine("sqlite:///:memory:"), catalog)
     row = archive._observation_rows(
@@ -2015,6 +2032,7 @@ def test_replay_preserves_a_distinct_source_athlete_team_in_market_reference():
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(create_engine("sqlite:///:memory:"), catalog)
     row = archive._observation_rows(
@@ -2079,6 +2097,7 @@ def test_sequential_mappings_preserve_each_source_observations_logical_state(
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
+                    selections=_PRICED_SELECTIONS,
         ),
         PlayerProjectionMarket(
             provider="dabble",
@@ -2101,6 +2120,7 @@ def test_sequential_mappings_preserve_each_source_observations_logical_state(
             status=MarketStatus.AVAILABLE,
             variant=MarketVariant.STANDARD,
             scoring_period=ScoringPeriod.FULL_GAME,
+                    selections=_PRICED_SELECTIONS,
         ),
     )
     archive = ProjectionArchive(engine, catalog)
@@ -2174,6 +2194,7 @@ def test_replay_recomputes_an_idless_reference_for_a_later_partial_update(tmp_pa
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     query = NBAMarketQuery(season=SEASON)
@@ -2261,6 +2282,7 @@ def test_replay_fences_a_snapshot_retrieved_before_the_mapping_decision(tmp_path
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     archive = ProjectionArchive(engine, catalog)
     query = NBAMarketQuery(season=SEASON)
@@ -2380,6 +2402,7 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+            selections=_PRICED_SELECTIONS,
     )
     current = replace(
         unresolved,
@@ -2447,3 +2470,139 @@ def test_replay_does_not_extend_a_provider_board_live_window(tmp_path):
 
     assert pool.players == ()
     assert pool.game_states[GAME_ID] == {"state": "missing", "observed_at": None}
+
+
+def test_archived_observations_carry_the_canonical_price_and_gate_targetability(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-prices.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+
+    def market(market_id: str, selections: tuple[Selection, ...]):
+        return PlayerProjectionMarket(
+            provider="dabble",
+            market_id=market_id,
+            athlete=AthleteEvidence(
+                canonical_id=2544,
+                name="LeBron James",
+                team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+            ),
+            event=EventEvidence(canonical_id=GAME_ID),
+            team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+            statistic=evidence,
+            statistic_match=StatisticMatch(
+                state=MatchState.CANONICAL,
+                evidence=evidence,
+                scoring_period=ScoringPeriod.FULL_GAME,
+                canonical=statistic,
+                provider="dabble",
+            ),
+            threshold=MarketThreshold("27.5", "count"),
+            status=MarketStatus.AVAILABLE,
+            variant=MarketVariant.STANDARD,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            selections=selections,
+        )
+
+    entry_priced = market(
+        "entry",
+        (
+            Selection(
+                selection_id="higher",
+                direction=SelectionDirection.HIGHER,
+                price_kind="multiplier",
+                price_value="3",
+                price_scope="entry",
+            ),
+        ),
+    )
+    selection_priced = market(
+        "selection",
+        (
+            Selection(
+                selection_id="higher",
+                direction=SelectionDirection.HIGHER,
+                american_price=-112,
+            ),
+            Selection(
+                selection_id="lower",
+                direction=SelectionDirection.LOWER,
+                american_price=100,
+            ),
+        ),
+    )
+    unpriced = market(
+        "unpriced",
+        (Selection(selection_id="higher", direction=SelectionDirection.HIGHER),),
+    )
+    snapshot = ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(entry_priced, selection_priced, unpriced),
+        coverage=CoverageEvidence(
+            fetched_count=3,
+            eligible_count=3,
+            normalized_count=3,
+            expected_total=3,
+        ),
+        retrieved_at=OBSERVED_AT,
+    )
+
+    ProjectionRecordingService(
+        ProjectionArchive(engine, catalog),
+        ProjectionArchiveReadScope(
+            provider="dabble", query=NBAMarketQuery(season=SEASON)
+        ),
+    ).record_complete_snapshot(
+        snapshot,
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT,
+    )
+
+    with engine.connect() as connection:
+        rows = {
+            row["provider_market_id"]: row
+            for row in connection.execute(
+                select(
+                    ProjectionObservation.provider_market_id,
+                    ProjectionObservation.price_kind,
+                    ProjectionObservation.price_value,
+                    ProjectionObservation.price_scope,
+                    ProjectionObservation.targetable,
+                )
+            ).mappings()
+        }
+        targetable_references = {
+            row["market_reference"]
+            for row in connection.execute(
+                select(LatestPlayerProjection.market_reference)
+            ).mappings()
+        }
+
+    assert (
+        rows["entry"]["price_kind"],
+        rows["entry"]["price_value"],
+        rows["entry"]["price_scope"],
+    ) == ("multiplier", "3", "entry")
+    # Each side of a two-sided market states its own number, so the market
+    # states the form but no single value.
+    assert (
+        rows["selection"]["price_kind"],
+        rows["selection"]["price_value"],
+        rows["selection"]["price_scope"],
+    ) == ("american", None, "selection")
+    assert (
+        rows["unpriced"]["price_kind"],
+        rows["unpriced"]["price_value"],
+        rows["unpriced"]["price_scope"],
+    ) == ("unpriced", None, "selection")
+    assert rows["entry"]["targetable"] is True
+    assert rows["selection"]["targetable"] is True
+    assert rows["unpriced"]["targetable"] is False
+    assert targetable_references == {
+        market_reference(entry_priced),
+        market_reference(selection_priced),
+    }

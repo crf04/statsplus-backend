@@ -56,6 +56,8 @@ from app.providers.dfs import (
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    Selection,
+    SelectionDirection,
     ProviderSnapshot,
     SnapshotStatus,
     StatisticEvidence,
@@ -119,6 +121,18 @@ from tests.services.test_matchup_parity import (
     _runner_world,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+
+
+#: A market must offer a priced side to be targetable, and what that price is
+#: is not what these tests are about, so every market here offers one.
+_PRICED_SELECTIONS = (
+    Selection(
+        selection_id="higher",
+        direction=SelectionDirection.HIGHER,
+        american_price=-110,
+    ),
+)
+
 
 
 TEAM_FIXTURE = Path(__file__).parents[1] / "fixtures/team_matchups/thirty_teams.json"
@@ -196,6 +210,7 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble"):
                 status=MarketStatus.AVAILABLE,
                 variant=MarketVariant.STANDARD,
                 scoring_period=ScoringPeriod.FULL_GAME,
+                            selections=_PRICED_SELECTIONS,
             ),
         ),
         coverage=CoverageEvidence(
