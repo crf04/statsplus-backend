@@ -1090,15 +1090,18 @@ def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
     ] == 0
     assert initial_matchup.get_json()["players"] == []
 
+    replayed_at = OBSERVED_AT + timedelta(minutes=30)
     replay = context.archive.replay_athlete_mapping(
         provider="dabble",
         provider_athlete_id="athlete-unresolved",
         canonical_player_id=7,
         canonical_player_name="Player 7",
         canonical_team_id=10,
+        replayed_at=replayed_at,
     )
     assert replay is not None
     assert replay.changed is True
+    context.route_now[0] = replayed_at
 
     recovered_slate = context.client.get(
         "/api/games/slate?date=2026-01-02", headers=context.headers
@@ -1187,6 +1190,102 @@ def test_concurrent_postgres_mapping_replay_advances_one_generation(
         ).scalar_one() == 1
     for archive in archives:
         archive.engine.dispose()
+
+
+def test_postgres_mapping_replay_serializes_with_inflight_snapshot_ingestion(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+
+    def unresolved_snapshot(retrieved_at, threshold):
+        snapshot = _snapshot(catalog, retrieved_at, threshold)
+        return replace(
+            snapshot,
+            markets=(
+                replace(
+                    snapshot.markets[0],
+                    athlete=replace(
+                        snapshot.markets[0].athlete,
+                        provider_id="athlete-ingest-race",
+                        canonical_id=None,
+                    ),
+                ),
+            ),
+        )
+
+    ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
+        unresolved_snapshot(OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    replay_archive = ProjectionArchive(create_engine(database_url), catalog)
+    ingestion_archive = ProjectionArchive(create_engine(database_url), catalog)
+    barrier = Barrier(2)
+    original_replay = replay_archive._replay_scope
+    original_ingest = ingestion_archive._ingest_prepared
+
+    def synchronized_replay_scope(**kwargs):
+        barrier.wait(timeout=10)
+        return original_replay(**kwargs)
+
+    def synchronized_ingest(prepared):
+        barrier.wait(timeout=10)
+        return original_ingest(prepared)
+
+    replay_archive._replay_scope = synchronized_replay_scope
+    ingestion_archive._ingest_prepared = synchronized_ingest
+    replayed_at = OBSERVED_AT + timedelta(minutes=10)
+    inflight = unresolved_snapshot(
+        OBSERVED_AT + timedelta(minutes=5),
+        "21.5",
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replay_future = executor.submit(
+            replay_archive.replay_athlete_mapping,
+            provider="dabble",
+            provider_athlete_id="athlete-ingest-race",
+            canonical_player_id=7,
+            canonical_player_name="Player 7",
+            canonical_team_id=10,
+            replayed_at=replayed_at,
+        )
+        ingestion_future = executor.submit(
+            ingestion_archive.ingest_snapshot,
+            inflight,
+            query=query,
+            accepted_at=replayed_at + timedelta(minutes=1),
+        )
+        replay = replay_future.result(timeout=20)
+        ingestion = ingestion_future.result(timeout=20)
+
+    assert replay is not None and replay.changed is True
+    assert ingestion.materialization_outcome in {
+        "advanced",
+        "older_not_promoted",
+    }
+    with projection_pg_engine.connect() as connection:
+        recovered = connection.execute(
+            select(
+                LatestPlayerProjection.canonical_player_id,
+                LatestPlayerProjection.generation_id,
+                ProjectionArchiveScopeLock.active_generation_id,
+            ).join(
+                ProjectionArchiveScopeLock,
+                (ProjectionArchiveScopeLock.provider == LatestPlayerProjection.provider)
+                & (ProjectionArchiveScopeLock.season == LatestPlayerProjection.season)
+                & (
+                    ProjectionArchiveScopeLock.query_key
+                    == LatestPlayerProjection.query_key
+                ),
+            )
+        ).one()
+    assert recovered[0] == 7
+    assert recovered[1] == recovered[2]
+    replay_archive.engine.dispose()
+    ingestion_archive.engine.dispose()
 
 
 def test_authenticated_postgres_routes_expire_disabled_provider_history(

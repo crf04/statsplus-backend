@@ -615,17 +615,31 @@ player outside a started game's derived empty pool. No request path calls a
 projection provider, takes an ingestion scope write lock, or creates a closing
 set.
 Projection Observations retain typed provider identities and an explicit
-'resolved'/'unresolved' state in migration 045. A valid normalized market is
+'resolved'/'unresolved' state in migration 045. Each rematerialized row also
+retains its original observation ID and source ordinal, so later athlete, event,
+or statistic decisions start from the same immutable provider market while
+preserving earlier decisions. Provider-plus-identity indexes bound the history
+lookup to observations affected by the decision. A valid normalized market is
 archived even when its athlete, event, or statistic identity is unresolved; only
 fully resolved, targetable rows enter Latest or Player Pool. An approved athlete
 or event mapping invokes the archive's database-only replay seam after the
 mapping transaction commits. Statistic Catalog corrections use the same seam.
-Replay acquires the existing provider/season/query scope fence, creates a
-deterministic generation containing only affected rematerialized observations,
-and advances affected Latest pointers in that transaction. It reuses the
+Replay acquires the existing provider/season/query scope fence, creates or
+reactivates the deterministic generation for the resulting materialization, and
+batch-replaces only affected Latest references in that transaction. Dense replay
+ordinals are generation-local. The provider-reported athlete name remains the
+observation name, while canonical IDs and the content-derived reference of an
+ID-less market are recomputed from the immutable source market. It reuses the
 accepted poll and immutable source snapshot, so source observations, checksums,
-and retrieval timestamps are not rewritten. Repeated replay is a no-op, and
-neither request-time reads nor mapping decisions call a provider.
+and retrieval timestamps are not rewritten. A replayed Latest pointer is
+confirmed at the mapping replay time, when its stored evidence becomes newly
+usable. The scope lock records both the active generation and that replay time;
+an in-flight snapshot retrieved before the mapping decision remains auditable as
+non-promoted evidence and cannot erase the recovery, while a snapshot genuinely
+retrieved afterward may advance normally. Repeated replay is a no-op. A replay
+failure after an athlete or event mapping commit is logged without changing the
+durable operator decision, and neither request-time reads nor mapping decisions
+call a provider.
 
 ### Matchup injury snapshots
 

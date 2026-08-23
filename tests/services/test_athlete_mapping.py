@@ -10,12 +10,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import and_, create_engine, event, inspect, insert, select
+from sqlalchemy import and_, create_engine, event, func, inspect, insert, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
 
-from app.domain.statistics import ScoringPeriod
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
 from app.models.athlete_mapping import (
@@ -27,9 +27,11 @@ from app.models.athlete_mapping import (
     AthleteMappingRejection,
     ProviderAthleteMapping,
 )
+from app.models.projection_archive import LatestPlayerProjection, ProjectionObservation
 from app.providers.dfs import AthleteEvidence, TeamEvidence
 from app.providers.dfs import (
     CoverageEvidence,
+    EventEvidence,
     MarketThreshold,
     MarketStatus,
     NBAMarketQuery,
@@ -51,6 +53,8 @@ from app.services.athlete_resolver import (
     normalize_athlete_name,
 )
 from app.services.dfs_board import DFSBoardService
+from app.services.projection_archive import ProjectionArchive
+from app.services.statistic_catalog import StatisticCatalog
 
 
 #: Fixed clearing timestamp for direct-insert constraint cases.
@@ -4107,6 +4111,92 @@ def test_manual_athlete_mapping_replays_projection_after_commit(mapping_db):
     )
 
     assert replay_calls == [result]
+
+
+def test_manual_athlete_mapping_recovers_projection_through_real_replay_seam(
+    mapping_db,
+):
+    engine, now = mapping_db
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    statistic_evidence = StatisticEvidence(
+        provider_id="pp-points",
+        canonical_id=statistic.id,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        ProviderSnapshot(
+            provider="prizepicks",
+            status=SnapshotStatus.COMPLETE,
+            markets=(
+                PlayerProjectionMarket(
+                    provider="prizepicks",
+                    market_id="real-replay-seam",
+                    athlete=_approved_evidence(),
+                    event=EventEvidence(
+                        provider_id="pp-event",
+                        canonical_id="game-real-replay",
+                    ),
+                    team=TeamEvidence(canonical_id=1610612747),
+                    statistic=statistic_evidence,
+                    statistic_match=StatisticMatch(
+                        state=MatchState.CANONICAL,
+                        evidence=statistic_evidence,
+                        scoring_period=ScoringPeriod.FULL_GAME,
+                        canonical=statistic,
+                        provider="prizepicks",
+                    ),
+                    threshold=MarketThreshold("20.5", "count"),
+                    status=MarketStatus.AVAILABLE,
+                    scoring_period=ScoringPeriod.FULL_GAME,
+                ),
+            ),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=1,
+            ),
+            retrieved_at=now,
+        ),
+        query=NBAMarketQuery(season="2024-25"),
+        accepted_at=now,
+    )
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(LatestPlayerProjection)
+        ).scalar_one() == 0
+
+    repository = AthleteMappingRepository(
+        engine,
+        clock=lambda: now,
+        projection_replay=archive.replay_athlete_decision,
+    )
+    result = repository.approve(
+        "prizepicks",
+        "pp-15",
+        15,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="verified source identity",
+        provider_evidence=_approved_evidence(),
+    )
+
+    assert result.persisted is True
+    with engine.connect() as connection:
+        recovered = connection.execute(
+            select(
+                ProjectionObservation.canonical_player_id,
+                ProjectionObservation.canonical_player_name,
+                ProjectionObservation.resolution_state,
+            )
+            .join(
+                LatestPlayerProjection,
+                LatestPlayerProjection.observation_id
+                == ProjectionObservation.observation_id,
+            )
+        ).one()
+    assert recovered == (15, "Nikola Jokic", "resolved")
 
 
 def test_projection_replay_failure_does_not_change_athlete_approval(

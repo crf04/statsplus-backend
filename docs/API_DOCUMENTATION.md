@@ -356,10 +356,17 @@ Latest references without duplicating observations while the immutable snapshot
 remains the content authority. Enabled providers are unioned; an unpolled or
 disabled provider expires independently and cannot erase another contribution.
 An approved athlete, event, or statistic mapping may replay matching unresolved
-observations into a deterministic new materialization generation. This is an
-internal database operation: it does not add a route, change any Slate,
-Matchup, or Matchup Selection payload, call a provider, or rewrite the source
-snapshot and its observations. Until replay succeeds, unresolved observations
+observations into a deterministic materialization generation, or reactivate an
+existing generation when a decision returns to an earlier materialized state.
+This is an internal database operation: it does not add a route, change any
+Slate, Matchup, or Matchup Selection payload, call a provider, or rewrite the
+source snapshot and its observations. It preserves the provider-reported player
+name, recomputes an ID-less market reference from the rematerialized identities,
+and confirms affected Latest pointers at replay time. They therefore receive a
+new 15-minute live window even though response `observed_at` continues to name
+the original provider retrieval. A snapshot fetched before that decision cannot
+promote after replay and erase the recovered state; evidence fetched after the
+decision may promote normally. Until replay succeeds, unresolved observations
 remain archive evidence only and do not contribute to Latest or Player Pool.
 Late valid polls remain archived but do not refresh eligibility or mask a newer
 failure; the failure attempt's actual start time (or its completion time when
