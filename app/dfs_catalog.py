@@ -1,9 +1,13 @@
-"""Closed catalog of reviewed DFS provider adapter names."""
+"""Closed catalog of reviewed DFS provider adapter names.
+
+The names themselves are constants because call sites need to spell one
+provider; *which* providers exist is decided by
+:mod:`app.providers.registry`, and nothing may read a list of providers from
+here.
+"""
 
 from __future__ import annotations
 
 DFS_DABBLE = "dabble"
 DFS_PRIZEPICKS = "prizepicks"
 DFS_UNDERDOG = "underdog"
-DFS_PROVIDER_NAMES = (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
-DFS_PROVIDER_NAME_SET = frozenset(DFS_PROVIDER_NAMES)

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config.settings import RuntimeSettings
-from app.dfs_catalog import DFS_PROVIDER_NAMES, DFS_PROVIDER_NAME_SET
+from app.providers.registry import dfs_provider_name_set, dfs_provider_names
 from app.domain.comparisons import ComparisonFilters
 from app.errors import InvalidInputError
 from app.providers.dfs import MarketStatus, NBAMarketQuery
@@ -159,9 +159,9 @@ def _single(args: Any, parameter: str) -> str | None:
 
 def _provider(value: str) -> str:
     name = value.casefold()
-    if name not in DFS_PROVIDER_NAME_SET:
+    if name not in dfs_provider_name_set():
         raise InvalidInputError(
-            "providers accepts only: " + ", ".join(sorted(DFS_PROVIDER_NAMES)) + ".",
+            "providers accepts only: " + ", ".join(sorted(dfs_provider_names())) + ".",
             detail=f"unsupported provider filter: {name!r}",
         )
     return name
