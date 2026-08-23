@@ -173,7 +173,23 @@ retained only as diagnostic context.
 Ranking differences are hard failures under deterministic #117 rankings.
 Well-formed per-36 identity, raw-count, game-count, or minute differences are
 likewise durable blocking differences: the command persists them row by row as
-`pending_adjudication` and exits `2`. Three provider representation gaps are
+`pending_adjudication` and exits `2`.
+
+One parent-approved semantic rule exists (crf04/statsplus#19, 2026-08-23):
+`official_scorekeeper_correction`, for post-game official box-score corrections
+the PBP feed never received. Pass `--semantic-rule official_scorekeeper_correction
+--semantic-rule-reason "<at least 20 characters>"` to `compare`. Under it, an
+integer count difference of magnitude at most 1 per (team or player, field), a
+per-36 season minutes difference of at most 2.0 per player, and a ranking
+difference fully explained by such counts are classified soft
+(`official_scorekeeper_correction` on matchup surfaces, `semantic_difference`
+with `blocks_approval: false` on per-36) and the artifact is adjudicable. The
+rule never covers identity, game-set, availability, cutoff/scope/authority,
+a provider game count below the ledger's, or any magnitude above the bounds,
+and it does not apply when more than 400 entities differ in one artifact. The
+rule id and reason are recorded on the artifact; approval still requires the
+audited `adjudicate … approved` step below and is bound to the candidate's
+checksum, so a recomposed candidate needs a fresh run and adjudication. Three provider representation gaps are
 not differences because the provider cannot evidence them: minutes may drift
 by up to 0.01 minutes per governed ledger game (official and PBP-derived
 per-game minutes disagree by seconds; a provider-only `0:00` appearance with

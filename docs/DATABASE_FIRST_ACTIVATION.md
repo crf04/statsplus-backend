@@ -18,7 +18,10 @@ Activation refuses to run without the evidence #117 produced. Confirm you have,
 for the stream you are about to activate:
 
 - the exact candidate `publication_id` and its payload checksum;
-- the parity `artifact_id`, with status `exact` or decision `approved`;
+- the parity `artifact_id`, with status `exact` or decision `approved` (an
+  artifact is approvable only when its differences are all soft — including
+  in-bound `official_scorekeeper_correction` differences recorded under the
+  parent-approved rule — see `MATCHUP_PARITY_OPERATIONS.md`);
 - the manifest and Event Catalog identities both are bound to;
 - proof that the production pointer has not moved since the artifact was cut.
 
