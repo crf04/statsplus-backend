@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 
 from . import Base
@@ -50,6 +51,9 @@ class ProjectionArchiveScopeLock(Base):
     provider = Column(String(64), primary_key=True)
     season = Column(String(7), primary_key=True)
     query_key = Column(String(72), primary_key=True)
+    active_generation_id = Column(String(72), nullable=True)
+    mapping_replayed_at = Column(DateTime(timezone=True), nullable=True)
+    mapping_replayed_retrieved_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class ProviderPoll(Base):
@@ -157,9 +161,17 @@ class ProjectionObservation(Base):
         ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
         nullable=False,
     )
+    source_observation_id = Column(
+        String(72), nullable=False, server_default=""
+    )
+    source_ordinal = Column(Integer, nullable=False, server_default="0")
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     provider_market_id = Column(String(255), nullable=True)
+    athlete_provider_id = Column(String(255), nullable=True)
+    event_provider_id = Column(String(255), nullable=True)
+    statistic_provider_id = Column(String(255), nullable=True)
+    statistic_provider_label = Column(String(255), nullable=True)
     market_reference = Column(String(72), nullable=False)
     canonical_game_id = Column(String(32), nullable=True)
     canonical_player_id = Column(Integer, nullable=True)
@@ -171,6 +183,12 @@ class ProjectionObservation(Base):
     market_variant = Column(String(32), nullable=False)
     scoring_period = Column(String(32), nullable=False)
     targetable = Column(Boolean, nullable=False, default=False, server_default="0")
+    resolution_state = Column(
+        String(32), nullable=False, default="resolved", server_default="resolved"
+    )
+    unresolved_identities = Column(
+        String(64), nullable=False, default="", server_default=""
+    )
     observed_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
@@ -184,6 +202,32 @@ class ProjectionObservation(Base):
             "canonical_game_id",
             "canonical_player_id",
             "canonical_statistic_id",
+        ),
+        Index("ix_projection_observations_snapshot_id", "snapshot_id"),
+        Index(
+            "ix_projection_observations_provider_athlete",
+            "provider",
+            "athlete_provider_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_event",
+            "provider",
+            "event_provider_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_statistic_id",
+            "provider",
+            "statistic_provider_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_statistic_label",
+            "provider",
+            "statistic_provider_label",
+        ),
+        Index(
+            "ix_projection_observations_provider_statistic_label_lower",
+            "provider",
+            func.lower(statistic_provider_label),
         ),
     )
 
@@ -206,12 +250,12 @@ class ProjectionMaterializationGeneration(Base):
         String(72),
         ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
         nullable=False,
-        unique=True,
     )
     created_at = Column(DateTime(timezone=True), nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     materialization_checksum = Column(String(64), nullable=False)
     outcome = Column(String(32), nullable=False)
+    is_replay = Column(Boolean, nullable=False, default=False, server_default="false")
 
     __table_args__ = (
         UniqueConstraint(

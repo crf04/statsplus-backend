@@ -599,6 +599,12 @@ builds a season-sized generation-ID parameter list, and a delayed provider
 delivery can remain immutable archive evidence without entering a set after
 the game-start boundary. Repeating a close returns the original set and cannot
 move its start time.
+Mapping replay generations are explicit deltas even when they reuse a Complete
+source snapshot and poll. They are never eligible as the Complete baseline;
+the closing fold applies their affected references like a Partial generation,
+so a pre-start mapping decision cannot truncate an otherwise complete frozen
+board. A Partial poll between the Complete baseline and a replay delta is
+folded in the same ordering.
 Enabling a provider after a game has closed does not backfill its closing set;
 that provider reads `missing` for the game permanently.
 
@@ -614,6 +620,44 @@ keeps scheduled missing-pool behavior and returns `resource_not_found` for a
 player outside a started game's derived empty pool. No request path calls a
 projection provider, takes an ingestion scope write lock, or creates a closing
 set.
+Projection Observations retain typed provider identities and an explicit
+'resolved'/'unresolved' state in migration 045. Each rematerialized row also
+retains its original observation ID and source ordinal, so later athlete, event,
+or statistic decisions start from the same immutable provider market while
+preserving earlier decisions. Provider-plus-identity indexes bound the history
+lookup to observations affected by the decision. A valid normalized market is
+archived even when its athlete, event, or statistic identity is unresolved; only
+fully resolved, targetable rows enter Latest or Player Pool. An approved athlete
+or event mapping invokes the archive's database-only replay seam after the
+mapping transaction commits. Statistic Catalog corrections use the same seam.
+Replay acquires the existing provider/season/query scope fence, creates or
+reactivates the deterministic generation for the resulting materialization, and
+batch-replaces only affected Latest references in that transaction. Dense replay
+ordinals are generation-local. A provider-reported athlete name remains the
+observation name when present; a missing provider name falls back to the
+approved canonical name. Canonical IDs and the content-derived reference of an
+ID-less market are recomputed from the immutable source market. It reuses the
+accepted poll and immutable source snapshot, so source observations, checksums,
+and retrieval timestamps are not rewritten. A replayed Latest pointer is
+activated at mapping replay time, while its eligibility confirmation remains
+the source observation time so the provider board's live window is not reset.
+The scope lock records both the active generation, the replay wall clock, and
+the source retrieval fence;
+an in-flight snapshot retrieved before the mapping decision remains auditable as
+non-promoted evidence and cannot erase the recovery when its observations still
+carry the pre-decision unresolved identity; evidence with a newer source
+retrieval identity may advance normally. Replay preserves the source
+`observed_at` for public freshness and does not extend the provider board's
+15-minute live window; `confirmed_at` remains the internal eligibility clock.
+Ordinary newer promoted polls may advance the Latest read-model `observed_at`,
+but replay itself never does so beyond its source observation.
+Repeated replay is a no-op. A replay failure after an athlete or event mapping
+commit is logged without changing the durable operator decision, and neither
+request-time reads nor mapping decisions call a provider. Replay scope
+enumeration is provider-wide and has no game filter. Therefore, if a mapping is
+approved after a game's closing set is frozen by sibling #108, replay rewrites
+the live Latest rows for that provider scope while the frozen membership keeps
+the pre-decision observations; this is the intended rule.
 
 ### Matchup injury snapshots
 

@@ -34,6 +34,7 @@ from app.providers.dfs import (
     TeamEvidence,
 )
 from app.services.projection_archive import ProjectionArchive
+from app.services.dfs_snapshot_cache import serialize_provider_snapshot
 from app.services.statistic_catalog import StatisticCatalog
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
@@ -69,6 +70,48 @@ def _create_projection_v40_fixture(engine) -> None:
     )
     observed_at = "2026-01-02 12:30:00"
     unchanged_at = "2026-01-02 12:31:00"
+    evidence_document = serialize_provider_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(
+                PlayerProjectionMarket(
+                    provider="dabble",
+                    market_id="market",
+                    athlete=AthleteEvidence(
+                        provider_id="athlete-v40",
+                        canonical_id=7,
+                        name="Player 7",
+                        team=TeamEvidence(canonical_id=10),
+                    ),
+                    event=EventEvidence(
+                        provider_id="event-v40",
+                        canonical_id="game",
+                    ),
+                    team=TeamEvidence(canonical_id=10),
+                    statistic=StatisticEvidence(
+                        provider_id="stat-v40",
+                        canonical_id="points",
+                        label="Points",
+                    ),
+                    status=MarketStatus.AVAILABLE,
+                    variant=MarketVariant.STANDARD,
+                    scoring_period=ScoringPeriod.FULL_GAME,
+                ),
+            ),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=1,
+            ),
+            retrieved_at=datetime.fromisoformat(observed_at).replace(
+                tzinfo=timezone.utc
+            ),
+        ),
+        NBAMarketQuery(season="2025-26"),
+        allow_partial=True,
+    )
     with engine.begin() as connection:
         for statement in statements:
             connection.exec_driver_sql(statement)
@@ -86,13 +129,14 @@ def _create_projection_v40_fixture(engine) -> None:
                 text(
                     "INSERT INTO projection_provider_snapshots VALUES "
                     "(:snapshot,'dabble','2025-26','query','1','complete',:at,:at,"
-                    ":checksum,:content,'{}')"
+                    ":checksum,:content,:document)"
                 ),
                 {
                     "snapshot": f"{identity}_snapshot",
                     "at": retrieved_at,
                     "checksum": f"{identity}_checksum",
                     "content": f"{identity}_content",
+                    "document": evidence_document if identity == "winner" else "{}",
                 },
             )
         for poll_id, completed_at, retrieved_at, outcome, snapshot_id, generation_id in (
@@ -208,8 +252,9 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
-    assert upgraded.current_version == 44
+    assert upgraded.current_version == 45
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -224,6 +269,61 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         for column in inspector.get_columns("latest_player_projections")
     }
     assert latest_columns["confirmed_at"]["nullable"] is False
+    observation_columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_observations")
+    }
+    assert {
+        "source_observation_id",
+        "source_ordinal",
+        "athlete_provider_id",
+        "event_provider_id",
+        "statistic_provider_id",
+        "statistic_provider_label",
+        "resolution_state",
+        "unresolved_identities",
+    } <= observation_columns
+    generation_columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "projection_materialization_generations"
+        )
+    }
+    assert "is_replay" in generation_columns
+    lock_columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_archive_scope_locks")
+    }
+    assert {
+        "active_generation_id",
+        "mapping_replayed_at",
+        "mapping_replayed_retrieved_at",
+    } <= lock_columns
+    observation_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("projection_observations")
+    }
+    assert {
+        "ix_projection_observations_provider_athlete",
+        "ix_projection_observations_provider_event",
+        "ix_projection_observations_provider_statistic_id",
+        "ix_projection_observations_provider_statistic_label",
+        "ix_projection_observations_snapshot_id",
+    } <= observation_indexes
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND name = "
+                "'ix_projection_observations_provider_statistic_label_lower'"
+            )
+        ).scalar_one() == "ix_projection_observations_provider_statistic_label_lower"
+    assert ("source_poll_id",) not in {
+        tuple(constraint["column_names"])
+        for constraint in inspector.get_unique_constraints(
+            "projection_materialization_generations"
+        )
+    }
     with engine.connect() as connection:
         promoted = dict(connection.execute(text(
             "SELECT poll_id, promoted FROM projection_provider_polls ORDER BY poll_id"
@@ -250,7 +350,23 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
             "older_generation": "older_not_promoted",
             "same_generation": "same_time_not_promoted",
         }
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM projection_materialization_generations "
+            "WHERE is_replay = 1"
+        )).scalar_one() == 0
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        backfilled = connection.execute(text(
+            "SELECT athlete_provider_id, event_provider_id, "
+            "statistic_provider_id, statistic_provider_label, resolution_state "
+            "FROM projection_observations WHERE observation_id = 'observation'"
+        )).one()
+        assert backfilled == (
+            "athlete-v40",
+            "event-v40",
+            "stat-v40",
+            "Points",
+            "resolved",
+        )
     with engine.begin() as connection:
         connection.execute(text(
             "INSERT INTO projection_provider_polls "
@@ -403,6 +519,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -477,6 +594,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -677,6 +795,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     with engine.connect() as connection:
         rows = {
@@ -914,6 +1033,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (42, "042_team_matchup_provider_provenance"),
             (43, "043_projection_collection_control"),
             (44, "044_projection_closing_sets"),
+            (45, "045_projection_mapping_replay"),
         ]
 
 
@@ -970,6 +1090,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1051,6 +1172,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1116,6 +1238,7 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1176,7 +1299,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 44
+    assert repaired.current_version == 45
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1220,8 +1343,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
-    assert upgraded.current_version == 44
+    assert upgraded.current_version == 45
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1298,8 +1422,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
-    assert upgraded.current_version == 44
+    assert upgraded.current_version == 45
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1377,6 +1502,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1436,8 +1562,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
-    assert upgraded.current_version == 44
+    assert upgraded.current_version == 45
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1534,6 +1661,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
 
 
@@ -1576,7 +1704,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 44
+    assert result.current_version == 45
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -1868,6 +1996,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -1933,10 +2062,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
-    assert upgraded.current_version == 44
+    assert upgraded.current_version == 45
     assert repeated.applied == ()
-    assert repeated.current_version == 44
+    assert repeated.current_version == 45
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2011,6 +2141,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -2079,8 +2210,9 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "042_team_matchup_provider_provenance",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
-    assert upgraded.current_version == 44
+    assert upgraded.current_version == 45
 
     for table_name in (
         "team_matchup_facts",
@@ -2135,18 +2267,20 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "041_projection_archive_transitions",
         "043_projection_collection_control",
         "044_projection_closing_sets",
+        "045_projection_mapping_replay",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-5:] == [
+    assert history[-6:] == [
         (40, "040_projection_archive"),
         (41, "041_projection_archive_transitions"),
         (42, "042_team_matchup_provider_provenance"),
         (43, "043_projection_collection_control"),
         (44, "044_projection_closing_sets"),
+        (45, "045_projection_mapping_replay"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2156,7 +2290,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 44
+    assert result.current_version == 45
     inspector = inspect(engine)
     columns = {
         column["name"]
