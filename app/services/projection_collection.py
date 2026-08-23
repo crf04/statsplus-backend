@@ -304,7 +304,6 @@ class ProjectionCollectionCoordinator:
                     "last_failure_at": None,
                     "last_failure_reason": None,
                     "consecutive_failures": 0,
-                    "next_poll_at": now + interval,
                     "backoff_until": None,
                     "updated_at": now,
                 }
@@ -326,7 +325,6 @@ class ProjectionCollectionCoordinator:
                     "last_failure_at": now,
                     "last_failure_reason": failure_reason,
                     "consecutive_failures": failures,
-                    "next_poll_at": now + delay,
                     "backoff_until": now + delay,
                     "updated_at": now,
                 }

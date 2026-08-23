@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, DateTime, Index, Integer, String
+from sqlalchemy import Column, DateTime, Integer, String
 
 from . import Base
 
@@ -32,20 +32,9 @@ class ProjectionCollectionProviderState(Base):
     last_failure_at = Column(DateTime(timezone=True), nullable=True)
     last_failure_reason = Column(String(64), nullable=True)
     consecutive_failures = Column(Integer, nullable=False, default=0, server_default="0")
-    next_poll_at = Column(DateTime(timezone=True), nullable=True)
     backoff_until = Column(DateTime(timezone=True), nullable=True)
     active_count = Column(Integer, nullable=False, default=0, server_default="0")
     unresolved_count = Column(Integer, nullable=False, default=0, server_default="0")
     updated_at = Column(DateTime(timezone=True), nullable=False)
-
-    __table_args__ = (
-        Index(
-            "ix_projection_collection_provider_state_next_poll",
-            "season",
-            "query_key",
-            "next_poll_at",
-        ),
-    )
-
 
 __all__ = ["ProjectionCollectionLease", "ProjectionCollectionProviderState"]

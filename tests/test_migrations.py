@@ -2126,3 +2126,22 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (43, "043_projection_collection_control"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
+
+
+def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-collection-schema.sqlite3'}")
+
+    result = run_migrations(engine)
+
+    assert result.current_version == 43
+    inspector = inspect(engine)
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_collection_provider_states")
+    }
+    indexes = {
+        index["name"]
+        for index in inspector.get_indexes("projection_collection_provider_states")
+    }
+    assert "next_poll_at" not in columns
+    assert "ix_projection_collection_provider_state_next_poll" not in indexes
