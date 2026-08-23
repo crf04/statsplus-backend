@@ -45,6 +45,7 @@ from app.services.projection_archive import (
     ProjectionArchiveReadScope,
     ProjectionRecordingService,
     ProjectionSelectionPlayerPoolReader,
+    _digest,
 )
 from app.services.statistic_catalog import StatisticCatalog
 
@@ -52,6 +53,81 @@ from app.services.statistic_catalog import StatisticCatalog
 OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
 SEASON = "2025-26"
 GAME_ID = "0022500501"
+
+
+def test_generated_projection_identifiers_fit_their_schema_columns():
+    identifier_families = (
+        (
+            "snapshot",
+            f"psn_{'a' * 64}",
+            (
+                ProjectionProviderSnapshot.__table__.c.snapshot_id,
+                ProviderPoll.__table__.c.snapshot_id,
+                ProjectionObservation.__table__.c.snapshot_id,
+                ProjectionMaterializationGeneration.__table__.c.snapshot_id,
+            ),
+        ),
+        (
+            "poll",
+            _digest("poll", "dabble", SEASON, "query", OBSERVED_AT.isoformat()),
+            (
+                ProviderPoll.__table__.c.poll_id,
+                ProjectionObservation.__table__.c.source_poll_id,
+                ProjectionMaterializationGeneration.__table__.c.source_poll_id,
+            ),
+        ),
+        (
+            "generation",
+            _digest("gen", "snapshot", "checksum", OBSERVED_AT.isoformat()),
+            (
+                ProjectionMaterializationGeneration.__table__.c.generation_id,
+                ProjectionArchiveScopeLock.__table__.c.active_generation_id,
+                ProviderPoll.__table__.c.generation_id,
+                ProjectionObservation.__table__.c.generation_id,
+                LatestPlayerProjection.__table__.c.generation_id,
+                ClosingProjectionMembership.__table__.c.generation_id,
+            ),
+        ),
+        (
+            "replay generation",
+            _digest(
+                "gen",
+                "replay",
+                "snapshot",
+                "checksum",
+                OBSERVED_AT.isoformat(),
+            ),
+            (
+                ProjectionMaterializationGeneration.__table__.c.generation_id,
+                ProjectionArchiveScopeLock.__table__.c.active_generation_id,
+                ProviderPoll.__table__.c.generation_id,
+                ProjectionObservation.__table__.c.generation_id,
+                LatestPlayerProjection.__table__.c.generation_id,
+                ClosingProjectionMembership.__table__.c.generation_id,
+            ),
+        ),
+        (
+            "replay observation",
+            _digest("obs", "replay", "generation", "observation"),
+            (
+                ProjectionObservation.__table__.c.observation_id,
+                LatestPlayerProjection.__table__.c.observation_id,
+                ClosingProjectionMembership.__table__.c.observation_id,
+            ),
+        ),
+        (
+            "closing set",
+            _digest("close", "dabble", SEASON, "query", GAME_ID),
+            (
+                ClosingProjectionSet.__table__.c.closing_set_id,
+                ClosingProjectionMembership.__table__.c.closing_set_id,
+            ),
+        ),
+    )
+
+    for family, identifier, columns in identifier_families:
+        for column in columns:
+            assert len(identifier) <= column.type.length, (family, column)
 
 
 def _reader(

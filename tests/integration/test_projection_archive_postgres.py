@@ -1632,7 +1632,7 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
         latest_times = connection.execute(text(
             "SELECT DISTINCT observed_at, confirmed_at FROM latest_player_projections"
         )).one()
-        assert latest_times.observed_at == OBSERVED_AT
+        assert latest_times.observed_at == unchanged_at
         assert latest_times.confirmed_at == unchanged_at
         before_replay = tuple(
             connection.execute(select(func.count()).select_from(model)).scalar_one()

@@ -1610,7 +1610,8 @@ class ProjectionArchive:
             ]
             materialization_checksum = _materialization_checksum(checksum_rows)
             generation_id = _digest(
-                "gen_replay",
+                "gen",
+                "replay",
                 current["snapshot_id"],
                 materialization_checksum,
                 assume_utc(current["retrieved_at"]).isoformat(),
@@ -1641,7 +1642,7 @@ class ProjectionArchive:
                         generation_id=generation_id,
                         ordinal=ordinal,
                         observation_id=_digest(
-                            "obs_replay", generation_id, row["observation_id"]
+                            "obs", "replay", generation_id, row["observation_id"]
                         ),
                     )
                     new_rows.append(new_row)
