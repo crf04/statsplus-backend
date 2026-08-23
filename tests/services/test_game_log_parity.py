@@ -8,7 +8,7 @@ database-first, and live and stored documents compare strictly.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import timedelta
+from datetime import date, timedelta
 import hashlib
 import json
 from unittest.mock import Mock
@@ -586,3 +586,172 @@ def test_database_first_router_falls_back_to_live_before_complete_publication(
     frame = router.get_player_logs(101, SEASON)
     assert len(frame) == 2
     assert frame.iloc[0]["GAME_ID"] == "0022500004"
+
+
+def _seed_player_log_projection(engine, records):
+    """Write one active publication and its indexed rows for the given facts."""
+
+    payload_rows = []
+    for record in records:
+        row = asdict(record)
+        row["game_date"] = record.game_date.isoformat()
+        payload_rows.append(row)
+    encoded = json.dumps({"rows": payload_rows}, sort_keys=True)
+    with engine.begin() as connection:
+        connection.execute(insert(PublicationStream).values(
+            stream_key="player_game_logs",
+            provider="ledger",
+            owner="railway",
+            required_observations="[]",
+            publication_strategy="ledger_compose",
+            supported_windows='["season"]',
+            schema_versions="[1]",
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+            enabled=True,
+            created_at=RETRIEVED_AT,
+        ))
+        connection.execute(insert(PublicationVersion).values(
+            publication_id="publication-1",
+            stream_key="player_game_logs",
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            version=1,
+            status="active",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            created_at=RETRIEVED_AT,
+            reason="summaries projection regression",
+            fence=1,
+        ))
+        connection.execute(insert(PublicationPointer).values(
+            stream_key="player_game_logs",
+            active_publication_id="publication-1",
+            previous_publication_id=None,
+            fence=1,
+            updated_at=RETRIEVED_AT,
+        ))
+        connection.execute(
+            text(
+                "INSERT INTO publication_player_game_logs "
+                "(publication_id, player_id, game_id, game_date, "
+                "opponent_team_id, row_payload) "
+                "VALUES (:publication_id, :player_id, :game_id, :game_date, "
+                ":opponent_team_id, :row_payload)"
+            ),
+            [
+                {
+                    "publication_id": "publication-1",
+                    "player_id": row["player_id"],
+                    "game_id": row["game_id"],
+                    "game_date": row["game_date"],
+                    "opponent_team_id": row["opponent_team_id"],
+                    "row_payload": json.dumps(row, sort_keys=True),
+                }
+                for row in payload_rows
+            ],
+        )
+
+
+def _summaries_repository(engine, reader):
+    return PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: RETRIEVED_AT,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+
+
+def test_player_summaries_projection_matches_the_hydrated_payload_path(tmp_path):
+    """The pool's summaries are identical whichever read shape supplies them."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'summaries.sqlite3'}")
+    run_migrations(engine)
+    records = (
+        _record(),
+        _record(game_id="0022500002", game_date=date(2026, 1, 5), minutes=28.0,
+                points=19),
+        _record(player_id=202, game_id="0022500003",
+                game_date=date(2026, 1, 6), points=11),
+    )
+    _seed_player_log_projection(engine, records)
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
+    repository = _summaries_repository(engine, reader)
+
+    hydrated = repository.get_player_summaries(
+        SEASON,
+        (101, 202),
+        publication_snapshot=reader.snapshot(
+            ("player_game_logs",), season=SEASON
+        ),
+    )
+
+    statements = []
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda _conn, _cursor, statement, _parameters, _context, _many: (
+            statements.append(statement)
+        ),
+    )
+    projected = repository.get_player_summaries(
+        SEASON,
+        (101, 202),
+        publication_snapshot=reader.snapshot(
+            ("player_game_logs",),
+            season=SEASON,
+            projection_only_keys=frozenset({"player_game_logs"}),
+        ),
+    )
+
+    assert projected == hydrated
+    assert projected[101].last_ten_minutes == (32.5, 28.0)
+    assert any(
+        "publication_player_game_logs" in statement for statement in statements
+    )
+    assert not any(
+        "publication_versions.payload" in statement for statement in statements
+    )
+    assert not any("player_game_logs.season" in statement for statement in statements)
+
+
+def test_corrupt_player_summaries_projection_fails_closed(tmp_path):
+    """A malformed projected row degrades instead of serving legacy facts."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'summaries-corrupt.sqlite3'}")
+    run_migrations(engine)
+    _seed_player_log_projection(engine, (_record(),))
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_player_game_logs SET row_payload = 'not-json'"
+            )
+        )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
+    repository = _summaries_repository(engine, reader)
+    statements = []
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda _conn, _cursor, statement, _parameters, _context, _many: (
+            statements.append(statement)
+        ),
+    )
+
+    summaries = repository.get_player_summaries(
+        SEASON,
+        (101,),
+        publication_snapshot=reader.snapshot(
+            ("player_game_logs",),
+            season=SEASON,
+            projection_only_keys=frozenset({"player_game_logs"}),
+        ),
+    )
+
+    assert summaries[101].season_rate is None
+    assert summaries[101].last_ten_minutes == ()
+    assert not any(
+        "FROM player_game_logs" in statement for statement in statements
+    )

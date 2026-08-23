@@ -17,7 +17,7 @@ from datetime import date, datetime, timezone
 from math import isfinite
 from typing import Any, Callable, Protocol
 
-from sqlalchemy import exists, select
+from sqlalchemy import case, exists, null, select
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, defer, sessionmaker
@@ -786,15 +786,21 @@ class DatabaseFirstPublicationReader:
         *,
         season: str | None = None,
         require_active: bool = True,
+        projection_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
-        """Capture all requested pointers, payloads, and decoded facts once."""
+        """Capture all requested pointers, payloads, and decoded facts once.
+
+        ``projection_only_keys`` names the streams a caller reads through an
+        indexed projection instead of the rendered payload, so one generation
+        can mix payload-bearing and payload-less reads.
+        """
 
         return self._snapshot(
             stream_keys,
             season=season,
             require_active=require_active,
-            projection_only=False,
+            projection_only_keys=projection_only_keys,
             session=session,
         )
 
@@ -810,7 +816,7 @@ class DatabaseFirstPublicationReader:
             ("player_game_logs",),
             season=season,
             require_active=require_active,
-            projection_only=True,
+            projection_only_keys=frozenset({"player_game_logs"}),
         )
 
     def _snapshot(
@@ -819,7 +825,7 @@ class DatabaseFirstPublicationReader:
         *,
         season: str | None,
         require_active: bool,
-        projection_only: bool,
+        projection_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture one immutable generation through its selected read shape."""
@@ -827,6 +833,7 @@ class DatabaseFirstPublicationReader:
         keys = tuple(sorted(set(str(key) for key in stream_keys)))
         if not keys:
             return PublicationReadSnapshot(season, {}, ())
+        projection_keys = frozenset(projection_only_keys).intersection(keys)
         with ExitStack() as stack:
             if session is None:
                 session = stack.enter_context(self._session())
@@ -848,7 +855,8 @@ class DatabaseFirstPublicationReader:
                 )
                 .where(PublicationStream.stream_key.in_(keys))
             )
-            if projection_only:
+            hydrated_keys = frozenset(keys) - projection_keys
+            if projection_keys:
                 statement = statement.options(
                     defer(PublicationVersion.payload, raiseload=True)
                 ).add_columns(
@@ -857,21 +865,38 @@ class DatabaseFirstPublicationReader:
                             PublicationPlayerGameLog.publication_id
                             == PublicationVersion.publication_id
                         )
-                    ).label("projection_ready")
+                    ).label("projection_ready"),
                 )
-                snapshot = {
-                    stream.stream_key: (
-                        stream,
-                        pointer,
-                        publication,
-                        bool(projection_ready),
+                if hydrated_keys:
+                    # One generation can mix payload-bearing and payload-less
+                    # streams, so the large column is chosen per row instead of
+                    # per statement.  CASE never evaluates the payload branch
+                    # for a projection-only key, and the deferred mapped
+                    # attribute stops a later attribute read from selecting it.
+                    statement = statement.add_columns(
+                        case(
+                            (
+                                PublicationVersion.stream_key.in_(
+                                    sorted(hydrated_keys)
+                                ),
+                                PublicationVersion.payload,
+                            ),
+                            else_=null(),
+                        ).label("payload_text")
                     )
-                    for stream, pointer, publication, projection_ready
-                    in session.execute(statement).all()
+                snapshot = {
+                    row[0].stream_key: (
+                        row[0],
+                        row[1],
+                        row[2],
+                        bool(row.projection_ready),
+                        row.payload_text if hydrated_keys else None,
+                    )
+                    for row in session.execute(statement).all()
                 }
             else:
                 snapshot = {
-                    stream.stream_key: (stream, pointer, publication, False)
+                    stream.stream_key: (stream, pointer, publication, False, None)
                     for stream, pointer, publication
                     in session.execute(statement).all()
                 }
@@ -881,8 +906,13 @@ class DatabaseFirstPublicationReader:
                     "stream": snapshot[key][0] if key in snapshot else None,
                     "pointer": snapshot[key][1] if key in snapshot else None,
                     "publication": snapshot[key][2] if key in snapshot else None,
-                    "projection_ready": snapshot[key][3] if key in snapshot else False,
-                    "hydrate_payload": not projection_only,
+                    "projection_ready": (
+                        key in projection_keys
+                        and key in snapshot
+                        and snapshot[key][3]
+                    ),
+                    "hydrate_payload": key not in projection_keys,
+                    "payload_text": snapshot[key][4] if key in snapshot else None,
                     "season": season,
                     "require_active": require_active,
                     "now": now,
@@ -920,6 +950,7 @@ class DatabaseFirstPublicationReader:
         session,
         projection_ready: bool = False,
         hydrate_payload: bool = True,
+        payload_text: str | None = None,
     ) -> PublicationRead:
         if stream is None:
             if stream_key == "synergy:l15":
@@ -1047,8 +1078,12 @@ class DatabaseFirstPublicationReader:
                 ),
                 event_catalog_checksum=publication.event_catalog_checksum,
             )
+        # A mixed snapshot selects this stream's payload as its own column, so
+        # the mapped attribute stays deferred for every row in that statement.
+        if payload_text is None:
+            payload_text = publication.payload
         if not publication_payload_matches_checksum(
-            publication.payload,
+            payload_text,
             publication.checksum,
         ):
             return self._missing(
@@ -1066,7 +1101,7 @@ class DatabaseFirstPublicationReader:
                 age_seconds=age,
             )
         try:
-            payload = json.loads(publication.payload, object_pairs_hook=_reject_duplicate_json_keys)
+            payload = json.loads(payload_text, object_pairs_hook=_reject_duplicate_json_keys)
         except (TypeError, ValueError, json.JSONDecodeError):
             # A corrupt rendered document must never make the read path fall
             # back to a provider or to a partial prior attempt.

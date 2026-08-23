@@ -172,6 +172,7 @@ _PUBLICATION_STREAM_KEYS = (
     "synergy:l15",
     *sorted(NBA_PUBLICATION_STREAM_KEYS),
 )
+_PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 
 
 class EventCatalogReader(Protocol):
@@ -425,24 +426,33 @@ class MatchupService:
             snapshot = getattr(self.publication_reader, "read_snapshot", None)
         if not callable(snapshot):
             return None
-        return snapshot(_PUBLICATION_STREAM_KEYS, season=season)
+        keyword = {}
+        if self._accepts_keyword(snapshot, "projection_only_keys"):
+            # The season-wide game-log payload is never needed here: the
+            # summaries read resolves this game's players from the projection.
+            keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     @staticmethod
-    def _call_with_snapshot(method, *args, publication_snapshot=None, **kwargs):
+    def _accepts_keyword(method, name: str) -> bool:
+        """Whether an injected seam takes a keyword this service may pass."""
+
+        try:
+            parameters = signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == name or parameter.kind == Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    @classmethod
+    def _call_with_snapshot(cls, method, *args, publication_snapshot=None, **kwargs):
         """Keep injected legacy test seams compatible with the new kwarg."""
 
         if publication_snapshot is None:
             return method(*args, **kwargs)
-        try:
-            parameters = signature(method).parameters.values()
-            accepts_snapshot = any(
-                parameter.name == "publication_snapshot"
-                or parameter.kind == Parameter.VAR_KEYWORD
-                for parameter in parameters
-            )
-        except (TypeError, ValueError):
-            accepts_snapshot = False
-        if accepts_snapshot:
+        if cls._accepts_keyword(method, "publication_snapshot"):
             kwargs["publication_snapshot"] = publication_snapshot
         return method(*args, **kwargs)
 
