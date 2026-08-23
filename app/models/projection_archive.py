@@ -264,7 +264,71 @@ class LatestPlayerProjection(Base):
     )
 
 
+class ClosingProjectionSet(Base):
+    """One immutable provider/game fence for post-start projection reads."""
+
+    __tablename__ = "projection_closing_sets"
+
+    closing_set_id = Column(String(72), primary_key=True)
+    provider = Column(String(64), nullable=False)
+    season = Column(String(7), nullable=False)
+    query_key = Column(String(72), nullable=False)
+    canonical_game_id = Column(String(32), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "season",
+            "query_key",
+            "canonical_game_id",
+            name="uq_projection_closing_set_scope_game",
+        ),
+        Index(
+            "ix_projection_closing_sets_season_game",
+            "season",
+            "canonical_game_id",
+        ),
+    )
+
+
+class ClosingProjectionMembership(Base):
+    """Immutable pointer from a closing set to one archived observation."""
+
+    __tablename__ = "projection_closing_memberships"
+
+    closing_set_id = Column(
+        String(72),
+        ForeignKey("projection_closing_sets.closing_set_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    market_reference = Column(String(72), primary_key=True)
+    observation_id = Column(
+        String(72),
+        ForeignKey("projection_observations.observation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    generation_id = Column(
+        String(72),
+        ForeignKey(
+            "projection_materialization_generations.generation_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_projection_closing_memberships_observation",
+            "observation_id",
+        ),
+    )
+
+
 __all__ = [
+    "ClosingProjectionMembership",
+    "ClosingProjectionSet",
     "LatestPlayerProjection",
     "ProjectionArchiveScopeLock",
     "ProjectionMaterializationGeneration",

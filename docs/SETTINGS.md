@@ -71,12 +71,12 @@ applicable closed reason, `unavailable/fetch_failed`.
 
 The projection archive reader also requires an application database whose
 migrations include its scope-lock, source-snapshot, poll, observation,
-materialization-generation, and Latest tables. Dependency assembly verifies
+materialization-generation, Latest, and immutable closing-set tables. Dependency assembly verifies
 those authoritative tables at startup when the reader is enabled. With the
 reader gate off, schema-39 deployments may boot; the recording service performs
 the same validation when called and fails before persistence. Either error
-directs operators to run migrations `040_projection_archive` and
-`041_projection_archive_transitions`. Setting
+directs operators to run migrations `040_projection_archive`,
+`041_projection_archive_transitions`, and `044_projection_closing_sets`. Setting
 `PROJECTION_ARCHIVE_READ_ENABLED=true` while `DATABASE_URL` points at the
 tracked read-only demo fixture is refused at startup. The gate defaults to
 `false`; `DFS_ENABLED_PROVIDERS` is the sole enablement authority for the

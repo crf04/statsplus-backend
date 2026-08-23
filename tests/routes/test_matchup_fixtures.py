@@ -29,6 +29,7 @@ from app.models.collection_control import (
     PublicationObservation,
     PublicationVersion,
 )
+from app.models.event_catalog import EventCatalogEntry
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
     LedgerObservationEvidence,
@@ -2251,6 +2252,8 @@ def projection_route_context(tmp_path, monkeypatch):
             template.scopes,
             clock=lambda: route_now[0],
             required_providers=template.required_providers,
+            closing_archive=template.closing_archive,
+            event_reader=template.event_reader,
         )
         route_settings = dependencies.settings
         route_dependencies = replace(
@@ -2759,6 +2762,90 @@ def test_authenticated_projection_routes_cover_partial_failure_and_recovery(
     )
     assert empty_selection.status_code == 404
     assert empty_selection.get_json()["error"]["code"] == "resource_not_found"
+
+
+def test_authenticated_projection_routes_use_immutable_closing_state_after_start(
+    projection_route_context,
+):
+    context = projection_route_context
+    assembled = context.assembled
+    query = NBAMarketQuery(season=SEASON)
+    assembled.projection_recorder.record_complete_snapshot(
+        _recorded_projection_snapshot(context.catalog),
+        query=query,
+        accepted_at=NOW,
+    )
+
+    live = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert live.status_code == 200
+    assert live.get_json()["freshness"]["pool"]["state"] == "live"
+
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Q1", status_code=2)
+        )
+    start_seen_at = NOW + timedelta(minutes=1)
+    context.route_now[0] = start_seen_at
+    started = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    started_selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+    assert started.status_code == started_selection.status_code == 200
+    assert started.get_json()["freshness"]["pool"]["state"] == "closing"
+    assert started_selection.get_json()["freshness"]["player_pool"]["state"] == "closing"
+    assert started.get_json()["players"]
+
+    late = replace(
+        _recorded_projection_snapshot(context.catalog),
+        retrieved_at=start_seen_at + timedelta(minutes=1),
+        markets=(
+            replace(
+                _recorded_projection_snapshot(context.catalog).markets[0],
+                market_id="late-closing-market",
+            ),
+        ),
+    )
+    assembled.projection_recorder.record_complete_snapshot(
+        late,
+        query=query,
+        accepted_at=start_seen_at + timedelta(minutes=2),
+    )
+    context.route_now[0] = start_seen_at + timedelta(hours=8)
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Final", status_code=3)
+        )
+    final = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    assert final.status_code == 200
+    assert final.get_json()["freshness"]["pool"]["state"] == "closing"
+    assert final.get_json()["freshness"]["pool"]["observed_at"] == NOW.isoformat()
+    assert [player["canonical_id"] for player in final.get_json()["players"]] == [2544]
+
+
+def test_authenticated_started_selection_outside_empty_closing_pool_is_404(
+    projection_route_context,
+):
+    context = projection_route_context
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text="Final", status_code=3)
+        )
+
+    response = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "resource_not_found"
 
 
 def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(

@@ -83,6 +83,8 @@ from .event_mapping import (  # noqa: E402
 )
 from .player_pool_snapshot import PlayerPoolSnapshot  # noqa: E402
 from .projection_archive import (  # noqa: E402
+    ClosingProjectionMembership,
+    ClosingProjectionSet,
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
@@ -164,6 +166,8 @@ __all__ = [
     'EventMappingLock',
     'EventMappingRejection',
     'PlayerPoolSnapshot',
+    'ClosingProjectionSet',
+    'ClosingProjectionMembership',
     'ProjectionArchiveScopeLock',
     'ProviderPoll',
     'ProjectionCollectionLease',

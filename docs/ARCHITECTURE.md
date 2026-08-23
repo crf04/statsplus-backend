@@ -565,15 +565,36 @@ reserved for a multi-game archive read containing both live and missing game
 states.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
 is enabled, dependency assembly gives the same archive reader to Slate and
-Matchup. Matchup Selection uses a thin adapter over that reader which translates
-a single game's explicit missing state to its established stored-pool
-unavailable contract; it does not select or call a legacy source. One request
-never combines archive and legacy facts. The gate is refused when the
+Matchup. Matchup Selection uses a thin adapter over that reader; scheduled
+missing state retains its stored-pool unavailable contract, while a started
+game's explicit empty closing set is a valid empty pool and an outside player
+is a resource-not-found selection. It does not select or call a legacy source.
+One request never combines archive and legacy facts. The gate is refused when the
 configured database is the read-only demo
 fixture, which cannot contain the archive schema. The legacy collection/reader
-behavior above remains selected while the gate is off. Scheduled collection,
-mapping replay, closing sets, and final cutover remain later slices of the
-projection-archive parent contract.
+behavior above remains selected while the gate is off.
+
+`ClosingProjectionSet` and `ClosingProjectionMembership` are the post-start
+read seam. A governed in-progress or final Event Catalog status acquires the
+same provider/query scope fence used by materialization and writes one set per
+provider and canonical game, including an explicit empty set. Membership rows
+contain only foreign-key pointers to immutable `ProjectionObservation` rows;
+they never copy, delete, or replace source snapshots. Closing materialization
+replays only promoted generations whose provider poll completed no later than
+the start fence. Thus a delayed provider delivery can remain immutable archive
+evidence but cannot enter a set after the game-start boundary. Repeating a
+close returns the original set and cannot move its start time.
+
+The archive reader checks governed Event Catalog status before choosing a pool.
+Scheduled games use the existing live Latest reader and its 15-minute/six-hour
+eligibility windows. Started or final games use the immutable closing pointers,
+report `state: closing` and their observation time, and do not age or refresh
+those pointers. A game with an empty closing set reports `state: missing` with
+zero targetable players; Slate and Matchup still return 200, while Selection
+keeps scheduled missing-pool behavior and returns `resource_not_found` for a
+player outside a started game's derived empty pool. No request path calls a
+projection provider. Scheduled collection, mapping replay, and final cutover
+remain outside this slice.
 
 ### Matchup injury snapshots
 

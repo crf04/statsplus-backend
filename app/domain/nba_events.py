@@ -86,6 +86,25 @@ def is_final_event(event: Mapping[str, object]) -> bool:
     )
 
 
+_STARTED_STATUS = re.compile(
+    r"^(?:q[1-4]|[1-4](?:st|nd|rd|th)\s+q(?:uarter)?|ot\d*|"
+    r"overtime|halftime|half\s+time|in\s+progress|live|game\s+on)\b"
+)
+
+
+def is_started_event(event: Mapping[str, object]) -> bool:
+    """Whether governed event status says the game has crossed its start fence."""
+
+    if is_postponed_event(event):
+        return False
+    if is_final_event(event):
+        return True
+    if event.get("status_code") in {2, "2"}:
+        return True
+    status = str(event.get("status_text", event.get("status", ""))).strip()
+    return bool(_STARTED_STATUS.match(status.casefold()))
+
+
 def l15_game_ids_by_team(
     chronological_events: Iterable[Mapping[str, object]],
 ) -> dict[int, frozenset[str]]:
@@ -219,6 +238,7 @@ __all__ = [
     "is_all_star_kind",
     "is_completed_non_postponed_event",
     "is_final_event",
+    "is_started_event",
     "l15_game_ids_by_team",
     "is_ordinary_classification",
     "is_postponed_event",

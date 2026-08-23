@@ -493,6 +493,8 @@ def build_dependencies(
             engine,
             projection_read_scopes,
             required_providers=settings.providers.dfs_enabled_providers,
+            closing_archive=projection_archive,
+            event_reader=event_catalog_service,
         )
         if settings.features.projection_archive_read_enabled
         else None

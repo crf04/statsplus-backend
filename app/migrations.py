@@ -1392,6 +1392,18 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
         ))
 
 
+def _create_projection_closing_sets(connection: Connection) -> None:
+    """Create immutable post-start projection membership tables."""
+
+    from app.models.projection_archive import (
+        ClosingProjectionMembership,
+        ClosingProjectionSet,
+    )
+
+    ClosingProjectionSet.__table__.create(connection, checkfirst=True)
+    ClosingProjectionMembership.__table__.create(connection, checkfirst=True)
+
+
 def _rebuild_projection_transition_tables_sqlite(
     connection: Connection,
     tables: tuple[Table, ...],
@@ -1781,6 +1793,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         43,
         "043_projection_collection_control",
         _create_projection_collection_tables,
+    ),
+    Migration(
+        44,
+        "044_projection_closing_sets",
+        _create_projection_closing_sets,
     ),
 )
 

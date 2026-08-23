@@ -304,10 +304,17 @@ never understates any provider observation included in the union.
 
 During projection-archive expansion, `PROJECTION_ARCHIVE_READ_ENABLED=true`
 selects one database-only reader for Slate, Matchup, and Matchup Selection.
-Each Slate game then adds `projection_state` with `state: live | missing` and a
+Each Slate game then adds `projection_state` with `state: live | closing | missing` and a
 timezone-aware `observed_at` or null. `freshness.pool` adds the same `state` and
 `observed_at` fields. Current archived Latest Player Projections produce
 `live` while their per-offering confirmation is no more than 15 minutes old.
+When governed Event Catalog status says a game is in progress or final, one
+immutable Closing Projection Set is frozen per provider and game from the
+materialized pre-start state. Slate and Matchup then report `closing` with the
+oldest observation time in that set. Closing membership points at immutable
+Projection Observations, is never aged by the live 15-minute or six-hour
+windows, and is not changed by a late-arriving pregame poll. A started or final
+game without closing members reports `missing` and zero targetable players.
 After a failed provider poll, prior confirmed offerings may be served as
 `stale-served` only through the inclusive six-hour fallback. Partial polls
 update and confirm only included references; omissions retain their prior
@@ -351,10 +358,12 @@ The request does not fall back to the legacy Player Pool or call a projection
 provider. Enabling the gate with the read-only demo database is refused at
 startup. With the gate left at its default `false`, the existing response and
 legacy reader remain unchanged during expansion.
-Matchup Selection retains its existing missing stored-pool error contract under
-the gate: when its single game has no archive evidence, it returns
-`503 provider_unavailable`. Slate and Matchup still expose the explicit missing
-projection state described above.
+Matchup Selection uses the Closing Projection Set for an in-progress or final
+game and keeps the market categories from that set without applying live
+freshness. A selected player outside the derived closing pool returns the
+existing `404 resource_not_found`; a scheduled game with no usable stored pool
+retains the existing `503 provider_unavailable` contract. Slate and Matchup
+still expose the explicit missing projection state described above.
 
 A stale but populated schedule remains a `200` with
 `freshness.schedule.status: "stale"`. Stored
@@ -746,10 +755,15 @@ matchup freshness timestamp byte-for-byte where the compatibility contract
 requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
 Pool freshness and per-provider status are passed through from the selected
-stored snapshot.
+stored snapshot. Under the projection archive gate, `freshness.player_pool`
+also carries `state: live | closing | missing` and `observed_at`. For a started
+or final game, `closing` is historical evidence and does not expire under the
+live freshness windows. A request for a player outside that closing pool is
+`404 resource_not_found`; a scheduled game without a usable stored pool remains
+`503 provider_unavailable`.
 When the projection-archive reader is activated, this block additionally
-contains `state: live | missing` and `observed_at`; the Matchup `game` header
-does not duplicate the Slate-only `projection_state` block.
+contains `state: live | closing | missing` and `observed_at`; the Matchup
+`game` header does not duplicate the Slate-only `projection_state` block.
 The stats-table surface is `stale` when its last successful publication
 predates the newest completed, non-postponed stored game; it is `missing` when
 no successful publication exists. Team facts for a started or past game are

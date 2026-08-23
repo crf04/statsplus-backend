@@ -6,11 +6,13 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
+    ClosingProjectionMembership,
+    ClosingProjectionSet,
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
@@ -63,6 +65,46 @@ def _reader(
             query=query or NBAMarketQuery(season=SEASON),
         ),
         clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+    )
+
+
+def _closing_snapshot(catalog, retrieved_at, threshold="27.5"):
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    market = PlayerProjectionMarket(
+        provider="dabble",
+        market_id=f"market-{threshold}",
+        athlete=AthleteEvidence(
+            canonical_id=2544,
+            name="LeBron James",
+            team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+        ),
+        event=EventEvidence(canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="dabble",
+        ),
+        threshold=MarketThreshold(threshold, "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    return ProviderSnapshot(
+        provider="dabble",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=1,
+        ),
+        retrieved_at=retrieved_at,
     )
 
 
@@ -859,3 +901,149 @@ def test_projection_scope_transaction_serializes_archive_instances(tmp_path):
         first.result(timeout=2)
         second.result(timeout=2)
     assert second_entered.is_set()
+
+
+def test_closing_set_freezes_the_last_pre_start_observation_and_is_idempotent(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    initial_at = OBSERVED_AT
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, initial_at),
+        query=query,
+        accepted_at=initial_at,
+    )
+
+    first = archive.freeze_closing_projection_set(
+        provider="dabble",
+        query=query,
+        canonical_game_id=GAME_ID,
+        started_at=start_at,
+        created_at=start_at,
+    )
+    late = archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, start_at - timedelta(minutes=1), "28.5"),
+        query=query,
+        accepted_at=start_at + timedelta(minutes=1),
+    )
+    repeated = archive.freeze_closing_projection_set(
+        provider="dabble",
+        query=query,
+        canonical_game_id=GAME_ID,
+        started_at=start_at + timedelta(minutes=1),
+        created_at=start_at + timedelta(minutes=1),
+    )
+
+    assert first.created is True
+    assert first.observation_count == 1
+    assert late.materialization_outcome == "advanced"
+    assert repeated.created is False
+    assert repeated.closing_set_id == first.closing_set_id
+    with engine.connect() as connection:
+        membership = connection.execute(
+            select(
+                ClosingProjectionMembership.observation_id,
+                ProjectionObservation.observed_at,
+            )
+            .join(
+                ProjectionObservation,
+                ProjectionObservation.observation_id
+                == ClosingProjectionMembership.observation_id,
+            )
+            .where(
+                ClosingProjectionMembership.closing_set_id == first.closing_set_id
+            )
+        ).first()
+        latest_observation = connection.execute(
+            select(LatestPlayerProjection.observation_id)
+        ).scalar_one()
+        snapshot_count = connection.execute(
+            select(func.count()).select_from(ProjectionProviderSnapshot)
+        ).scalar_one()
+        observation_count = connection.execute(
+            select(func.count()).select_from(ProjectionObservation)
+        ).scalar_one()
+        set_count = connection.execute(
+            select(func.count()).select_from(ClosingProjectionSet)
+        ).scalar_one()
+    assert membership is not None
+    assert membership.observed_at == initial_at.replace(tzinfo=None)
+    assert latest_observation != membership.observation_id
+    assert snapshot_count == 2
+    assert observation_count == 2
+    assert set_count == 1
+
+
+def test_started_reader_uses_closing_state_for_actual_start_and_final_status(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-status.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    observed_at = OBSERVED_AT
+    archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, observed_at),
+        query=query,
+        accepted_at=observed_at,
+    )
+    event = {
+        "nba_game_id": GAME_ID,
+        "status_text": "Delayed",
+        "status_code": 1,
+    }
+    now = [OBSERVED_AT + timedelta(minutes=4)]
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: now[0],
+        closing_archive=archive,
+        event_reader=lambda _season: (event,),
+    )
+
+    delayed = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert delayed.freshness["state"] == "live"
+    event.update(status_text="Q1", status_code=2)
+    now[0] = OBSERVED_AT + timedelta(minutes=5)
+    started = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert started.freshness["state"] == "closing"
+    assert started.game_states[GAME_ID]["state"] == "closing"
+    assert started.players[0].canonical_player_id == 2544
+    observed = started.freshness["observed_at"]
+
+    event.update(status_text="Final", status_code=3)
+    now[0] = OBSERVED_AT + timedelta(hours=8)
+    final = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert final.freshness["state"] == "closing"
+    assert final.freshness["observed_at"] == observed
+    assert [player.canonical_player_id for player in final.players] == [2544]
+
+
+def test_started_reader_reports_missing_without_synthesizing_a_player(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing-missing.sqlite3'}")
+    run_migrations(engine)
+    archive = ProjectionArchive(engine, StatisticCatalog.load_default())
+    query = NBAMarketQuery(season=SEASON)
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: OBSERVED_AT,
+        closing_archive=archive,
+        event_reader=lambda _season: (
+            {"nba_game_id": GAME_ID, "status_text": "Final", "status_code": 3},
+        ),
+    )
+
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.players == ()
+    assert pool.team_counts == {}
+    assert pool.freshness["state"] == "missing"
+    assert pool.game_states[GAME_ID] == {"state": "missing", "observed_at": None}
+    selection_pool = ProjectionSelectionPlayerPoolReader(reader).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert selection_pool is not None
+    assert selection_pool.players == ()
