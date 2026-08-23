@@ -64,6 +64,88 @@ profile changes and new users persist immediately. This bounds authentication
 write amplification without caching authorization, claims, or revocation
 decisions.
 
+### Projection Provider registry
+
+`app.providers.registry` is the single authority on which DFS providers exist.
+One `DFSProviderRegistration` carries a provider's name, the callable that
+builds its adapter, and the static entry payout tables the provider publishes
+outside its API. Everything that needs to name a provider reads the registry
+and nothing else: `DFS_ENABLED_PROVIDERS` and `PROJECTION_ARCHIVE_READ_PROVIDER`
+validation, adapter construction in `app.dependencies`, the board's known and
+disabled provider sets, the `providers` query filter, the projection archive
+read and recording scopes, the statistic catalog's provider vocabulary, and the
+pytest parameterization of the shared compliance suite.
+
+A name the registry does not admit fails configuration with
+`ConfigurationError`. A registration whose builder returns something that is
+not a `ProviderSnapshotProvider` fails `build_dependencies` with the same
+error, so a nonconforming provider stops the process rather than the first
+collection run. `registered_dfs_provider` admits one further registration for
+the duration of a block; it exists so onboarding can be demonstrated to be a
+registration plus adapter evidence and nothing else.
+
+Onboarding a provider is therefore: one registration, its statistic-catalog
+label mappings, and recorded evidence in
+`tests/providers/test_dfs_adapter_contract.py`. That suite is parameterized
+from the registry and requires, per provider, a complete retrieval, an empty
+board, a partial retrieval whose omitted record carries typed coverage, a typed
+upstream failure, a market identity that does not move between two retrievals
+of one payload, selections whose prices and modifiers are in the closed
+vocabularies, a canonical archive document that round-trips byte for byte,
+numbers and documents inside the archive's bounds, and one board that reaches
+Latest Player Projections, the database-first Player Pool, and a Closing
+Projection Set. `tests/providers/fourth_provider.py` is a recorded fourth
+provider that passes it with no application code naming it.
+
+### Comparable Projection prices
+
+Providers publish prices in different shapes: Underdog quotes American odds per
+selection, Dabble a payout multiplier, PrizePicks nothing at all in its API.
+Every `Selection` therefore states one canonical triple, additive to the
+existing `american_price`/`decimal_price` fields, which are unchanged:
+
+- `price_kind` ∈ `american`, `decimal`, `multiplier`, `unpriced`
+- `price_value` — the exact published `Decimal`, `None` when unpriced
+- `price_scope` ∈ `selection` (odds for this leg alone), `entry` (the slip-level
+  payout the leg takes part in, which depends on the entry's leg count)
+
+An adapter states the triple only when the provider prices a selection outside
+its payload — PrizePicks' entry payout table, declared in the registry. Every
+other case is derived once, at the shared normalization seam, from the fields
+the adapter already retained: an American price, then a decimal price, then a
+single payout-multiplier modifier priced at entry scope, and otherwise
+`unpriced`. All the priced sides of one market must agree on kind and scope; a
+market whose sides disagree is a `MalformedProviderResponseError`.
+
+`SelectionModifier.kind` is the closed vocabulary `payout_multiplier`,
+`line_adjustment`, `promo`; Underdog's `payout_multiplier` and Dabble's
+`multiplier` both normalize to `payout_multiplier`, and an unrecognized kind is
+a `CoverageRecordMalformed` rather than a retained string. `MarketVariant`
+likewise maps PrizePicks' `demon` and `goblin` to `ALTERNATE` and Underdog's
+`balanced` to `STANDARD`, always retaining the provider's own word as
+`variant_label`. A variant word outside that closed map stays `UNKNOWN`: it is
+retained and archived, and it is never targetable, so naming a new provider
+word is a reviewed change to one map rather than a silent drop downstream.
+
+An archived observation carries the market's triple in
+`projection_observations.price_kind`, `price_value`, and `price_scope`.
+`price_value` is null whenever each side of the market states its own number —
+two-sided odds — because that is a fact about the sides, which stay in the
+archived source document. A market that offers no priced side is evidence
+rather than something to select from: it is archived, and it is excluded from
+`targetable`, from Latest Player Projections, from the database-first Player
+Pool, and from closing membership, including when a mapping replay recomputes
+the decision from the stored row.
+
+The canonical archive document carries the triple as schema version 2. A
+document is read back and re-encoded in the version it declares, so every
+snapshot archived before this change keeps its exact bytes and therefore its
+checksum. Changing the canonical form again means bumping
+`SNAPSHOT_SCHEMA_VERSION`, adding the new version to
+`SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS`, and teaching
+`serialize_provider_snapshot` to emit the older shape when asked for it —
+never rewriting an archived document in place.
+
 ## Provider telemetry and correlation IDs
 
 Every request is correlated with one safe ID. `app.utils.request_id` accepts an
@@ -530,8 +612,8 @@ Without an injected test clock the reader uses `app.domain.utc.utc_now`; stored
 confirmation timestamps never substitute for the present and therefore cannot
 freeze freshness.
 `DFS_ENABLED_PROVIDERS` is the sole enablement authority. Dependency assembly
-always retains read scopes for every supported archive provider (`dabble`,
-`prizepicks`, and `underdog`), independently of the enabled set, so rebuilding
+always retains read scopes for every registered archive provider,
+independently of the enabled set, so rebuilding
 the graph cannot hide a just-disabled provider. Removing the final provider
 leaves those historical read scopes intact for expiry and audit, but the
 application recording service owns an empty authorization set: every snapshot

@@ -1660,6 +1660,10 @@ after an intended contract change, and review the diff.
   `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`,
   `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, and the
   `DFS_CACHE_*` windows. See `.env.example` for safe disabled defaults.
+  `DFS_ENABLED_PROVIDERS` and the `providers` query filter accept exactly the
+  names `app.providers.registry` admits; the disabled-provider list a board
+  reports is the registered set minus the enabled one. See
+  [ARCHITECTURE.md](ARCHITECTURE.md) for the registry and its admission rules.
 - **Catalog refresh.** Comparisons need fresh Athlete and Event Catalogs.
   Deployment-owned scheduling runs `scripts/refresh_athlete_catalog.py` and
   `scripts/refresh_event_catalog.py` daily with explicit seasons; API workers
