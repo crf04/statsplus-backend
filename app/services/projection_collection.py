@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import math
+import re
 import time
 from typing import Any
 
@@ -42,6 +43,7 @@ _SCHEDULED_STATUSES = frozenset(
         "warm-up",
     }
 )
+_LIVE_STATUS = re.compile(r"^(?:q[1-4]|ot\d*|halftime|in progress)\b")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,12 +114,10 @@ class ProjectionCollectionCoordinator:
             status_code = None
         if status_code in {2, 3}:
             return True
-        if status_code is None:
-            return False
         status = str(event.get("status_text", event.get("status", ""))).strip().casefold()
         if not status or status in _SCHEDULED_STATUSES or status_code == 1:
             return False
-        return True
+        return status_code is not None or _LIVE_STATUS.match(status) is not None
 
     def _schedule(self, now: datetime, providers: tuple[str, ...]) -> _ScheduleDecision | None:
         events = []
@@ -278,7 +278,6 @@ class ProjectionCollectionCoordinator:
         self,
         *,
         provider: str,
-        now: datetime,
         interval: timedelta,
         success: bool,
         changed_at: datetime | None = None,
@@ -290,6 +289,7 @@ class ProjectionCollectionCoordinator:
         query_key = projection_query_key(NBAMarketQuery(season=self.season))
         table = ProjectionCollectionProviderState.__table__
         with self._transaction() as connection:
+            now = self._database_now(connection)
             row = connection.execute(
                 select(table).where(
                     table.c.provider == provider,
@@ -446,7 +446,6 @@ class ProjectionCollectionCoordinator:
                     )
                     self._update_state(
                         provider=provider,
-                        now=completed_at,
                         interval=decision.interval,
                         success=False,
                         failure_reason="upstream_error",
@@ -502,7 +501,6 @@ class ProjectionCollectionCoordinator:
                         )
                         self._update_state(
                             provider=provider,
-                            now=self._utc(self.clock()),
                             interval=decision.interval,
                             success=False,
                             failure_reason="persistence_error",
@@ -516,7 +514,6 @@ class ProjectionCollectionCoordinator:
                     retrieved_at = self._utc(snapshot.retrieved_at)
                     self._update_state(
                         provider=provider,
-                        now=self._utc(self.clock()),
                         interval=decision.interval,
                         success=True,
                         changed_at=retrieved_at if bool(getattr(result, "changed", False)) else None,
@@ -540,7 +537,6 @@ class ProjectionCollectionCoordinator:
                         )
                     self._update_state(
                         provider=provider,
-                        now=self._utc(self.clock()),
                         interval=decision.interval,
                         success=False,
                         failure_reason=reason,
@@ -565,7 +561,6 @@ class ProjectionCollectionCoordinator:
                 )
                 self._update_state(
                     provider=provider,
-                    now=completed_at,
                     interval=decision.interval,
                     success=False,
                     failure_reason="missing_outcome",

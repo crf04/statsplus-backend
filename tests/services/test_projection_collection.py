@@ -205,6 +205,24 @@ def test_pregame_clock_text_without_status_code_remains_collectible(tmp_path):
     assert board.calls == [("dabble",)]
 
 
+def test_live_clock_text_without_status_code_stops_collection(tmp_path):
+    board = FakeBoard()
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[
+            _event(
+                scheduled_at=NOW - timedelta(hours=1),
+                status_text="Q3 5:22",
+                status_code=None,
+            )
+        ],
+        board=board,
+    )
+
+    assert coordinator.run(providers=("dabble",)).status == "no_work"
+    assert board.calls == []
+
+
 def test_adaptive_policy_switches_from_slow_to_fast_board_wide(tmp_path):
     board = FakeBoard()
     coordinator, _ = _coordinator(
@@ -226,8 +244,9 @@ def test_adaptive_policy_switches_from_slow_to_fast_board_wide(tmp_path):
 
 
 def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
-    current = [NOW]
-    scheduled_at = NOW + timedelta(hours=2, minutes=15)
+    initial = datetime.now(timezone.utc)
+    current = [initial]
+    scheduled_at = initial + timedelta(hours=2, minutes=15)
     board = FakeBoard(
         {
             "dabble": SimpleNamespace(
@@ -254,7 +273,7 @@ def test_fast_window_recomputes_due_time_from_the_last_slow_poll(tmp_path):
     )
 
     assert coordinator.run(providers=("dabble",)).status == "complete"
-    current[0] = NOW + timedelta(minutes=15)
+    current[0] = initial + timedelta(minutes=15)
     assert coordinator.run(providers=("dabble",)).status == "complete"
     assert board.calls == [("dabble",), ("dabble",)]
 
@@ -275,7 +294,9 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
         settings=_settings(fast_interval=timedelta(seconds=1), backoff_base=timedelta(minutes=5)),
     )
 
+    before_poll = datetime.now(timezone.utc)
     first = coordinator.run(providers=("dabble", "prizepicks"))
+    after_poll = datetime.now(timezone.utc)
     second = coordinator.run(providers=("dabble", "prizepicks"))
 
     assert first.status == "partial"
@@ -290,7 +311,9 @@ def test_provider_failure_is_recorded_independently_and_enters_bounded_backoff(t
             )
         ).mappings().one()
     assert state["consecutive_failures"] == 1
-    assert state["backoff_until"].replace(tzinfo=timezone.utc) == NOW + timedelta(minutes=5)
+    backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
+    assert before_poll + timedelta(minutes=5, seconds=-1) <= backoff_until
+    assert backoff_until <= after_poll + timedelta(minutes=5, seconds=1)
 
 
 def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
@@ -314,7 +337,9 @@ def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
         ),
     )
 
+    before_poll = datetime.now(timezone.utc)
     assert coordinator.run(providers=("dabble",)).status == "partial"
+    after_poll = datetime.now(timezone.utc)
 
     with engine.connect() as connection:
         state = connection.execute(
@@ -322,9 +347,9 @@ def test_failure_backoff_never_retries_faster_than_current_cadence(tmp_path):
                 ProjectionCollectionProviderState.__table__.c.provider == "dabble"
             )
         ).mappings().one()
-    assert state["backoff_until"].replace(tzinfo=timezone.utc) == NOW + timedelta(
-        minutes=30
-    )
+    backoff_until = state["backoff_until"].replace(tzinfo=timezone.utc)
+    assert before_poll + timedelta(minutes=30, seconds=-1) <= backoff_until
+    assert backoff_until <= after_poll + timedelta(minutes=30, seconds=1)
 
 
 def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tmp_path):
@@ -351,7 +376,9 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
         settings=_settings(backoff_base=timedelta(minutes=5)),
     )
 
+    before_poll = datetime.now(timezone.utc)
     result = coordinator.run(providers=("dabble",))
+    after_poll = datetime.now(timezone.utc)
     diagnostics = coordinator.diagnostics()
 
     assert result.status == "partial"
@@ -359,11 +386,12 @@ def test_stale_cache_fallback_records_provider_failure_and_keeps_backoff_open(tm
     assert [failure["failure_reason"] for failure in recorder.failures] == [
         "timeout"
     ]
-    assert diagnostics["providers"][0]["failure"] == {
-        "last_at": NOW.isoformat(),
-        "reason": "timeout",
-        "consecutive": 1,
-    }
+    failure = diagnostics["providers"][0]["failure"]
+    failure_at = datetime.fromisoformat(failure["last_at"])
+    assert before_poll - timedelta(seconds=1) <= failure_at
+    assert failure_at <= after_poll + timedelta(seconds=1)
+    assert failure["reason"] == "timeout"
+    assert failure["consecutive"] == 1
     assert diagnostics["providers"][0]["backoff"]["active"] is True
 
 
@@ -440,7 +468,6 @@ def test_diagnostics_are_bounded_and_exclude_raw_scope_identifiers(tmp_path):
     fence, _ = coordinator._acquire_lease(NOW)
     coordinator._update_state(
         provider="dabble",
-        now=NOW,
         interval=timedelta(minutes=5),
         success=True,
         changed_at=NOW,
@@ -582,6 +609,34 @@ def test_process_clock_skew_cannot_steal_a_database_live_lease(tmp_path):
     assert second_board.calls == []
     assert first_errors == []
     assert first_result[0].status == "complete"
+
+
+def test_process_clock_skew_cannot_delay_provider_state_cadence(tmp_path):
+    database_time = datetime.now(timezone.utc)
+    current = [database_time + timedelta(hours=1)]
+    scheduled_at = database_time + timedelta(hours=1)
+    board = FakeBoard(
+        {
+            "dabble": SimpleNamespace(
+                provider="dabble",
+                status="complete",
+                snapshot=_snapshot("dabble", retrieved_at=current[0]),
+                reason=None,
+            )
+        }
+    )
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[_event(scheduled_at=scheduled_at)],
+        board=board,
+        now=current[0],
+    )
+    coordinator.clock = lambda: current[0]
+
+    assert coordinator.run(providers=("dabble",)).status == "complete"
+    current[0] = database_time + timedelta(minutes=10)
+    assert coordinator.run(providers=("dabble",)).status == "complete"
+    assert board.calls == [("dabble",), ("dabble",)]
 
 
 @pytest.mark.parametrize("lease_change", ("expired", "taken_over"))
