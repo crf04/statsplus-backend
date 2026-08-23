@@ -2453,12 +2453,30 @@ def test_database_first_projection_routes_never_call_dfs_providers(
 ):
     context = projection_route_context
 
+    # The cutover makes the database-only reader the sole source, so every
+    # authenticated read route -- Slate, Matchup, and Matchup Selection -- must
+    # serve without touching any DFS/projection provider or the legacy pool.
+    assert (
+        context.assembled.slate_service.player_pool
+        is context.assembled.projection_player_pool_reader
+    )
+    assert (
+        context.assembled.matchup_service.player_pool
+        is context.assembled.projection_player_pool_reader
+    )
+    assert (
+        context.assembled.matchup_selection_service.player_pool.reader
+        is context.assembled.projection_player_pool_reader
+    )
+
     slate = context.client.get("/api/games/slate?date=2026-01-15")
+    matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
     selection = context.client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     )
 
     assert slate.status_code == 200
+    assert matchup.status_code == 200
     assert selection.status_code == 503
     assert context.projection_provider_calls == {
         "dabble": 0,
