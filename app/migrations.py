@@ -1282,25 +1282,10 @@ def _upgrade_projection_archive_transitions(connection: Connection) -> None:
 
     from app.models.projection_archive import (
         LatestPlayerProjection,
-        ProjectionArchiveScopeLock,
         ProjectionMaterializationGeneration,
         ProjectionObservation,
         ProviderPoll,
     )
-
-    lock_name = connection.dialect.identifier_preparer.quote(
-        ProjectionArchiveScopeLock.__tablename__
-    )
-    lock_columns = {
-        column["name"]
-        for column in inspect(connection).get_columns(
-            ProjectionArchiveScopeLock.__tablename__
-        )
-    }
-    if "active_generation_id" not in lock_columns:
-        connection.execute(text(
-            f"ALTER TABLE {lock_name} ADD COLUMN active_generation_id VARCHAR(72)"
-        ))
 
     inspector = inspect(connection)
     poll_columns = {
@@ -1506,6 +1491,10 @@ def _rebuild_projection_transition_tables_sqlite(
                 expressions.append("NULL AS failure_reason")
             elif column == "duration_ms":
                 expressions.append("NULL AS duration_ms")
+            elif column == "source_observation_id":
+                expressions.append("observation_id AS source_observation_id")
+            elif column == "source_ordinal":
+                expressions.append("ordinal AS source_ordinal")
             elif column in {
                 "athlete_provider_id",
                 "event_provider_id",
@@ -1577,10 +1566,32 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
 
     from app.models.projection_archive import (
         LatestPlayerProjection,
+        ProjectionArchiveScopeLock,
         ProjectionMaterializationGeneration,
         ProjectionObservation,
         ProviderPoll,
     )
+
+    lock_name = connection.dialect.identifier_preparer.quote(
+        ProjectionArchiveScopeLock.__tablename__
+    )
+    lock_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionArchiveScopeLock.__tablename__
+        )
+    }
+    if "active_generation_id" not in lock_columns:
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN active_generation_id VARCHAR(72)"
+        ))
+    if "mapping_replayed_at" not in lock_columns:
+        timestamp_type = DateTime(timezone=True).compile(
+            dialect=connection.dialect
+        )
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_at {timestamp_type}"
+        ))
 
     observation_name = connection.dialect.identifier_preparer.quote(
         ProjectionObservation.__tablename__
@@ -1592,6 +1603,8 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
         )
     }
     additions = (
+        ("source_observation_id", "VARCHAR(72) NOT NULL DEFAULT ''"),
+        ("source_ordinal", "INTEGER NOT NULL DEFAULT 0"),
         ("athlete_provider_id", "VARCHAR(255)"),
         ("event_provider_id", "VARCHAR(255)"),
         ("statistic_provider_id", "VARCHAR(255)"),
@@ -1604,6 +1617,15 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
             connection.execute(text(
                 f"ALTER TABLE {observation_name} ADD COLUMN {name} {definition}"
             ))
+
+    connection.execute(text(
+        f"UPDATE {observation_name} SET source_ordinal = ordinal "
+        "WHERE source_observation_id = ''"
+    ))
+    connection.execute(text(
+        f"UPDATE {observation_name} SET source_observation_id = observation_id "
+        "WHERE source_observation_id = ''"
+    ))
 
     connection.execute(text(
         f"UPDATE {observation_name} SET resolution_state = CASE "
@@ -1660,6 +1682,17 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
                 ),
                 {**values, "snapshot_id": snapshot["snapshot_id"], "ordinal": ordinal},
             )
+
+    replay_index_names = {
+        "ix_projection_observations_provider_athlete",
+        "ix_projection_observations_provider_event",
+        "ix_projection_observations_provider_statistic_id",
+        "ix_projection_observations_provider_statistic_label",
+        "ix_projection_observations_source_identity",
+    }
+    for index in ProjectionObservation.__table__.indexes:
+        if index.name in replay_index_names:
+            index.create(connection, checkfirst=True)
 
     if not _projection_source_poll_is_unique(connection):
         return

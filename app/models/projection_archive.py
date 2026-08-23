@@ -51,6 +51,7 @@ class ProjectionArchiveScopeLock(Base):
     season = Column(String(7), primary_key=True)
     query_key = Column(String(72), primary_key=True)
     active_generation_id = Column(String(72), nullable=True)
+    mapping_replayed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class ProviderPoll(Base):
@@ -158,6 +159,8 @@ class ProjectionObservation(Base):
         ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
         nullable=False,
     )
+    source_observation_id = Column(String(72), nullable=False)
+    source_ordinal = Column(Integer, nullable=False)
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     provider_market_id = Column(String(255), nullable=True)
@@ -195,6 +198,30 @@ class ProjectionObservation(Base):
             "canonical_game_id",
             "canonical_player_id",
             "canonical_statistic_id",
+        ),
+        Index(
+            "ix_projection_observations_source_identity",
+            "source_observation_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_athlete",
+            "provider",
+            "athlete_provider_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_event",
+            "provider",
+            "event_provider_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_statistic_id",
+            "provider",
+            "statistic_provider_id",
+        ),
+        Index(
+            "ix_projection_observations_provider_statistic_label",
+            "provider",
+            "statistic_provider_label",
         ),
     )
 

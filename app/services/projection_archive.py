@@ -27,7 +27,7 @@ from app.domain.freshness import (
 )
 from app.domain.market_content import market_evidence_key
 from app.domain.nba_events import is_started_event
-from app.domain.statistics import MatchState, ScoringPeriod
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.domain.utc import assume_utc, parse_utc_iso, utc_now
 from app.models.projection_archive import (
     ClosingProjectionMembership,
@@ -48,6 +48,7 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     ProviderSnapshot,
     SnapshotStatus,
+    TeamEvidence,
 )
 from app.services.dfs_snapshot_cache import (
     deserialize_provider_snapshot,
@@ -68,9 +69,14 @@ PROJECTION_ARCHIVE_REQUIRED_TABLES = (
     "projection_closing_memberships",
 )
 PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
-    "projection_archive_scope_locks": ("active_generation_id",),
+    "projection_archive_scope_locks": (
+        "active_generation_id",
+        "mapping_replayed_at",
+    ),
     "projection_provider_polls": ("failure_reason", "promoted"),
     "projection_observations": (
+        "source_observation_id",
+        "source_ordinal",
         "athlete_provider_id",
         "event_provider_id",
         "statistic_provider_id",
@@ -429,6 +435,7 @@ class ProjectionArchive:
         self.engine = engine
         self.max_markets = max_markets
         self.max_document_bytes = max_document_bytes
+        self.statistic_catalog = statistic_catalog
         self.market_categories = {
             statistic.id: statistic.market_category
             for statistic in statistic_catalog.statistics
@@ -684,25 +691,29 @@ class ProjectionArchive:
                 ProjectionMaterializationGeneration.generation_id == generation_id
             )
         ).scalar_one_or_none() is not None
-        observation_rows = tuple(
-            {
-                **row,
-                "snapshot_id": snapshot_id,
-                "generation_id": generation_id,
-                "source_poll_id": prepared.poll_id,
-                "observation_id": _digest(
-                    "obs", generation_id, row["ordinal"], row["market_reference"]
-                ),
-            }
-            for row in prepared.observation_rows
-        )
+        observation_rows = []
+        for row in prepared.observation_rows:
+            observation_id = _digest(
+                "obs", generation_id, row["ordinal"], row["market_reference"]
+            )
+            observation_rows.append(
+                {
+                    **row,
+                    "snapshot_id": snapshot_id,
+                    "generation_id": generation_id,
+                    "source_poll_id": prepared.poll_id,
+                    "source_observation_id": observation_id,
+                    "source_ordinal": row["ordinal"],
+                    "observation_id": observation_id,
+                }
+            )
         return _ProjectionTransitionWrite(
             snapshot_id=snapshot_id,
             generation_id=generation_id,
             provider_content_unchanged=provider_content_unchanged,
             snapshot_exists=existing is not None,
             generation_exists=generation_exists,
-            observation_rows=observation_rows,
+            observation_rows=tuple(observation_rows),
         )
 
     def _persist_generation_evidence(
@@ -1430,15 +1441,35 @@ class ProjectionArchive:
             if current is None:
                 return None
             observation_table = ProjectionObservation.__table__
+            generation_table = ProjectionMaterializationGeneration.__table__
             latest_table = LatestPlayerProjection.__table__
+            identity_predicate = self._mapping_identity_predicate(
+                observation_table,
+                kind=kind,
+                identity=identity,
+                canonical=canonical,
+            )
             source_rows = connection.execute(
-                select(observation_table).where(
-                    observation_table.c.snapshot_id == current["snapshot_id"]
+                select(observation_table)
+                .join(
+                    generation_table,
+                    generation_table.c.generation_id
+                    == observation_table.c.generation_id,
+                )
+                .where(
+                    observation_table.c.snapshot_id == current["snapshot_id"],
+                    identity_predicate,
+                )
+                .order_by(
+                    generation_table.c.created_at,
+                    generation_table.c.generation_id,
+                    observation_table.c.observation_id,
                 )
             ).mappings().all()
             generation_rows = connection.execute(
                 select(observation_table).where(
-                    observation_table.c.generation_id == current["generation_id"]
+                    observation_table.c.generation_id == current["generation_id"],
+                    identity_predicate,
                 )
             ).mappings().all()
             latest_observation_ids = select(latest_table.c.observation_id).where(
@@ -1446,21 +1477,29 @@ class ProjectionArchive:
                 latest_table.c.season == season,
                 latest_table.c.query_key == query_key,
             )
-            latest_rows = connection.execute(
+            current_latest_rows = connection.execute(
                 select(observation_table).where(
                     observation_table.c.observation_id.in_(latest_observation_ids)
                 )
             ).mappings().all()
-            candidates: dict[tuple[str, int], dict[str, Any]] = {}
+            latest_rows = connection.execute(
+                select(observation_table).where(
+                    observation_table.c.observation_id.in_(latest_observation_ids),
+                    identity_predicate,
+                )
+            ).mappings().all()
+            candidates: dict[str, dict[str, Any]] = {}
             for rows in (source_rows, generation_rows, latest_rows):
                 for row in rows:
-                    candidates[(str(row["snapshot_id"]), int(row["ordinal"]))] = dict(
-                        row
-                    )
+                    candidates[str(row["source_observation_id"])] = dict(row)
             if not candidates:
                 return None
+            source_markets = self._replay_source_markets(
+                connection, tuple(candidates.values())
+            )
 
             changed_rows: list[dict[str, Any]] = []
+            replaced_references: set[str] = set()
             for row in candidates.values():
                 if not self._observation_matches_mapping(
                     row, kind=kind, identity=identity, canonical=canonical
@@ -1470,9 +1509,13 @@ class ProjectionArchive:
                     row,
                     kind=kind,
                     canonical=canonical,
+                    source_market=source_markets[
+                        (str(row["snapshot_id"]), int(row["source_ordinal"]))
+                    ],
                 )
                 if self._replay_fields(row) != self._replay_fields(rematerialized):
                     changed_rows.append(rematerialized)
+                    replaced_references.add(str(row["market_reference"]))
 
             if not changed_rows:
                 latest_generation = str(current["generation_id"])
@@ -1490,7 +1533,14 @@ class ProjectionArchive:
                     str(row["observation_id"]),
                 )
             )
-            latest_state = [dict(row) for row in latest_rows]
+            affected_references = replaced_references | {
+                str(row["market_reference"]) for row in changed_rows
+            }
+            latest_state = [
+                dict(row)
+                for row in current_latest_rows
+                if str(row["market_reference"]) not in affected_references
+            ]
             changed_by_reference: dict[str, dict[str, Any]] = {}
             for row in changed_rows:
                 reference = str(row["market_reference"])
@@ -1503,11 +1553,6 @@ class ProjectionArchive:
                     and int(row["ordinal"]) < int(previous["ordinal"])
                 ):
                     changed_by_reference[reference] = row
-                latest_state = [
-                    current_row
-                    for current_row in latest_state
-                    if str(current_row["market_reference"]) != reference
-                ]
             for row in changed_by_reference.values():
                 if row["targetable"]:
                     latest_state.append(row)
@@ -1614,35 +1659,39 @@ class ProjectionArchive:
                     raise RuntimeError(
                         "existing projection materialization lacks replay observations"
                     )
-            for row in changed_rows:
-                reference = str(row["market_reference"])
+            deleted_references = tuple(sorted(affected_references))
+            if deleted_references:
                 connection.execute(
                     delete(latest_table).where(
                         latest_table.c.provider == provider,
                         latest_table.c.season == season,
                         latest_table.c.query_key == query_key,
-                        latest_table.c.market_reference == reference,
+                        latest_table.c.market_reference.in_(deleted_references),
                     )
                 )
+            latest_values = []
             for row in new_rows:
                 if not row["targetable"]:
                     continue
                 selected = changed_by_reference[str(row["market_reference"])]
                 if self._replay_fields(row) != self._replay_fields(selected):
                     continue
-                self._insert_latest_row(
-                    connection,
+                latest_values.append(self._latest_row_values(
                     row,
                     season=season,
                     query_key=query_key,
                     generation_id=generation_id,
-                )
+                    confirmed_at=created_at,
+                ))
+            if latest_values:
+                connection.execute(insert(latest_table), latest_values)
             self._activate_generation(
                 connection,
                 provider=provider,
                 season=season,
                 query_key=query_key,
                 generation_id=generation_id,
+                mapping_replayed_at=created_at,
             )
             return ProjectionReplayResult(
                 generation_id=generation_id,
@@ -1650,6 +1699,28 @@ class ProjectionArchive:
                 observation_count=len(new_rows),
                 materialization_outcome=MaterializationOutcome.ADVANCED,
             )
+
+    @staticmethod
+    def _mapping_identity_predicate(
+        table: Any,
+        *,
+        kind: str,
+        identity: str | None,
+        canonical: Mapping[str, Any],
+    ) -> Any:
+        if kind == "athlete":
+            return table.c.athlete_provider_id == identity
+        if kind == "event":
+            return table.c.event_provider_id == identity
+        predicates = []
+        if identity is not None:
+            predicates.append(table.c.statistic_provider_id == identity)
+        label = canonical.get("provider_statistic_label")
+        if label is not None:
+            predicates.append(
+                func.lower(table.c.statistic_provider_label) == str(label).casefold()
+            )
+        return or_(*predicates)
 
     @staticmethod
     def _observation_matches_mapping(
@@ -1673,18 +1744,18 @@ class ProjectionArchive:
             )
         )
 
-    @staticmethod
     def _rematerialize_observation(
+        self,
         row: Mapping[str, Any],
         *,
         kind: str,
         canonical: Mapping[str, Any],
+        source_market: PlayerProjectionMarket,
     ) -> dict[str, Any]:
         rematerialized = dict(row)
         if kind == "athlete":
             rematerialized.update(
                 canonical_player_id=canonical["canonical_player_id"],
-                canonical_player_name=canonical["canonical_player_name"],
                 canonical_team_id=canonical["canonical_team_id"],
             )
         elif kind == "event":
@@ -1712,6 +1783,92 @@ class ProjectionArchive:
             and rematerialized["canonical_team_id"] is not None
             and rematerialized["market_category"] is not None
         )
+        rematerialized["market_reference"] = market_reference(
+            self._market_with_replayed_identities(source_market, rematerialized)
+        )
+        return rematerialized
+
+    @staticmethod
+    def _replay_source_markets(
+        connection: Any,
+        rows: tuple[Mapping[str, Any], ...],
+    ) -> dict[tuple[str, int], PlayerProjectionMarket]:
+        snapshot_ids = tuple(sorted({str(row["snapshot_id"]) for row in rows}))
+        table = ProjectionProviderSnapshot.__table__
+        documents = {
+            str(row["snapshot_id"]): deserialize_provider_snapshot(
+                str(row["evidence_document"]), allow_partial=True
+            )
+            for row in connection.execute(
+                select(table.c.snapshot_id, table.c.evidence_document).where(
+                    table.c.snapshot_id.in_(snapshot_ids)
+                )
+            ).mappings()
+        }
+        markets: dict[tuple[str, int], PlayerProjectionMarket] = {}
+        for row in rows:
+            snapshot_id = str(row["snapshot_id"])
+            source_ordinal = int(row["source_ordinal"])
+            snapshot = documents.get(snapshot_id)
+            if snapshot is None or source_ordinal >= len(snapshot.markets):
+                raise RuntimeError(
+                    "projection replay observation has no immutable source market"
+                )
+            markets[(snapshot_id, source_ordinal)] = snapshot.markets[source_ordinal]
+        return markets
+
+    def _market_with_replayed_identities(
+        self,
+        source_market: PlayerProjectionMarket,
+        row: Mapping[str, Any],
+    ) -> PlayerProjectionMarket:
+        athlete = source_market.athlete
+        if athlete is not None:
+            team = athlete.team
+            canonical_team_id = row["canonical_team_id"]
+            if canonical_team_id is not None:
+                team = (
+                    TeamEvidence(canonical_id=int(canonical_team_id))
+                    if team is None
+                    else replace(team, canonical_id=int(canonical_team_id))
+                )
+            athlete = replace(
+                athlete,
+                canonical_id=row["canonical_player_id"],
+                team=team,
+            )
+        event = source_market.event
+        if event is not None:
+            event = replace(event, canonical_id=row["canonical_game_id"])
+        statistic = source_market.statistic
+        if statistic is not None:
+            statistic = replace(
+                statistic,
+                canonical_id=row["canonical_statistic_id"],
+            )
+        rematerialized = replace(
+            source_market,
+            athlete=athlete,
+            event=event,
+            statistic=statistic,
+            statistic_match=None,
+        )
+        canonical_statistic_id = row["canonical_statistic_id"]
+        canonical_statistic = self.statistic_catalog.by_id.get(
+            str(canonical_statistic_id)
+        ) if canonical_statistic_id is not None else None
+        if statistic is not None and canonical_statistic is not None:
+            rematerialized = replace(
+                rematerialized,
+                statistic_match=StatisticMatch(
+                    state=MatchState.CANONICAL,
+                    evidence=statistic,
+                    scoring_period=ScoringPeriod(str(row["scoring_period"])),
+                    canonical=canonical_statistic,
+                    provider=source_market.provider,
+                    unit=canonical_statistic.unit,
+                ),
+            )
         return rematerialized
 
     @staticmethod
@@ -1964,8 +2121,12 @@ class ProjectionArchive:
         season: str,
         query_key: str,
         generation_id: str,
+        mapping_replayed_at: datetime | None = None,
     ) -> None:
         table = ProjectionArchiveScopeLock.__table__
+        values: dict[str, Any] = {"active_generation_id": generation_id}
+        if mapping_replayed_at is not None:
+            values["mapping_replayed_at"] = mapping_replayed_at
         connection.execute(
             update(table)
             .where(
@@ -1973,7 +2134,7 @@ class ProjectionArchive:
                 table.c.season == season,
                 table.c.query_key == query_key,
             )
-            .values(active_generation_id=generation_id)
+            .values(**values)
         )
 
     @staticmethod
@@ -2010,7 +2171,7 @@ class ProjectionArchive:
         query_key: str,
     ) -> datetime | None:
         table = ProviderPoll.__table__
-        return connection.execute(
+        poll_fence = connection.execute(
             select(func.max(table.c.retrieved_at)).where(
                 table.c.provider == provider,
                 table.c.season == season,
@@ -2018,6 +2179,20 @@ class ProjectionArchive:
                 table.c.promoted.is_(True),
             )
         ).scalar_one()
+        lock_table = ProjectionArchiveScopeLock.__table__
+        replay_fence = connection.execute(
+            select(lock_table.c.mapping_replayed_at).where(
+                lock_table.c.provider == provider,
+                lock_table.c.season == season,
+                lock_table.c.query_key == query_key,
+            )
+        ).scalar_one_or_none()
+        fences = tuple(
+            assume_utc(value)
+            for value in (poll_fence, replay_fence)
+            if value is not None
+        )
+        return max(fences) if fences else None
 
     @staticmethod
     def _failure_attempt_fence(
@@ -2216,25 +2391,44 @@ class ProjectionArchive:
         season: str,
         query_key: str,
         generation_id: str,
+        confirmed_at: datetime | None = None,
     ) -> None:
         connection.execute(
-            insert(LatestPlayerProjection.__table__).values(
-                provider=row["provider"],
+            insert(LatestPlayerProjection.__table__),
+            ProjectionArchive._latest_row_values(
+                row,
                 season=season,
                 query_key=query_key,
-                canonical_game_id=row["canonical_game_id"],
-                canonical_player_id=row["canonical_player_id"],
-                market_reference=row["market_reference"],
-                observation_id=row["observation_id"],
                 generation_id=generation_id,
-                canonical_team_id=row["canonical_team_id"],
-                canonical_player_name=row["canonical_player_name"],
-                canonical_statistic_id=row["canonical_statistic_id"],
-                market_category=row["market_category"],
-                observed_at=row["observed_at"],
-                confirmed_at=row["observed_at"],
-            )
+                confirmed_at=confirmed_at,
+            ),
         )
+
+    @staticmethod
+    def _latest_row_values(
+        row: dict[str, Any],
+        *,
+        season: str,
+        query_key: str,
+        generation_id: str,
+        confirmed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "provider": row["provider"],
+            "season": season,
+            "query_key": query_key,
+            "canonical_game_id": row["canonical_game_id"],
+            "canonical_player_id": row["canonical_player_id"],
+            "market_reference": row["market_reference"],
+            "observation_id": row["observation_id"],
+            "generation_id": generation_id,
+            "canonical_team_id": row["canonical_team_id"],
+            "canonical_player_name": row["canonical_player_name"],
+            "canonical_statistic_id": row["canonical_statistic_id"],
+            "market_category": row["market_category"],
+            "observed_at": row["observed_at"],
+            "confirmed_at": confirmed_at or row["observed_at"],
+        }
 
     @staticmethod
     def _plan_partial_transition(

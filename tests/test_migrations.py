@@ -34,6 +34,7 @@ from app.providers.dfs import (
     TeamEvidence,
 )
 from app.services.projection_archive import ProjectionArchive
+from app.services.dfs_snapshot_cache import serialize_provider_snapshot
 from app.services.statistic_catalog import StatisticCatalog
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
@@ -69,6 +70,48 @@ def _create_projection_v40_fixture(engine) -> None:
     )
     observed_at = "2026-01-02 12:30:00"
     unchanged_at = "2026-01-02 12:31:00"
+    evidence_document = serialize_provider_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(
+                PlayerProjectionMarket(
+                    provider="dabble",
+                    market_id="market",
+                    athlete=AthleteEvidence(
+                        provider_id="athlete-v40",
+                        canonical_id=7,
+                        name="Player 7",
+                        team=TeamEvidence(canonical_id=10),
+                    ),
+                    event=EventEvidence(
+                        provider_id="event-v40",
+                        canonical_id="game",
+                    ),
+                    team=TeamEvidence(canonical_id=10),
+                    statistic=StatisticEvidence(
+                        provider_id="stat-v40",
+                        canonical_id="points",
+                        label="Points",
+                    ),
+                    status=MarketStatus.AVAILABLE,
+                    variant=MarketVariant.STANDARD,
+                    scoring_period=ScoringPeriod.FULL_GAME,
+                ),
+            ),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=1,
+            ),
+            retrieved_at=datetime.fromisoformat(observed_at).replace(
+                tzinfo=timezone.utc
+            ),
+        ),
+        NBAMarketQuery(season="2025-26"),
+        allow_partial=True,
+    )
     with engine.begin() as connection:
         for statement in statements:
             connection.exec_driver_sql(statement)
@@ -86,13 +129,14 @@ def _create_projection_v40_fixture(engine) -> None:
                 text(
                     "INSERT INTO projection_provider_snapshots VALUES "
                     "(:snapshot,'dabble','2025-26','query','1','complete',:at,:at,"
-                    ":checksum,:content,'{}')"
+                    ":checksum,:content,:document)"
                 ),
                 {
                     "snapshot": f"{identity}_snapshot",
                     "at": retrieved_at,
                     "checksum": f"{identity}_checksum",
                     "content": f"{identity}_content",
+                    "document": evidence_document if identity == "winner" else "{}",
                 },
             )
         for poll_id, completed_at, retrieved_at, outcome, snapshot_id, generation_id in (
@@ -230,6 +274,8 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         for column in inspector.get_columns("projection_observations")
     }
     assert {
+        "source_observation_id",
+        "source_ordinal",
         "athlete_provider_id",
         "event_provider_id",
         "statistic_provider_id",
@@ -237,6 +283,22 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "resolution_state",
         "unresolved_identities",
     } <= observation_columns
+    lock_columns = {
+        column["name"]
+        for column in inspector.get_columns("projection_archive_scope_locks")
+    }
+    assert {"active_generation_id", "mapping_replayed_at"} <= lock_columns
+    observation_indexes = {
+        index["name"]
+        for index in inspector.get_indexes("projection_observations")
+    }
+    assert {
+        "ix_projection_observations_provider_athlete",
+        "ix_projection_observations_provider_event",
+        "ix_projection_observations_provider_statistic_id",
+        "ix_projection_observations_provider_statistic_label",
+        "ix_projection_observations_source_identity",
+    } <= observation_indexes
     assert ("source_poll_id",) not in {
         tuple(constraint["column_names"])
         for constraint in inspector.get_unique_constraints(
@@ -270,6 +332,18 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
             "same_generation": "same_time_not_promoted",
         }
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        backfilled = connection.execute(text(
+            "SELECT athlete_provider_id, event_provider_id, "
+            "statistic_provider_id, statistic_provider_label, resolution_state "
+            "FROM projection_observations WHERE observation_id = 'observation'"
+        )).one()
+        assert backfilled == (
+            "athlete-v40",
+            "event-v40",
+            "stat-v40",
+            "Points",
+            "resolved",
+        )
     with engine.begin() as connection:
         connection.execute(text(
             "INSERT INTO projection_provider_polls "

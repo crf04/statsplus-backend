@@ -7,8 +7,9 @@ from threading import Event
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, event as sqlalchemy_event, func, select
+from sqlalchemy import create_engine, event, func, select
 
+from app.domain.comparisons import market_reference
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
 from app.models.projection_archive import (
@@ -997,7 +998,7 @@ def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_p
     def capture_statement(_connection, _cursor, statement, _parameters, _context, _many):
         statements.append(statement)
 
-    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_statement)
+    event.listen(engine, "before_cursor_execute", capture_statement)
     try:
         archive.freeze_closing_projection_set(
             provider="dabble",
@@ -1007,7 +1008,7 @@ def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_p
             created_at=OBSERVED_AT + timedelta(minutes=2),
         )
     finally:
-        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_statement)
+        event.remove(engine, "before_cursor_execute", capture_statement)
 
     observation_reads = [
         statement
@@ -1383,7 +1384,11 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
     )
 
     assert replayed.changed is True
-    assert _reader(engine).get_pool_for_game(season=SEASON, game_id=GAME_ID).players[0].canonical_player_id == 7
+    recovered_player = _reader(engine).get_pool_for_game(
+        season=SEASON, game_id=GAME_ID
+    ).players[0]
+    assert recovered_player.canonical_player_id == 7
+    assert recovered_player.name == "Provider Player"
     with engine.connect() as connection:
         counts = tuple(
             connection.execute(select(func.count()).select_from(model)).scalar_one()
@@ -1414,6 +1419,7 @@ def test_replay_athlete_mapping_recovers_unresolved_evidence_without_mutating_so
     assert original.canonical_player_id is None
     assert original.observed_at == OBSERVED_AT.replace(tzinfo=None)
     assert replay_observation.canonical_player_id == 7
+    assert replay_observation.canonical_player_name == "Provider Player"
     assert replay_observation.ordinal == observation_before.ordinal
     assert replay_observation.observed_at == OBSERVED_AT.replace(tzinfo=None)
     assert archive.load_source_snapshot(ingested.snapshot_id) == source_before
@@ -1503,6 +1509,7 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
         provider="dabble",
         provider_event_id="event-1",
         canonical_game_id=GAME_ID,
+        replayed_at=OBSERVED_AT + timedelta(minutes=1),
     )
     assert event_replay is not None
     assert event_replay.observation_count == 1
@@ -1514,6 +1521,7 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
         provider="dabble",
         provider_statistic_id="stat-2",
         canonical_statistic_id=statistic.id,
+        replayed_at=OBSERVED_AT + timedelta(minutes=2),
     )
     assert statistic_replay is not None
     assert statistic_replay.observation_count == 1
@@ -1524,6 +1532,7 @@ def test_replay_event_and_statistic_mappings_only_advances_affected_observations
         provider="dabble",
         provider_event_id="event-1",
         canonical_game_id=GAME_ID,
+        replayed_at=OBSERVED_AT + timedelta(minutes=3),
     )
     assert repeated is not None
     assert repeated.changed is False
@@ -1590,7 +1599,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
         canonical_player_id=7,
         canonical_player_name="Mapped Player One",
         canonical_team_id=10,
-        replayed_at=OBSERVED_AT + timedelta(minutes=1),
+        replayed_at=OBSERVED_AT + timedelta(minutes=30),
     )
     second = archive.replay_athlete_mapping(
         provider="dabble",
@@ -1598,7 +1607,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
         canonical_player_id=8,
         canonical_player_name="Mapped Player Two",
         canonical_team_id=10,
-        replayed_at=OBSERVED_AT + timedelta(minutes=2),
+        replayed_at=OBSERVED_AT + timedelta(minutes=31),
     )
     reverted = archive.replay_athlete_mapping(
         provider="dabble",
@@ -1606,7 +1615,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
         canonical_player_id=7,
         canonical_player_name="Mapped Player One",
         canonical_team_id=10,
-        replayed_at=OBSERVED_AT + timedelta(minutes=3),
+        replayed_at=OBSERVED_AT + timedelta(minutes=32),
     )
 
     assert first is not None and second is not None and reverted is not None
@@ -1617,7 +1626,7 @@ def test_replay_mapping_can_return_to_an_existing_materialization(tmp_path):
         ProjectionArchiveReadScope(
             provider="dabble", query=NBAMarketQuery(season=SEASON)
         ),
-        clock=lambda: OBSERVED_AT + timedelta(minutes=3),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=32),
     ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert [player.canonical_player_id for player in pool.players] == [7]
 
@@ -1691,17 +1700,35 @@ def test_replay_densely_numbers_affected_rows_carried_across_snapshots(tmp_path)
         accepted_at=partial_at,
     )
 
-    replay = archive.replay_athlete_mapping(
-        provider="dabble",
-        provider_athlete_id="athlete-carried",
-        canonical_player_id=8,
-        canonical_player_name="Catalog Player",
-        canonical_team_id=10,
-        replayed_at=partial_at + timedelta(minutes=1),
-    )
+    latest_writes: list[tuple[str, bool]] = []
+
+    def record_latest_writes(
+        _connection, _cursor, statement, _parameters, _context, executemany
+    ):
+        normalized = statement.strip().upper()
+        if (
+            normalized.startswith("DELETE FROM LATEST_PLAYER_PROJECTIONS")
+            or normalized.startswith("INSERT INTO LATEST_PLAYER_PROJECTIONS")
+        ):
+            latest_writes.append((normalized.split()[0], executemany))
+
+    event.listen(engine, "before_cursor_execute", record_latest_writes)
+
+    try:
+        replay = archive.replay_athlete_mapping(
+            provider="dabble",
+            provider_athlete_id="athlete-carried",
+            canonical_player_id=8,
+            canonical_player_name="Catalog Player",
+            canonical_team_id=10,
+            replayed_at=partial_at + timedelta(minutes=1),
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record_latest_writes)
 
     assert replay is not None
     assert replay.observation_count == 2
+    assert latest_writes == [("DELETE", False), ("INSERT", True)]
     with engine.connect() as connection:
         ordinals = connection.execute(
             select(ProjectionObservation.ordinal)
@@ -1735,3 +1762,289 @@ def test_teamless_or_nameless_athlete_decision_skips_projection_replay(
     )
 
     assert archive.replay_athlete_decision(decision) is None
+
+
+def test_sequential_mappings_preserve_each_source_observations_logical_state(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'mapping-lineage.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+
+    unresolved_statistic = StatisticEvidence(provider_id="stat-first")
+    resolved_statistic = StatisticEvidence(
+        provider_id="stat-second", canonical_id=statistic.id
+    )
+    markets = (
+        PlayerProjectionMarket(
+            provider="dabble",
+            market_id="first-market",
+            athlete=AthleteEvidence(
+                provider_id="athlete-first",
+                canonical_id=101,
+                name="First Player",
+                team=TeamEvidence(canonical_id=10),
+            ),
+            event=EventEvidence(provider_id="event-first", canonical_id=GAME_ID),
+            team=TeamEvidence(canonical_id=10),
+            statistic=unresolved_statistic,
+            threshold=MarketThreshold("20.5", "count"),
+            status=MarketStatus.AVAILABLE,
+            variant=MarketVariant.STANDARD,
+            scoring_period=ScoringPeriod.FULL_GAME,
+        ),
+        PlayerProjectionMarket(
+            provider="dabble",
+            market_id="second-market",
+            athlete=AthleteEvidence(
+                provider_id="athlete-second",
+                name="Second Provider Player",
+            ),
+            event=EventEvidence(provider_id="event-second", canonical_id=GAME_ID),
+            team=TeamEvidence(canonical_id=10),
+            statistic=resolved_statistic,
+            statistic_match=StatisticMatch(
+                state=MatchState.CANONICAL,
+                evidence=resolved_statistic,
+                scoring_period=ScoringPeriod.FULL_GAME,
+                canonical=statistic,
+                provider="dabble",
+            ),
+            threshold=MarketThreshold("10.5", "count"),
+            status=MarketStatus.AVAILABLE,
+            variant=MarketVariant.STANDARD,
+            scoring_period=ScoringPeriod.FULL_GAME,
+        ),
+    )
+    archive = ProjectionArchive(engine, catalog)
+    archive.ingest_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=markets,
+            coverage=CoverageEvidence(
+                fetched_count=2,
+                eligible_count=2,
+                normalized_count=2,
+                expected_total=2,
+            ),
+            retrieved_at=OBSERVED_AT,
+        ),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT,
+    )
+
+    archive.replay_athlete_mapping(
+        provider="dabble",
+        provider_athlete_id="athlete-second",
+        canonical_player_id=202,
+        canonical_player_name="Second Catalog Player",
+        canonical_team_id=10,
+        replayed_at=OBSERVED_AT + timedelta(minutes=1),
+    )
+    statistic_replay = archive.replay_statistic_mapping(
+        provider="dabble",
+        provider_statistic_id="stat-first",
+        canonical_statistic_id=statistic.id,
+        replayed_at=OBSERVED_AT + timedelta(minutes=2),
+    )
+
+    assert statistic_replay is not None
+    pool = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(
+            provider="dabble", query=NBAMarketQuery(season=SEASON)
+        ),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=2),
+    ).get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert [player.canonical_player_id for player in pool.players] == [101, 202]
+
+
+def test_replay_recomputes_an_idless_reference_for_a_later_partial_update(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'mapping-reference.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    unresolved_market = PlayerProjectionMarket(
+        provider="dabble",
+        athlete=AthleteEvidence(
+            provider_id="athlete-reference",
+            name="Provider Player",
+        ),
+        event=EventEvidence(provider_id="event-reference", canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="dabble",
+            unit=statistic.unit,
+        ),
+        threshold=MarketThreshold("20.5", "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    archive.ingest_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(unresolved_market,),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=1,
+            ),
+            retrieved_at=OBSERVED_AT,
+        ),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    replay = archive.replay_athlete_mapping(
+        provider="dabble",
+        provider_athlete_id="athlete-reference",
+        canonical_player_id=7,
+        canonical_player_name="Catalog Player",
+        canonical_team_id=10,
+        replayed_at=OBSERVED_AT + timedelta(minutes=1),
+    )
+    assert replay is not None
+
+    partial_at = OBSERVED_AT + timedelta(minutes=2)
+    resolved_partial = replace(
+        unresolved_market,
+        athlete=replace(
+            unresolved_market.athlete,
+            canonical_id=7,
+            team=TeamEvidence(canonical_id=10),
+        ),
+    )
+    expected_available_reference = market_reference(resolved_partial)
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(LatestPlayerProjection.market_reference)
+        ).scalar_one() == expected_available_reference
+    archive.ingest_snapshot(
+        ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.PARTIAL,
+            markets=(resolved_partial,),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=2,
+            ),
+            retrieved_at=partial_at,
+        ),
+        query=query,
+        accepted_at=partial_at,
+    )
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(LatestPlayerProjection)
+        ).scalar_one() == 1
+
+
+def test_replay_fences_a_snapshot_retrieved_before_the_mapping_decision(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'mapping-fence.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    unresolved_market = PlayerProjectionMarket(
+        provider="dabble",
+        market_id="mapping-fence-market",
+        athlete=AthleteEvidence(
+            provider_id="athlete-fence",
+            name="Provider Player",
+        ),
+        event=EventEvidence(provider_id="event-fence", canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="dabble",
+        ),
+        threshold=MarketThreshold("20.5", "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+
+    def snapshot(market, retrieved_at):
+        return ProviderSnapshot(
+            provider="dabble",
+            status=SnapshotStatus.COMPLETE,
+            markets=(market,),
+            coverage=CoverageEvidence(
+                fetched_count=1,
+                eligible_count=1,
+                normalized_count=1,
+                expected_total=1,
+            ),
+            retrieved_at=retrieved_at,
+        )
+
+    archive.ingest_snapshot(
+        snapshot(unresolved_market, OBSERVED_AT),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    replayed_at = OBSERVED_AT + timedelta(minutes=10)
+    archive.replay_athlete_mapping(
+        provider="dabble",
+        provider_athlete_id="athlete-fence",
+        canonical_player_id=7,
+        canonical_player_name="Catalog Player",
+        canonical_team_id=10,
+        replayed_at=replayed_at,
+    )
+
+    stale_result = archive.ingest_snapshot(
+        snapshot(unresolved_market, OBSERVED_AT + timedelta(minutes=5)),
+        query=query,
+        accepted_at=replayed_at + timedelta(minutes=1),
+    )
+
+    assert stale_result.materialization_outcome == "older_not_promoted"
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: replayed_at + timedelta(minutes=1),
+    )
+    assert [
+        player.canonical_player_id
+        for player in reader.get_pool_for_game(
+            season=SEASON, game_id=GAME_ID
+        ).players
+    ] == [7]
+
+    current_market = replace(
+        unresolved_market,
+        athlete=replace(
+            unresolved_market.athlete,
+            canonical_id=7,
+            team=TeamEvidence(canonical_id=10),
+        ),
+    )
+    current_at = replayed_at + timedelta(minutes=2)
+    current_result = archive.ingest_snapshot(
+        snapshot(current_market, current_at),
+        query=query,
+        accepted_at=current_at,
+    )
+    assert current_result.materialization_outcome == "advanced"
