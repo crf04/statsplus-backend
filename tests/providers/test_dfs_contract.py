@@ -1043,6 +1043,22 @@ def test_a_stated_price_must_agree_with_the_fields_it_claims():
         _priced_selection(price_value="1")
     with pytest.raises(ValueError, match="price_kind is not a reviewed value"):
         _priced_selection(price_kind="fractional", price_value="1")
+    # A stated multiplier is cross-checked against a coexisting payout modifier,
+    # exactly as american/decimal prices are cross-checked against their fields.
+    with pytest.raises(ValueError, match="contradicts its payout multiplier"):
+        _priced_selection(
+            price_kind="multiplier",
+            price_value="3",
+            price_scope="entry",
+            modifiers=(SelectionModifier("2.5", "payout_multiplier", "selection"),),
+        )
+    agreeing = _priced_selection(
+        price_kind="multiplier",
+        price_value="2.5",
+        price_scope="entry",
+        modifiers=(SelectionModifier("2.5", "payout_multiplier", "selection"),),
+    )
+    assert agreeing.price_value == Decimal("2.5")
 
 
 def test_modifier_kinds_are_a_closed_vocabulary():

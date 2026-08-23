@@ -71,7 +71,6 @@ _PRICED_SELECTIONS = (
 )
 
 
-
 pytestmark = pytest.mark.integration
 SEASON = "2025-26"
 GAME_ID = "0022500501"
@@ -231,7 +230,7 @@ def _snapshot(catalog, retrieved_at, threshold):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
     return ProviderSnapshot(
         provider="dabble",

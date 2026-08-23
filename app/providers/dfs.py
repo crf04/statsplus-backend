@@ -477,6 +477,11 @@ def _canonical_price(
         return kind, value, scope
     if value <= 0:
         raise ValueError("a multiplier price_value must be positive")
+    # A stated multiplier is cross-checked against a coexisting payout modifier,
+    # the same way american/decimal prices are checked against their fields, so
+    # one selection cannot claim two different multipliers for the same side.
+    if len(payouts) == 1 and value != payouts[0].value:
+        raise ValueError("selection price_value contradicts its payout multiplier")
     return kind, value, scope
 
 

@@ -250,6 +250,10 @@ def registered_dfs_provider(
     else, so this seam exists to demonstrate exactly that: a caller that
     registers an adapter gets configuration, construction, collection,
     diagnostics, and the compliance suite without touching any of them.
+
+    This mutates the module-global registration tuple without a lock and is a
+    single-threaded pytest-only seam: production admits providers through the
+    static ``_DEFAULT_REGISTRATIONS`` and never registers one at runtime.
     """
 
     global _registrations

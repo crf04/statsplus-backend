@@ -27,7 +27,6 @@ from app.dfs_catalog import DFS_DABBLE
 from app.domain.freshness import cache_window_policy, time_window_seconds
 from app.domain.market_content import NumericDomainError
 
-
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -37,6 +36,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
 
 def dfs_provider_name_set() -> frozenset[str]:
     """Read the provider registry, which is the sole authority on admission.

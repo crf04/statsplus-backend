@@ -134,7 +134,6 @@ _PRICED_SELECTIONS = (
 )
 
 
-
 TEAM_FIXTURE = Path(__file__).parents[1] / "fixtures/team_matchups/thirty_teams.json"
 NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
 SEASON = "2025-26"
@@ -210,7 +209,7 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble"):
                 status=MarketStatus.AVAILABLE,
                 variant=MarketVariant.STANDARD,
                 scoring_period=ScoringPeriod.FULL_GAME,
-                            selections=_PRICED_SELECTIONS,
+                selections=_PRICED_SELECTIONS,
             ),
         ),
         coverage=CoverageEvidence(

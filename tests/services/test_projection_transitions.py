@@ -52,7 +52,6 @@ _PRICED_SELECTIONS = (
 )
 
 
-
 SEASON = "2025-26"
 GAME_ID = "0022500501"
 OBSERVED_AT = datetime(2026, 1, 2, 12, 30, tzinfo=timezone.utc)
@@ -96,7 +95,7 @@ def _market(
         status=status,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
 
 

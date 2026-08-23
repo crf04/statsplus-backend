@@ -70,7 +70,6 @@ _PRICED_SELECTIONS = (
 )
 
 
-
 #: Fixed clearing timestamp for direct-insert constraint cases.
 _CLEARED_AT = datetime(2026, 8, 9, 12, tzinfo=timezone.utc)
 
@@ -2329,7 +2328,7 @@ def _market(
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
         status=MarketStatus.AVAILABLE,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
 
 
@@ -3114,7 +3113,7 @@ def _identified_market(
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
         status=MarketStatus.AVAILABLE,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
 
 
@@ -4165,7 +4164,7 @@ def test_manual_athlete_mapping_recovers_projection_through_real_replay_seam(
                     threshold=MarketThreshold("20.5", "count"),
                     status=MarketStatus.AVAILABLE,
                     scoring_period=ScoringPeriod.FULL_GAME,
-                                    selections=_PRICED_SELECTIONS,
+                    selections=_PRICED_SELECTIONS,
                 ),
             ),
             coverage=CoverageEvidence(
@@ -5103,7 +5102,7 @@ def _nameless_market(*, team: TeamEvidence | None = None) -> PlayerProjectionMar
         statistic=StatisticEvidence(provider_id="pts"),
         threshold=MarketThreshold(value="20.5", unit="points"),
         status=MarketStatus.AVAILABLE,
-            selections=_PRICED_SELECTIONS,
+        selections=_PRICED_SELECTIONS,
     )
 
 
