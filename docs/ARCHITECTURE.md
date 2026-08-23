@@ -1150,7 +1150,12 @@ envelope is as sparse as every other PBP row: a governed diagnostic key that is
 omitted is accepted as the observed zero only when the declared authority for
 that count is itself zero (a team with no blocks has no `Blocks` key on any of
 its rows); an omission against a nonzero authority, and an explicit `null`
-under any authority, still reject. Missing optional expanded
+under any authority, still reject. The same rule covers a side whose whole
+`EntityId == 0` team-summary row is omitted: it is accepted as a zero team-only
+residual only when the side's `team_results` envelope exists and every
+governed diagnostic count equals that side's player-row sum; otherwise the
+missing row still rejects, and at the repository boundary a side without an
+archived team row must have typed counts equal to its player sums. Missing optional expanded
 fields preserve the game and leave the dependent typed facts (such as assist
 locations) null in the ledger. A null assist-location counter becomes a
 governed zero at derivation time only when the retained split proves it

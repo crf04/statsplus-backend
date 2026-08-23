@@ -2027,6 +2027,42 @@ def test_every_zero_authority_diagnostic_omission_is_accepted(wire_name):
     assert getattr(away, field) == 0
 
 
+def test_omitted_team_summary_row_is_accepted_only_with_a_proven_zero_residual(tmp_path):
+    """pbp_stats omits a side's whole Team row when it has no team-only residual."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'no-team-row.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+    participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
+
+    def without_home_team_row(payload):
+        rows = payload["stats"]["Home"]["FullGame"]
+        payload["stats"]["Home"]["FullGame"] = [
+            row for row in rows if str(row.get("EntityId")) != "0" and row.get("Name") != "Team"
+        ]
+        return payload
+
+    # Unexplained residual (the diagnostics still carry the team rebounds).
+    unproven = without_home_team_row(_raw_observation_with_unknown_fields())
+    with pytest.raises(LedgerValidationError, match="exactly one team-summary row for Home"):
+        canonical_game_from_pbp(unproven, event=event, participant_ids_by_team=participants)
+
+    # Proven zero residual: every Home diagnostic equals the player-row sum.
+    proven = without_home_team_row(_raw_observation_with_unknown_fields())
+    players = proven["stats"]["Home"]["FullGame"]
+    diagnostics = proven["team_results"]["Home"]["FullGame"]
+    for wire_name in ("Rebounds", "OffRebounds", "DefRebounds"):
+        diagnostics[wire_name] = sum(int(row.get(wire_name) or 0) for row in players)
+    game = canonical_game_from_pbp(proven, event=event, participant_ids_by_team=participants)
+    home = next(fact for fact in game.team_facts if fact.team_id == 1610612747)
+    assert home.rebounds == sum(p.rebounds for p in game.player_facts if p.team_id == 1610612747)
+    assert not any(row.row_type == "team" and row.side == "Home" for row in game.raw_rows)
+    assert any(row.row_type == "team" and row.side == "Away" for row in game.raw_rows)
+    assert repository.replace_game(game).inserted
+    stored = repository.get_game(game.game_id)
+    assert stored is not None and stored.checksum == game.checksum
+
+
 def test_explicit_zero_required_count_remains_valid(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'explicit_zero.sqlite3'}")
     run_migrations(engine)
