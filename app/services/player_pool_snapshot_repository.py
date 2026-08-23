@@ -56,10 +56,30 @@ class PlayerPoolRefreshResult:
 class PlayerPoolSnapshotRepository:
     """Store canonical pool documents and coordinate their lazy refresh."""
 
-    def __init__(self, engine: Engine) -> None:
+    # The legacy request-time Player Pool is published through the
+    # ``dfs_boards`` stream.  Activating that stream fences every write here so
+    # the empty legacy ``player_pool_snapshots`` table can never be refreshed
+    # after the #110 database-only cutover, ahead of the #111 table drop.
+    LEGACY_WRITE_STREAM_KEY = "dfs_boards"
+
+    def __init__(self, engine: Engine, *, write_fence: Any | None = None) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store Player Pool snapshots")
         self.engine = engine
+        self._write_fence = write_fence
+
+    def _assert_writable(self, *, connection: Any | None = None) -> None:
+        """Refuse a legacy pool write once the cutover fence is activated."""
+
+        if self._write_fence is None:
+            return
+        checker = getattr(self._write_fence, "assert_writable", None)
+        if not callable(checker):
+            raise TypeError(
+                "write_fence must expose a callable assert_writable(stream_key, "
+                "connection=...)"
+            )
+        checker(self.LEGACY_WRITE_STREAM_KEY, connection=connection)
 
     @staticmethod
     def _identity(table: Any, scope: PlayerPoolSnapshotScope) -> Any:
@@ -161,6 +181,7 @@ class PlayerPoolSnapshotRepository:
             field="Player Pool refresh lease",
         )
         with self.engine.begin() as connection:
+            self._assert_writable(connection=connection)
             try:
                 with connection.begin_nested():
                     connection.execute(
@@ -205,6 +226,7 @@ class PlayerPoolSnapshotRepository:
         observed_at = assume_utc(now)
         result = None
         with self.engine.begin() as connection:
+            self._assert_writable(connection=connection)
             result = connection.execute(
                 update(table)
                 .where(
@@ -234,6 +256,7 @@ class PlayerPoolSnapshotRepository:
         table = PlayerPoolSnapshot.__table__
         observed_at = assume_utc(now)
         with self.engine.begin() as connection:
+            self._assert_writable(connection=connection)
             result = connection.execute(
                 update(table)
                 .where(

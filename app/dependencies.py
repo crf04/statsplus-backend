@@ -101,7 +101,6 @@ def build_dependencies(
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerService
     from app.services.player_diet import PlayerDietService
-    from app.services.player_pool import PlayerPoolService, StoredPlayerPoolReader
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
         ProjectionArchive,
@@ -110,7 +109,6 @@ def build_dependencies(
         ProjectionSelectionPlayerPoolReader,
         require_projection_archive_schema,
     )
-    from app.services.player_pool_snapshot_repository import PlayerPoolSnapshotRepository
     from app.services.player_archetype_repository import PlayerArchetypeRepository
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.matchup import MatchupService
@@ -435,21 +433,12 @@ def build_dependencies(
         comparison_board_service,
         settings=settings,
     )
-    player_pool_snapshot_repository = (
-        None if demo_database
-        else PlayerPoolSnapshotRepository(engine)
-    )
     matchup_injury_service = MatchupInjuryService(
         provider=injury_provider,
         snapshot_repository=injury_snapshot_repository,
         athlete_catalog=athlete_catalog_service,
         enabled=settings.features.injury_report_enabled,
         permission_granted=settings.providers.rotowire_permission_granted,
-    )
-    player_pool_service = PlayerPoolService(
-        dfs_board_service,
-        statistic_catalog,
-        snapshot_repository=player_pool_snapshot_repository,
     )
     projection_archive = (
         None
@@ -527,7 +516,11 @@ def build_dependencies(
             collection_operations.set_projection_collection(
                 projection_collection_coordinator
             )
-    slate_player_pool = projection_player_pool_reader or player_pool_service
+    # The database-only projection reader is the sole Slate/Matchup/Selection
+    # source after the #110 cutover.  There is no request-time legacy fallback:
+    # when the archive read gate is off the pool is simply absent, never a
+    # provider-driven build.
+    slate_player_pool = projection_player_pool_reader
     slate_service = SlateService(
         event_catalog_service,
         settings=settings,
@@ -576,18 +569,11 @@ def build_dependencies(
         player_diets=player_diet_service,
         team_matchups=team_matchup_query_service,
     )
-    stored_player_pool_reader = (
-        StoredPlayerPoolReader(player_pool_snapshot_repository)
-        if player_pool_snapshot_repository is not None
-        else None
-    )
-    matchup_player_pool_reader = (
-        projection_player_pool_reader or stored_player_pool_reader
-    )
+    matchup_player_pool_reader = projection_player_pool_reader
     selection_player_pool_reader = (
         ProjectionSelectionPlayerPoolReader(projection_player_pool_reader)
         if projection_player_pool_reader is not None
-        else stored_player_pool_reader
+        else None
     )
     matchup_selection_service = MatchupSelectionService(
         event_catalog=event_catalog_service,
