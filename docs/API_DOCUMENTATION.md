@@ -1952,6 +1952,58 @@ Optional-auth endpoint:
 POST /api/user/activity/ping
 ```
 
+### Saved Filter Sets
+
+A Saved Filter Set is an account-private bookmark of a Log Workspace URL: a
+user-chosen name plus the bare query string that addresses the Filter Set. No
+game-log data is stored. Every route requires Firebase auth and operates only
+on the caller's own rows.
+
+```http
+GET    /api/user/saved-filter-sets
+POST   /api/user/saved-filter-sets
+PATCH  /api/user/saved-filter-sets/<id>
+DELETE /api/user/saved-filter-sets/<id>
+```
+
+`GET` returns the caller's items newest-first:
+
+```json
+{
+  "success": true,
+  "saved_filter_sets": [
+    {
+      "id": 7,
+      "name": "Jokic at home",
+      "query_string": "player=Nikola+Jokic&location_filter=Home",
+      "created_at": "2026-08-23T12:00:00+00:00",
+      "updated_at": "2026-08-23T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+`POST {"name", "query_string"}` returns `201` with
+`{"success": true, "saved_filter_set": {...}}`. `PATCH {"name"}` renames one
+item and returns `200` with the same single-item envelope; the saved
+`query_string` is immutable. `DELETE` returns
+`{"success": true, "message": "Saved filter set deleted"}`.
+
+Validation and conflicts:
+
+- `name` is required and is 1–100 characters after trimming.
+- `query_string` is required, at most 2048 characters, and must be a bare URL
+  query string: no scheme, host, path, leading `?`, `#` fragment, or
+  whitespace. Parameter names inside it are not validated; a query string that
+  is no longer recognised surfaces the client's existing URL-entry error when
+  it is opened.
+- `400 invalid_input` for either validation failure.
+- `404 resource_not_found` for an id that does not exist or belongs to another
+  account. Foreign ids are never reported as `403`.
+- `409 operation_conflict` for a duplicate name within the account (compared
+  case-insensitively) and for exceeding the cap of 100 saved items per
+  account.
+
 
 ## Filtering Reference
 

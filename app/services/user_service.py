@@ -5,18 +5,79 @@ This service handles user account operations using SQLAlchemy ORM,
 including creating, updating, and retrieving user information.
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
 import logging
+import re
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.models import get_session, User
+from app.errors import ConflictError, InvalidInputError, ResourceNotFoundError
+from app.models import get_session, SavedFilterSet, User
 from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
 
 USER_LOGIN_TOUCH_INTERVAL = timedelta(minutes=15)
+
+SAVED_FILTER_SET_NAME_MAX_LENGTH = 100
+SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH = 2048
+SAVED_FILTER_SET_LIMIT = 100
+
+# A bare query string never carries a scheme, so anything shaped like
+# ``scheme://`` is a whole URL rather than the value this feature stores.
+_URL_SCHEME_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+_BARE_QUERY_STRING_MESSAGE = (
+    "A saved filter set query string must be a bare URL query string, without "
+    "a scheme, host, path, leading '?', or '#' fragment."
+)
+
+
+def _validated_saved_filter_set_name(value: Any) -> str:
+    """Return the trimmed name, or refuse one the contract cannot store."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidInputError("A saved filter set name is required.")
+
+    name = value.strip()
+    if len(name) > SAVED_FILTER_SET_NAME_MAX_LENGTH:
+        raise InvalidInputError(
+            "A saved filter set name may be at most "
+            f"{SAVED_FILTER_SET_NAME_MAX_LENGTH} characters."
+        )
+    return name
+
+
+def _validated_saved_filter_set_query_string(value: Any) -> str:
+    """Return the query string, or refuse one that is not bare.
+
+    Parameter names inside the query string are deliberately not judged here:
+    a saved set that no longer parses is reported by the client's existing
+    URL-entry error path when it is opened.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise InvalidInputError("A saved filter set query string is required.")
+
+    if len(value) > SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH:
+        raise InvalidInputError(
+            "A saved filter set query string may be at most "
+            f"{SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH} characters."
+        )
+
+    unusable = (
+        value.startswith("?")
+        or value.startswith("/")
+        or "#" in value
+        or any(character.isspace() for character in value)
+        or _URL_SCHEME_PREFIX.match(value) is not None
+    )
+    if unusable:
+        raise InvalidInputError(_BARE_QUERY_STRING_MESSAGE)
+
+    return value
 
 
 def _days_since(timestamp: Optional[datetime]) -> int:
@@ -278,5 +339,176 @@ class UserService:
         except SQLAlchemyError as e:
             logger.error(f"Database error in get_all_active_users_count: {e}")
             return 0
+        finally:
+            session.close()
+
+    # --- Saved Filter Sets -------------------------------------------------
+    #
+    # Every operation is scoped to the caller's ``firebase_uid``.  A row that
+    # belongs to another account is reported as missing rather than forbidden,
+    # so one account cannot probe another's identifiers.
+
+    @staticmethod
+    def _saved_filter_set_name_taken(
+        session,
+        firebase_uid: str,
+        name: str,
+        *,
+        exclude_id: Optional[int] = None,
+    ) -> bool:
+        """Whether the account already holds this name, ignoring case."""
+
+        query = session.query(SavedFilterSet.id).filter(
+            SavedFilterSet.firebase_uid == firebase_uid,
+            func.lower(SavedFilterSet.name) == name.lower(),
+        )
+        if exclude_id is not None:
+            query = query.filter(SavedFilterSet.id != exclude_id)
+        return session.query(query.exists()).scalar()
+
+    @staticmethod
+    def _owned_saved_filter_set(
+        session,
+        firebase_uid: str,
+        saved_filter_set_id: int,
+    ) -> SavedFilterSet:
+        """Load one of the caller's saved filter sets or report it missing."""
+
+        saved_filter_set = (
+            session.query(SavedFilterSet)
+            .filter(
+                SavedFilterSet.id == saved_filter_set_id,
+                SavedFilterSet.firebase_uid == firebase_uid,
+            )
+            .first()
+        )
+        if saved_filter_set is None:
+            raise ResourceNotFoundError(
+                "The requested saved filter set was not found."
+            )
+        return saved_filter_set
+
+    def list_saved_filter_sets(self, firebase_uid: str) -> List[Dict[str, Any]]:
+        """Return the caller's saved filter sets, newest first."""
+
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(SavedFilterSet)
+                .filter(SavedFilterSet.firebase_uid == firebase_uid)
+                .order_by(
+                    SavedFilterSet.created_at.desc(),
+                    SavedFilterSet.id.desc(),
+                )
+                .all()
+            )
+            return [row.to_dict() for row in rows]
+        finally:
+            session.close()
+
+    def create_saved_filter_set(
+        self,
+        firebase_uid: str,
+        *,
+        name: Any,
+        query_string: Any,
+    ) -> Dict[str, Any]:
+        """Save a named query string for the caller and return the new item."""
+
+        validated_name = _validated_saved_filter_set_name(name)
+        validated_query_string = _validated_saved_filter_set_query_string(query_string)
+
+        session = self._get_session()
+        try:
+            held = (
+                session.query(SavedFilterSet)
+                .filter(SavedFilterSet.firebase_uid == firebase_uid)
+                .count()
+            )
+            if held >= SAVED_FILTER_SET_LIMIT:
+                raise ConflictError(
+                    "An account may hold at most "
+                    f"{SAVED_FILTER_SET_LIMIT} saved filter sets."
+                )
+            if self._saved_filter_set_name_taken(
+                session, firebase_uid, validated_name
+            ):
+                raise ConflictError(
+                    "A saved filter set with that name already exists."
+                )
+
+            now = datetime.now(timezone.utc)
+            saved_filter_set = SavedFilterSet(
+                firebase_uid=firebase_uid,
+                name=validated_name,
+                query_string=validated_query_string,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(saved_filter_set)
+            session.commit()
+            return saved_filter_set.to_dict()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def rename_saved_filter_set(
+        self,
+        firebase_uid: str,
+        saved_filter_set_id: int,
+        *,
+        name: Any,
+    ) -> Dict[str, Any]:
+        """Rename one of the caller's saved filter sets.
+
+        The query string is immutable; only the label changes.
+        """
+
+        validated_name = _validated_saved_filter_set_name(name)
+
+        session = self._get_session()
+        try:
+            saved_filter_set = self._owned_saved_filter_set(
+                session, firebase_uid, saved_filter_set_id
+            )
+            if self._saved_filter_set_name_taken(
+                session,
+                firebase_uid,
+                validated_name,
+                exclude_id=saved_filter_set.id,
+            ):
+                raise ConflictError(
+                    "A saved filter set with that name already exists."
+                )
+
+            saved_filter_set.name = validated_name
+            saved_filter_set.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            return saved_filter_set.to_dict()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def delete_saved_filter_set(
+        self,
+        firebase_uid: str,
+        saved_filter_set_id: int,
+    ) -> None:
+        """Delete one of the caller's saved filter sets."""
+
+        session = self._get_session()
+        try:
+            saved_filter_set = self._owned_saved_filter_set(
+                session, firebase_uid, saved_filter_set_id
+            )
+            session.delete(saved_filter_set)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
         finally:
             session.close()
