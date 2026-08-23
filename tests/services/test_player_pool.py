@@ -1443,3 +1443,13 @@ def test_legacy_player_pool_writes_are_fenced_after_cutover(tmp_path):
             now=now,
             lease_seconds=60,
         )
+
+    # A non-conforming fence is a programming error, not a silent no-op.
+    misconfigured = PlayerPoolSnapshotRepository(engine, write_fence=object())
+    with pytest.raises(TypeError, match="assert_writable"):
+        misconfigured.try_acquire_refresh(
+            PlayerPoolSnapshotScope.create("2025-26", ("0022500003",)),
+            owner="worker",
+            now=now,
+            lease_seconds=60,
+        )

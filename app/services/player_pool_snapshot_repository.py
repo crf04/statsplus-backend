@@ -71,10 +71,15 @@ class PlayerPoolSnapshotRepository:
     def _assert_writable(self, *, connection: Any | None = None) -> None:
         """Refuse a legacy pool write once the cutover fence is activated."""
 
-        if self._write_fence is not None:
-            checker = getattr(self._write_fence, "assert_writable", None)
-            if callable(checker):
-                checker(self.LEGACY_WRITE_STREAM_KEY, connection=connection)
+        if self._write_fence is None:
+            return
+        checker = getattr(self._write_fence, "assert_writable", None)
+        if not callable(checker):
+            raise TypeError(
+                "write_fence must expose a callable assert_writable(stream_key, "
+                "connection=...)"
+            )
+        checker(self.LEGACY_WRITE_STREAM_KEY, connection=connection)
 
     @staticmethod
     def _identity(table: Any, scope: PlayerPoolSnapshotScope) -> Any:
