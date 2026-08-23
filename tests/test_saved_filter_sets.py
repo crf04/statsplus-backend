@@ -713,3 +713,114 @@ def test_a_non_numeric_identifier_is_not_found(client, authenticate, user_servic
     response = client.delete("/api/user/saved-filter-sets/not-an-id", headers=headers)
 
     assert response.status_code == 404
+
+
+# --- end to end ------------------------------------------------------------
+
+
+def test_the_contract_walks_end_to_end_against_a_real_database(
+    tmp_path, make_client, authenticate, make_db_user
+):
+    """Every contract behavior over HTTP with the real service and database."""
+
+    from app.utils.db import get_engine
+
+    database_url = f"sqlite:///{tmp_path / 'end-to-end.sqlite3'}"
+    get_engine.cache_clear()
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    with engine.begin() as connection:
+        for uid in (OWNER, OTHER):
+            connection.execute(
+                User.__table__.insert(),
+                {
+                    "firebase_uid": uid,
+                    "email": f"{uid}@example.com",
+                    "display_name": uid,
+                    "photo_url": None,
+                    "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "is_active": True,
+                },
+            )
+    engine.dispose()
+
+    client = make_client(database_url)
+    headers = authenticate(
+        claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER)
+    )
+
+    assert client.get("/api/user/saved-filter-sets", headers=headers).get_json() == {
+        "success": True,
+        "saved_filter_sets": [],
+    }
+
+    created = client.post(
+        "/api/user/saved-filter-sets",
+        headers=headers,
+        json={"name": "Jokic at home", "query_string": QUERY_STRING},
+    )
+    assert created.status_code == 201
+    item = created.get_json()["saved_filter_set"]
+    assert item["name"] == "Jokic at home"
+    assert item["query_string"] == QUERY_STRING
+
+    # 409 duplicate name, compared without regard to case.
+    duplicate = client.post(
+        "/api/user/saved-filter-sets",
+        headers=headers,
+        json={"name": "JOKIC AT HOME", "query_string": QUERY_STRING},
+    )
+    assert duplicate.status_code == 409
+
+    # 400 for a query string that is not bare.
+    invalid = client.post(
+        "/api/user/saved-filter-sets",
+        headers=headers,
+        json={"name": "Whole URL", "query_string": "https://statsplus.app/?a=1"},
+    )
+    assert invalid.status_code == 400
+
+    renamed = client.patch(
+        f"/api/user/saved-filter-sets/{item['id']}",
+        headers=headers,
+        json={"name": "Jokic home splits"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.get_json()["saved_filter_set"]["name"] == "Jokic home splits"
+    assert renamed.get_json()["saved_filter_set"]["query_string"] == QUERY_STRING
+
+    listed = client.get("/api/user/saved-filter-sets", headers=headers).get_json()
+    assert [entry["name"] for entry in listed["saved_filter_sets"]] == [
+        "Jokic home splits"
+    ]
+
+    # The other account can neither see, rename, nor delete it.
+    other_headers = authenticate(
+        claims={"uid": OTHER}, db_user=make_db_user(firebase_uid=OTHER)
+    )
+    assert client.get(
+        "/api/user/saved-filter-sets", headers=other_headers
+    ).get_json()["saved_filter_sets"] == []
+    assert client.patch(
+        f"/api/user/saved-filter-sets/{item['id']}",
+        headers=other_headers,
+        json={"name": "Stolen"},
+    ).status_code == 404
+    assert client.delete(
+        f"/api/user/saved-filter-sets/{item['id']}", headers=other_headers
+    ).status_code == 404
+
+    # ``authenticate`` installs one verifier for the whole process, so the
+    # owner's identity has to be reinstalled before the last two calls.
+    headers = authenticate(
+        claims={"uid": OWNER}, db_user=make_db_user(firebase_uid=OWNER)
+    )
+    assert client.delete(
+        f"/api/user/saved-filter-sets/{item['id']}", headers=headers
+    ).status_code == 200
+    assert client.get("/api/user/saved-filter-sets", headers=headers).get_json() == {
+        "success": True,
+        "saved_filter_sets": [],
+    }
+    get_engine.cache_clear()
