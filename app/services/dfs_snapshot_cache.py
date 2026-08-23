@@ -44,6 +44,7 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     PriceKind,
     PriceScope,
+    lenient_provider_decode,
     ProviderSnapshot,
     ProviderSnapshotProvider,
     RetrievalContext,
@@ -642,12 +643,25 @@ def deserialize_provider_snapshot(
     markets = data["markets"]
     if not isinstance(markets, list):
         raise SnapshotCacheError("snapshot markets schema is invalid")
+    # A schema-version-1 document predates this module's closed modifier
+    # vocabulary and its one-price-form-per-market rule.  It was a legal archive
+    # under the old contract, so it decodes leniently: reviewed aliases still
+    # normalize, an unreviewed modifier kind is preserved verbatim, and a market
+    # priced in mixed forms is accepted rather than rejected.
+    legacy_document = schema_version == 1
+    if legacy_document:
+        with lenient_provider_decode():
+            decoded_markets = tuple(
+                _market(item, schema_version=schema_version) for item in markets
+            )
+    else:
+        decoded_markets = tuple(
+            _market(item, schema_version=schema_version) for item in markets
+        )
     decoded = {
         "provider": provider,
         "status": data["status"],
-        "markets": tuple(
-            _market(item, schema_version=schema_version) for item in markets
-        ),
+        "markets": decoded_markets,
         "coverage": _coverage(data["coverage"]),
         "retrieved_at": data["retrieved_at"],
         "contract_version": contract_version,
@@ -663,6 +677,15 @@ def deserialize_provider_snapshot(
     # whitespace, reordered keys, and alternate escapes are all rejected.  So is
     # anything a constructor normalized, dropped, canonicalized from an alias, or
     # deduplicated -- that is corrupt data, not a usable cache value.
+    #
+    # A legacy v1 document is exempt from the byte-for-byte comparison alone: it
+    # was written under a superseded canonical form, so this module deliberately
+    # re-normalizes a reviewed alias to its new spelling (``multiplier`` ->
+    # ``payout_multiplier``), which changes the bytes by design rather than by
+    # corruption.  Its structure and values are still validated above, and the
+    # archived document's integrity is guaranteed by its stored checksum.
+    if legacy_document:
+        return snapshot
     try:
         canonical = serialize_provider_snapshot(
             snapshot,

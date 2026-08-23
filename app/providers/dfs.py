@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
@@ -104,6 +106,56 @@ def normalize_modifier_kind(label: str | ModifierKind | None) -> ModifierKind:
             "line_adjustment, or promo value"
         )
     return kind
+
+
+# A document archived before this module's closed vocabularies existed can hold
+# a modifier kind outside the reviewed set and a market whose sides priced in
+# different forms; both were legal under the old contract.  Re-normalizing such
+# a document must not hard-fail, so the schema-version-1 decode path (and only
+# that path) opts into leniency for the duration of one document.
+_LENIENT_PROVIDER_DECODE: ContextVar[bool] = ContextVar(
+    "lenient_provider_decode", default=False
+)
+
+
+@contextmanager
+def lenient_provider_decode():
+    """Decode one archived legacy document without new-normalization strictness.
+
+    Scope this only around decoding a schema-version-1 provider document.  New
+    provider normalization never runs inside it, so the closed modifier
+    vocabulary and the one-price-form-per-market rule stay strict for every
+    live retrieval.
+    """
+
+    token = _LENIENT_PROVIDER_DECODE.set(True)
+    try:
+        yield
+    finally:
+        _LENIENT_PROVIDER_DECODE.reset(token)
+
+
+def _resolved_modifier_kind(label: str | ModifierKind | None) -> str:
+    """The stored kind for one modifier, honouring a lenient legacy decode.
+
+    Strict (the default, and every live retrieval): the closed vocabulary, or a
+    typed malformed record.  Lenient (a legacy document only): a reviewed alias
+    still normalizes so a known payout still prices its selection, but an
+    unreviewed kind is preserved verbatim rather than rejected -- it was a legal
+    archived value, and discarding it would drop the offering it modifies.
+    """
+
+    if not _LENIENT_PROVIDER_DECODE.get():
+        return normalize_modifier_kind(label).value
+    if isinstance(label, ModifierKind):
+        return label.value
+    normalized = label.strip().casefold() if isinstance(label, str) else ""
+    kind = _MODIFIER_KIND_LABELS.get(normalized)
+    if kind is not None:
+        return kind.value
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    raise CoverageRecordMalformed("selection modifier kind must be a non-empty value")
 
 
 class MarketStatus(str, Enum):
@@ -330,7 +382,7 @@ class SelectionModifier:
 
     def __post_init__(self) -> None:
         decimal = _decimal_value(self.value, field="selection modifier value")
-        kind = normalize_modifier_kind(self.kind).value
+        kind = _resolved_modifier_kind(self.kind)
         scope = self.scope.strip() if isinstance(self.scope, str) else ""
         if not scope:
             raise ValueError("selection modifier scope must be a non-empty string")
@@ -856,7 +908,10 @@ class PlayerProjectionMarket:
         # with another provider's, so a provider that publishes them that way
         # is publishing a market this application cannot represent.
         priced = tuple(selection for selection in selections if selection.is_priced)
-        if len({(selection.price_kind, selection.price_scope) for selection in priced}) > 1:
+        if (
+            not _LENIENT_PROVIDER_DECODE.get()
+            and len({(selection.price_kind, selection.price_scope) for selection in priced}) > 1
+        ):
             raise MalformedProviderResponseError(
                 "market selections must state one price kind and scope"
             )
@@ -1635,6 +1690,7 @@ __all__ = [
     "TeamEvidence",
     "normalize_market_variant",
     "normalize_market_status",
+    "lenient_provider_decode",
     "normalize_modifier_kind",
     "normalize_coverage_code",
     "normalize_selection_direction",

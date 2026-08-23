@@ -968,6 +968,7 @@ def test_dfs_module_exports_only_contract_symbols():
         "SportEvidence",
         "StatisticEvidence",
         "TeamEvidence",
+        "lenient_provider_decode",
         "normalize_coverage_code",
         "normalize_market_status",
         "normalize_market_variant",

@@ -2719,3 +2719,110 @@ def test_legacy_backfilled_row_replays_targetable_from_its_priced_document(tmp_p
     assert replay_row["price_kind"] == "american"
     assert replay_row["price_scope"] == "selection"
     assert latest.generation_id == replayed.generation_id
+
+
+def test_replay_decodes_a_legacy_v1_document_with_an_unreviewed_modifier(tmp_path):
+    """Mapping replay must not hard-fail on a document archived before the
+    closed modifier vocabulary: it decodes leniently and rematerializes."""
+
+    import json as _json
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-v1-replay.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    market = PlayerProjectionMarket(
+        provider="underdog",
+        market_id="legacy-line",
+        athlete=AthleteEvidence(
+            provider_id="athlete-unresolved",
+            name="Provider Player",
+            team=TeamEvidence(canonical_id=None),
+        ),
+        event=EventEvidence(provider_id="event-1", canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="underdog",
+        ),
+        threshold=MarketThreshold("20.5", "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+        selections=(
+            Selection(
+                selection_id="higher",
+                direction=SelectionDirection.HIGHER,
+                american_price=-112,
+            ),
+        ),
+    )
+    snapshot = ProviderSnapshot(
+        provider="underdog",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1, eligible_count=1, normalized_count=1, expected_total=1
+        ),
+        retrieved_at=OBSERVED_AT,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    ingested = archive.ingest_snapshot(snapshot, query=query, accepted_at=OBSERVED_AT)
+
+    # Rewrite the stored document into the schema-version-1 shape a pre-#109
+    # deploy would have archived: no price triple on the selection, and an
+    # unreviewed provider modifier kind.
+    snapshots = ProjectionProviderSnapshot.__table__
+    with engine.connect() as connection:
+        document = _json.loads(
+            connection.execute(
+                select(snapshots.c.evidence_document).where(
+                    snapshots.c.snapshot_id == ingested.snapshot_id
+                )
+            ).scalar_one()
+        )
+    document["schema_version"] = 1
+    for legacy_market in document["markets"]:
+        for selection in legacy_market["selections"]:
+            for key in ("price_kind", "price_value", "price_scope"):
+                selection.pop(key, None)
+            selection["modifiers"] = [
+                {"value": "1.5", "kind": "boost", "scope": "selection", "label": None}
+            ]
+    with engine.begin() as connection:
+        connection.execute(
+            snapshots.update()
+            .where(snapshots.c.snapshot_id == ingested.snapshot_id)
+            .values(
+                evidence_document=_json.dumps(
+                    document, separators=(",", ":"), sort_keys=True
+                )
+            )
+        )
+
+    replayed = archive.replay_athlete_mapping(
+        provider="underdog",
+        provider_athlete_id="athlete-unresolved",
+        canonical_player_id=7,
+        canonical_player_name="Mapped Player",
+        canonical_team_id=10,
+        replayed_at=OBSERVED_AT - timedelta(minutes=1),
+    )
+
+    # The legacy document decodes and the observation rematerializes; the
+    # unreviewed modifier survives, and the priced selection keeps the row
+    # targetable.
+    assert replayed.changed is True
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="underdog", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+    )
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert [player.canonical_player_id for player in pool.players] == [7]
