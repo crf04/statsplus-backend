@@ -74,9 +74,13 @@ def projection_pg_engine():
         pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
     engine = create_engine(url)
     Base.metadata.drop_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
     run_migrations(engine)
     yield engine
     Base.metadata.drop_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
     engine.dispose()
 
 
