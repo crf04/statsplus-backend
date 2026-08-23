@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from inspect import Parameter, signature
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -57,6 +56,10 @@ from app.services.team_matchup_query import (
     TeamMatchupWindow,
 )
 from app.services.database_first_activation import DatabaseFirstPublicationReader
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_snapshot,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -316,13 +319,13 @@ class MatchupService:
             for player in pool_players
             if player.canonical_player_id not in injury_result.out_player_ids
         )
-        summaries = self._call_with_snapshot(
+        summaries = call_with_snapshot(
             self.player_logs.get_player_summaries,
             season,
             tuple(player.canonical_player_id for player in players),
             publication_snapshot=publication_snapshot,
         )
-        log_freshness = self._call_with_snapshot(
+        log_freshness = call_with_snapshot(
             self.player_logs.get_read_freshness,
             season,
             publication_snapshot=publication_snapshot,
@@ -427,34 +430,11 @@ class MatchupService:
         if not callable(snapshot):
             return None
         keyword = {}
-        if self._accepts_keyword(snapshot, "projection_only_keys"):
+        if accepts_keyword(snapshot, "projection_only_keys"):
             # The season-wide game-log payload is never needed here: the
             # summaries read resolves this game's players from the projection.
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
-
-    @staticmethod
-    def _accepts_keyword(method, name: str) -> bool:
-        """Whether an injected seam takes a keyword this service may pass."""
-
-        try:
-            parameters = signature(method).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        return any(
-            parameter.name == name or parameter.kind == Parameter.VAR_KEYWORD
-            for parameter in parameters
-        )
-
-    @classmethod
-    def _call_with_snapshot(cls, method, *args, publication_snapshot=None, **kwargs):
-        """Keep injected legacy test seams compatible with the new kwarg."""
-
-        if publication_snapshot is None:
-            return method(*args, **kwargs)
-        if cls._accepts_keyword(method, "publication_snapshot"):
-            kwargs["publication_snapshot"] = publication_snapshot
-        return method(*args, **kwargs)
 
     def _publication_metadata(
         self,
@@ -559,7 +539,7 @@ class MatchupService:
     ) -> TeamMatchupWindow | None:
         if self.team_matchups is None:
             return None
-        return self._call_with_snapshot(
+        return call_with_snapshot(
             self.team_matchups.get_latest_window,
             season,
             window_games=window_games,
@@ -576,7 +556,7 @@ class MatchupService:
     ) -> PlayerDietResult:
         if self.player_diets is None:
             return PlayerDietResult(season, {}, ())
-        return self._call_with_snapshot(
+        return call_with_snapshot(
             self.player_diets.get_for_players,
             season,
             tuple(player.canonical_player_id for player in players),

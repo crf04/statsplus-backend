@@ -383,6 +383,38 @@ class PlayerGameLogRepository:
             season=season,
         )
 
+    def _projected_opponent_rows(
+        self,
+        publication_id: str | None,
+        season: str,
+        *,
+        player_ids: tuple[int, ...],
+        opponent_team_id: int,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Read one opponent's rows for a player set from the projection.
+
+        The where clause leads with the opponent index's columns, so a card
+        never scans the publication's other opponents.
+        """
+
+        if publication_id is None:
+            return ()
+        projection = PublicationPlayerGameLog.__table__
+        return self._decode_projection(
+            select(projection.c.row_payload)
+            .where(
+                projection.c.publication_id == publication_id,
+                projection.c.opponent_team_id == opponent_team_id,
+                projection.c.player_id.in_(player_ids),
+            )
+            .order_by(
+                projection.c.game_date.desc(),
+                projection.c.player_id.asc(),
+                projection.c.game_id.desc(),
+            ),
+            season=season,
+        )
+
     def _projected_summary_rows(
         self,
         season: str,
@@ -996,6 +1028,15 @@ class PlayerGameLogRepository:
         publication_snapshot: Any | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
         canonical_season = validate_canonical_season(season)
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                return self._projected_opponent_rows(
+                    read.publication_id,
+                    canonical_season,
+                    player_ids=player_ids,
+                    opponent_team_id=opponent_team_id,
+                )
         publication_rows = self._publication_rows(
             canonical_season, publication_snapshot=publication_snapshot
         )
