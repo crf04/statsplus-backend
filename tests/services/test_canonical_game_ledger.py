@@ -1087,6 +1087,35 @@ def test_schema_drift_is_recorded_and_alerted_when_field_sets_change(tmp_path):
     assert json.loads(alert["details"])["removed_fields"] == []
 
 
+def test_schema_drift_corresponds_rows_by_identity_across_a_row_count_change(tmp_path):
+    """Omitting the Home team row shifts every index; drift must not fire."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'drift-shift.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine, schema_drift_sink=record_schema_drift)
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+    participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
+    payload = _clean_observation()
+    repository.replace_game(canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants))
+
+    corrected = json.loads(json.dumps(payload))
+    rows = corrected["stats"]["Home"]["FullGame"]
+    corrected["stats"]["Home"]["FullGame"] = [
+        row for row in rows if str(row.get("EntityId")) != "0" and row.get("Name") != "Team"
+    ]
+    diagnostics = corrected["team_results"]["Home"]["FullGame"]
+    for wire_name in ("Rebounds", "OffRebounds", "DefRebounds"):
+        diagnostics[wire_name] = sum(
+            int(row.get(wire_name) or 0) for row in corrected["stats"]["Home"]["FullGame"]
+        )
+    replacement = canonical_game_from_pbp(corrected, event=event, participant_ids_by_team=participants)
+    assert repository.replace_game(replace(replacement, retrieved_at=replacement.retrieved_at + timedelta(minutes=1))).replaced
+    with engine.connect() as connection:
+        alerts = connection.execute(select(ReconciliationItem).where(
+            ReconciliationItem.kind == "schema_drift"
+        )).mappings().all()
+    assert alerts == []
+
+
 def test_unchanged_replacement_emits_no_schema_drift_alert(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'no-drift.sqlite3'}")
     run_migrations(engine)
@@ -2061,6 +2090,18 @@ def test_omitted_team_summary_row_is_accepted_only_with_a_proven_zero_residual(t
     assert repository.replace_game(game).inserted
     stored = repository.get_game(game.game_id)
     assert stored is not None and stored.checksum == game.checksum
+
+    # Without a team-summary row there is no possession authority to bind.
+    unbound = replace(
+        game,
+        team_facts=tuple(
+            replace(fact, possessions=99.0) if fact.team_id == 1610612747 else fact
+            for fact in game.team_facts
+        ),
+        checksum=None,
+    ).with_checksum()
+    with pytest.raises(LedgerValidationError, match="possessions requires a team-summary row"):
+        repository.replace_game(unbound)
 
 
 def test_explicit_zero_required_count_remains_valid(tmp_path):

@@ -1146,8 +1146,8 @@ def _sum_team_facts(
     where the declared authority is zero), well-formed, and reconciling with
     the declared team authority, and the
     diagnostics never populate a typed fact.  ``require_team_row`` is set for
-    accepted raw observations: a complete game may never omit a side's
-    team-summary row.
+    accepted raw observations: a side may omit its team-summary row only when
+    the diagnostics are present to prove a zero team-only residual.
     """
 
     if require_team_row and team_row is None and provider_total is None:
@@ -1871,6 +1871,10 @@ def validate_complete_game(game: CanonicalGame) -> CanonicalGame:
                 raise LedgerValidationError(
                     f"team_fact.{field_name} must reconcile with player primitives and team-only evidence"
                 )
+        if not team_row_payload[team_fact.team_id] and team_fact.possessions is not None:
+            raise LedgerValidationError(
+                "team_fact.possessions requires a team-summary row"
+            )
         expected_minutes = sum(player.minutes for player in team_players) / 5.0
         if not math.isclose(team_fact.team_minutes, expected_minutes, abs_tol=1e-9):
             raise LedgerValidationError(
@@ -2166,11 +2170,14 @@ class CanonicalGameLedgerRepository:
         raw_rows = connection.execute(select(
             tables["raw"].c.side,
             tables["raw"].c.row_type,
-            tables["raw"].c.row_index,
+            tables["raw"].c.entity_id,
             tables["raw"].c.observed_fields,
         ).where(tables["raw"].c.game_id == candidate.game_id)).mappings().all()
+        # Rows correspond by identity (side, type, entity), never by provider
+        # index: a correction that adds or omits a row shifts every later
+        # index without changing which player a row describes.
         candidate_fields = {
-            (row.side, row.row_type, row.row_index): frozenset(row.observed_fields)
+            (row.side, row.row_type, row.entity_id): frozenset(row.observed_fields)
             for row in candidate.raw_rows
         }
         if existing is None or not raw_rows:
@@ -2192,7 +2199,7 @@ class CanonicalGameLedgerRepository:
             }
 
         def row_key(row: Any) -> tuple[Any, Any, Any]:
-            return (row["side"], row["row_type"], row["row_index"])
+            return (row["side"], row["row_type"], row["entity_id"])
 
         existing_fields = {
             row_key(row): frozenset(json.loads(row["observed_fields"] or "[]"))

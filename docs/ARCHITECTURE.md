@@ -1095,9 +1095,10 @@ production backfill consumes the complete raw
 `/get-game-stats` document through a dedicated adapter seam
 (`PBPGameLogAdapter.fetch_game_stats`) rather than the projected player-only
 DataFrame, so team-summary rows and unknown additive keys always reach the
-archive. An accepted raw observation must contain exactly one team-summary row
-for each governed Home/Away side; the team row is the sparse residual authority
-and is never a fallback.
+archive. An accepted raw observation carries at most one team-summary row per
+governed Home/Away side, and may omit one only where the side's diagnostics
+prove a zero team-only residual (see below); the team row is the sparse
+residual authority and is never a fallback.
 
 Raw JSON canonicalization is deterministic and lossless: each payload is
 serialized with sorted keys and compact separators, and the game-level
