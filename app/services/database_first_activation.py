@@ -15,7 +15,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from math import isfinite
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, NamedTuple, Protocol
 
 from sqlalchemy import case, exists, null, select
 from sqlalchemy.engine import Connection, Engine
@@ -659,6 +659,16 @@ class PublicationRead:
         }
 
 
+class _SnapshotRow(NamedTuple):
+    """One stream's captured generation: its pointer, version, and read shape."""
+
+    stream: Any
+    pointer: Any
+    publication: Any
+    projection_ready: bool = False
+    payload_text: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationReadSnapshot:
     """One request-scoped publication generation.
@@ -885,34 +895,34 @@ class DatabaseFirstPublicationReader:
                         ).label("payload_text")
                     )
                 snapshot = {
-                    row[0].stream_key: (
-                        row[0],
-                        row[1],
-                        row[2],
-                        bool(row.projection_ready),
-                        row.payload_text if hydrated_keys else None,
+                    row[0].stream_key: _SnapshotRow(
+                        stream=row[0],
+                        pointer=row[1],
+                        publication=row[2],
+                        projection_ready=bool(row.projection_ready),
+                        payload_text=row.payload_text if hydrated_keys else None,
                     )
                     for row in session.execute(statement).all()
                 }
             else:
                 snapshot = {
-                    stream.stream_key: (stream, pointer, publication, False, None)
+                    stream.stream_key: _SnapshotRow(stream, pointer, publication)
                     for stream, pointer, publication
                     in session.execute(statement).all()
                 }
             now = _utc(self.clock())
+            missing = _SnapshotRow(None, None, None)
             reads = {
                 key: self._read_row(key, **{
-                    "stream": snapshot[key][0] if key in snapshot else None,
-                    "pointer": snapshot[key][1] if key in snapshot else None,
-                    "publication": snapshot[key][2] if key in snapshot else None,
+                    "stream": snapshot.get(key, missing).stream,
+                    "pointer": snapshot.get(key, missing).pointer,
+                    "publication": snapshot.get(key, missing).publication,
                     "projection_ready": (
                         key in projection_keys
-                        and key in snapshot
-                        and snapshot[key][3]
+                        and snapshot.get(key, missing).projection_ready
                     ),
                     "hydrate_payload": key not in projection_keys,
-                    "payload_text": snapshot[key][4] if key in snapshot else None,
+                    "payload_text": snapshot.get(key, missing).payload_text,
                     "season": season,
                     "require_active": require_active,
                     "now": now,

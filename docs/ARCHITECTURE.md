@@ -1474,8 +1474,9 @@ and game. The request planner reads pointer/version metadata without selecting
 `publication_versions.payload`, then the repository executes one indexed
 player query and decodes only those rows. The matchup read takes the same
 projection path: its one snapshot names `player_game_logs` as projection-only,
-so that stream's payload column is left unread while the other publication
-streams in the same generation stay hydrated, and the summaries read resolves
+so that stream's payload value is never fetched (the one capture statement
+guards the column behind a per-row `CASE` on stream key) while the other
+publication streams in the same generation stay hydrated, and the summaries read resolves
 the game's player pool from one indexed query. Composition and rollback write the
 projection in the publication transaction, while migration 036 backfills
 existing valid versions; the projection therefore preserves exact active and

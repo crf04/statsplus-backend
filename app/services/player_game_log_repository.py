@@ -370,26 +370,18 @@ class PlayerGameLogRepository:
         if publication_id is None:
             return ()
         projection = PublicationPlayerGameLog.__table__
-        with self.engine.connect() as connection:
-            payloads = connection.execute(
-                select(projection.c.row_payload)
-                .where(
-                    projection.c.publication_id == publication_id,
-                    projection.c.player_id == player_id,
-                )
-                .order_by(
-                    projection.c.game_date.desc(),
-                    projection.c.game_id.desc(),
-                )
-            ).scalars().all()
-        try:
-            return tuple(
-                decode_player_game_log_projection(payloads, season=season)
+        return self._decode_projection(
+            select(projection.c.row_payload)
+            .where(
+                projection.c.publication_id == publication_id,
+                projection.c.player_id == player_id,
             )
-        except PublicationPayloadError:
-            # A corrupt immutable projection fails closed and never falls back
-            # to a different legacy generation.
-            return ()
+            .order_by(
+                projection.c.game_date.desc(),
+                projection.c.game_id.desc(),
+            ),
+            season=season,
+        )
 
     def _projected_summary_rows(
         self,
@@ -412,19 +404,25 @@ class PlayerGameLogRepository:
         if read.publication_id is None:
             return ()
         projection = PublicationPlayerGameLog.__table__
+        return self._decode_projection(
+            select(projection.c.row_payload)
+            .where(
+                projection.c.publication_id == read.publication_id,
+                projection.c.player_id.in_(player_ids),
+            )
+            .order_by(
+                projection.c.player_id.asc(),
+                projection.c.game_date.asc(),
+                projection.c.game_id.asc(),
+            ),
+            season=season,
+        )
+
+    def _decode_projection(
+        self, statement, *, season: str
+    ) -> tuple[PlayerGameLogRecord, ...]:
         with self.engine.connect() as connection:
-            payloads = connection.execute(
-                select(projection.c.row_payload)
-                .where(
-                    projection.c.publication_id == read.publication_id,
-                    projection.c.player_id.in_(player_ids),
-                )
-                .order_by(
-                    projection.c.player_id.asc(),
-                    projection.c.game_date.asc(),
-                    projection.c.game_id.asc(),
-                )
-            ).scalars().all()
+            payloads = connection.execute(statement).scalars().all()
         try:
             return tuple(
                 decode_player_game_log_projection(payloads, season=season)
