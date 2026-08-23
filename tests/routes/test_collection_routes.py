@@ -466,3 +466,98 @@ def test_rate_limit_has_stable_retry_timing(client, app):
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "60"
     assert response.json["error"]["details"] == {"retry_after_seconds": 60}
+
+
+def _install_real_collection_operations(app, tmp_path):
+    """Bind the admin/collector routes to real usage and publication state."""
+
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.collection_control import (
+        CollectionOperationsService,
+        PublicationService,
+    )
+
+    dependencies = _install_collection_services(app)
+    engine = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine)
+    publications.register_default_streams()
+    dependencies.collection_operations = CollectionOperationsService(
+        engine, publication_service=publications,
+    )
+    return dependencies, engine
+
+
+def test_activation_route_enables_an_nba_stream_for_its_first_collection(client, app, tmp_path):
+    _install_real_collection_operations(app, tmp_path)
+
+    response = client.post(
+        "/api/admin/collection/streams/synergy_play_types_opponent_season/activate",
+        json={"reason": "enable for first collection"},
+    )
+
+    assert response.status_code == 202, response.json
+    assert response.json["stream_key"] == "synergy_play_types_opponent_season"
+    assert response.json["enabled"] is True
+
+
+def test_activation_route_still_requires_a_candidate_for_a_ledger_stream(client, app, tmp_path):
+    from sqlalchemy import select as sa_select
+
+    from app.models.collection_control import PublicationStream
+
+    _, engine = _install_real_collection_operations(app, tmp_path)
+
+    response = client.post(
+        "/api/admin/collection/streams/traditional_opponent_season/activate",
+        json={"reason": "enable for first collection"},
+    )
+
+    assert response.status_code == 400
+    with engine.connect() as connection:
+        assert connection.execute(sa_select(PublicationStream.enabled).where(
+            PublicationStream.stream_key == "traditional_opponent_season"
+        )).scalar_one() is False
+
+
+def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, app, tmp_path):
+    from sqlalchemy import select as sa_select
+
+    from app.models.collection_control import CollectorUsage
+
+    dependencies, engine = _install_real_collection_operations(app, tmp_path)
+    dependencies.collection_control.discover.return_value = {
+        "environment": "testing", "bootstrap_requests": [], "manifests": [],
+    }
+    envelope = {
+        "manifest_id": "manifest-1", "client_observation_id": "obs-1",
+        "environment": "testing", "provider": "nba",
+        "observation_type": "synergy_play_types", "scope": {},
+        "season": "2025-26", "cutoff": "2026-08-11T00:00:00+00:00",
+        "schema_version": 2, "retrieved_at": "2026-08-12T00:00:00+00:00",
+        "payload": {"rows": []},
+    }
+
+    for index in range(3):
+        upload = client.post(
+            "/api/collector/observations",
+            data=gzip.compress(json.dumps({
+                **envelope, "client_observation_id": f"obs-{index}",
+            }).encode()),
+            headers={"Authorization": "Bearer token", "Content-Encoding": "gzip"},
+        )
+        assert upload.status_code == 202
+
+    with engine.connect() as connection:
+        uploaded = connection.execute(sa_select(CollectorUsage)).one()
+    assert (uploaded.envelope_count, uploaded.poll_count) == (3, 0)
+
+    discovery = client.get(
+        "/api/collector/discovery", headers={"Authorization": "Bearer token"}
+    )
+    assert discovery.status_code == 200
+    with engine.connect() as connection:
+        polled = connection.execute(sa_select(CollectorUsage)).one()
+    assert (polled.envelope_count, polled.poll_count) == (3, 1)

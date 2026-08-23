@@ -4594,10 +4594,32 @@ class CollectionOperationsService(_SessionService):
                 parity_artifact_id=parity_artifact_id,
                 candidate_publication_id=candidate_publication_id,
                 actor=actor,
-                require_candidate=True,
+                require_candidate=not self._enables_first_collection(
+                    session, stream_key
+                ),
                 session=session,
             ),
         )
+
+    @staticmethod
+    def _enables_first_collection(session: Session, stream_key: str) -> bool:
+        """Is this the operator enabling an NBA stream for its first collection?
+
+        NBA-owned snapshot streams are registered disabled, and ingestion only
+        accepts observations for an enabled stream, so their first candidate
+        cannot exist before the enable.  Once the stream is bound to a
+        publication that cycle is over and the candidate gate applies again.
+        Ledger streams never take this path: their evidence arrives on a
+        separate observation stream, so the parity gates stay unchanged.
+        """
+
+        row = session.get(PublicationStream, stream_key)
+        if row is None or row.provider != "nba":
+            return False
+        if row.publication_strategy != "snapshot_replace":
+            return False
+        pointer = session.get(PublicationPointer, stream_key)
+        return pointer is None or not pointer.active_publication_id
 
     def retry_composition(self, job_id: str, *, actor: str, reason: str) -> OperatorActionResult:
         if self.publication_service is None:

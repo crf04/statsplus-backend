@@ -51,6 +51,7 @@ from app.migrations import run_migrations
 from app.services.collection_control import (
     CollectorTokenService,
     CollectionControlService,
+    CollectionOperationsService,
     ControlPlaneError,
     NBA_TEAM_IDS,
     ObservationIngestionService,
@@ -1686,3 +1687,132 @@ def test_outbox_fails_closed_when_wal_durability_is_unavailable(monkeypatch, tmp
     monkeypatch.setattr(module.sqlite3, "connect", lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)))
     with pytest.raises(Exception, match="durability mode"):
         OutboxRepository(tmp_path / "unsafe.sqlite3")
+
+
+def test_operator_enable_unblocks_the_first_collection_of_an_nba_stream(tmp_path: Path):
+    """The registry ships NBA opponent streams disabled, and ingestion only
+    accepts observations for an enabled stream, so the operator enable is the
+    only way out of the first-candidate cycle."""
+
+    control_db = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
+    run_migrations(control_db)
+    team_ids = sorted(NBA_TEAM_IDS)
+    cutoff = NOW
+    control = CollectionControlService(control_db, clock=lambda: NOW)
+    control.activate_season("2025-26", actor="operator")
+    event_request = control.create_bootstrap_request(
+        "2025-26", "event", cutoff=cutoff
+    )
+    control.publish_catalog(event_request.request_id, {
+        "complete_snapshot": True,
+        "events": [{
+            "nba_game_id": f"game-{round_index}-{pair_index}",
+            "home_team_id": team_ids[pair_index * 2],
+            "away_team_id": team_ids[pair_index * 2 + 1],
+            "phase": "Regular Season", "status": "Final",
+            "scheduled_at": (
+                cutoff - timedelta(days=15 - round_index, hours=1)
+            ).isoformat(),
+        } for round_index in range(15) for pair_index in range(15)],
+    }, version="event-v1")
+    athlete_request = control.create_bootstrap_request(
+        "2025-26", "athlete", cutoff=cutoff
+    )
+    control.publish_catalog(athlete_request.request_id, {
+        "complete_snapshot": True,
+        "identities": [{
+            "player_id": "1", "team_id": team_ids[0], "status": "active",
+            "event_ids": [
+                f"game-{round_index}-{pair_index}"
+                for round_index in range(15) for pair_index in range(15)
+            ],
+        }],
+    }, version="athlete-v1")
+    stream_key = NBA_PUBLICATION_STREAMS["play_types"].format(window="season")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=cutoff, scopes={stream_key, "canonical_game_ledger"},
+        collect_before=NOW + timedelta(hours=1),
+    )
+    manifest_scopes = set(json.loads(manifest.scopes))
+    descriptors = _collector_scope_descriptors(manifest_scopes, cutoff)
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": manifest.manifest_id, "season": "2025-26",
+        "cutoff": cutoff.isoformat(),
+        "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+        "accepted_versions": [2], "scopes": sorted(manifest_scopes),
+        "scope_descriptors": descriptors,
+    }]}
+
+    class OpponentProvider(FakeProvider):
+        def fetch_synergy_play_types(self, category, **kwargs):
+            return [{
+                "team_id": int(team_id), "category": category,
+                "GP": 15, "MIN": 750, "POSS": 10, "PTS": 12,
+            } for team_id in team_ids]
+
+    collector, transport, outbox = _collector(
+        tmp_path, discovery=discovery, provider=OpponentProvider()
+    )
+    assert collector.run().disposition is RunDisposition.COMPLETE
+    uploaded = [
+        json.loads(gzip.decompress(call[3]))
+        for call in transport.calls
+        if "/api/collector/observations" in call[1]
+    ]
+    assert {document["observation_type"] for document in uploaded} == {
+        "synergy_opponent"
+    }
+
+    governance = ActiveManifestLedgerGovernanceReader(control_db)
+    publications = PublicationService(
+        control_db, clock=lambda: NOW, l15_expectation_resolver=governance,
+    )
+    publications.register_default_streams()
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: NOW
+    )
+    identity = tokens.create_identity(
+        "collector", scopes=["ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=["synergy_opponent"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    ingestion = ObservationIngestionService(
+        control_db, publication_service=publications, clock=lambda: NOW
+    )
+    blocked = json.loads(json.dumps(uploaded[0]))
+    blocked_payload = json.dumps(
+        blocked.pop("payload"), sort_keys=True, separators=(",", ":")
+    ).encode()
+    with pytest.raises(ControlPlaneError, match="provider_not_registered"):
+        ingestion.ingest(claims, blocked, blocked_payload)
+
+    operations = CollectionOperationsService(
+        control_db, publication_service=publications, clock=lambda: NOW
+    )
+    activation = operations.activate_stream(
+        stream_key, actor="operator", reason="enable for first collection",
+    )
+    assert activation.resource.enabled is True
+
+    for document in uploaded:
+        payload = json.dumps(
+            document.pop("payload"), sort_keys=True, separators=(",", ":")
+        ).encode()
+        ingestion.ingest(claims, document, payload)
+    publication = publications.compose_from_observations(
+        stream_key, season="2025-26", cutoff=cutoff,
+        manifest_id=manifest.manifest_id,
+    )
+
+    assert publication.status in {"candidate", "active"}
+    with control_db.connect() as connection:
+        assert connection.execute(select(PublicationVersion).where(
+            PublicationVersion.stream_key == stream_key
+        )).one().publication_id == publication.publication_id
+    read = DatabaseFirstPublicationReader(control_db, clock=lambda: NOW).read(
+        stream_key, season="2025-26"
+    )
+    assert read.available and len(read.decoded or ()) == 30
+    outbox.close()
