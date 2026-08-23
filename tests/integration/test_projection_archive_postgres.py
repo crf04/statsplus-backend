@@ -140,7 +140,7 @@ def test_concurrent_postgres_close_and_late_materialization_keep_one_fenced_set(
     initial_observation_id = next(
         observation_id
         for observation_id, observed_at in observations
-        if observed_at == initial.retrieved_at.replace(tzinfo=None)
+        if observed_at == initial.retrieved_at
     )
     assert memberships[0].observation_id == initial_observation_id
     assert initial_result.snapshot_id != late_result.snapshot_id
