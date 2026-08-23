@@ -1480,7 +1480,12 @@ posted primitive row and every combo that consumes it. Components unavailable
 from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
 score applies each raw observed share to the slice's fractional matchup
 difference, so the unobserved residual in an admitted rounded partition has a
-neutral baseline without share normalization or fabricated evidence. A slice
+neutral baseline without share normalization or fabricated evidence. Every
+Base except play types must arrive as a whole partition; Synergy publishes a
+player's play-type row only where the sample is large enough to rate, so a
+play-type Diet is complete when every observed slice is governed, and its
+cell is marked thin when the observed shares cover less than 0.85 of the
+player's possessions. A slice
 with exact league/opponent `0/0` is likewise a neutral structural zero; nonzero
 opponent evidence against a non-positive league denominator fails closed, and
 an all-structural-zero component remains absent. A

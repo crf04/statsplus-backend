@@ -152,8 +152,13 @@ _DIET_SLICE_KEYS = {
 # Provider shares are rounded rather than derived from the persisted volumes.
 # Recorded/live 2025-26 observations span 0.998-1.002 for a full play-type
 # partition and 0.900-1.001 for the three governed shot-type rows.
+# Synergy publishes a player's play-type row only where the sample is large
+# enough to rate, so a player's observed shares are a partial partition whose
+# unobserved residual is neutral by construction. Below this coverage the
+# component still computes, but the cell is marked thin.
+_PLAY_TYPE_THIN_COVERAGE = 0.85
 _DIET_SHARE_BOUNDS = {
-    "play_types": (0.995, 1.005),
+    "play_types": (0.0, 1.005),
     "shot_zones": (1.0 - 1e-6, 1.0 + 1e-6),
     "shot_types": (0.9, 1.01),
     "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
@@ -1049,7 +1054,8 @@ class MatchupService:
         ):
             return None
         facts = tuple(fact for fact in diet_facts if fact.base == base)
-        if not self._complete_diet(base, facts):
+        observed_share = self._complete_diet(base, facts)
+        if observed_share is None:
             return None
         selected_facts = tuple(
             fact for fact in facts if slice_keys is None or fact.slice_key in slice_keys
@@ -1134,7 +1140,8 @@ class MatchupService:
         return {
             "value": self._number(value),
             "thin": (
-                any(
+                (base == "play_types" and observed_share < _PLAY_TYPE_THIN_COVERAGE)
+                or any(
                     fact.games_played < self.settings.matchup_scores.min_games
                     for fact in selected_facts
                 )
@@ -1150,15 +1157,27 @@ class MatchupService:
     @staticmethod
     def _complete_diet(
         base: str, facts: Sequence[StoredPlayerDietFact]
-    ) -> bool:
+    ) -> float | None:
+        """Return the observed share sum of a complete Diet, else ``None``."""
+
         if not facts:
-            return False
+            return None
         keys = [fact.slice_key for fact in facts]
-        if len(keys) != len(set(keys)) or set(keys) != _DIET_SLICE_KEYS[base]:
-            return False
+        if len(keys) != len(set(keys)):
+            return None
+        # play_types is the one Base whose provider omits unobserved slices,
+        # so it is complete when every observed slice is governed; the other
+        # Bases are full partitions and must arrive whole.
+        if base == "play_types":
+            if not set(keys) <= _DIET_SLICE_KEYS[base]:
+                return None
+        elif set(keys) != _DIET_SLICE_KEYS[base]:
+            return None
         lower, upper = _DIET_SHARE_BOUNDS[base]
         share_sum = sum(fact.share for fact in facts)
-        return lower - 1e-12 <= share_sum <= upper + 1e-12
+        if not lower - 1e-12 <= share_sum <= upper + 1e-12:
+            return None
+        return share_sum
 
     @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:
