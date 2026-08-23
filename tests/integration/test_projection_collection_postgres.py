@@ -1,14 +1,17 @@
 """PostgreSQL lease-fence coverage for projection collection (#106)."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from threading import Event, Thread
+from threading import Barrier, Event
 from types import SimpleNamespace
 import os
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 
+from app.migrations import run_migrations
 from app.models import Base
+from app.models.projection_collection import ProjectionCollectionLease
 from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
 from app.services.projection_collection import (
     ProjectionCollectionCoordinator,
@@ -58,7 +61,22 @@ def test_postgres_projection_lease_has_one_winner():
         pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
     engine = create_engine(url)
     Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
+    run_migrations(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "DROP TABLE projection_collection_provider_states"
+        )
+        connection.exec_driver_sql("DROP TABLE projection_collection_leases")
+        connection.exec_driver_sql(
+            "ALTER TABLE projection_provider_polls DROP COLUMN duration_ms"
+        )
+        connection.exec_driver_sql(
+            "DELETE FROM schema_migrations WHERE version = 43"
+        )
+    upgraded = run_migrations(engine)
+    assert upgraded.applied == ("043_projection_collection_control",)
     try:
         entered = Event()
         release = Event()
@@ -71,27 +89,47 @@ def test_postgres_projection_lease_has_one_winner():
                 "status_code": 1,
             }
         ]
-        kwargs = {
-            "engine": engine,
-            "board_service": board,
-            "recording_service": _Recorder(),
-            "event_reader": lambda season: events,
-            "season": "2025-26",
-            "providers": ("dabble",),
-            "settings": ProjectionCollectionSettings(),
-            "clock": lambda: NOW,
-        }
-        first = ProjectionCollectionCoordinator(owner="postgres-first", **kwargs)
-        second = ProjectionCollectionCoordinator(owner="postgres-second", **kwargs)
-        results = []
-        worker = Thread(target=lambda: results.append(first.run()))
-        worker.start()
-        assert entered.wait(timeout=5)
-        assert second.run().status == "busy"
-        release.set()
-        worker.join(timeout=5)
-        assert results[0].status == "complete"
+        start = Barrier(2)
+        database_url = engine.url.render_as_string(hide_password=False)
+
+        def collect(owner):
+            worker_engine = create_engine(database_url)
+            try:
+                coordinator = ProjectionCollectionCoordinator(
+                    worker_engine,
+                    board_service=board,
+                    recording_service=_Recorder(),
+                    event_reader=lambda _season: events,
+                    season="2025-26",
+                    providers=("dabble",),
+                    settings=ProjectionCollectionSettings(),
+                    clock=lambda: NOW,
+                    owner=owner,
+                )
+                start.wait(timeout=5)
+                result = coordinator.run()
+                if result.status == "busy":
+                    release.set()
+                return result
+            finally:
+                worker_engine.dispose()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = tuple(
+                executor.map(collect, ("postgres-first", "postgres-second"))
+            )
+
+        assert sorted(result.status for result in results) == ["busy", "complete"]
         assert board.calls == 1
+        with engine.connect() as connection:
+            fence = connection.execute(
+                select(ProjectionCollectionLease.fence).where(
+                    ProjectionCollectionLease.lease_key == "projection"
+                )
+            ).scalar_one()
+        assert fence == 1
     finally:
         Base.metadata.drop_all(engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
         engine.dispose()

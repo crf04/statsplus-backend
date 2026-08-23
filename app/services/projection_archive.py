@@ -269,7 +269,7 @@ class ProjectionArchiveReadScope:
 
     @property
     def query_key(self) -> str:
-        return _query_key(self.query)
+        return projection_query_key(self.query)
 
 
 def _digest(prefix: str, *values: object) -> str:
@@ -339,7 +339,7 @@ def _canonical_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
     )
 
 
-def _query_key(query: NBAMarketQuery) -> str:
+def projection_query_key(query: NBAMarketQuery) -> str:
     return _digest(
         "qry",
         query.season,
@@ -440,7 +440,7 @@ class ProjectionArchive:
         if poll_started is not None and poll_started > accepted:
             raise ValueError("projection poll cannot start after it completes")
         source = _source_snapshot(snapshot)
-        query_key = _query_key(query)
+        query_key = projection_query_key(query)
         observation_count = len(snapshot.markets)
         document = serialize_provider_snapshot(source, query, allow_partial=True)
         if len(document.encode("utf-8")) > self.max_document_bytes:
@@ -838,7 +838,7 @@ class ProjectionArchive:
         started = None if poll_started_at is None else assume_utc(poll_started_at)
         if started is not None and started > completed:
             raise ValueError("projection poll cannot start after it completes")
-        query_key = _query_key(query)
+        query_key = projection_query_key(query)
         poll_id = _digest(
             "pollf",
             normalized_provider,
@@ -1890,7 +1890,7 @@ class ProjectionRecordingService:
                 "projection snapshot provider is outside the configured recording scope: "
                 f"received {normalized_provider!r}"
             )
-        if _query_key(query) != scope.query_key:
+        if projection_query_key(query) != scope.query_key:
             raise ValueError(
                 "projection snapshot query is outside the configured recording scope"
             )
@@ -1986,5 +1986,6 @@ __all__ = [
     "ProjectionPollResult",
     "ProjectionRecordingService",
     "ProjectionSelectionPlayerPoolReader",
+    "projection_query_key",
     "require_projection_archive_schema",
 ]

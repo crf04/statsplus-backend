@@ -432,19 +432,31 @@ lease, so offseason/no-due runs do not call a provider. The default board-wide
 policy is every 30 minutes beginning 24 hours before the earliest non-postponed,
 non-started event and every five minutes in the final two hours. Both intervals
 and the horizon are configurable. A past scheduled timestamp does not stop the
-poll: only governed event status (live/final/postponed) closes that event's
-collection window. The one-shot `scripts/collect_projections.py` command uses
-this coordinator, not a second ingestion path or an admin refresh route.
+poll during the bounded delayed-game window: governed event status
+(live/final/postponed), rather than tip-off time, closes an active event's
+collection window. A still-scheduled row more than the configured horizon past
+tip-off is ignored as stale so an abandoned catalog row cannot pin offseason
+collection forever. Each wake derives dueness from the last poll plus the
+*current* interval, so crossing into the final two hours immediately adopts the
+five-minute cadence instead of waiting out an earlier 30-minute deadline. The
+one-shot `scripts/collect_projections.py` command uses this coordinator, not a
+second ingestion path or an admin refresh route.
 
 Migration 043 adds one singleton `projection_collection_leases` row and
 per-provider `projection_collection_provider_states`. PostgreSQL locks and
-fences the lease row; SQLite uses `BEGIN IMMEDIATE` for local tests but is not
-evidence for the production concurrency contract. A busy or overlapping run is
-a safe no-op. Provider outcomes are persisted independently through the
-existing archive recorder, with bounded exponential backoff/circuit-open state
-for failures and a bounded Provider Poll duration. A failure from one provider
-cannot suppress another provider's attempt. The coordinator's adaptive policy
-is intended to be woken by a dedicated Railway service every five minutes.
+fences the lease row using database time, so process-clock skew cannot steal a
+live lease. The owner renews that lease around board and per-provider work; an
+expiry or takeover returns the bounded `busy/lease_lost` outcome. SQLite uses
+`BEGIN IMMEDIATE` for local tests but is not evidence for the production
+locking contract. A busy or overlapping run is a safe no-op. Provider outcomes
+are persisted independently through the existing archive recorder, with
+bounded exponential backoff/circuit-open state for failures and a bounded
+Provider Poll duration. Stale-if-error cache fallback is failure health rather
+than a successful poll, board-wide defects and omitted outcomes create bounded
+failure rows, and no failed provider is retried faster than the current healthy
+cadence. A failure from one provider cannot suppress another provider's
+attempt. The coordinator's adaptive policy is intended to be woken by a
+dedicated Railway service every five minutes.
 Admin diagnostics expose only provider-safe last-poll/last-changed timestamps,
 bounded freshness, failure/backoff state, active/unresolved counts, and lease
 state; they never expose raw payloads or source identifiers. Request-time

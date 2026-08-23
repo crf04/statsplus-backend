@@ -10,7 +10,7 @@ import math
 import time
 from typing import Any
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -23,7 +23,7 @@ from app.models.projection_collection import (
 )
 from app.providers.dfs import NBAMarketQuery, ProviderSnapshot
 from app.services.event_catalog_repository import EventCatalogRepository
-from app.services.projection_archive import _query_key
+from app.services.projection_archive import projection_query_key
 
 
 LEASE_KEY = "projection"
@@ -112,6 +112,8 @@ class ProjectionCollectionCoordinator:
             status_code = None
         if status_code in {2, 3}:
             return True
+        if status_code is None:
+            return False
         status = str(event.get("status_text", event.get("status", ""))).strip().casefold()
         if not status or status in _SCHEDULED_STATUSES or status_code == 1:
             return False
@@ -126,7 +128,11 @@ class ProjectionCollectionCoordinator:
             if scheduled_at is None:
                 continue
             scheduled = self._utc(scheduled_at)
-            if scheduled <= now + self.settings.pregame_horizon:
+            if (
+                now - self.settings.pregame_horizon
+                <= scheduled
+                <= now + self.settings.pregame_horizon
+            ):
                 events.append(scheduled)
         if not events or not providers:
             return None
@@ -139,7 +145,7 @@ class ProjectionCollectionCoordinator:
             else self.settings.slow_interval
         )
         query = NBAMarketQuery(season=self.season)
-        query_key = _query_key(query)
+        query_key = projection_query_key(query)
         due: list[str] = []
         state_table = ProjectionCollectionProviderState.__table__
         with self.engine.connect() as connection:
@@ -155,7 +161,13 @@ class ProjectionCollectionCoordinator:
             }
         for provider in providers:
             row = rows.get(provider)
-            if row is None or row["next_poll_at"] is None or self._utc(row["next_poll_at"]) <= now:
+            if row is None or row["last_poll_at"] is None:
+                due.append(provider)
+                continue
+            backoff_until = row["backoff_until"]
+            if backoff_until is not None and self._utc(backoff_until) > now:
+                continue
+            if self._utc(row["last_poll_at"]) + interval <= now:
                 due.append(provider)
         return _ScheduleDecision(interval=interval, providers=tuple(due)) if due else None
 
@@ -177,9 +189,15 @@ class ProjectionCollectionCoordinator:
         with self.engine.begin() as connection:
             yield connection
 
-    def _acquire_lease(self, now: datetime) -> tuple[int, int] | None:
+    def _database_now(self, connection: Any) -> datetime:
+        return self._utc(
+            connection.execute(select(func.current_timestamp())).scalar_one()
+        )
+
+    def _acquire_lease(self, _process_now: datetime | None = None) -> tuple[int, int] | None:
         table = ProjectionCollectionLease.__table__
         with self._transaction() as connection:
+            now = self._database_now(connection)
             row = connection.execute(
                 select(table).where(table.c.lease_key == LEASE_KEY).with_for_update()
             ).mappings().one_or_none()
@@ -216,23 +234,40 @@ class ProjectionCollectionCoordinator:
             )
             return fence, int(math.ceil(self.settings.lease_duration.total_seconds()))
 
-    def _assert_lease(self, now: datetime, fence: int) -> None:
-        table = ProjectionCollectionLease.__table__
-        with self.engine.connect() as connection:
-            row = connection.execute(
-                select(table).where(table.c.lease_key == LEASE_KEY)
-            ).mappings().one_or_none()
-        if (
-            row is None
-            or row["owner"] != self.owner
-            or int(row["fence"]) != fence
-            or self._utc(row["lease_expires_at"]) <= now
-        ):
-            raise RuntimeError("projection collection lease is stale")
-
-    def _release_lease(self, now: datetime, fence: int) -> None:
+    def _renew_lease(self, fence: int) -> bool:
         table = ProjectionCollectionLease.__table__
         with self._transaction() as connection:
+            now = self._database_now(connection)
+            row = connection.execute(
+                select(table)
+                .where(table.c.lease_key == LEASE_KEY)
+                .with_for_update()
+            ).mappings().one_or_none()
+            if (
+                row is None
+                or row["owner"] != self.owner
+                or int(row["fence"]) != fence
+                or self._utc(row["lease_expires_at"]) <= now
+            ):
+                return False
+            connection.execute(
+                update(table)
+                .where(
+                    table.c.lease_key == LEASE_KEY,
+                    table.c.owner == self.owner,
+                    table.c.fence == fence,
+                )
+                .values(
+                    lease_expires_at=now + self.settings.lease_duration,
+                    updated_at=now,
+                )
+            )
+            return True
+
+    def _release_lease(self, _process_now: datetime, fence: int) -> None:
+        table = ProjectionCollectionLease.__table__
+        with self._transaction() as connection:
+            now = self._database_now(connection)
             connection.execute(
                 update(table)
                 .where(table.c.lease_key == LEASE_KEY, table.c.owner == self.owner, table.c.fence == fence)
@@ -252,7 +287,7 @@ class ProjectionCollectionCoordinator:
         duration_ms: int | None = None,
     ) -> None:
         del duration_ms  # Poll duration is stored on ProviderPoll, not state.
-        query_key = _query_key(NBAMarketQuery(season=self.season))
+        query_key = projection_query_key(NBAMarketQuery(season=self.season))
         table = ProjectionCollectionProviderState.__table__
         with self._transaction() as connection:
             row = connection.execute(
@@ -279,9 +314,12 @@ class ProjectionCollectionCoordinator:
                     values["active_count"], values["unresolved_count"] = counts
             else:
                 failures = previous_failures + 1
-                delay = min(
-                    self.settings.backoff_max,
-                    self.settings.backoff_base * (2 ** min(failures - 1, 20)),
+                delay = max(
+                    interval,
+                    min(
+                        self.settings.backoff_max,
+                        self.settings.backoff_base * (2 ** min(failures - 1, 20)),
+                    ),
                 )
                 values = {
                     "last_poll_at": now,
@@ -324,9 +362,18 @@ class ProjectionCollectionCoordinator:
 
     @staticmethod
     def _failure_reason(outcome: Any) -> str:
-        reason = getattr(outcome, "reason", None)
+        reason = getattr(outcome, "cache_failure_reason", None) or getattr(
+            outcome, "reason", None
+        )
         value = str(getattr(reason, "value", reason) or "upstream_error").casefold()
         return value if value.replace("_", "").isalnum() and len(value) <= 64 else "upstream_error"
+
+    @staticmethod
+    def _has_cache_failure(outcome: Any) -> bool:
+        return bool(
+            getattr(outcome, "cache_status", None) == "stale"
+            or getattr(outcome, "cache_failure_reason", None)
+        )
 
     @staticmethod
     def _snapshot_counts(snapshot: ProviderSnapshot) -> tuple[int, int]:
@@ -337,6 +384,19 @@ class ProjectionCollectionCoordinator:
             if market.event is None or market.athlete is None or market.statistic is None
         )
         return active, unresolved
+
+    def _lease_lost_result(
+        self,
+        *,
+        started: float,
+        providers: Iterable[str],
+    ) -> CollectionRunResult:
+        return CollectionRunResult(
+            "busy",
+            "lease_lost",
+            tuple(providers),
+            max(0, int(round((self.monotonic() - started) * 1000))),
+        )
 
     def run(self, *, providers: Iterable[str] | None = None) -> CollectionRunResult:
         started = self.monotonic()
@@ -357,21 +417,66 @@ class ProjectionCollectionCoordinator:
                 return CollectionRunResult("no_work", "not_due")
             poll_started = self._utc(self.clock())
             board_started = self.monotonic()
-            self._assert_lease(poll_started, fence)
-            board = self.board_service.get_board(
-                NBAMarketQuery(season=self.season),
-                providers=decision.providers,
-            )
+            if not self._renew_lease(fence):
+                return self._lease_lost_result(
+                    started=started, providers=decision.providers
+                )
+            try:
+                board = self.board_service.get_board(
+                    NBAMarketQuery(season=self.season),
+                    providers=decision.providers,
+                )
+            except Exception:
+                duration_ms = max(
+                    0, int(round((self.monotonic() - board_started) * 1000))
+                )
+                for provider in decision.providers:
+                    if not self._renew_lease(fence):
+                        return self._lease_lost_result(
+                            started=started, providers=decision.providers
+                        )
+                    completed_at = self._utc(self.clock())
+                    self.recording_service.record_failed_poll(
+                        provider=provider,
+                        query=NBAMarketQuery(season=self.season),
+                        completed_at=completed_at,
+                        poll_started_at=poll_started,
+                        failure_reason="upstream_error",
+                        duration_ms=duration_ms,
+                    )
+                    self._update_state(
+                        provider=provider,
+                        now=completed_at,
+                        interval=decision.interval,
+                        success=False,
+                        failure_reason="upstream_error",
+                        duration_ms=duration_ms,
+                    )
+                return CollectionRunResult(
+                    "partial",
+                    "provider_collection_failed",
+                    tuple(decision.providers),
+                    max(0, int(round((self.monotonic() - started) * 1000))),
+                )
             duration_ms = max(0, int(round((self.monotonic() - board_started) * 1000)))
             outcomes = tuple(getattr(board, "provider_outcomes", ()))
             successes = 0
             failures = 0
+            observed_providers: set[str] = set()
             for outcome in outcomes:
                 provider = str(getattr(outcome, "provider", "")).strip().casefold()
                 if provider not in decision.providers:
                     continue
-                self._assert_lease(self._utc(self.clock()), fence)
-                if self._outcome_status(outcome) in {"complete", "partial"} and getattr(outcome, "snapshot", None) is not None:
+                observed_providers.add(provider)
+                if not self._renew_lease(fence):
+                    return self._lease_lost_result(
+                        started=started, providers=decision.providers
+                    )
+                if (
+                    self._outcome_status(outcome) in {"complete", "partial"}
+                    and getattr(outcome, "snapshot", None) is not None
+                    and not self._has_cache_failure(outcome)
+                ):
                     snapshot = outcome.snapshot
                     try:
                         result = self.recording_service.record_snapshot(
@@ -383,6 +488,10 @@ class ProjectionCollectionCoordinator:
                         )
                     except Exception:
                         failures += 1
+                        if not self._renew_lease(fence):
+                            return self._lease_lost_result(
+                                started=started, providers=decision.providers
+                            )
                         self.recording_service.record_failed_poll(
                             provider=provider,
                             query=NBAMarketQuery(season=self.season),
@@ -399,6 +508,10 @@ class ProjectionCollectionCoordinator:
                             failure_reason="persistence_error",
                         )
                         continue
+                    if not self._renew_lease(fence):
+                        return self._lease_lost_result(
+                            started=started, providers=decision.providers
+                        )
                     successes += 1
                     retrieved_at = self._utc(snapshot.retrieved_at)
                     self._update_state(
@@ -421,6 +534,10 @@ class ProjectionCollectionCoordinator:
                         failure_reason=reason,
                         duration_ms=duration_ms,
                     )
+                    if not self._renew_lease(fence):
+                        return self._lease_lost_result(
+                            started=started, providers=decision.providers
+                        )
                     self._update_state(
                         provider=provider,
                         now=self._utc(self.clock()),
@@ -429,6 +546,31 @@ class ProjectionCollectionCoordinator:
                         failure_reason=reason,
                         duration_ms=duration_ms,
                     )
+            for provider in decision.providers:
+                if provider in observed_providers:
+                    continue
+                failures += 1
+                if not self._renew_lease(fence):
+                    return self._lease_lost_result(
+                        started=started, providers=decision.providers
+                    )
+                completed_at = self._utc(self.clock())
+                self.recording_service.record_failed_poll(
+                    provider=provider,
+                    query=NBAMarketQuery(season=self.season),
+                    completed_at=completed_at,
+                    poll_started_at=poll_started,
+                    failure_reason="missing_outcome",
+                    duration_ms=duration_ms,
+                )
+                self._update_state(
+                    provider=provider,
+                    now=completed_at,
+                    interval=decision.interval,
+                    success=False,
+                    failure_reason="missing_outcome",
+                    duration_ms=duration_ms,
+                )
             status = "complete" if failures == 0 and successes == len(decision.providers) else "partial"
             return CollectionRunResult(
                 status,
@@ -444,8 +586,9 @@ class ProjectionCollectionCoordinator:
 
         bounded = max(1, min(int(limit), 100))
         now = self._utc(self.clock())
-        query_key = _query_key(NBAMarketQuery(season=self.season))
+        query_key = projection_query_key(NBAMarketQuery(season=self.season))
         with self.engine.connect() as connection:
+            database_now = self._database_now(connection)
             states = list(
                 connection.execute(
                     select(ProjectionCollectionProviderState.__table__)
@@ -489,7 +632,11 @@ class ProjectionCollectionCoordinator:
                     "unresolved_count": min(100000, max(0, int(state["unresolved_count"] or 0))),
                 }
             )
-        lease_active = bool(lease and lease["owner"] and self._utc(lease["lease_expires_at"]) > now)
+        lease_active = bool(
+            lease
+            and lease["owner"]
+            and self._utc(lease["lease_expires_at"]) > database_now
+        )
         return {
             "providers": provider_diagnostics,
             "active_count": sum(item["active_count"] for item in provider_diagnostics),

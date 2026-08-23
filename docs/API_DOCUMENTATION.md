@@ -1842,8 +1842,10 @@ raw payloads or source identifiers. Absent evidence is JSON `null`:
 Projection collection is not an HTTP refresh operation. Railway wakes
 `scripts/collect_projections.py` every five minutes; its coordinator applies
 the configured 30-minute/5-minute adaptive cadence, governed event-status
-cutoff, database lease, provider backoff, and archive persistence path. API
-and browser reads remain database-only.
+cutoff, database-time lease/renewal, provider backoff, and archive persistence
+path. Stale cache fallback, omitted outcomes, and collector defects are health
+failures rather than successful polls. API and browser reads remain
+database-only.
 
 `freshness_status` is closed to `fresh`, `stale`, `missing`, or
 `unavailable`. Age is the non-negative bounded age of the active publication;
