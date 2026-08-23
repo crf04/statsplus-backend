@@ -362,14 +362,15 @@ class PBPTotalsAdapter:
             # the declared schema explicitly so a valid table is never
             # replaced by a schema-less DataFrame.
             return pd.DataFrame(columns=required_columns)
-        missing = [column for column in required_columns if column not in rows[0]]
-        if missing:
+        # The PBP wire is sparse: optional counters a row never observed are
+        # omitted, so row key sets legitimately differ (production 2025-26
+        # opponent totals: 230 keys in the union, 228 in every row).  The
+        # contract is that every row carries every required column.
+        if any(
+            any(column not in row for column in required_columns) for row in rows
+        ):
             raise ProviderResponseError(
                 "PBP Stats totals payload has an invalid schema."
-            )
-        if any(set(row) != set(rows[0]) for row in rows[1:]):
-            raise ProviderResponseError(
-                "PBP Stats totals payload has inconsistent row schemas."
             )
         return pd.DataFrame(rows)
 

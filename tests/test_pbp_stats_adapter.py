@@ -468,6 +468,19 @@ def test_parse_totals_valid_and_malformed():
     frame = PBPTotalsAdapter.parse_totals(VALID_PAYLOAD)
     assert len(frame) == 2
 
+    # The wire is sparse: optional counters vary per row (production 2025-26
+    # opponent totals carry "Clear Path Fouls" on some rows only).  Required
+    # columns must still be on every row.
+    import copy
+    sparse = copy.deepcopy(VALID_PAYLOAD)
+    sparse["multi_row_table_data"][0]["Clear Path Fouls"] = 1
+    sparse_frame = PBPTotalsAdapter.parse_totals(sparse)
+    assert len(sparse_frame) == 2 and "Clear Path Fouls" in sparse_frame.columns
+    missing_required = copy.deepcopy(VALID_PAYLOAD)
+    del missing_required["multi_row_table_data"][1]["TwoPtAssists"]
+    with pytest.raises(telemetry.ProviderResponseError, match="invalid schema"):
+        PBPTotalsAdapter.parse_totals(missing_required)
+
     with pytest.raises(telemetry.ProviderResponseError):
         PBPTotalsAdapter.parse_totals({"multi_row_table_data": "nope"})
 
