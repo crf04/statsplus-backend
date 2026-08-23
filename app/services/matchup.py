@@ -21,6 +21,7 @@ from app.domain.nba_events import (
     is_postponed_event,
     resolve_stored_event_classification,
 )
+from app.domain.play_type_matchup import play_type_matchup
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.team_matchup_taxonomy import (
@@ -151,8 +152,13 @@ _DIET_SLICE_KEYS = {
 # Provider shares are rounded rather than derived from the persisted volumes.
 # Recorded/live 2025-26 observations span 0.998-1.002 for a full play-type
 # partition and 0.900-1.001 for the three governed shot-type rows.
+# Synergy publishes a player's play-type row only where the sample is large
+# enough to rate, so a player's observed shares are a partial partition whose
+# unobserved residual is neutral by construction. Below this coverage the
+# component still computes, but the cell is marked thin.
+_PLAY_TYPE_THIN_COVERAGE = 0.85
 _DIET_SHARE_BOUNDS = {
-    "play_types": (0.995, 1.005),
+    "play_types": (0.0, 1.005),
     "shot_zones": (1.0 - 1e-6, 1.0 + 1e-6),
     "shot_types": (0.9, 1.01),
     "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
@@ -1058,64 +1064,94 @@ class MatchupService:
         ):
             return None
         facts = tuple(fact for fact in diet_facts if fact.base == base)
-        if not self._complete_diet(base, facts):
+        observed_share = self._complete_diet(base, facts)
+        if observed_share is None:
             return None
         selected_facts = tuple(
             fact for fact in facts if slice_keys is None or fact.slice_key in slice_keys
         )
         if not selected_facts:
             return None
-        if slice_keys is None:
-            positive_facts = []
-            for fact in selected_facts:
-                share = fact.share
-                if share > 0:
-                    positive_facts.append((fact, share))
-            weighted_facts = tuple(positive_facts)
+        if base == "play_types":
+            # The Log Workspace rating scores the same crossing, so the
+            # arithmetic is stated once in the domain instead of twice here.
+            # play_types carries a single stat whose weight cancels inside the
+            # opponent/league ratio, so the domain takes bare per-48 values.
+            (stat_key,) = stat_weights
+            identities = {
+                fact.slice_key: (base, fact.slice_key, stat_key)
+                for fact in selected_facts
+            }
+            opponent_metrics = metric_index.teams.get(opponent_id, {})
+            value = play_type_matchup(
+                {fact.slice_key: fact.share for fact in selected_facts},
+                {
+                    slice_key: metric.allowed_per_48
+                    for slice_key, identity in identities.items()
+                    if (metric := opponent_metrics.get(identity)) is not None
+                },
+                {
+                    slice_key: metric.average_allowed_per_48
+                    for slice_key, identity in identities.items()
+                    if (metric := metric_index.league.get(identity)) is not None
+                },
+            )
+            if value is None:
+                return None
         else:
-            selected_volume = sum(fact.volume for fact in selected_facts)
-            if selected_volume <= 0:
-                return None
-            weighted_facts = tuple(
-                (fact, fact.volume / selected_volume) for fact in selected_facts
-                if fact.volume > 0
-            )
-        if not weighted_facts:
-            return None
-        total = 0.0
-        weight_total = 0.0
-        for fact, share in weighted_facts:
-            league_value = 0.0
-            team_value = 0.0
-            slice_key = (
-                _SHOT_TYPE_STORED_SLICES.get(fact.slice_key, fact.slice_key)
-                if base == "shot_types"
-                else fact.slice_key
-            )
-            resolved_weights = stat_weights or {fact.slice_key: 1.0}
-            for stat_key, weight in resolved_weights.items():
-                identity = (base, slice_key, stat_key)
-                league = metric_index.league.get(identity)
-                team = metric_index.teams.get(opponent_id, {}).get(identity)
-                if league is None or team is None:
+            if slice_keys is None:
+                positive_facts = []
+                for fact in selected_facts:
+                    share = fact.share
+                    if share > 0:
+                        positive_facts.append((fact, share))
+                weighted_facts = tuple(positive_facts)
+            else:
+                selected_volume = sum(fact.volume for fact in selected_facts)
+                if selected_volume <= 0:
                     return None
-                league_value += weight * league.average_allowed_per_48
-                team_value += weight * team.allowed_per_48
-            if league_value == 0 and team_value == 0:
-                continue
-            if league_value <= 0:
+                weighted_facts = tuple(
+                    (fact, fact.volume / selected_volume) for fact in selected_facts
+                    if fact.volume > 0
+                )
+            if not weighted_facts:
                 return None
-            total += share * (team_value / league_value)
-            weight_total += share
-        if weight_total == 0:
-            return None
+            total = 0.0
+            weight_total = 0.0
+            for fact, share in weighted_facts:
+                league_value = 0.0
+                team_value = 0.0
+                slice_key = (
+                    _SHOT_TYPE_STORED_SLICES.get(fact.slice_key, fact.slice_key)
+                    if base == "shot_types"
+                    else fact.slice_key
+                )
+                resolved_weights = stat_weights or {fact.slice_key: 1.0}
+                for stat_key, weight in resolved_weights.items():
+                    identity = (base, slice_key, stat_key)
+                    league = metric_index.league.get(identity)
+                    team = metric_index.teams.get(opponent_id, {}).get(identity)
+                    if league is None or team is None:
+                        return None
+                    league_value += weight * league.average_allowed_per_48
+                    team_value += weight * team.allowed_per_48
+                if league_value == 0 and team_value == 0:
+                    continue
+                if league_value <= 0:
+                    return None
+                total += share * (team_value / league_value)
+                weight_total += share
+            if weight_total == 0:
+                return None
+            value = total - weight_total
         volume_per_game = sum(
             fact.volume / fact.games_played for fact in selected_facts
         )
         return {
-            "value": self._number(total - weight_total),
+            "value": self._number(value),
             "thin": (
-                any(
+                (base == "play_types" and observed_share < _PLAY_TYPE_THIN_COVERAGE)
+                or any(
                     fact.games_played < self.settings.matchup_scores.min_games
                     for fact in selected_facts
                 )
@@ -1131,15 +1167,27 @@ class MatchupService:
     @staticmethod
     def _complete_diet(
         base: str, facts: Sequence[StoredPlayerDietFact]
-    ) -> bool:
+    ) -> float | None:
+        """Return the observed share sum of a complete Diet, else ``None``."""
+
         if not facts:
-            return False
+            return None
         keys = [fact.slice_key for fact in facts]
-        if len(keys) != len(set(keys)) or set(keys) != _DIET_SLICE_KEYS[base]:
-            return False
+        if len(keys) != len(set(keys)):
+            return None
+        # play_types is the one Base whose provider omits unobserved slices,
+        # so it is complete when every observed slice is governed; the other
+        # Bases are full partitions and must arrive whole.
+        if base == "play_types":
+            if not set(keys) <= _DIET_SLICE_KEYS[base]:
+                return None
+        elif set(keys) != _DIET_SLICE_KEYS[base]:
+            return None
         lower, upper = _DIET_SHARE_BOUNDS[base]
         share_sum = sum(fact.share for fact in facts)
-        return lower - 1e-12 <= share_sum <= upper + 1e-12
+        if not lower - 1e-12 <= share_sum <= upper + 1e-12:
+            return None
+        return share_sum
 
     @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:

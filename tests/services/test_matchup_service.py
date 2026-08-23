@@ -441,7 +441,7 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
             assert {row["key"] for row in team["defense_sheet"][base]} <= league_keys
 
 
-def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_degraded():
+def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence_is_partial():
     player = _service().get_matchup(game_id=GAME_ID)["players"][0]
 
     assert player == {
@@ -484,7 +484,14 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_truthfully_degraded
         },
         "scores": {
             "PTS": {
-                "season": {"components": {}, "blend": None},
+                # One observed play type is a complete Synergy Diet, so the
+                # crossing scores; at 0.19 coverage the cell is thin.
+                "season": {
+                    "components": {
+                        "play_types": {"value": -0.011875, "thin": True}
+                    },
+                    "blend": {"value": -0.011875, "thin": True},
+                },
                 "last_15": {"components": {}, "blend": None},
             },
             "FGA": {

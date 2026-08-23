@@ -1,0 +1,36 @@
+{
+  "multi_row_table_data": [
+    {
+      "Arc3Assists": 648,
+      "AssistPoints": 5599,
+      "Assists": 2314,
+      "AtRimAssists": 906,
+      "Clear Path Fouls": 2,
+      "Corner3Assists": 323,
+      "Corner3PctBlocked": 0.003601440576230492,
+      "GamesPlayed": 82,
+      "LongMidRangeAssists": 99,
+      "Name": "MEM",
+      "SecondsPlayed": 236760.0,
+      "ShortMidRangeAssists": 338,
+      "TeamId": "1610612763",
+      "ThreePtAssists": 971,
+      "TwoPtAssists": 1343
+    },
+    {
+      "Arc3Assists": 737,
+      "AssistPoints": 6131,
+      "Assists": 2519,
+      "AtRimAssists": 837,
+      "Corner3Assists": 356,
+      "GamesPlayed": 82,
+      "LongMidRangeAssists": 109,
+      "Name": "UTA",
+      "SecondsPlayed": 237960.0,
+      "ShortMidRangeAssists": 480,
+      "TeamId": "1610612762",
+      "ThreePtAssists": 1093,
+      "TwoPtAssists": 1426
+    }
+  ]
+}

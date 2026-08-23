@@ -432,17 +432,27 @@ def test_legacy_window_minutes_are_read_as_the_nominal_length():
         for difference in report.differences
     )
 
-    # The NBA traditional legacy reports integer nominal minutes and stays
-    # strict: the same drift is a difference there.
+    # The NBA traditional Season aggregate is seconds-grained too
+    # (production: 3960.971667 against a nominal 3961), so the same band
+    # applies there; beyond it the drift is still a difference.
     traditional = _replace_fact(
         _materialization(facts=(
             *_surface_facts(TEAM_IDS, surface="traditional", minutes=96.0),
             *_surface_facts(TEAM_IDS, surface="assist_locations", minutes=96.0),
         )),
         surface="traditional", team_id=TEAM_A, stat="OPP_REB",
-        denominator_value=95.995,
+        denominator_value=95.971667,
     )
     report = _compare(surface="traditional", legacy=traditional, ledger=ledger)
+    assert not any(
+        difference.classification == "denominator_tolerance_exceeded"
+        for difference in report.differences
+    )
+    beyond = _replace_fact(
+        traditional, surface="traditional", team_id=TEAM_A, stat="OPP_REB",
+        denominator_value=95.9,
+    )
+    report = _compare(surface="traditional", legacy=beyond, ledger=ledger)
     assert any(
         difference.classification == "denominator_tolerance_exceeded"
         for difference in report.differences

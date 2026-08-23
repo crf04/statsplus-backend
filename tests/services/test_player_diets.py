@@ -45,7 +45,10 @@ class RecordedNBAPlayerDiets:
         self.missing_play_type = None
         self.malformed_play_type = None
         self.fail_shot_zones = False
-        self.duplicate_play_rows = False
+        self.duplicate_shot_type_rows = False
+        self.stint_player_id = None
+        self.stint_play_type = "Isolation"
+        self.stints = ()
 
     def fetch_synergy_play_types(self, play_type, **kwargs):
         self.calls.append(("play_type", play_type, kwargs))
@@ -67,19 +70,32 @@ class RecordedNBAPlayerDiets:
             "POSS_PCT": self.play_share,
             "POSS": 120,
         }
-        return pd.DataFrame([row, row] if self.duplicate_play_rows else [row])
+        rows = [row]
+        if self.stint_player_id is not None and play_type == self.stint_play_type:
+            rows.extend(
+                {
+                    "PLAYER_ID": self.stint_player_id,
+                    "PLAYER_NAME": "James Harden",
+                    "PLAY_TYPE": play_type,
+                    "TYPE_GROUPING": "Offensive",
+                    "GP": games,
+                    "POSS_PCT": share,
+                    "POSS": possessions,
+                }
+                for games, possessions, share in self.stints
+            )
+        return pd.DataFrame(rows)
 
     def fetch_player_shot_type(self, general_range, **kwargs):
         self.calls.append(("shot_type", general_range, kwargs))
-        return pd.DataFrame(
-            [{
-                "PLAYER_ID": self.shot_type_player_id or self.player_id,
-                "PLAYER_NAME": "LeBron James",
-                "GP": self.shot_type_games.get(general_range, 40),
-                "FGA_FREQUENCY": self.shot_share,
-                "FGA": 100,
-            }]
-        )
+        row = {
+            "PLAYER_ID": self.shot_type_player_id or self.player_id,
+            "PLAYER_NAME": "LeBron James",
+            "GP": self.shot_type_games.get(general_range, 40),
+            "FGA_FREQUENCY": self.shot_share,
+            "FGA": 100,
+        }
+        return pd.DataFrame([row, row] if self.duplicate_shot_type_rows else [row])
 
     def fetch_player_shooting_zone(self, **kwargs):
         self.calls.append(("shot_zones", kwargs))
@@ -268,19 +284,18 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
 def test_duplicate_provider_identity_degrades_only_its_base(tmp_path):
     service, nba, _ = _service(tmp_path)
     service.refresh("2025-26")
-    nba.duplicate_play_rows = True
-    nba.shot_share = 0.3
+    nba.duplicate_shot_type_rows = True
+    nba.play_share = 0.3
 
     service.refresh("2025-26")
 
     result = service.get_for_players("2025-26", [2544])
-    isolation = next(
-        fact
+    assert next(
+        fact.share
         for fact in result.players[2544]
-        if fact.base == "play_types" and fact.slice_key == "Isolation"
-    )
-    assert isolation.share == 0.2
-    observation = {item.base: item for item in result.observations}["play_types"]
+        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+    ) == 0.25
+    observation = {item.base: item for item in result.observations}["shot_types"]
     assert (observation.status, observation.unavailable_reason) == (
         "unavailable",
         "provider_invalid_response",
@@ -288,8 +303,53 @@ def test_duplicate_provider_identity_degrades_only_its_base(tmp_path):
     assert next(
         fact.share
         for fact in result.players[2544]
-        if fact.base == "shot_types" and fact.slice_key == "Catch and Shoot"
+        if fact.base == "play_types" and fact.slice_key == "Isolation"
     ) == 0.3
+
+
+def test_traded_player_play_type_stints_combine_into_one_fact(tmp_path):
+    service, nba, _ = _service(tmp_path, player_ids=(2544, 201935))
+    nba.stint_player_id = 201935
+    nba.stints = ((41, 419, 0.421), (26, 181, 0.365))
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544, 201935])
+
+    isolation = [
+        fact
+        for fact in result.players[201935]
+        if fact.base == "play_types" and fact.slice_key == "Isolation"
+    ]
+    assert len(isolation) == 1
+    assert (isolation[0].volume, isolation[0].games_played) == (600, 67)
+    assert isolation[0].share == pytest.approx(
+        600 / (419 / 0.421 + 181 / 0.365)
+    )
+    observation = {item.base: item for item in result.observations}["play_types"]
+    assert (observation.status, observation.unavailable_reason) == ("available", None)
+    assert next(
+        fact.share
+        for fact in result.players[2544]
+        if fact.base == "play_types" and fact.slice_key == "Isolation"
+    ) == 0.2
+
+
+def test_play_type_stint_without_a_share_degrades_its_base(tmp_path):
+    service, nba, _ = _service(tmp_path, player_ids=(2544, 201935))
+    nba.stint_player_id = 201935
+    nba.stints = ((41, 419, 0.0), (26, 181, 0.365))
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [201935])
+
+    observation = {item.base: item for item in result.observations}["play_types"]
+    assert (observation.status, observation.unavailable_reason) == (
+        "unavailable",
+        "provider_invalid_response",
+    )
+    assert not [
+        fact for fact in result.players.get(201935, ()) if fact.base == "play_types"
+    ]
 
 
 def test_nonfinite_base_is_explicit_and_preserves_prior_facts(tmp_path):

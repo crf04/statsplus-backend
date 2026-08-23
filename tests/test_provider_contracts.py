@@ -151,6 +151,18 @@ def test_recorded_pbp_totals_parse_through_the_live_path():
     }
 
 
+def test_recorded_sparse_opponent_totals_parse_through_the_live_path():
+    # Recorded 2026-08-23 from the live 2025-26 opponent totals: optional
+    # counters ("Clear Path Fouls", "Corner3PctBlocked") are present on some
+    # rows only; every contract column is on every row.
+    frame = PBPTotalsAdapter.parse_totals(
+        _load("pbp_stats/opponent_totals_sparse.valid.json"), data_type="opponent",
+    )
+    assert len(frame) == 2
+    assert frame["Clear Path Fouls"].isna().sum() == 1
+    assert frame["Assists"].notna().all()
+
+
 def test_recorded_bounded_opponent_totals_carry_window_verification_fields():
     frame = PBPTotalsAdapter.parse_totals(
         _load("pbp_stats/opponent_bos_bounded.valid.json"),
