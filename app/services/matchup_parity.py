@@ -1289,8 +1289,13 @@ def compare_matchup_materializations(
         "ledger": {},
         "legacy": {},
     }
-    corrected_entities: set[int] = set()
-    out_of_rule_count_difference = False
+    # Scorekeeper-rule bookkeeping is per stat key: a rank difference on one
+    # metric can only be explained by in-bound count corrections on that same
+    # metric, and never when that metric also carries a denominator or rate
+    # difference.
+    corrected_by_stat: dict[str, set[int]] = {key: set() for key in stat_to_metric}
+    out_of_rule_by_stat: dict[str, bool] = {key: False for key in stat_to_metric}
+    other_difference_by_stat: dict[str, bool] = {key: False for key in stat_to_metric}
     shared_teams = sorted(ledger_teams & legacy_teams)
     for stat_key in stat_to_metric:
         for team_id in shared_teams:
@@ -1321,9 +1326,9 @@ def compare_matchup_materializations(
                     and count_difference_within_correction_bound(ledger_count, legacy_count)
                 ):
                     classification = CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION
-                    corrected_entities.add(team_id)
+                    corrected_by_stat[stat_key].add(team_id)
                 else:
-                    out_of_rule_count_difference = True
+                    out_of_rule_by_stat[stat_key] = True
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, stat_key,
                     ledger_count, legacy_count,
@@ -1365,6 +1370,7 @@ def compare_matchup_materializations(
                     rel_tol=tolerance, abs_tol=tolerance,
                 )
                 if not denominator_matches:
+                    other_difference_by_stat[stat_key] = True
                     differences.append(MatchupParityDifference(
                         window, surface, team_id, "denominator_minutes",
                         ledger_minutes, legacy_minutes,
@@ -1400,6 +1406,13 @@ def compare_matchup_materializations(
             if ledger_rate is not None and legacy_rate is not None and not math.isclose(
                 ledger_rate, legacy_rate, rel_tol=tolerance, abs_tol=tolerance
             ):
+                if not (
+                    semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
+                    and team_id in corrected_by_stat[stat_key]
+                ):
+                    # A rate difference not produced by this team's own
+                    # in-bound count correction is another cause.
+                    other_difference_by_stat[stat_key] = True
                 differences.append(MatchupParityDifference(
                     window, surface, team_id, f"per48.{stat_key}",
                     ledger_rate, legacy_rate,
@@ -1424,6 +1437,7 @@ def compare_matchup_materializations(
                 CLASSIFICATION_EXTRA_METRIC,
             ))
 
+    corrected_entities = set().union(*corrected_by_stat.values())
     # Deterministic rankings per metric (ascending, ties 1, 1, 3).
     rankings_deterministic = True
     for stat_key in stat_to_metric:
@@ -1457,8 +1471,9 @@ def compare_matchup_materializations(
             # difference is explained by them and stays soft under the rule.
             explained = (
                 semantic_rule == SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION
-                and corrected_entities
-                and not out_of_rule_count_difference
+                and bool(corrected_by_stat[stat_key])
+                and not out_of_rule_by_stat[stat_key]
+                and not other_difference_by_stat[stat_key]
                 and len(corrected_entities) <= SCOREKEEPER_CORRECTION_MAX_ENTITIES
             )
             if not explained:

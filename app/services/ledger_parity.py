@@ -1597,7 +1597,7 @@ class LedgerParityArtifactRepository:
                 raise ValueError("parity artifact decision is immutable")
             if decision == "approved" and (
                 len(reason.strip()) < 20
-                or not matchup_parity_artifact_is_activatable(row)
+                or not matchup_parity_artifact_is_activatable(row, session=session)
             ):
                 raise ValueError("hard matchup parity failures cannot be approved")
             row.decision = decision

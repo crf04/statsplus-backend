@@ -440,6 +440,19 @@ def test_per36_capture_is_scoped_immutable_and_rejects_stale_window(tmp_path):
             artifact_with((correction, hard), rule="official_scorekeeper_correction", reason=reason),
             stream_key="player_per36", session=session,
         )
+
+    # The audited operator step can approve the in-bound artifact and still
+    # refuses the one carrying a hard difference.
+    approvable = artifact_with((correction,), rule="official_scorekeeper_correction", reason=reason)
+    adjudicated = LedgerParityArtifactRepository(engine).adjudicate(
+        approvable.artifact_id, decision="approved", actor="operator@example.com", reason=reason,
+    )
+    assert adjudicated.decision == "approved"
+    blocked = artifact_with((correction, hard), rule="official_scorekeeper_correction", reason=reason)
+    with pytest.raises(ValueError, match="cannot be approved"):
+        LedgerParityArtifactRepository(engine).adjudicate(
+            blocked.artifact_id, decision="approved", actor="operator@example.com", reason=reason,
+        )
     with pytest.raises(ValueError, match="source observation|window identity"):
         repository.record(
             publication_id=publication_id,
