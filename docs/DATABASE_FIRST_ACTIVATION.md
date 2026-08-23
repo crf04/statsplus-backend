@@ -89,6 +89,25 @@ Activate in dependency order and one stream at a time, confirming each before
 the next. Season before L15 within a surface, and traditional before assist
 locations, so a failure leaves the smallest possible mixed state.
 
+### Enabling an NBA-owned stream for its first collection
+
+NBA-owned streams are registered disabled, and ingestion refuses observations
+for a disabled stream with `provider_not_registered`. Their first candidate
+therefore cannot exist before the stream is enabled. For an NBA-owned
+`snapshot_replace` stream that has no active pointer yet, activation accepts a
+body carrying only `reason`:
+
+```
+POST /admin/collection/streams/synergy_play_types_opponent_season/activate
+{"reason": "enable for first collection"}
+```
+
+The response reads `enabled: true` and no pointer moves; public reads for the
+surface stay `missing` until composition produces and activates a candidate.
+This is an enable, not a promotion. It applies to nothing else: a ledger stream
+and an NBA-owned stream that is already bound to a publication both still
+require `candidate_publication_id`, and every parity gate below is unchanged.
+
 ### When activation refuses
 
 Every one of these is the gate working. None should be worked around.

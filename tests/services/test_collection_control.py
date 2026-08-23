@@ -2188,3 +2188,58 @@ def test_base_completeness_requires_every_registered_slice(control_db):
             "synergy_play_types", season="2025-26", cutoff=now,
             payload={"published": True}, manifest_id="manifest-slice",
         )
+
+
+def test_operator_enables_nba_stream_for_its_first_collection_without_a_candidate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    operations = CollectionOperationsService(
+        control_db, publication_service=publications, clock=lambda: now,
+    )
+
+    result = operations.activate_stream(
+        "synergy_play_types_opponent_season",
+        actor="operator", reason="enable for first collection",
+    )
+
+    assert result.resource.enabled is True
+    assert result.audit.action == "stream.activate"
+    with control_db.connect() as connection:
+        assert connection.execute(select(PublicationPointer)).all() == []
+        assert connection.execute(select(PublicationVersion)).all() == []
+
+
+def test_ledger_stream_still_requires_a_candidate_to_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    operations = CollectionOperationsService(
+        control_db, publication_service=publications, clock=lambda: now,
+    )
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_required"):
+        operations.activate_stream(
+            "traditional_opponent_season",
+            actor="operator", reason="enable for first collection",
+        )
+
+
+def test_bound_nba_stream_still_requires_a_candidate_to_activate(control_db):
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    operations = CollectionOperationsService(
+        control_db, publication_service=publications, clock=lambda: now,
+    )
+    with control_db.begin() as connection:
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key="synergy_play_types_opponent_season",
+            active_publication_id="publication-1", fence=1, updated_at=now,
+        ))
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_required"):
+        operations.activate_stream(
+            "synergy_play_types_opponent_season",
+            actor="operator", reason="re-enable a bound stream",
+        )

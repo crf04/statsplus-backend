@@ -193,7 +193,9 @@ def discover_collection_work():
 @collection_bp.post("/collector/catalog/<request_id>")
 @route_error_boundary("Failed to publish the bootstrap catalog.")
 def publish_bootstrap_catalog(request_id: str):
-    claims = _collector_claims_any(("catalog_publish", "bootstrap", "ingest"))
+    claims = _collector_claims_any(
+        ("catalog_publish", "bootstrap", "ingest"), count_poll=False
+    )
     if request.headers.get("Content-Encoding", "").lower() != "gzip":
         raise InvalidInputError(
             "Catalog envelopes must use gzip compression.", detail="compression_required"
@@ -272,8 +274,13 @@ def publish_bootstrap_catalog(request_id: str):
     }), 201
 
 
-def _collector_claims(required_scope: str):
-    """Authenticate a collector and preserve auth-vs-authorization errors."""
+def _collector_claims(required_scope: str, *, count_poll: bool = True):
+    """Authenticate a collector and preserve auth-vs-authorization errors.
+
+    Uploads pass ``count_poll=False``: they are already bounded by the envelope
+    and byte budgets, and charging them a poll as well lets one ordinary
+    collection run exhaust the read budget and rate-limit its own retries.
+    """
 
     header = request.headers.get("Authorization", "")
     if not header.lower().startswith("bearer "):
@@ -282,7 +289,8 @@ def _collector_claims(required_scope: str):
         claims = _service("collector_tokens").validate(header[7:].strip(), required_scope=required_scope)
         if required_scope not in claims.scopes:
             raise ControlPlaneError("scope_denied")
-        _service("collection_operations").record_usage(claims.collector_id, polls=1)
+        if count_poll:
+            _service("collection_operations").record_usage(claims.collector_id, polls=1)
         return claims
     except ControlPlaneError as error:
         if error.reason == "usage_limit":
@@ -290,7 +298,7 @@ def _collector_claims(required_scope: str):
         raise _control_error(error) from error
 
 
-def _collector_claims_any(required_scopes: tuple[str, ...]):
+def _collector_claims_any(required_scopes: tuple[str, ...], *, count_poll: bool = True):
     """Accept compatible scope names during a rolling collector upgrade."""
 
     header = request.headers.get("Authorization", "")
@@ -300,7 +308,8 @@ def _collector_claims_any(required_scopes: tuple[str, ...]):
         claims = _service("collector_tokens").validate(header[7:].strip())
         if not set(required_scopes).intersection(claims.scopes):
             raise ControlPlaneError("scope_denied")
-        _service("collection_operations").record_usage(claims.collector_id, polls=1)
+        if count_poll:
+            _service("collection_operations").record_usage(claims.collector_id, polls=1)
         return claims
     except ControlPlaneError as error:
         if error.reason == "usage_limit":
@@ -425,7 +434,7 @@ def get_manifest(manifest_id: str):
 @collection_bp.post("/collector/observations")
 @route_error_boundary("Failed to ingest the observation.")
 def ingest_observation():
-    claims = _collector_claims("ingest")
+    claims = _collector_claims("ingest", count_poll=False)
     if request.headers.get("Content-Encoding", "").lower() != "gzip":
         raise InvalidInputError("Observation envelopes must use gzip compression.", detail="compression_required")
     raw = _read_limited_body(MAX_COMPRESSED_BYTES)
