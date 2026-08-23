@@ -1,0 +1,44 @@
+{
+  "sportFixtureDetail": {
+    "id": "fixture-1",
+    "name": "Los Angeles Lakers @ Chicago Bulls",
+    "competitionId": "090c2877-4d13-4f6e-8faf-886092153c58",
+    "competitionName": "NBA",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "sportName": "Basketball",
+    "advertisedStart": "2026-08-09T16:30:00.000Z",
+    "status": "Open",
+    "playerProps": [
+      {
+        "playerId": "player-1",
+        "playerName": "LeBron James",
+        "teamId": "team-1",
+        "teamName": "Los Angeles Lakers",
+        "teamAbbreviation": "LAL",
+        "position": "F",
+        "marketId": "market-1",
+        "selectionId": "selection-over",
+        "stats": ["points"],
+        "value": 27.5,
+        "multiplier": 1.5,
+        "variant": "standard",
+        "lineType": "over"
+      },
+      {
+        "playerId": "player-1",
+        "playerName": "LeBron James",
+        "teamId": "team-1",
+        "teamName": "Los Angeles Lakers",
+        "teamAbbreviation": "LAL",
+        "position": "F",
+        "marketId": "market-1",
+        "selectionId": "selection-under",
+        "stats": ["points"],
+        "value": 27.5,
+        "multiplier": 1.5,
+        "variant": "standard",
+        "lineType": "under"
+      }
+    ]
+  }
+}

@@ -130,7 +130,9 @@ def normalize_market_variant(label: str | MarketVariant | None) -> NormalizedLab
     The map below is the closed variant vocabulary.  PrizePicks names its two
     adjusted-line products ``demon`` and ``goblin``; both are alternate lines
     on the same offering, so they normalize to :attr:`MarketVariant.ALTERNATE`
-    with the provider's own word retained as the variant label.
+    with the provider's own word retained as the variant label.  Underdog calls
+    its two-sided line ``balanced``, which is that provider's word for its
+    standard offering.
 
     A label outside this map stays :attr:`MarketVariant.UNKNOWN`, and the rule
     for an UNKNOWN variant is a single one, stated in one place: it is retained
@@ -150,6 +152,7 @@ def normalize_market_variant(label: str | MarketVariant | None) -> NormalizedLab
         "standard": MarketVariant.STANDARD,
         "default": MarketVariant.STANDARD,
         "main": MarketVariant.STANDARD,
+        "balanced": MarketVariant.STANDARD,
         "alternate": MarketVariant.ALTERNATE,
         "alt": MarketVariant.ALTERNATE,
         "demon": MarketVariant.ALTERNATE,
