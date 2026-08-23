@@ -607,6 +607,9 @@ def _ledger_raw_rows(
     participating player rows never carry.
     """
 
+    observation = _governed_orientation(
+        observation, home_team_id=home_team_id, away_team_id=away_team_id
+    )
     stats = observation.get("stats")
     if not isinstance(stats, Mapping):
         raise LedgerValidationError("PBP game observation is missing a stats envelope")
@@ -964,6 +967,71 @@ def _wire_player_rows(observation: Mapping[str, Any]) -> dict[tuple[int, str], M
     return rows
 
 
+def _wire_sides_are_swapped(
+    observation: Mapping[str, Any],
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> bool:
+    """Return whether the wire labels the governed away team ``Home``.
+
+    Only the exactly swapped pair counts: the document must carry both team
+    identities and they must be the governed pair reversed.  Any other
+    disagreement remains an identity contradiction.
+    """
+
+    raw_home = _raw_value(observation, "home_team_id", "homeTeamId", "HomeTeamId")
+    raw_away = _raw_value(observation, "away_team_id", "awayTeamId", "AwayTeamId")
+    if raw_home is None or raw_away is None:
+        return False
+    try:
+        wire_home = _integer(raw_home, "home_team_id")
+        wire_away = _integer(raw_away, "away_team_id")
+    except LedgerValidationError:
+        return False
+    return wire_home == away_team_id and wire_away == home_team_id
+
+
+def _governed_orientation(
+    observation: Mapping[str, Any],
+    *,
+    home_team_id: int,
+    away_team_id: int,
+) -> Mapping[str, Any]:
+    """Return the document with ``Home``/``Away`` in governed orientation.
+
+    pbp_stats occasionally labels the sides backwards while every row still
+    belongs to the correct team.  When the wire identity pair is exactly the
+    governed pair reversed, swap the ``stats`` and ``team_results`` envelopes,
+    the identities, and the abbreviations so downstream reads see the
+    governed sides; the original document stays the retained observation.
+    """
+
+    if not _wire_sides_are_swapped(
+        observation, home_team_id=home_team_id, away_team_id=away_team_id
+    ):
+        return observation
+    oriented = dict(observation)
+    for envelope in ("stats", "team_results"):
+        value = observation.get(envelope)
+        if isinstance(value, Mapping):
+            oriented[envelope] = {
+                **value,
+                "Home": value.get("Away"),
+                "Away": value.get("Home"),
+            }
+    for home_key, away_key in (
+        ("home_team_id", "away_team_id"),
+        ("homeTeamId", "awayTeamId"),
+        ("HomeTeamId", "AwayTeamId"),
+        ("home_team_abbreviation", "away_team_abbreviation"),
+    ):
+        if home_key in observation or away_key in observation:
+            oriented[home_key] = observation.get(away_key)
+            oriented[away_key] = observation.get(home_key)
+    return oriented
+
+
 def _validate_wire_game_identity(
     observation: Mapping[str, Any],
     *,
@@ -983,12 +1051,21 @@ def _validate_wire_game_identity(
     raw_game_id = _raw_value(observation, *identity_aliases["game_id"])
     if raw_game_id is not None and str(raw_game_id) != expected_game_id:
         raise LedgerValidationError("PBP game identity contradicts the governed event")
+    swapped = _wire_sides_are_swapped(
+        observation,
+        home_team_id=_integer(event.get("home_team_id"), "home_team_id") or 0,
+        away_team_id=_integer(event.get("away_team_id"), "away_team_id") or 0,
+    )
     for field_name, expected in (
         ("home_team_id", event.get("home_team_id")),
         ("away_team_id", event.get("away_team_id")),
     ):
         raw_value = _raw_value(observation, *identity_aliases[field_name])
-        if raw_value is not None and _integer(raw_value, field_name) != _integer(expected, field_name):
+        if (
+            not swapped
+            and raw_value is not None
+            and _integer(raw_value, field_name) != _integer(expected, field_name)
+        ):
             raise LedgerValidationError("PBP team identity contradicts the governed event")
     raw_season = _raw_value(observation, *identity_aliases["season"])
     if raw_season is not None:
@@ -1302,13 +1379,21 @@ def canonical_game_from_pbp(
     if ("status_code" in event or "status_text" in event) and not is_final_event(event):
         raise LedgerValidationError("only completed games can enter the ledger")
     if isinstance(observation, Mapping) and "stats" in observation:
-        raw_observation = observation
         _validate_wire_game_identity(
             observation,
             event=event,
             canonical_season=canonical_season,
             expected_game_id=game_id,
         )
+        # Every downstream read of the wire uses the governed orientation;
+        # the retained observation payload stays the provider's document and
+        # the raw archive re-orients it identically when binding.
+        observation = _governed_orientation(
+            observation,
+            home_team_id=_integer(event.get("home_team_id"), "home_team_id") or 0,
+            away_team_id=_integer(event.get("away_team_id"), "away_team_id") or 0,
+        )
+        raw_observation = observation
         frame = PBPGameLogAdapter.parse_game_stats(observation, game_id=game_id)
         team_results = observation.get("team_results")
     elif isinstance(observation, pd.DataFrame):

@@ -1100,6 +1100,51 @@ def test_historical_repair_replaces_fallback_provenance_with_pbp(tmp_path, monke
     assert any(player.at_rim_assists is not None for player in stored.player_facts)
 
 
+def test_swapped_wire_sides_are_accepted_through_the_production_seam(tmp_path):
+    """The real backfill path: staged original document, participant catalog,
+    accepted-observation binding, archived sides in governed orientation."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'swapped-seam.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    cutoff = datetime(2024, 11, 16, 0, 0, tzinfo=timezone.utc)
+    _install_manifest(engine, cutoff)
+    _seed_participant_event(engine, cutoff)
+    recorder = CollectionObservationLedgerRecorder(engine)
+
+    straight = _payload()
+    swapped = json.loads(json.dumps(straight))
+    swapped["home_team_id"], swapped["away_team_id"] = straight["away_team_id"], straight["home_team_id"]
+    swapped["home_team_abbreviation"], swapped["away_team_abbreviation"] = (
+        straight["away_team_abbreviation"], straight["home_team_abbreviation"],
+    )
+    for envelope in ("stats", "team_results"):
+        swapped[envelope] = {"Home": straight[envelope]["Away"], "Away": straight[envelope]["Home"]}
+
+    result = LedgerBackfillService(
+        provider=_Provider(swapped), athlete_catalog=_Athletes(),
+        participant_catalog=AcceptedObservationParticipantCatalog(engine, recorder),
+        reconciliation_sink=lambda game_id, payload: None,
+        observation_recorder=recorder, repository=repository,
+        max_concurrency=1, clock=lambda: cutoff,
+    ).refresh("2024-25", **_authorized(_event(), cutoff))
+
+    assert result.complete and result.failed_game_ids == ()
+    stored = repository.get_game("0022400001")
+    assert stored is not None
+    assert stored.home_team_id == 1610612747 and stored.away_team_id == 1610612759
+    assert {p.player_id for p in stored.player_facts if p.team_id == 1610612747} == {2544, 203507}
+    assert {p.player_id for p in stored.player_facts if p.team_id == 1610612759} == {201935}
+    with engine.connect() as connection:
+        observation = connection.execute(select(CollectionObservation)).mappings().one()
+        raw_rows = connection.execute(select(LedgerGameRowEvidence)).mappings().all()
+    # The retained observation is the provider's own (swapped) document ...
+    assert json.loads(observation["payload"])["home_team_id"] == straight["away_team_id"]
+    # ... while the archive carries governed sides.
+    assert all(
+        row["side"] == ("Home" if row["team_id"] == 1610612747 else "Away") for row in raw_rows
+    )
+
+
 def test_each_observation_records_its_own_retrieval_time(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'retrieval.sqlite3'}")
     run_migrations(engine)

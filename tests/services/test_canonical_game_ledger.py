@@ -2104,6 +2104,51 @@ def test_omitted_team_summary_row_is_accepted_only_with_a_proven_zero_residual(t
         repository.replace_game(unbound)
 
 
+def test_swapped_wire_sides_are_read_in_governed_orientation(tmp_path):
+    """pbp_stats can label the sides backwards while every row is right."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'swapped.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+    participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
+    payload = _raw_observation_with_unknown_fields()
+    expected = canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants)
+
+    swapped = json.loads(json.dumps(payload))
+    swapped["home_team_id"], swapped["away_team_id"] = payload["away_team_id"], payload["home_team_id"]
+    swapped["home_team_abbreviation"], swapped["away_team_abbreviation"] = (
+        payload["away_team_abbreviation"], payload["home_team_abbreviation"],
+    )
+    for envelope in ("stats", "team_results"):
+        swapped[envelope] = {"Home": payload[envelope]["Away"], "Away": payload[envelope]["Home"]}
+
+    game = canonical_game_from_pbp(swapped, event=event, participant_ids_by_team=participants)
+    assert game.home_team_id == expected.home_team_id == 1610612747
+    assert {fact.team_id for fact in game.team_facts} == {1610612747, 1610612759}
+    assert game.team_facts == expected.team_facts
+    assert set(game.player_facts) == set(expected.player_facts)
+    assert all(
+        row.side == ("Home" if row.team_id == game.home_team_id else "Away")
+        for row in game.raw_rows
+    )
+    assert repository.replace_game(game).inserted
+
+    # The archive recomputed from the provider's own document binds identically.
+    from app.services.canonical_game_ledger import _ledger_raw_rows
+
+    recomputed = _ledger_raw_rows(
+        swapped, game_id=game.game_id,
+        home_team_id=game.home_team_id, away_team_id=game.away_team_id,
+    )
+    assert tuple(recomputed) == tuple(game.raw_rows)
+
+    # Anything other than the exactly swapped pair is still a contradiction.
+    foreign = json.loads(json.dumps(swapped))
+    foreign["away_team_id"] = 1610612738
+    with pytest.raises(LedgerValidationError, match="team identity contradicts"):
+        canonical_game_from_pbp(foreign, event=event, participant_ids_by_team=participants)
+
+
 def test_explicit_zero_required_count_remains_valid(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'explicit_zero.sqlite3'}")
     run_migrations(engine)
