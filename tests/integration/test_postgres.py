@@ -116,9 +116,12 @@ def test_saved_filter_set_ddl_applies_to_postgres(pg_engine):
         "created_at",
         "updated_at",
     }
+    # Postgres renders the indexed expression with an explicit cast, e.g.
+    # ``lower((name)::text)``, so match the function call loosely rather than
+    # the exact source spelling.
     assert any(
         "UNIQUE INDEX uq_saved_filter_sets_owner_name" in definition
-        and "lower(name" in definition
+        and "lower(" in definition
         for definition in indexes
     )
 
