@@ -1340,17 +1340,14 @@ def compare_matchup_materializations(
             legacy_minutes = _minutes(
                 legacy_fact.denominator_value, legacy_fact.denominator_unit
             )
-            if (
-                legacy_minutes is not None
-                and legacy.producer != PRODUCER_LEDGER
-                and surface == "assist_locations"
-            ):
-                # The legacy PBP assist aggregate reports its window minutes
-                # from summed player seconds at a tenth-of-a-second grain; the
-                # contract denominator is the nominal game length, so read the
-                # legacy value as the nominal length it establishes.  The NBA
-                # traditional legacy already reports integer nominal minutes
-                # and stays strict.
+            if legacy_minutes is not None and legacy.producer != PRODUCER_LEDGER:
+                # Both legacy aggregates report window minutes from summed
+                # seconds (PBP at a tenth-second grain; NBA LeagueDashTeamStats
+                # Season totals likewise, e.g. 3960.971667 against a nominal
+                # 3961); the contract denominator is the nominal game length,
+                # so read the legacy value as the nominal length it
+                # establishes.  Outside the evidence band it is compared as
+                # reported.
                 nominal = nominal_window_minutes(
                     legacy_minutes,
                     len(legacy.game_ids_by_team.get(team_id, ())),
