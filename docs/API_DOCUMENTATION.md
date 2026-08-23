@@ -1839,13 +1839,16 @@ raw payloads or source identifiers. Absent evidence is JSON `null`:
 }
 ```
 
-Projection collection is not an HTTP refresh operation. Railway wakes
-`scripts/collect_projections.py` every five minutes; its coordinator applies
-the configured 30-minute/5-minute adaptive cadence, governed event-status
-cutoff, database-time lease/renewal, provider backoff, and archive persistence
-path. Stale cache fallback, omitted outcomes, and collector defects are health
-failures rather than successful polls. API and browser reads remain
-database-only.
+Projection collection is not an HTTP refresh operation. The dedicated Railway
+service constructs settings, dependencies, provider executors, and Redis/cache
+clients once, then wakes the same coordinator every five minutes. The
+coordinator applies the configured 30-minute/5-minute adaptive cadence,
+governed event-status cutoff, database-time lease/renewal and provider-state
+timestamps, provider backoff, and archive persistence path. The one-shot
+`scripts/collect_projections.py` command uses the same run-once path and exits
+nonzero when every due provider fails at board collection. Stale cache fallback,
+omitted outcomes, and collector defects are health failures rather than
+successful polls. API and browser reads remain database-only.
 
 `freshness_status` is closed to `fresh`, `stale`, `missing`, or
 `unavailable`. Age is the non-negative bounded age of the active publication;

@@ -427,8 +427,11 @@ number of newly inserted rows.
 
 Provider polling is coordinated by `ProjectionCollectionCoordinator`, which is
 constructed once in application dependencies for the dedicated collector
-process. It reads the canonical Event Catalog before taking the collector
-lease, so offseason/no-due runs do not call a provider. The default board-wide
+process. The long-lived Railway loop builds settings, Redis/cache clients, and
+provider executors once, then invokes that same coordinator on each five-minute
+wake; the one-shot command builds one dependency graph for its single attempt.
+It reads the canonical Event Catalog before taking the collector lease, so
+offseason/no-due runs do not call a provider. The default board-wide
 policy is every 30 minutes beginning 24 hours before the earliest non-postponed,
 non-started event and every five minutes in the final two hours. Both intervals
 and the horizon are configurable. A past scheduled timestamp does not stop the
@@ -440,13 +443,19 @@ collection forever. Each wake derives dueness from the last poll plus the
 *current* interval, so crossing into the final two hours immediately adopts the
 five-minute cadence instead of waiting out an earlier 30-minute deadline. The
 one-shot `scripts/collect_projections.py` command uses this coordinator, not a
-second ingestion path or an admin refresh route.
+second ingestion path or an admin refresh route, and exits nonzero when board
+collection fails for every due provider. Code-less Event Catalog rows use
+recognized live clock text such as `Q3 5:22` as started while unknown clock text
+remains conservatively pregame.
 
 Migration 043 adds one singleton `projection_collection_leases` row and
 per-provider `projection_collection_provider_states`. PostgreSQL locks and
 fences the lease row using database time, so process-clock skew cannot steal a
-live lease. The owner renews that lease around board and per-provider work; an
-expiry or takeover returns the bounded `busy/lease_lost` outcome. SQLite uses
+live lease or write future poll/backoff state that suppresses the scheduled
+collector. Dueness is derived from database-timed `last_poll_at` and
+`backoff_until`; no separate poll-deadline column is stored. The owner renews
+that lease around board and per-provider work; an expiry or takeover returns
+the bounded `busy/lease_lost` outcome. SQLite uses
 `BEGIN IMMEDIATE` for local tests but is not evidence for the production
 locking contract. A busy or overlapping run is a safe no-op. Provider outcomes
 are persisted independently through the existing archive recorder, with
