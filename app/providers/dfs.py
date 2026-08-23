@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
@@ -44,6 +46,118 @@ class SelectionDirection(str, Enum):
     UNKNOWN = "unknown"
 
 
+class PriceKind(str, Enum):
+    """The one canonical form a selection's published price is stated in."""
+
+    AMERICAN = "american"
+    DECIMAL = "decimal"
+    MULTIPLIER = "multiplier"
+    UNPRICED = "unpriced"
+
+
+class PriceScope(str, Enum):
+    """What a selection's published price is a price for.
+
+    ``SELECTION`` is odds for this leg alone; ``ENTRY`` is the slip-level
+    payout a leg takes part in, which depends on the entry's leg count.
+    """
+
+    SELECTION = "selection"
+    ENTRY = "entry"
+
+
+class ModifierKind(str, Enum):
+    """The closed vocabulary of provider-defined selection adjustments."""
+
+    PAYOUT_MULTIPLIER = "payout_multiplier"
+    LINE_ADJUSTMENT = "line_adjustment"
+    PROMO = "promo"
+
+
+_MODIFIER_KIND_LABELS = {
+    "payout_multiplier": ModifierKind.PAYOUT_MULTIPLIER,
+    "payout multiplier": ModifierKind.PAYOUT_MULTIPLIER,
+    "multiplier": ModifierKind.PAYOUT_MULTIPLIER,
+    "payout": ModifierKind.PAYOUT_MULTIPLIER,
+    "line_adjustment": ModifierKind.LINE_ADJUSTMENT,
+    "line adjustment": ModifierKind.LINE_ADJUSTMENT,
+    "line": ModifierKind.LINE_ADJUSTMENT,
+    "promo": ModifierKind.PROMO,
+    "promotion": ModifierKind.PROMO,
+    "promotional": ModifierKind.PROMO,
+}
+
+
+def normalize_modifier_kind(label: str | ModifierKind | None) -> ModifierKind:
+    """Normalize a provider modifier label into the closed kind vocabulary.
+
+    A modifier the application cannot name is a malformed source record, not a
+    pass-through string: an unrecognized adjustment silently retained would be
+    read by no consumer and would still change what a selection offers.
+    """
+
+    if isinstance(label, ModifierKind):
+        return label
+    normalized = label.strip().casefold() if isinstance(label, str) else ""
+    kind = _MODIFIER_KIND_LABELS.get(normalized)
+    if kind is None:
+        raise CoverageRecordMalformed(
+            "selection modifier kind is not a reviewed payout_multiplier, "
+            "line_adjustment, or promo value"
+        )
+    return kind
+
+
+# A document archived before this module's closed vocabularies existed can hold
+# a modifier kind outside the reviewed set and a market whose sides priced in
+# different forms; both were legal under the old contract.  Re-normalizing such
+# a document must not hard-fail, so the schema-version-1 decode path (and only
+# that path) opts into leniency for the duration of one document.
+_LENIENT_PROVIDER_DECODE: ContextVar[bool] = ContextVar(
+    "lenient_provider_decode", default=False
+)
+
+
+@contextmanager
+def lenient_provider_decode():
+    """Decode one archived legacy document without new-normalization strictness.
+
+    Scope this only around decoding a schema-version-1 provider document.  New
+    provider normalization never runs inside it, so the closed modifier
+    vocabulary and the one-price-form-per-market rule stay strict for every
+    live retrieval.
+    """
+
+    token = _LENIENT_PROVIDER_DECODE.set(True)
+    try:
+        yield
+    finally:
+        _LENIENT_PROVIDER_DECODE.reset(token)
+
+
+def _resolved_modifier_kind(label: str | ModifierKind | None) -> str:
+    """The stored kind for one modifier, honouring a lenient legacy decode.
+
+    Strict (the default, and every live retrieval): the closed vocabulary, or a
+    typed malformed record.  Lenient (a legacy document only): a reviewed alias
+    still normalizes so a known payout still prices its selection, but an
+    unreviewed kind is preserved verbatim rather than rejected -- it was a legal
+    archived value, and discarding it would drop the offering it modifies.
+    """
+
+    if not _LENIENT_PROVIDER_DECODE.get():
+        return normalize_modifier_kind(label).value
+    if isinstance(label, ModifierKind):
+        return label.value
+    normalized = label.strip().casefold() if isinstance(label, str) else ""
+    kind = _MODIFIER_KIND_LABELS.get(normalized)
+    if kind is not None:
+        return kind.value
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    raise CoverageRecordMalformed("selection modifier kind must be a non-empty value")
+
+
 class MarketStatus(str, Enum):
     """The eligible market availability states in a provider snapshot."""
 
@@ -63,7 +177,23 @@ class NormalizedLabel(Generic[EnumValue]):
 
 
 def normalize_market_variant(label: str | MarketVariant | None) -> NormalizedLabel[MarketVariant]:
-    """Normalize a provider variant label without guessing unknown values."""
+    """Normalize a provider variant label without guessing unknown values.
+
+    The map below is the closed variant vocabulary.  PrizePicks names its two
+    adjusted-line products ``demon`` and ``goblin``; both are alternate lines
+    on the same offering, so they normalize to :attr:`MarketVariant.ALTERNATE`
+    with the provider's own word retained as the variant label.  Underdog calls
+    its two-sided line ``balanced``, which is that provider's word for its
+    standard offering.
+
+    A label outside this map stays :attr:`MarketVariant.UNKNOWN`, and the rule
+    for an UNKNOWN variant is a single one, stated in one place: it is retained
+    and archived with its label, and it is never targetable -- neither the
+    database-first Player Pool nor a Latest Player Projection row admits a
+    market whose variant the application cannot name.  Naming a new provider
+    word is therefore a change to this map, reviewed once, rather than a
+    silent drop at a downstream filter.
+    """
 
     if isinstance(label, MarketVariant):
         original_label = None if label is MarketVariant.UNKNOWN else label.value
@@ -74,8 +204,11 @@ def normalize_market_variant(label: str | MarketVariant | None) -> NormalizedLab
         "standard": MarketVariant.STANDARD,
         "default": MarketVariant.STANDARD,
         "main": MarketVariant.STANDARD,
+        "balanced": MarketVariant.STANDARD,
         "alternate": MarketVariant.ALTERNATE,
         "alt": MarketVariant.ALTERNATE,
+        "demon": MarketVariant.ALTERNATE,
+        "goblin": MarketVariant.ALTERNATE,
         "promotional": MarketVariant.PROMOTIONAL,
         "promotion": MarketVariant.PROMOTIONAL,
         "promo": MarketVariant.PROMOTIONAL,
@@ -249,10 +382,8 @@ class SelectionModifier:
 
     def __post_init__(self) -> None:
         decimal = _decimal_value(self.value, field="selection modifier value")
-        kind = self.kind.strip() if isinstance(self.kind, str) else ""
+        kind = _resolved_modifier_kind(self.kind)
         scope = self.scope.strip() if isinstance(self.scope, str) else ""
-        if not kind:
-            raise ValueError("selection modifier kind must be a non-empty string")
         if not scope:
             raise ValueError("selection modifier scope must be a non-empty string")
         if self.label is None:
@@ -265,6 +396,94 @@ class SelectionModifier:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "label", label)
+
+def _price_enum(
+    value: object,
+    enum: type[EnumValue],
+    *,
+    field: str,
+) -> EnumValue:
+    if isinstance(value, enum):
+        return value
+    try:
+        return enum(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"selection {field} is not a reviewed value") from error
+
+
+def _canonical_price(
+    *,
+    price_kind: object,
+    price_value: object,
+    price_scope: object,
+    american_price: int | None,
+    decimal_price: Decimal | None,
+    modifiers: tuple["SelectionModifier", ...],
+) -> tuple["PriceKind", Decimal | None, "PriceScope"]:
+    """State one selection's price in the single canonical form, exactly once.
+
+    A stated kind is honoured and checked against the fields it claims; an
+    unstated one is derived from the retained fields in a fixed order so that
+    every provider -- and every provider yet to be written -- answers the same
+    question the same way.
+    """
+
+    payouts = tuple(
+        modifier
+        for modifier in modifiers
+        if modifier.kind == ModifierKind.PAYOUT_MULTIPLIER.value
+    )
+    if price_kind is None:
+        if price_value is not None or price_scope is not None:
+            raise ValueError(
+                "selection price_value and price_scope require a price_kind"
+            )
+        if american_price is not None:
+            return PriceKind.AMERICAN, Decimal(american_price), PriceScope.SELECTION
+        if decimal_price is not None:
+            return PriceKind.DECIMAL, decimal_price, PriceScope.SELECTION
+        if len(payouts) > 1:
+            raise CoverageRecordMalformed(
+                "selection states more than one payout multiplier"
+            )
+        if payouts:
+            return PriceKind.MULTIPLIER, payouts[0].value, PriceScope.ENTRY
+        return PriceKind.UNPRICED, None, PriceScope.SELECTION
+
+    kind = _price_enum(price_kind, PriceKind, field="price_kind")
+    if price_scope is None:
+        scope = (
+            PriceScope.ENTRY
+            if kind is PriceKind.MULTIPLIER
+            else PriceScope.SELECTION
+        )
+    else:
+        scope = _price_enum(price_scope, PriceScope, field="price_scope")
+    if kind is PriceKind.UNPRICED:
+        if price_value is not None:
+            raise ValueError("an unpriced selection must not state a price_value")
+        return kind, None, scope
+    if price_value is None:
+        raise ValueError("a priced selection must state a price_value")
+    if kind is PriceKind.AMERICAN:
+        value = Decimal(_integral_value(price_value, field="selection price_value"))
+        if american_price is not None and value != Decimal(american_price):
+            raise ValueError("selection price_value contradicts american_price")
+        return kind, value, scope
+    value = _decimal_value(price_value, field="selection price_value")
+    if kind is PriceKind.DECIMAL:
+        if decimal_price is not None and value != decimal_price:
+            raise ValueError("selection price_value contradicts decimal_price")
+        return kind, value, scope
+    if value <= 0:
+        raise ValueError("a multiplier price_value must be positive")
+    # A stated multiplier is cross-checked against a coexisting payout modifier,
+    # the same way american/decimal prices are checked against their fields, so
+    # one selection cannot claim two different multipliers for the same side.
+    if len(payouts) == 1 and value != payouts[0].value:
+        raise ValueError("selection price_value contradicts its payout multiplier")
+    return kind, value, scope
+
 
 def normalize_timestamp(value: datetime | str | None) -> datetime | None:
     """Return an aware timestamp in UTC; never assume a timezone."""
@@ -517,7 +736,26 @@ class CompetitionEvidence:
 
 @dataclass(frozen=True, slots=True)
 class Selection:
-    """One selectable side of a provider projection market."""
+    """One selectable side of a provider projection market.
+
+    Every selection states its price in exactly one canonical form, so two
+    providers that publish prices in different shapes can still be compared as
+    prices rather than as adapter-specific fields.  The triple is
+    ``price_kind``/``price_value``/``price_scope``: what form the number is in,
+    the exact number as published, and whether it prices this leg alone or the
+    slip the leg takes part in.
+
+    An adapter states the triple only when the provider prices a selection
+    outside its own payload -- an entry payout declared in the provider
+    registry, for instance.  Otherwise it is derived here, once, from the
+    fields the adapter already normalized, in this order: an American price,
+    then a decimal price, then a single payout-multiplier modifier, and
+    otherwise ``unpriced``.  Deriving it at this seam is what makes the rule
+    the same rule for every provider, including ones not yet written.
+
+    ``american_price`` and ``decimal_price`` stay exactly as they were; the
+    canonical triple is additive and never contradicts them.
+    """
 
     selection_id: str | None = None
     label: str | None = None
@@ -527,6 +765,9 @@ class Selection:
     modifiers: tuple[SelectionModifier, ...] = ()
     american_price: Decimal | int | str | float | None = None
     decimal_price: Decimal | int | str | float | None = None
+    price_kind: PriceKind | str | None = None
+    price_value: Decimal | int | str | float | None = None
+    price_scope: PriceScope | str | None = None
 
     def __post_init__(self) -> None:
         selection_id = _optional_identifier(
@@ -568,6 +809,23 @@ class Selection:
         object.__setattr__(self, "modifiers", modifiers)
         object.__setattr__(self, "american_price", american_price)
         object.__setattr__(self, "decimal_price", decimal_price)
+        kind, value, scope = _canonical_price(
+            price_kind=self.price_kind,
+            price_value=self.price_value,
+            price_scope=self.price_scope,
+            american_price=american_price,
+            decimal_price=decimal_price,
+            modifiers=modifiers,
+        )
+        object.__setattr__(self, "price_kind", kind)
+        object.__setattr__(self, "price_value", value)
+        object.__setattr__(self, "price_scope", scope)
+
+    @property
+    def is_priced(self) -> bool:
+        """Whether this selection states a price at all."""
+
+        return self.price_kind is not PriceKind.UNPRICED
 
 @dataclass(frozen=True, slots=True)
 class PlayerProjectionMarket:
@@ -650,6 +908,18 @@ class PlayerProjectionMarket:
         selections = tuple(self.selections)
         if any(not isinstance(selection, Selection) for selection in selections):
             raise ValueError("market selections must be Selection values")
+        # One market states one price form.  Two sides of one offering priced
+        # in different forms could not be compared with each other, let alone
+        # with another provider's, so a provider that publishes them that way
+        # is publishing a market this application cannot represent.
+        priced = tuple(selection for selection in selections if selection.is_priced)
+        if (
+            not _LENIENT_PROVIDER_DECODE.get()
+            and len({(selection.price_kind, selection.price_scope) for selection in priced}) > 1
+        ):
+            raise MalformedProviderResponseError(
+                "market selections must state one price kind and scope"
+            )
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "market_id", market_id)
         object.__setattr__(self, "status", status.value)
@@ -661,6 +931,49 @@ class PlayerProjectionMarket:
         object.__setattr__(self, "starts_at", normalize_timestamp(self.starts_at))
         object.__setattr__(self, "updated_at", normalize_timestamp(self.updated_at))
         object.__setattr__(self, "selections", selections)
+
+    @property
+    def price_kind(self) -> PriceKind:
+        """The one canonical form this market's selections are priced in."""
+
+        for selection in self.selections:
+            if selection.is_priced:
+                return selection.price_kind
+        return PriceKind.UNPRICED
+
+    @property
+    def price_scope(self) -> PriceScope:
+        """Whether this market's price is for one leg or for the entry."""
+
+        for selection in self.selections:
+            if selection.is_priced:
+                return selection.price_scope
+        return PriceScope.SELECTION
+
+    @property
+    def price_value(self) -> Decimal | None:
+        """The market's price when every priced side states the same number.
+
+        An entry payout is one number for the whole slip, so it is a fact about
+        the market.  Two-sided odds are not: each side states its own number,
+        and those stay on the selections in the archived source document rather
+        than being averaged or arbitrarily chosen here.
+        """
+
+        values = {
+            selection.price_value
+            for selection in self.selections
+            if selection.is_priced
+        }
+        if len(values) != 1:
+            return None
+        return values.pop()
+
+    @property
+    def is_priced(self) -> bool:
+        """Whether this market states a price for any side it offers."""
+
+        return any(selection.is_priced for selection in self.selections)
 
     @property
     def statistic_match_state(self) -> MatchState | None:
@@ -1359,6 +1672,9 @@ __all__ = [
     "MarketStatus",
     "MarketVariant",
     "MarketThreshold",
+    "ModifierKind",
+    "PriceKind",
+    "PriceScope",
     "CoverageEvidence",
     "CoverageCode",
     "DeadlineExceededError",
@@ -1379,6 +1695,8 @@ __all__ = [
     "TeamEvidence",
     "normalize_market_variant",
     "normalize_market_status",
+    "lenient_provider_decode",
+    "normalize_modifier_kind",
     "normalize_coverage_code",
     "normalize_selection_direction",
     "normalize_scoring_period",

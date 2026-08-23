@@ -1513,6 +1513,12 @@ def _rebuild_projection_transition_tables_sqlite(
                 )
             elif column == "unresolved_identities":
                 expressions.append("'' AS unresolved_identities")
+            elif column == "price_kind":
+                expressions.append("'unpriced' AS price_kind")
+            elif column == "price_value":
+                expressions.append("NULL AS price_value")
+            elif column == "price_scope":
+                expressions.append("'selection' AS price_scope")
             elif column == "is_replay":
                 expressions.append("0 AS is_replay")
             else:
@@ -1999,6 +2005,43 @@ def _bind_publication_versions_to_manifest_authority(
         ))
 
 
+def _add_projection_observation_prices(connection: Connection) -> None:
+    """Add the canonical comparable price triple to archived observations.
+
+    The columns are additive and defaulted, so every row archived before this
+    migration reads as ``unpriced``: the price a provider published was never
+    recorded in these columns.  This backfill deliberately does not read the
+    referenced source document -- a per-row parse of every archived document
+    is out of scope for a schema migration -- so the true price stays recoverable
+    from that document, which is exactly what the mapping-replay path does when
+    it recomputes targetability.  The source document each row points at is
+    untouched, so its checksum keeps the meaning it was written with.
+    """
+
+    from app.models.projection_archive import ProjectionObservation
+
+    table = connection.dialect.identifier_preparer.quote(
+        ProjectionObservation.__tablename__
+    )
+    existing = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionObservation.__tablename__
+        )
+    }
+    additions = (
+        ("price_kind", "VARCHAR(16) NOT NULL DEFAULT 'unpriced'"),
+        ("price_value", "VARCHAR(260)"),
+        ("price_scope", "VARCHAR(16) NOT NULL DEFAULT 'selection'"),
+    )
+    for column, definition in additions:
+        if column in existing:
+            continue
+        connection.execute(
+            text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        )
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2091,6 +2134,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         45,
         "045_projection_mapping_replay",
         _upgrade_projection_mapping_replay,
+    ),
+    Migration(
+        46,
+        "046_projection_observation_prices",
+        _add_projection_observation_prices,
     ),
 )
 

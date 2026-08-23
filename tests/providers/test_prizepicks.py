@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,11 @@ from app.providers.dfs import (
     MarketVariant,
     MalformedProviderResponseError,
     NBAMarketQuery,
+    PriceKind,
+    PriceScope,
     RetrievalContext,
     ScoringPeriod,
+    SelectionDirection,
     SnapshotStatus,
 )
 from app.providers.prizepicks import PrizePicksAdapter
@@ -115,7 +119,17 @@ def test_get_snapshot_paginates_and_keeps_typed_prizepicks_evidence() -> None:
     assert market.variant_label == "standard"
     assert market.scoring_period is ScoringPeriod.UNKNOWN
     assert market.scoring_period_label is None
-    assert market.selections == ()
+    # Both sides of the line are offered;  without a registry payout table the
+    # provider prices neither of them.
+    assert [selection.selection_id for selection in market.selections] == [
+        "projection-1:higher",
+        "projection-1:lower",
+    ]
+    assert [selection.direction for selection in market.selections] == [
+        SelectionDirection.HIGHER,
+        SelectionDirection.LOWER,
+    ]
+    assert all(not selection.is_priced for selection in market.selections)
     assert snapshot.coverage.fetched_count == 2
     assert snapshot.coverage.eligible_count == 2
     assert snapshot.coverage.normalized_count == 2
@@ -726,3 +740,39 @@ def test_prizepicks_does_not_hide_value_error_from_normalizer(monkeypatch) -> No
 
     with pytest.raises(ValueError, match="normalizer bug"):
         PrizePicksAdapter(session=session).get_snapshot(_query(), _context())
+
+
+def test_registry_payout_tables_price_both_sides_of_a_projection():
+    from app.providers.registry import PRIZEPICKS_ENTRY_PAYOUT_TABLES
+
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"]["total_pages"] = 1
+    adapter = PrizePicksAdapter(
+        session=FakeSession([FakeResponse(payload)]),
+        entry_payout_tables=PRIZEPICKS_ENTRY_PAYOUT_TABLES,
+    )
+
+    snapshot = adapter.get_snapshot(_query(), _context())
+    market = snapshot.markets[0]
+
+    assert market.variant is MarketVariant.STANDARD
+    assert market.price_kind is PriceKind.MULTIPLIER
+    assert market.price_scope is PriceScope.ENTRY
+    assert market.price_value == Decimal("3")
+    assert all(selection.is_priced for selection in market.selections)
+
+
+def test_a_demon_projection_is_an_alternate_variant_priced_by_its_own_multiplier():
+    payload = _payload("projections.page1.valid.json")
+    payload["meta"]["total_pages"] = 1
+    payload["data"][0]["attributes"]["odds_type"] = "demon"
+    payload["data"][0]["attributes"]["payout_multiplier"] = "1.250"
+    adapter = PrizePicksAdapter(session=FakeSession([FakeResponse(payload)]))
+
+    market = adapter.get_snapshot(_query(), _context()).markets[0]
+
+    assert market.variant is MarketVariant.ALTERNATE
+    assert market.variant_label == "demon"
+    assert market.price_kind is PriceKind.MULTIPLIER
+    assert market.price_value == Decimal("1.250")
+    assert market.price_scope is PriceScope.ENTRY

@@ -44,6 +44,8 @@ from app.providers.dfs import (
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
+    Selection,
+    SelectionDirection,
     SnapshotStatus,
     StatisticEvidence,
     TeamEvidence,
@@ -60,6 +62,13 @@ from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.statistic_catalog import StatisticCatalog
+
+
+#: A market must offer a priced side to be targetable, and what that price is
+#: is not what these tests are about, so every market here offers one.
+_PRICED_SELECTIONS = (
+    Selection(selection_id="higher", direction=SelectionDirection.HIGHER, american_price=-110),
+)
 
 
 pytestmark = pytest.mark.integration
@@ -221,6 +230,7 @@ def _snapshot(catalog, retrieved_at, threshold):
         status=MarketStatus.AVAILABLE,
         variant=MarketVariant.STANDARD,
         scoring_period=ScoringPeriod.FULL_GAME,
+        selections=_PRICED_SELECTIONS,
     )
     return ProviderSnapshot(
         provider="dabble",

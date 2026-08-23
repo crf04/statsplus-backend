@@ -1,0 +1,55 @@
+{
+  "data": [
+    {
+      "type": "projection",
+      "id": "projection-1",
+      "attributes": {
+        "line_score": "27.500",
+        "stat_type": "Points",
+        "status": "pre_game",
+        "start_time": "2026-08-10T00:00:00-05:00",
+        "updated_at": "2026-08-09T18:00:00-05:00",
+        "odds_type": "standard",
+        "scoring_period": "full_game",
+        "description": "LAL vs. CHI"
+      },
+      "relationships": {
+        "new_player": {"data": {"type": "new_player", "id": "player-1"}},
+        "league": {"data": {"type": "league", "id": "7"}}
+      }
+    },
+    {
+      "type": "projection",
+      "id": "projection-2",
+      "attributes": {
+        "line_score": "31.500",
+        "stat_type": "Points",
+        "status": "pre_game",
+        "start_time": "2026-08-10T00:00:00-05:00",
+        "updated_at": "2026-08-09T18:00:00-05:00",
+        "odds_type": "demon",
+        "payout_multiplier": "1.250",
+        "scoring_period": "full_game",
+        "description": "LAL vs. CHI"
+      },
+      "relationships": {
+        "new_player": {"data": {"type": "new_player", "id": "player-1"}},
+        "league": {"data": {"type": "league", "id": "7"}}
+      }
+    }
+  ],
+  "included": [
+    {
+      "type": "new_player",
+      "id": "player-1",
+      "attributes": {
+        "name": "LeBron James",
+        "team": "LAL",
+        "team_id": "team-1",
+        "team_abbreviation": "LAL"
+      }
+    },
+    {"type": "league", "id": "7", "attributes": {"name": "NBA"}}
+  ],
+  "meta": {"current_page": 1, "total_pages": 1}
+}

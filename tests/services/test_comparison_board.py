@@ -2046,7 +2046,7 @@ def _rich_selection(**overrides):
         "direction": "higher",
         "status": "open",
         "modifiers": (
-            SelectionModifier(value="1.25", kind="boost", scope="selection"),
+            SelectionModifier(value="1.25", kind="promo", scope="selection"),
         ),
         "american_price": -120,
         "decimal_price": "1.83",
@@ -2119,7 +2119,7 @@ def test_a_retained_market_keeps_every_offered_selection_and_its_prices():
     assert selection.decimal_price == Decimal("1.83")
     assert selection.modifiers[0].value == Decimal("1.25")
     assert (selection.modifiers[0].kind, selection.modifiers[0].scope) == (
-        "boost",
+        "promo",
         "selection",
     )
 
@@ -2216,10 +2216,10 @@ def test_a_separator_in_one_field_cannot_forge_another_market_identity():
 
 def test_a_separator_in_a_modifier_cannot_forge_another_selection_identity():
     one = _rich_selection(
-        modifiers=(SelectionModifier(value="1.25", kind="a\x1fb", scope="c"),)
+        modifiers=(SelectionModifier(value="1.25", kind="promo", scope="a\x1fb", label="c"),)
     )
     two = _rich_selection(
-        modifiers=(SelectionModifier(value="1.25", kind="a", scope="b\x1fc"),)
+        modifiers=(SelectionModifier(value="1.25", kind="promo", scope="a", label="b\x1fc"),)
     )
 
     assert selection_reference("mkt", one) != selection_reference("mkt", two)
@@ -2428,14 +2428,14 @@ def test_selection_references_separate_every_distinct_offering():
         _rich_selection(decimal_price="1.91"),
         _rich_selection(modifiers=()),
         _rich_selection(
-            modifiers=(SelectionModifier(value="1.5", kind="boost", scope="selection"),)
+            modifiers=(SelectionModifier(value="1.5", kind="promo", scope="selection"),)
         ),
         _rich_selection(
-            modifiers=(SelectionModifier(value="1.25", kind="boost", scope="entry"),)
+            modifiers=(SelectionModifier(value="1.25", kind="promo", scope="entry"),)
         ),
         _rich_selection(
             modifiers=(
-                SelectionModifier(value="1.25", kind="boost", scope="selection", label="Boosted"),
+                SelectionModifier(value="1.25", kind="promo", scope="selection", label="Boosted"),
             )
         ),
     )
@@ -2524,7 +2524,7 @@ def _scaled_selection(price, modifier):
 
     return _rich_selection(
         decimal_price=price,
-        modifiers=(SelectionModifier(value=modifier, kind="boost", scope="selection"),),
+        modifiers=(SelectionModifier(value=modifier, kind="promo", scope="selection"),),
     )
 
 

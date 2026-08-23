@@ -17,7 +17,10 @@ from app.providers.dfs import (
     MarketThreshold,
     MarketStatus,
     MarketVariant,
+    ModifierKind,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     NBAMarketQuery,
     CoverageEvidence,
     CoverageRecordExcluded,
@@ -36,6 +39,7 @@ from app.providers.dfs import (
     TeamEvidence,
     normalize_market_variant,
     normalize_market_status,
+    normalize_modifier_kind,
     normalize_selection_direction,
     normalize_scoring_period,
 )
@@ -247,7 +251,7 @@ def test_selection_modifier_is_decimal_evidence_not_a_payout():
     )
 
     assert modifier.value == Decimal("1.000")
-    assert modifier.kind == "multiplier"
+    assert modifier.kind == "payout_multiplier"
     assert modifier.scope == "selection"
     assert modifier.label == "1.000x"
     assert not hasattr(modifier, "payout")
@@ -262,7 +266,7 @@ def test_selection_modifier_can_preserve_a_missing_provider_label():
     )
 
     assert modifier.value == Decimal("1.500")
-    assert modifier.kind == "multiplier"
+    assert modifier.kind == "payout_multiplier"
     assert modifier.scope == "selection"
     assert modifier.label is None
     assert not hasattr(modifier, "original_label")
@@ -947,9 +951,12 @@ def test_dfs_module_exports_only_contract_symbols():
         "MarketStatus",
         "MarketThreshold",
         "MarketVariant",
+        "ModifierKind",
         "NBAMarketQuery",
         "NormalizedLabel",
         "PlayerProjectionMarket",
+        "PriceKind",
+        "PriceScope",
         "ProviderSnapshot",
         "ProviderSnapshotProvider",
         "RetrievalContext",
@@ -961,10 +968,182 @@ def test_dfs_module_exports_only_contract_symbols():
         "SportEvidence",
         "StatisticEvidence",
         "TeamEvidence",
+        "lenient_provider_decode",
         "normalize_coverage_code",
         "normalize_market_status",
         "normalize_market_variant",
+        "normalize_modifier_kind",
         "normalize_scoring_period",
         "normalize_selection_direction",
         "normalize_timestamp",
     }
+
+
+def _priced_selection(**overrides: object) -> Selection:
+    return Selection(**{"selection_id": "sel-1", "direction": "higher", **overrides})
+
+
+def test_a_selection_states_its_price_in_exactly_one_canonical_form():
+    american = _priced_selection(american_price="-112", decimal_price="1.900")
+    decimal_only = _priced_selection(decimal_price="2.000")
+    entry = _priced_selection(
+        modifiers=(SelectionModifier("1.5", "multiplier", "selection"),)
+    )
+    unpriced = _priced_selection()
+
+    assert (american.price_kind, american.price_value, american.price_scope) == (
+        PriceKind.AMERICAN,
+        Decimal("-112"),
+        PriceScope.SELECTION,
+    )
+    assert (
+        decimal_only.price_kind,
+        decimal_only.price_value,
+        decimal_only.price_scope,
+    ) == (PriceKind.DECIMAL, Decimal("2.000"), PriceScope.SELECTION)
+    assert (entry.price_kind, entry.price_value, entry.price_scope) == (
+        PriceKind.MULTIPLIER,
+        Decimal("1.5"),
+        PriceScope.ENTRY,
+    )
+    assert (unpriced.price_kind, unpriced.price_value, unpriced.price_scope) == (
+        PriceKind.UNPRICED,
+        None,
+        PriceScope.SELECTION,
+    )
+    assert american.is_priced and entry.is_priced
+    assert not unpriced.is_priced
+    # The compatibility fields are untouched by the canonical triple.
+    assert american.american_price == -112
+    assert american.decimal_price == Decimal("1.900")
+
+
+def test_a_stated_price_must_agree_with_the_fields_it_claims():
+    stated = _priced_selection(
+        price_kind="multiplier",
+        price_value="3",
+        price_scope="entry",
+    )
+
+    assert (stated.price_kind, stated.price_value, stated.price_scope) == (
+        PriceKind.MULTIPLIER,
+        Decimal("3"),
+        PriceScope.ENTRY,
+    )
+
+    with pytest.raises(ValueError, match="contradicts american_price"):
+        _priced_selection(american_price=-110, price_kind="american", price_value=-120)
+    with pytest.raises(ValueError, match="contradicts decimal_price"):
+        _priced_selection(decimal_price="1.91", price_kind="decimal", price_value="2.0")
+    with pytest.raises(ValueError, match="must state a price_value"):
+        _priced_selection(price_kind="multiplier")
+    with pytest.raises(ValueError, match="must not state a price_value"):
+        _priced_selection(price_kind="unpriced", price_value="1")
+    with pytest.raises(ValueError, match="require a price_kind"):
+        _priced_selection(price_value="1")
+    with pytest.raises(ValueError, match="price_kind is not a reviewed value"):
+        _priced_selection(price_kind="fractional", price_value="1")
+    # A stated multiplier is cross-checked against a coexisting payout modifier,
+    # exactly as american/decimal prices are cross-checked against their fields.
+    with pytest.raises(ValueError, match="contradicts its payout multiplier"):
+        _priced_selection(
+            price_kind="multiplier",
+            price_value="3",
+            price_scope="entry",
+            modifiers=(SelectionModifier("2.5", "payout_multiplier", "selection"),),
+        )
+    agreeing = _priced_selection(
+        price_kind="multiplier",
+        price_value="2.5",
+        price_scope="entry",
+        modifiers=(SelectionModifier("2.5", "payout_multiplier", "selection"),),
+    )
+    assert agreeing.price_value == Decimal("2.5")
+
+
+def test_modifier_kinds_are_a_closed_vocabulary():
+    assert normalize_modifier_kind("multiplier") is ModifierKind.PAYOUT_MULTIPLIER
+    assert normalize_modifier_kind("payout_multiplier") is ModifierKind.PAYOUT_MULTIPLIER
+    assert normalize_modifier_kind("promotion") is ModifierKind.PROMO
+    assert normalize_modifier_kind("line adjustment") is ModifierKind.LINE_ADJUSTMENT
+    assert SelectionModifier("1.5", "multiplier", "selection").kind == (
+        "payout_multiplier"
+    )
+
+    with pytest.raises(CoverageRecordMalformed, match="reviewed payout_multiplier"):
+        SelectionModifier("1.5", "boost", "selection")
+    with pytest.raises(CoverageRecordMalformed):
+        normalize_modifier_kind(None)
+
+
+def test_prizepicks_adjusted_line_words_are_alternate_variants():
+    for label in ("demon", "goblin", "Demon"):
+        normalized = normalize_market_variant(label)
+        assert normalized.value is MarketVariant.ALTERNATE
+        assert normalized.original_label == label
+
+    market = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="projection-1",
+        variant="demon",
+    )
+
+    assert market.variant is MarketVariant.ALTERNATE
+    assert market.variant_label == "demon"
+    # A word outside the closed map is retained, never guessed.
+    assert normalize_market_variant("flex").value is MarketVariant.UNKNOWN
+
+
+def test_a_market_states_one_price_form_for_every_side_it_offers():
+    two_sided = PlayerProjectionMarket(
+        provider="underdog",
+        market_id="line-1",
+        selections=(
+            _priced_selection(selection_id="higher", american_price=-112),
+            _priced_selection(selection_id="lower", american_price=100),
+        ),
+    )
+    entry_priced = PlayerProjectionMarket(
+        provider="prizepicks",
+        market_id="projection-1",
+        selections=(
+            _priced_selection(
+                selection_id="higher",
+                price_kind="multiplier",
+                price_value="3",
+                price_scope="entry",
+            ),
+            _priced_selection(
+                selection_id="lower",
+                price_kind="multiplier",
+                price_value="3",
+                price_scope="entry",
+            ),
+            _priced_selection(selection_id="promo"),
+        ),
+    )
+
+    assert two_sided.price_kind is PriceKind.AMERICAN
+    assert two_sided.price_scope is PriceScope.SELECTION
+    # Each side states its own number, so no one number is the market's.
+    assert two_sided.price_value is None
+    assert two_sided.is_priced
+    assert entry_priced.price_value == Decimal("3")
+    assert entry_priced.price_scope is PriceScope.ENTRY
+    assert PlayerProjectionMarket(provider="dabble").price_kind is PriceKind.UNPRICED
+    assert not PlayerProjectionMarket(provider="dabble").is_priced
+
+    with pytest.raises(
+        MalformedProviderResponseError, match="one price kind and scope"
+    ):
+        PlayerProjectionMarket(
+            provider="underdog",
+            market_id="line-2",
+            selections=(
+                _priced_selection(selection_id="higher", american_price=-112),
+                _priced_selection(
+                    selection_id="lower",
+                    modifiers=(SelectionModifier("2", "multiplier", "entry"),),
+                ),
+            ),
+        )

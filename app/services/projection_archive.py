@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -49,6 +49,7 @@ from app.providers.dfs import (
     ProviderSnapshot,
     SnapshotStatus,
     TeamEvidence,
+    lenient_provider_decode,
 )
 from app.services.dfs_snapshot_cache import (
     deserialize_provider_snapshot,
@@ -84,6 +85,9 @@ PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
         "statistic_provider_label",
         "resolution_state",
         "unresolved_identities",
+        "price_kind",
+        "price_value",
+        "price_scope",
     ),
     "projection_materialization_generations": ("is_replay",),
     "latest_player_projections": ("confirmed_at",),
@@ -145,7 +149,8 @@ def require_projection_archive_schema(engine: Engine) -> None:
         raise ConfigurationError(
             "Projection archive dependencies require migrations "
             "040_projection_archive, 041_projection_archive_transitions, "
-            "044_projection_closing_sets, and 045_projection_mapping_replay; missing: "
+            "044_projection_closing_sets, 045_projection_mapping_replay, and "
+            "046_projection_observation_prices; missing: "
             + ", ".join(missing)
         )
 
@@ -289,6 +294,22 @@ class _EligibleProjectionEvidence:
     rows: tuple[Any, ...]
     provider_statuses: dict[str, str]
     empty_provider_observed_at: dict[str, datetime]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplaySourceMarket:
+    """One market decoded from an archived document for mapping replay.
+
+    ``legacy`` records that the document declared schema version 1, so its
+    market may hold shapes the current constructors reject (an unreviewed
+    modifier kind, or sides priced in different forms).  Any reconstruction of
+    it -- which re-runs those constructors via ``dataclasses.replace`` -- must
+    therefore run under the same leniency the decode used, or replay would
+    hard-fail on a document that was legal to archive.
+    """
+
+    market: PlayerProjectionMarket
+    legacy: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1530,13 +1551,15 @@ class ProjectionArchive:
                     row, kind=kind, identity=identity, canonical=canonical
                 ):
                     continue
+                source = source_markets[
+                    (str(row["snapshot_id"]), int(row["source_ordinal"]))
+                ]
                 rematerialized = self._rematerialize_observation(
                     row,
                     kind=kind,
                     canonical=canonical,
-                    source_market=source_markets[
-                        (str(row["snapshot_id"]), int(row["source_ordinal"]))
-                    ],
+                    source_market=source.market,
+                    legacy=source.legacy,
                 )
                 if self._replay_fields(row) != self._replay_fields(rematerialized):
                     changed_rows.append(rematerialized)
@@ -1781,6 +1804,7 @@ class ProjectionArchive:
         kind: str,
         canonical: Mapping[str, Any],
         source_market: PlayerProjectionMarket,
+        legacy: bool = False,
     ) -> dict[str, Any]:
         rematerialized = dict(row)
         athlete_team_id = None
@@ -1813,35 +1837,60 @@ class ProjectionArchive:
             "resolved" if not unresolved else "unresolved"
         )
         rematerialized["unresolved_identities"] = ",".join(unresolved)
+        # The price is a fact of the archived source document, not of the
+        # observation row: migration 046 backfilled every pre-046 row's price
+        # columns to 'unpriced', but the document those rows point at still
+        # carries the published price.  Re-derive the triple from the decoded
+        # source market so a legacy Underdog/Dabble row keeps its price -- and
+        # its targetability -- across a mapping replay, while a legacy
+        # PrizePicks row (no priced selection) still correctly flips per P2.
+        rematerialized["price_kind"] = source_market.price_kind.value
+        rematerialized["price_value"] = (
+            None
+            if source_market.price_value is None
+            else str(source_market.price_value)
+        )
+        rematerialized["price_scope"] = source_market.price_scope.value
         rematerialized["targetable"] = bool(
             rematerialized["market_status"] == MarketStatus.AVAILABLE.value
             and rematerialized["market_variant"] == MarketVariant.STANDARD.value
             and rematerialized["scoring_period"] == ScoringPeriod.FULL_GAME.value
+            and source_market.is_priced
             and not unresolved
             and rematerialized["canonical_team_id"] is not None
             and rematerialized["market_category"] is not None
         )
-        rematerialized["market_reference"] = market_reference(
-            self._market_with_replayed_identities(
-                source_market,
-                rematerialized,
-                athlete_team_id=athlete_team_id,
-            )
+        # Reconstructing the market re-runs the strict constructor via
+        # ``dataclasses.replace``.  A market decoded from a schema-version-1
+        # document may hold a shape that constructor now rejects (mixed price
+        # forms, an unreviewed modifier kind), so its reconstruction must run
+        # under the same leniency its decode used.  A v2 (new-format) market
+        # stays strict.
+        reconstruction = (
+            lenient_provider_decode() if legacy else nullcontext()
         )
+        with reconstruction:
+            rematerialized["market_reference"] = market_reference(
+                self._market_with_replayed_identities(
+                    source_market,
+                    rematerialized,
+                    athlete_team_id=athlete_team_id,
+                )
+            )
         return rematerialized
 
     @staticmethod
     def _replay_source_markets(
         connection: Any,
         rows: tuple[Mapping[str, Any], ...],
-    ) -> dict[tuple[str, int], PlayerProjectionMarket]:
+    ) -> dict[tuple[str, int], "_ReplaySourceMarket"]:
         ordinals_by_snapshot: dict[str, set[int]] = {}
         for row in rows:
             ordinals_by_snapshot.setdefault(str(row["snapshot_id"]), set()).add(
                 int(row["source_ordinal"])
             )
         table = ProjectionProviderSnapshot.__table__
-        markets: dict[tuple[str, int], PlayerProjectionMarket] = {}
+        markets: dict[tuple[str, int], _ReplaySourceMarket] = {}
         for snapshot in connection.execute(
             select(table.c.snapshot_id, table.c.evidence_document).where(
                 table.c.snapshot_id.in_(ordinals_by_snapshot)
@@ -1849,6 +1898,7 @@ class ProjectionArchive:
         ).mappings():
             snapshot_id = str(snapshot["snapshot_id"])
             document = json.loads(str(snapshot["evidence_document"]))
+            legacy = int(document.get("schema_version", 1)) == 1
             raw_markets = document.get("markets")
             if not isinstance(raw_markets, list):
                 raise RuntimeError(
@@ -1865,7 +1915,10 @@ class ProjectionArchive:
                     json.dumps(candidate_document, separators=(",", ":"), sort_keys=True),
                     allow_partial=True,
                 )
-                markets[(snapshot_id, source_ordinal)] = candidate_snapshot.markets[0]
+                markets[(snapshot_id, source_ordinal)] = _ReplaySourceMarket(
+                    market=candidate_snapshot.markets[0],
+                    legacy=legacy,
+                )
         if len(markets) != len({
             (str(row["snapshot_id"]), int(row["source_ordinal"])) for row in rows
         }):
@@ -2378,6 +2431,9 @@ class ProjectionArchive:
                 market.status is MarketStatus.AVAILABLE
                 and market.variant is MarketVariant.STANDARD
                 and market.scoring_period is ScoringPeriod.FULL_GAME
+                # A market nobody published a price for is evidence, not an
+                # offering something can be selected from.
+                and market.is_priced
                 and canonical_player_id is not None
                 and canonical_player_name is not None
                 and canonical_game_id is not None
@@ -2416,6 +2472,13 @@ class ProjectionArchive:
                     "market_status": market.status.value,
                     "market_variant": market.variant.value,
                     "scoring_period": market.scoring_period.value,
+                    "price_kind": market.price_kind.value,
+                    "price_value": (
+                        None
+                        if market.price_value is None
+                        else str(market.price_value)
+                    ),
+                    "price_scope": market.price_scope.value,
                     "targetable": targetable,
                     "resolution_state": (
                         "resolved" if not unresolved_identities else "unresolved"

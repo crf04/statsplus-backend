@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-from app.dfs_catalog import DFS_DABBLE, DFS_PROVIDER_NAME_SET
+from app.dfs_catalog import DFS_DABBLE
 from app.domain.freshness import cache_window_policy, time_window_seconds
 from app.domain.market_content import NumericDomainError
 
@@ -36,6 +36,20 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+
+def dfs_provider_name_set() -> frozenset[str]:
+    """Read the provider registry, which is the sole authority on admission.
+
+    The import is deferred because the adapter package this settings module
+    configures imports it back;  the registry itself is read at validation
+    time, so a provider registered for one process is configurable in it.
+    """
+
+    from app.providers.registry import dfs_provider_name_set as registered
+
+    return registered()
+
 
 DEFAULT_SQLITE_URL = "sqlite:///nba_play_types.db"
 LOCAL_ENVIRONMENTS = frozenset({"development", "testing", "test", "local"})
@@ -160,9 +174,9 @@ class FeatureSettings(BaseModel):
     @classmethod
     def validate_projection_archive_read_provider(cls, value: Any) -> str:
         provider = str(value).strip().casefold()
-        if provider not in DFS_PROVIDER_NAME_SET:
+        if provider not in dfs_provider_name_set():
             raise ValueError(
-                "PROJECTION_ARCHIVE_READ_PROVIDER must name a supported DFS provider"
+                "PROJECTION_ARCHIVE_READ_PROVIDER must name a registered DFS provider"
             )
         return provider
 
@@ -251,9 +265,9 @@ class ProviderSettings(BaseModel):
             provider = str(raw_provider).strip().casefold()
             if not provider:
                 continue
-            if provider not in DFS_PROVIDER_NAME_SET:
+            if provider not in dfs_provider_name_set():
                 raise ValueError(
-                    "DFS_ENABLED_PROVIDERS contains an unsupported provider: "
+                    "DFS_ENABLED_PROVIDERS contains an unregistered provider: "
                     + provider
                 )
             if provider not in seen:
@@ -287,7 +301,7 @@ class ProviderSettings(BaseModel):
         """
 
         names = {
-            *DFS_PROVIDER_NAME_SET,
+            *dfs_provider_name_set(),
             "*",
             *(
                 self.dfs_cache_fresh_seconds
@@ -679,7 +693,7 @@ def _build_settings(
     )
     fresh_overrides: dict[str, Decimal] = {}
     stale_overrides: dict[str, Decimal] = {}
-    for provider_name in DFS_PROVIDER_NAME_SET:
+    for provider_name in dfs_provider_name_set():
         env_name = provider_name.upper()
         for suffix, overrides in (
             ("CACHE_FRESH_SECONDS", fresh_overrides),

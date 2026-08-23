@@ -26,6 +26,8 @@ from app.providers.dfs import (
     MarketThreshold,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
     RetrievalContext,
     Selection,
@@ -37,6 +39,7 @@ from app.providers.dfs import (
 )
 from app.services.dfs_snapshot_cache import (
     COMPARE_AND_DELETE_SCRIPT,
+    SNAPSHOT_SCHEMA_VERSION,
     deserialize_provider_snapshot,
     ProviderSnapshotCache,
     ProviderSnapshotCacheCoordinator,
@@ -2509,3 +2512,216 @@ def test_a_fresh_window_equal_to_its_stale_ceiling_is_accepted() -> None:
     clock.advance(0.000001)
     with pytest.raises(TimeoutError):
         cache.get_snapshot(NBAMarketQuery(), _context())
+
+
+def test_the_canonical_price_triple_survives_the_document_round_trip() -> None:
+    priced = replace(
+        _market_payload_snapshot(),
+        markets=(
+            replace(
+                _market_payload_snapshot().markets[0],
+                selections=(
+                    Selection(
+                        selection_id="selection-1",
+                        direction="higher",
+                        american_price=-112,
+                        decimal_price="1.900",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    document = serialize_provider_snapshot(priced, NBAMarketQuery())
+    payload = json.loads(document)
+    decoded = deserialize_provider_snapshot(document, expected_query=NBAMarketQuery())
+    selection = decoded.markets[0].selections[0]
+
+    assert payload["schema_version"] == SNAPSHOT_SCHEMA_VERSION
+    assert payload["markets"][0]["selections"][0]["price_kind"] == "american"
+    assert payload["markets"][0]["selections"][0]["price_value"] == "-112"
+    assert payload["markets"][0]["selections"][0]["price_scope"] == "selection"
+    assert (selection.price_kind, selection.price_value, selection.price_scope) == (
+        PriceKind.AMERICAN,
+        Decimal("-112"),
+        PriceScope.SELECTION,
+    )
+    assert serialize_provider_snapshot(decoded, NBAMarketQuery()) == document
+
+
+def test_a_document_is_read_and_re_encoded_in_the_version_it_declares() -> None:
+    snapshot = replace(
+        _market_payload_snapshot(),
+        markets=(
+            replace(
+                _market_payload_snapshot().markets[0],
+                selections=(
+                    Selection(
+                        selection_id="selection-1",
+                        direction="higher",
+                        modifiers=(
+                            SelectionModifier("1.5", "multiplier", "selection"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    archived = serialize_provider_snapshot(snapshot, NBAMarketQuery(), schema_version=1)
+    payload = json.loads(archived)
+
+    assert payload["schema_version"] == 1
+    assert "price_kind" not in payload["markets"][0]["selections"][0]
+
+    # An archived document keeps its exact bytes, so its checksum keeps its
+    # meaning, while the triple is still available to every reader.
+    decoded = deserialize_provider_snapshot(archived, expected_query=NBAMarketQuery())
+    selection = decoded.markets[0].selections[0]
+
+    assert (selection.price_kind, selection.price_value, selection.price_scope) == (
+        PriceKind.MULTIPLIER,
+        Decimal("1.5"),
+        PriceScope.ENTRY,
+    )
+    assert (
+        serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=1)
+        == archived
+    )
+    with pytest.raises(ValueError, match="schema version is unsupported"):
+        serialize_provider_snapshot(decoded, NBAMarketQuery(), schema_version=3)
+    with pytest.raises(SnapshotCacheError, match="schema version is incompatible"):
+        deserialize_provider_snapshot(
+            _canonical({**payload, "schema_version": 3}),
+            expected_query=NBAMarketQuery(),
+        )
+
+
+def _legacy_v1_document(*, provider: str, modifier_kind: str, mixed: bool) -> str:
+    """A schema-version-1 document as pre-#109 code could legally archive it.
+
+    v1 selections carry no price triple, and the old contract accepted any
+    non-empty modifier kind (Underdog read a provider ``modifier_kind`` field
+    verbatim) and never rejected a market whose sides priced in different
+    forms.  These documents are already in production archives.
+    """
+
+    selections = [
+        {
+            "selection_id": "higher",
+            "label": None,
+            "direction": "higher",
+            "direction_label": None,
+            "status": None,
+            "modifiers": [
+                {"value": "1.5", "kind": modifier_kind, "scope": "selection", "label": None}
+            ],
+            "american_price": "-112",
+            "decimal_price": None,
+        }
+    ]
+    if mixed:
+        # A second side priced in a different form -- forbidden for new
+        # normalization, legal in a v1 archive.
+        selections.append(
+            {
+                "selection_id": "lower",
+                "label": None,
+                "direction": "lower",
+                "direction_label": None,
+                "status": None,
+                "modifiers": [
+                    {"value": "2.0", "kind": "multiplier", "scope": "selection", "label": None}
+                ],
+                "american_price": None,
+                "decimal_price": None,
+            }
+        )
+    document = {
+        "schema": "statsplus.provider_snapshot",
+        "schema_version": 1,
+        "contract_version": "1",
+        "provider": provider,
+        "status": "complete",
+        "coverage": {
+            "fetched_count": 1,
+            "eligible_count": 1,
+            "normalized_count": 1,
+            "skipped_count": 0,
+            "pagination_complete": True,
+            "fanout_complete": True,
+            "expected_total": None,
+            "warning_codes": [],
+            "skipped_reasons": [],
+            "diagnostic_details": [],
+        },
+        "retrieved_at": "2026-08-09T20:00:00+00:00",
+        "query": {
+            "sport": "NBA",
+            "league": "NBA",
+            "market_statuses": ["available", "suspended"],
+            "pregame_only": True,
+        },
+        "markets": [
+            {
+                "provider": provider,
+                "market_id": "line-1",
+                "athlete": None,
+                "event": None,
+                "team": None,
+                "opponent": None,
+                "league": None,
+                "competition": None,
+                "sport": None,
+                "statistic": None,
+                "threshold": None,
+                "status": "available",
+                "status_label": None,
+                "variant": "standard",
+                "variant_label": None,
+                "scoring_period": "full_game",
+                "scoring_period_label": None,
+                "starts_at": None,
+                "updated_at": None,
+                "appearance": None,
+                "statistic_match": None,
+                "selections": selections,
+            }
+        ],
+    }
+    return json.dumps(document, separators=(",", ":"), sort_keys=True)
+
+
+def test_a_v1_document_with_a_legacy_modifier_kind_still_decodes() -> None:
+    payload = _legacy_v1_document(
+        provider="underdog", modifier_kind="boost", mixed=False
+    )
+
+    snapshot = deserialize_provider_snapshot(payload, expected_query=NBAMarketQuery())
+
+    # The unreviewed kind is preserved verbatim, not remapped or rejected.
+    modifier = snapshot.markets[0].selections[0].modifiers[0]
+    assert modifier.kind == "boost"
+
+
+def test_a_v1_document_priced_in_mixed_forms_still_decodes() -> None:
+    payload = _legacy_v1_document(
+        provider="underdog", modifier_kind="multiplier", mixed=True
+    )
+
+    snapshot = deserialize_provider_snapshot(payload, expected_query=NBAMarketQuery())
+
+    market = snapshot.markets[0]
+    # A known alias still normalizes, so the priced side is comparable.
+    assert market.selections[0].price_kind is PriceKind.AMERICAN
+    assert len(market.selections) == 2
+
+
+def test_a_v2_document_still_enforces_the_closed_vocabularies() -> None:
+    # The same shape at schema version 2 is new-format data and stays strict.
+    payload = _legacy_v1_document(
+        provider="underdog", modifier_kind="boost", mixed=False
+    ).replace('"schema_version":1', '"schema_version":2')
+
+    with pytest.raises(SnapshotCacheError):
+        deserialize_provider_snapshot(payload, expected_query=NBAMarketQuery())

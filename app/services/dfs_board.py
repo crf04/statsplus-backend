@@ -23,7 +23,7 @@ from typing import Any, Callable
 import requests
 
 from app.config.settings import RuntimeSettings
-from app.dfs_catalog import DFS_PROVIDER_NAMES
+from app.providers.registry import dfs_provider_names
 from app.domain.freshness import exact_age_seconds
 from app.errors import ProviderUnavailableError
 from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
@@ -939,7 +939,7 @@ class DFSBoardService:
         self,
         provider_registry: Mapping[str, ProviderSnapshotProvider],
         *,
-        known_providers: Iterable[str] = DFS_PROVIDER_NAMES,
+        known_providers: Iterable[str] | None = None,
         max_concurrency: int = DEFAULT_BOARD_MAX_CONCURRENCY,
         deadline_seconds: float = DEFAULT_BOARD_DEADLINE_SECONDS,
         clock: Callable[[], datetime] | None = None,
@@ -979,7 +979,9 @@ class DFSBoardService:
         if deadline_seconds <= 0:
             raise ValueError("DFS board deadline_seconds must be positive")
 
-        known = _normalize_names(known_providers)
+        known = _normalize_names(
+            dfs_provider_names() if known_providers is None else known_providers
+        )
         self.provider_registry = MappingProxyType(
             {name: registry[name] for name in sorted(registry)}
         )

@@ -25,9 +25,13 @@ from app.providers.dfs import (
     MalformedProviderResponseError,
     NBAMarketQuery,
     PlayerProjectionMarket,
+    PriceKind,
+    PriceScope,
     ProviderSnapshot,
     RetrievalContext,
     ScoringPeriod,
+    Selection,
+    SelectionDirection,
     _SnapshotMarketCollector,
     _RecordCoverageAccumulator,
     SportEvidence,
@@ -104,9 +108,15 @@ class PrizePicksAdapter:
         session: requests.Session | Any | None = None,
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
         now: Callable[[], datetime] | None = None,
+        entry_payout_tables: Mapping[str, Any] | None = None,
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
+        # PrizePicks publishes its payouts as a static table on its own site
+        # rather than in this API, so the table is injected from the provider
+        # registry.  Without it a projection is retrievable and archivable, but
+        # its two sides state no price at all.
+        self.entry_payout_tables = dict(entry_payout_tables or {})
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.session.headers.update(
             {
@@ -271,6 +281,7 @@ class PrizePicksAdapter:
                     payload,
                     expected_sport=expected_sport,
                     allowed_statuses=allowed_statuses,
+                    entry_payout_tables=self.entry_payout_tables,
                 ),
                 error_policy=_PRIZEPICKS_TRANSPORT_POLICY,
             )
@@ -292,6 +303,7 @@ class PrizePicksAdapter:
         *,
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
+        entry_payout_tables: Mapping[str, Any] | None = None,
     ) -> _PageResult:
         if not isinstance(payload, Mapping):
             raise _MalformedPage("payload must be an object")
@@ -320,6 +332,7 @@ class PrizePicksAdapter:
                 resources=resources,
                 expected_sport=expected_sport,
                 allowed_statuses=allowed_statuses,
+                entry_payout_tables=entry_payout_tables or {},
             ),
         )
 
@@ -350,6 +363,7 @@ class PrizePicksAdapter:
         resources: Mapping[tuple[str, str], Mapping[str, Any]],
         expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
+        entry_payout_tables: Mapping[str, Any] = {},
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
             raise CoverageRecordMalformed("projection must be an object")
@@ -439,10 +453,67 @@ class PrizePicksAdapter:
                 scoring_period_label=period_label,
                 starts_at=start_value,
                 updated_at=updated_value,
-                selections=(),
+                selections=cls._selections(
+                    projection_id,
+                    variant_label=variant_label,
+                    attributes=attributes,
+                    entry_payout_tables=entry_payout_tables,
+                ),
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
+
+    @classmethod
+    def _selections(
+        cls,
+        projection_id: str,
+        *,
+        variant_label: str | None,
+        attributes: Mapping[str, Any],
+        entry_payout_tables: Mapping[str, Any],
+    ) -> tuple[Selection, ...]:
+        """Emit the two sides PrizePicks offers on every projection.
+
+        The API publishes one line and never the sides that line is played
+        from, so the sides are the two directions the product itself defines.
+        Their price is the entry payout, which PrizePicks publishes as a static
+        table outside this API: the registry's table for this projection's odds
+        type prices both sides, and an odds type the registry declares no table
+        for stays unpriced with a per-projection multiplier used when the
+        payload carries one.
+        """
+
+        multiplier = attributes.get(
+            "payout_multiplier", attributes.get("odds_multiplier")
+        )
+        if multiplier is None or multiplier == "":
+            table = cls._payout_table(variant_label, entry_payout_tables)
+            multiplier = None if table is None else table.reference_multiplier
+        price_kind = PriceKind.UNPRICED if multiplier is None else PriceKind.MULTIPLIER
+        try:
+            return tuple(
+                Selection(
+                    selection_id=f"{projection_id}:{direction.value}",
+                    direction=direction,
+                    price_kind=price_kind,
+                    price_value=multiplier,
+                    price_scope=PriceScope.ENTRY,
+                )
+                for direction in (
+                    SelectionDirection.HIGHER,
+                    SelectionDirection.LOWER,
+                )
+            )
+        except ValueError as error:
+            raise CoverageRecordMalformed(str(error)) from error
+
+    @staticmethod
+    def _payout_table(
+        variant_label: str | None,
+        entry_payout_tables: Mapping[str, Any],
+    ) -> Any | None:
+        key = variant_label.strip().casefold() if isinstance(variant_label, str) else ""
+        return entry_payout_tables.get(key)
 
     @classmethod
     def _event_from_projection(

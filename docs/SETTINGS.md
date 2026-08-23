@@ -57,6 +57,16 @@ explicitly provide `DFS_ENABLED_PROVIDERS`; a comma-separated list enables
 those providers, while an explicit empty value disables all of them. Publishing
 the board still requires at least one enabled provider.
 
+`DFS_ENABLED_PROVIDERS` and `PROJECTION_ARCHIVE_READ_PROVIDER` accept exactly
+the names `app.providers.registry` admits; anything else fails startup with
+`ConfigurationError`, as does a registered provider whose adapter is not the
+shared snapshot contract. The registry also owns each provider's static entry
+payout tables — the tables a provider publishes outside its API, such as
+PrizePicks' Power Play payouts — so an operator updates them there rather than
+in an adapter, and no environment variable carries them. The same names bound
+the statistic catalog's `provider_mappings`, so a provider's labels are
+catalogable exactly when it is registered.
+
 The RotoWire injury adapter has two independent, false-by-default gates.
 `INJURY_REPORT_ENABLED=true` opts the deployment into the surface;
 `ROTOWIRE_PERMISSION_GRANTED=true` asserts that written permission or explicit
@@ -114,9 +124,13 @@ tables.
 Migration `045_projection_mapping_replay` adds typed unresolved Projection
 Observation identity evidence, immutable source-observation lineage, the active
 generation/replay-time scope fence, and the database-only mapping replay
-generation seam.
-The reader retains scopes for every supported archive provider (`dabble`,
-`prizepicks`, and `underdog`) independently of the enabled registry. A provider
+generation seam. Migration `046_projection_observation_prices` adds the
+canonical comparable price triple (`price_kind`, `price_value`, `price_scope`)
+to Projection Observations; it is additive and defaulted, so every row archived
+before it reads as `unpriced`, and no archived source document or checksum
+changes.
+The reader retains scopes for every registered archive provider independently
+of the enabled registry. A provider
 removed from `DFS_ENABLED_PROVIDERS` therefore ages out through the 15-minute
 eligibility window rather than disappearing when dependencies are rebuilt;
 disabled providers are not counted as required coverage and immutable evidence

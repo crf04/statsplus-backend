@@ -12,7 +12,12 @@ from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
 
 from app.config.settings import ConfigurationError, RuntimeSettings
-from app.dfs_catalog import DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG
+from app.providers.registry import (
+    DFSProviderRuntime,
+    ProviderRegistryError,
+    build_dfs_provider,
+    dfs_provider_names,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +80,10 @@ def build_dependencies(
 ) -> ApplicationDependencies:
     """Construct the complete request dependency graph for one application."""
 
-    from app.providers.dabble import DabbleAdapter
     from app.providers.nba_stats import NBAStatsAdapter
     from app.providers.nba_live_data import NBALiveDataBoxscoreAdapter
     from app.providers.pbp_game_logs import PBPGameLogAdapter
     from app.providers.pbp_stats import PBPStatsAdapter
-    from app.providers.prizepicks import PrizePicksAdapter
-    from app.providers.underdog import UnderdogAdapter
     from app.providers.rotowire import RotoWireInjuryProvider
     from app.providers.dfs import NBAMarketQuery
     from app.services.athlete_catalog_service import AthleteCatalogService
@@ -223,23 +225,20 @@ def build_dependencies(
     dfs_providers: dict[str, Any] = {}
     cached_dfs_providers: dict[str, Any] = {}
     dfs_snapshot_cache = ProviderSnapshotCacheCoordinator()
-    dfs_timeout = (
-        settings.providers.dfs_provider_connect_timeout_seconds,
-        settings.providers.dfs_provider_read_timeout_seconds,
+    dfs_runtime = DFSProviderRuntime(
+        connect_timeout_seconds=settings.providers.dfs_provider_connect_timeout_seconds,
+        read_timeout_seconds=settings.providers.dfs_provider_read_timeout_seconds,
+        detail_concurrency=settings.providers.dfs_dabble_detail_concurrency,
     )
     for provider_name in settings.providers.dfs_enabled_providers:
-        if provider_name == DFS_DABBLE:
-            provider = DabbleAdapter(
-                connect_timeout_seconds=dfs_timeout[0],
-                read_timeout_seconds=dfs_timeout[1],
-                detail_concurrency=settings.providers.dfs_dabble_detail_concurrency,
-            )
-        elif provider_name == DFS_PRIZEPICKS:
-            provider = PrizePicksAdapter(timeout=dfs_timeout)
-        elif provider_name == DFS_UNDERDOG:
-            provider = UnderdogAdapter(timeout=dfs_timeout)
-        else:  # settings validation normally makes this unreachable
-            raise ValueError(f"unsupported DFS provider {provider_name}")
+        # The registry is the only authority on which providers exist and how
+        # they are built, so a name it does not admit -- or a registration whose
+        # adapter is not the shared snapshot seam -- stops this process here
+        # rather than failing at the first collection run.
+        try:
+            provider = build_dfs_provider(provider_name, dfs_runtime)
+        except ProviderRegistryError as error:
+            raise ConfigurationError(str(error)) from error
         dfs_providers[provider_name] = provider
         cached_dfs_providers[provider_name] = ProviderSnapshotCache(
             provider,
@@ -476,7 +475,7 @@ def build_dependencies(
             provider=provider,
             query=projection_query,
         )
-        for provider in (DFS_DABBLE, DFS_PRIZEPICKS, DFS_UNDERDOG)
+        for provider in dfs_provider_names()
     )
     projection_read_scopes_by_provider = {
         scope.provider: scope for scope in projection_read_scopes

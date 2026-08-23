@@ -37,11 +37,16 @@ from app.services.statistic_catalog_schema import (
 )
 
 
-SUPPORTED_STATISTIC_PROVIDERS: tuple[str, ...] = (
-    "dabble",
-    "prizepicks",
-    "underdog",
-)
+def supported_statistic_providers() -> tuple[str, ...]:
+    """The providers a catalog definition may map labels for.
+
+    Which providers exist is the registry's decision, not this module's, so a
+    provider is catalogable exactly when it is registered.
+    """
+
+    from app.providers.registry import dfs_provider_names
+
+    return dfs_provider_names()
 
 # The complete schema-v1 field vocabulary.  It is intentionally closed: an
 # undocumented alias for a documented field would let two spellings of the
@@ -120,9 +125,9 @@ def _provider(value: Any, *, field_name: str = "provider") -> str:
 
     if not isinstance(value, str) or not value.strip():
         raise StatisticCatalogSchemaError(f"{field_name} must be a non-empty string")
-    if value not in SUPPORTED_STATISTIC_PROVIDERS:
+    if value not in supported_statistic_providers():
         raise StatisticCatalogSchemaError(
-            f"{field_name} {value!r} is not one of the supported DFS providers"
+            f"{field_name} {value!r} is not a registered DFS provider"
         )
     return value
 
@@ -802,7 +807,7 @@ __all__ = [
     "StatisticMatch",
     "StatisticResolver",
     "StatisticUnit",
-    "SUPPORTED_STATISTIC_PROVIDERS",
+    "supported_statistic_providers",
     "load_statistic_catalog",
 ]
 

@@ -1,0 +1,58 @@
+{
+  "board": [
+    {
+      "id": "market-1",
+      "player": {"id": "athlete-1", "name": "LeBron James", "team": "LAL"},
+      "game": {
+        "id": "game-1",
+        "label": "LAL @ CHI",
+        "starts_at": "2026-08-10T01:00:00-05:00"
+      },
+      "stat": "Points",
+      "line": "27.5",
+      "period": "full_game",
+      "variant": "standard",
+      "status": "open",
+      "sides": [
+        {"id": "market-1-higher", "direction": "higher", "american_price": "-112"},
+        {"id": "market-1-lower", "direction": "lower", "american_price": "+100"}
+      ]
+    },
+    {
+      "id": "market-2",
+      "player": {"id": "athlete-1", "name": "LeBron James", "team": "LAL"},
+      "game": {
+        "id": "game-1",
+        "label": "LAL @ CHI",
+        "starts_at": "2026-08-10T01:00:00-05:00"
+      },
+      "stat": "Rebounds",
+      "line": "7.5",
+      "period": "full_game",
+      "variant": "standard",
+      "status": "open",
+      "sides": [
+        {"id": "market-2-higher", "direction": "higher", "entry_multiplier": "2.500"},
+        {"id": "market-2-lower", "direction": "lower", "entry_multiplier": "2.500"}
+      ]
+    },
+    {
+      "id": "market-3",
+      "player": {"id": "athlete-1", "name": "LeBron James", "team": "LAL"},
+      "game": {
+        "id": "game-1",
+        "label": "LAL @ CHI",
+        "starts_at": "2026-08-10T01:00:00-05:00"
+      },
+      "stat": "Assists",
+      "line": "8.5",
+      "period": "full_game",
+      "variant": "standard",
+      "status": "open",
+      "sides": [
+        {"id": "market-3-higher", "direction": "higher"},
+        {"id": "market-3-lower", "direction": "lower"}
+      ]
+    }
+  ]
+}
