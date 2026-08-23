@@ -21,6 +21,7 @@ from app.config.settings import (
 from app.migrations import run_migrations
 from app.models.event_catalog import EventCatalogEntry
 from app.services.event_catalog_service import EventCatalogService
+from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.nba_stats_adapter import normalize_whole_season_schedule
 from app.services.slate_service import SlateService
 
@@ -89,6 +90,18 @@ def test_date_window_read_is_half_open_and_ordered(tmp_path):
     )
 
     assert [row["nba_game_id"] for row in rows] == ["0022500001"]
+
+
+def test_game_id_read_returns_only_requested_events(tmp_path):
+    service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider())
+    service.refresh("2025-26")
+
+    rows = service.get_events_by_ids(
+        "2025-26",
+        ("0022500002", "missing", "0022500002"),
+    )
+
+    assert [row["nba_game_id"] for row in rows] == ["0022500002"]
 
 
 def test_stored_event_without_refresh_row_is_available_to_slate(tmp_path):
@@ -190,6 +203,58 @@ def test_refresh_upserts_by_game_id_and_retains_omitted_rows(tmp_path):
     retained = next(row for row in rows if row["nba_game_id"] == "0022500002")
     assert retained["status_text"] == "Postponed"
     assert changed["classification"] == "Playoffs"
+
+
+def test_refresh_persists_the_first_governed_started_observation(tmp_path):
+    engine = _engine(tmp_path)
+    provider = FakeScheduleProvider()
+    service = EventCatalogService(engine, provider)
+    scheduled_at = datetime(2025, 10, 23, tzinfo=timezone.utc)
+    service.refresh("2025-26", now=scheduled_at - timedelta(minutes=10))
+    scheduled = next(
+        event
+        for event in service.get_events("2025-26")
+        if event["nba_game_id"] == "0022500001"
+    )
+    assert scheduled["first_observed_started_at"] is None
+
+    live_frame = _frame()
+    live_frame.loc[live_frame["gameId"] == "0022500001", "gameStatus"] = 2
+    live_frame.loc[live_frame["gameId"] == "0022500001", "gameStatusText"] = "Q1"
+    provider.frame = live_frame
+    first_observed_started_at = scheduled_at + timedelta(minutes=5)
+    service.refresh("2025-26", now=first_observed_started_at)
+
+    final_frame = live_frame.copy()
+    final_frame.loc[final_frame["gameId"] == "0022500001", "gameStatus"] = 3
+    final_frame.loc[final_frame["gameId"] == "0022500001", "gameStatusText"] = "Final"
+    provider.frame = final_frame
+    service.refresh("2025-26", now=scheduled_at + timedelta(hours=3))
+
+    final = next(
+        event
+        for event in service.get_events("2025-26")
+        if event["nba_game_id"] == "0022500001"
+    )
+    assert final["first_observed_started_at"] == first_observed_started_at.isoformat()
+
+
+@pytest.mark.parametrize("evidence", ({}, []))
+def test_empty_postponement_evidence_does_not_suppress_started_transition(
+    tmp_path, evidence
+):
+    engine = _engine(tmp_path)
+    frame = normalize_whole_season_schedule(_frame(), season="2025-26").iloc[[0]].copy()
+    frame.loc[:, "status_code"] = 2
+    frame.loc[:, "status_text"] = "Q1"
+    frame.at[frame.index[0], "postponement_evidence"] = evidence
+    refreshed_at = datetime(2025, 10, 23, 1, tzinfo=timezone.utc)
+
+    EventCatalogRepository(engine).publish("2025-26", frame, refreshed_at)
+
+    event = EventCatalogRepository(engine).list_events("2025-26")[0]
+    assert event["postponement_evidence"] == evidence
+    assert event["first_observed_started_at"] == refreshed_at.isoformat()
 
 
 def test_replacement_game_id_is_a_new_event_without_heuristic_transfer(tmp_path):

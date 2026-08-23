@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
@@ -164,6 +165,37 @@ class FeatureSettings(BaseModel):
                 "PROJECTION_ARCHIVE_READ_PROVIDER must name a supported DFS provider"
             )
         return provider
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionCollectionSettings:
+    """Cadence, lease, and bounded retry policy for projection collection."""
+
+    slow_interval: timedelta = timedelta(minutes=30)
+    fast_interval: timedelta = timedelta(minutes=5)
+    pregame_horizon: timedelta = timedelta(hours=24)
+    fast_window: timedelta = timedelta(hours=2)
+    lease_duration: timedelta = timedelta(minutes=1)
+    backoff_base: timedelta = timedelta(minutes=1)
+    backoff_max: timedelta = timedelta(minutes=30)
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "slow_interval",
+            "fast_interval",
+            "pregame_horizon",
+            "fast_window",
+            "lease_duration",
+            "backoff_base",
+            "backoff_max",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, timedelta) or value <= timedelta(0):
+                raise ValueError(f"{field_name} must be a positive duration")
+        if self.fast_window > self.pregame_horizon:
+            raise ValueError("fast_window cannot exceed pregame_horizon")
+        if self.backoff_base > self.backoff_max:
+            raise ValueError("backoff_base cannot exceed backoff_max")
 
 
 class ProviderSettings(BaseModel):
@@ -524,6 +556,9 @@ class RuntimeSettings(BaseModel):
     cache: CacheSettings = Field(default_factory=CacheSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     providers: ProviderSettings = Field(default_factory=ProviderSettings)
+    projection_collection: ProjectionCollectionSettings = Field(
+        default_factory=ProjectionCollectionSettings
+    )
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
@@ -763,6 +798,30 @@ def _build_settings(
             cache=cache,
             features=features,
             providers=providers,
+            projection_collection=_validated_model(
+                ProjectionCollectionSettings,
+                slow_interval=timedelta(
+                    minutes=reader.decimal("PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES", 30)
+                ),
+                fast_interval=timedelta(
+                    minutes=reader.decimal("PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES", 5)
+                ),
+                pregame_horizon=timedelta(
+                    hours=reader.decimal("PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS", 24)
+                ),
+                fast_window=timedelta(
+                    hours=reader.decimal("PROJECTION_COLLECTION_FAST_WINDOW_HOURS", 2)
+                ),
+                lease_duration=timedelta(
+                    seconds=reader.decimal("PROJECTION_COLLECTION_LEASE_SECONDS", 60)
+                ),
+                backoff_base=timedelta(
+                    seconds=reader.decimal("PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS", 60)
+                ),
+                backoff_max=timedelta(
+                    seconds=reader.decimal("PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS", 1800)
+                ),
+            ),
             llm=llm,
             cors=cors,
             nba=_validated_model(NBASeasonSettings),
@@ -819,11 +878,14 @@ def _build_settings(
             debug=reader.boolean("FLASK_DEBUG", True),
             log_level=reader.text("LOG_LEVEL", "INFO") or "INFO",
         )
-    except ValidationError as error:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
-            for issue in error.errors()
-        )
+    except (ValidationError, ValueError) as error:
+        if isinstance(error, ValidationError):
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
+                for issue in error.errors()
+            )
+        else:
+            problems = str(error)
         raise ConfigurationError(
             f"Invalid runtime configuration: {problems}"
         ) from error

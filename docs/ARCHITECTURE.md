@@ -423,8 +423,53 @@ attempt timing. Query status filters are sorted exactly as the
 Provider Snapshot codec sorts them, so caller order cannot split one archive
 scope. `observation_count` always means the number of normalized observations
 present in that accepted snapshot, including unchanged attempts; it is not the
-number of newly inserted rows. Provider polling and scheduling remain outside
-this slice.
+number of newly inserted rows.
+
+Provider polling is coordinated by `ProjectionCollectionCoordinator`, which is
+constructed once in application dependencies for the dedicated collector
+process. The long-lived Railway loop builds settings, Redis/cache clients, and
+provider executors once, then invokes that same coordinator on each five-minute
+wake; the one-shot command builds one dependency graph for its single attempt.
+It reads the canonical Event Catalog before taking the collector lease, so
+offseason/no-due runs do not call a provider. The default board-wide
+policy is every 30 minutes beginning 24 hours before the earliest non-postponed,
+non-started event and every five minutes in the final two hours. Both intervals
+and the horizon are configurable. A past scheduled timestamp does not stop the
+poll during the bounded delayed-game window: governed event status
+(live/final/postponed), rather than tip-off time, closes an active event's
+collection window. A still-scheduled row more than the configured horizon past
+tip-off is ignored as stale so an abandoned catalog row cannot pin offseason
+collection forever. Each wake derives dueness from the last poll plus the
+*current* interval, so crossing into the final two hours immediately adopts the
+five-minute cadence instead of waiting out an earlier 30-minute deadline. The
+one-shot `scripts/collect_projections.py` command uses this coordinator, not a
+second ingestion path or an admin refresh route, and exits nonzero when board
+collection fails for every due provider. Code-less Event Catalog rows use
+recognized live clock text such as `Q3 5:22` as started while unknown clock text
+remains conservatively pregame.
+
+Migration 043 adds one singleton `projection_collection_leases` row and
+per-provider `projection_collection_provider_states`. PostgreSQL locks and
+fences the lease row using database time, so process-clock skew cannot steal a
+live lease or write future poll/backoff state that suppresses the scheduled
+collector. Dueness is derived from database-timed `last_poll_at` and
+`backoff_until`; no separate poll-deadline column is stored. The owner renews
+that lease around board and per-provider work; an expiry or takeover returns
+the bounded `busy/lease_lost` outcome. SQLite uses
+`BEGIN IMMEDIATE` for local tests but is not evidence for the production
+locking contract. A busy or overlapping run is a safe no-op. Provider outcomes
+are persisted independently through the existing archive recorder, with
+bounded exponential backoff/circuit-open state for failures and a bounded
+Provider Poll duration. Stale-if-error cache fallback is failure health rather
+than a successful poll, board-wide defects and omitted outcomes create bounded
+failure rows, and no failed provider is retried faster than the current healthy
+cadence. A failure from one provider cannot suppress another provider's
+attempt. The coordinator's adaptive policy is intended to be woken by a
+dedicated Railway service every five minutes.
+Admin diagnostics expose only provider-safe last-poll/last-changed timestamps,
+bounded freshness, failure/backoff state, active/unresolved counts, and lease
+state; they never expose raw payloads or source identifiers. Request-time
+readers remain database-only and never invoke the coordinator or a provider.
 Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An
@@ -514,21 +559,105 @@ at provider level but cannot lift missing required coverage to aggregate live.
 With no required providers, eligible empty evidence may remain live only
 through the same inclusive 15-minute disabled-provider window. Mixed or
 incomplete provider coverage remains missing.
-Mixed
-provider states omit aggregate `status`; `partial` remains
-reserved for a multi-game archive read containing both live and missing game
-states.
+Mixed provider states omit aggregate `status`; `partial` remains reserved for
+a multi-game live read containing both live and missing game states. For a
+multi-game read spanning live, closing, and missing phases, live evidence
+controls aggregate and provider freshness. Closing timestamps never age the
+live aggregate, and aggregate `status` is omitted because it does not describe
+one uniform phase. If no live evidence exists, a non-empty closing pool takes
+precedence over missing games.
 `PROJECTION_ARCHIVE_READ_ENABLED=false` is the default expansion gate. When it
 is enabled, dependency assembly gives the same archive reader to Slate and
-Matchup. Matchup Selection uses a thin adapter over that reader which translates
-a single game's explicit missing state to its established stored-pool
-unavailable contract; it does not select or call a legacy source. One request
-never combines archive and legacy facts. The gate is refused when the
+Matchup. Matchup Selection uses a thin adapter over that reader; scheduled
+missing state retains its stored-pool unavailable contract, while a started
+game's explicit empty closing set is a valid empty pool and an outside player
+is a resource-not-found selection. It does not select or call a legacy source.
+One request never combines archive and legacy facts. The gate is refused when the
 configured database is the read-only demo
 fixture, which cannot contain the archive schema. The legacy collection/reader
-behavior above remains selected while the gate is off. Scheduled collection,
-mapping replay, closing sets, and final cutover remain later slices of the
-projection-archive parent contract.
+behavior above remains selected while the gate is off.
+
+`ClosingProjectionSet` and `ClosingProjectionMembership` are the post-start
+read seam. `EventCatalogRepository.publish` persists
+`first_observed_started_at` exactly once when governed status first becomes
+in-progress or final. `ProjectionCollectionCoordinator.run` is the sole normal
+closing-set writer: after a poll, and also when a newly started slate leaves no
+provider poll due, it asks `ProjectionRecordingService` to close every enabled
+provider scope. The durable observed transition is the start fence. Legacy
+started rows without that value fall back to `scheduled_at`; request time is
+never used as a fence.
+
+A closing set is unique by provider, season, exact projection `query_key`, and
+canonical game, including an explicit empty set. The writer acquires the same
+provider/query scope fence used by materialization. Membership rows contain
+only foreign-key pointers to immutable `ProjectionObservation` rows; they
+never copy, delete, or replace source snapshots. Closing materialization starts
+at the newest promoted Complete generation whose provider poll completed no
+later than the start fence, then replays its promoted suffix with observations
+joined by canonical game ID. Thus replay is bounded in the normal case, never
+builds a season-sized generation-ID parameter list, and a delayed provider
+delivery can remain immutable archive evidence without entering a set after
+the game-start boundary. Repeating a close returns the original set and cannot
+move its start time.
+Mapping replay generations are explicit deltas even when they reuse a Complete
+source snapshot and poll. They are never eligible as the Complete baseline;
+the closing fold applies their affected references like a Partial generation,
+so a pre-start mapping decision cannot truncate an otherwise complete frozen
+board. A Partial poll between the Complete baseline and a replay delta is
+folded in the same ordering.
+Enabling a provider after a game has closed does not backfill its closing set;
+that provider reads `missing` for the game permanently.
+
+The archive reader performs a game-ID-scoped Event Catalog lookup before
+choosing a pool; it neither scans a season nor writes archive state. Scheduled
+games use the existing live Latest reader and its 15-minute/six-hour
+eligibility windows. Started or final games use only immutable closing
+pointers, report `state: closing` and provider status `closing`, and do not age
+or refresh those pointers. A started game whose collector has not created a
+set yet, or whose explicit set has no members, reports `state: missing` with
+zero targetable players. Slate and Matchup still return 200, while Selection
+keeps scheduled missing-pool behavior and returns `resource_not_found` for a
+player outside a started game's derived empty pool. No request path calls a
+projection provider, takes an ingestion scope write lock, or creates a closing
+set.
+Projection Observations retain typed provider identities and an explicit
+'resolved'/'unresolved' state in migration 045. Each rematerialized row also
+retains its original observation ID and source ordinal, so later athlete, event,
+or statistic decisions start from the same immutable provider market while
+preserving earlier decisions. Provider-plus-identity indexes bound the history
+lookup to observations affected by the decision. A valid normalized market is
+archived even when its athlete, event, or statistic identity is unresolved; only
+fully resolved, targetable rows enter Latest or Player Pool. An approved athlete
+or event mapping invokes the archive's database-only replay seam after the
+mapping transaction commits. Statistic Catalog corrections use the same seam.
+Replay acquires the existing provider/season/query scope fence, creates or
+reactivates the deterministic generation for the resulting materialization, and
+batch-replaces only affected Latest references in that transaction. Dense replay
+ordinals are generation-local. A provider-reported athlete name remains the
+observation name when present; a missing provider name falls back to the
+approved canonical name. Canonical IDs and the content-derived reference of an
+ID-less market are recomputed from the immutable source market. It reuses the
+accepted poll and immutable source snapshot, so source observations, checksums,
+and retrieval timestamps are not rewritten. A replayed Latest pointer is
+activated at mapping replay time, while its eligibility confirmation remains
+the source observation time so the provider board's live window is not reset.
+The scope lock records both the active generation, the replay wall clock, and
+the source retrieval fence;
+an in-flight snapshot retrieved before the mapping decision remains auditable as
+non-promoted evidence and cannot erase the recovery when its observations still
+carry the pre-decision unresolved identity; evidence with a newer source
+retrieval identity may advance normally. Replay preserves the source
+`observed_at` for public freshness and does not extend the provider board's
+15-minute live window; `confirmed_at` remains the internal eligibility clock.
+Ordinary newer promoted polls may advance the Latest read-model `observed_at`,
+but replay itself never does so beyond its source observation.
+Repeated replay is a no-op. A replay failure after an athlete or event mapping
+commit is logged without changing the durable operator decision, and neither
+request-time reads nor mapping decisions call a provider. Replay scope
+enumeration is provider-wide and has no game filter. Therefore, if a mapping is
+approved after a game's closing set is frozen by sibling #108, replay rewrites
+the live Latest rows for that provider scope while the frozen membership keeps
+the pre-decision observations; this is the intended rule.
 
 ### Matchup injury snapshots
 

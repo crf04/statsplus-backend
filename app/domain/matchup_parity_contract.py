@@ -31,6 +31,9 @@ CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED = (
     "denominator_tolerance_exceeded"
 )
 CLASSIFICATION_DERIVED_RATE_DIFFERENCE = "derived_rate_difference"
+#: A count or rank difference explained by a post-game official box-score
+#: correction the PBP feed never received.  Soft only under the approved rule.
+CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION = "official_scorekeeper_correction"
 CLASSIFICATION_SERVED_RATE_MISMATCH = "served_rate_mismatch"
 CLASSIFICATION_SERVED_RANK_MISMATCH = "served_rank_mismatch"
 
@@ -60,9 +63,29 @@ HARD_CLASSIFICATIONS = frozenset({
 SOFT_CLASSIFICATIONS = frozenset({
     CLASSIFICATION_DENOMINATOR_TOLERANCE_EXCEEDED,
     CLASSIFICATION_DERIVED_RATE_DIFFERENCE,
+    CLASSIFICATION_OFFICIAL_SCOREKEEPER_CORRECTION,
 })
 
-APPROVED_SEMANTIC_RULES = frozenset()
+#: Parent-approved semantic rule (crf04/statsplus#19, 2026-08-23): the NBA
+#: corrects official box scores after the game and the PBP feed never
+#: receives the correction.  The rule is bounded so a real defect cannot hide
+#: behind it; everything outside the bounds stays hard.
+SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION = "official_scorekeeper_correction"
+#: Largest season-total integer count difference per (entity, field) the rule
+#: explains.  Amended from 1 on 2026-08-23: per-game verification showed every
+#: underlying game-level delta at most 2 (mirrored re-attributions between two
+#: players), with season totals accumulating to at most 5.
+SCOREKEEPER_CORRECTION_COUNT_BOUND = 6
+#: Largest per-36 season minutes difference per player the rule explains.
+SCOREKEEPER_CORRECTION_MINUTES_BOUND = 2.0
+#: Most entities (players or teams) one artifact may absorb under the rule.
+SCOREKEEPER_CORRECTION_MAX_ENTITIES = 400
+#: Shortest acceptable adjudication reason.
+SEMANTIC_RULE_REASON_MIN_LENGTH = 20
+
+APPROVED_SEMANTIC_RULES = frozenset({
+    SEMANTIC_RULE_OFFICIAL_SCOREKEEPER_CORRECTION,
+})
 
 
 def semantic_rule_is_approved(rule: object, reason: object) -> bool:
@@ -70,10 +93,34 @@ def semantic_rule_is_approved(rule: object, reason: object) -> bool:
 
     Provider rounding is diagnostic context, not authority to soften public
     team minutes or derived rates.  Free-form operator prose is deliberately
-    excluded from this gate.
+    excluded from this gate: the rule must be one the parent approved and the
+    reason must be a recorded sentence, never the authority itself.
     """
 
-    return False
+    return (
+        isinstance(rule, str)
+        and rule in APPROVED_SEMANTIC_RULES
+        and isinstance(reason, str)
+        and len(reason.strip()) >= SEMANTIC_RULE_REASON_MIN_LENGTH
+    )
+
+
+def count_difference_within_correction_bound(ledger_value: object, legacy_value: object) -> bool:
+    """Whether two integer counts differ by at most the correction bound."""
+
+    try:
+        return abs(int(ledger_value) - int(legacy_value)) <= SCOREKEEPER_CORRECTION_COUNT_BOUND
+    except (TypeError, ValueError):
+        return False
+
+
+def minutes_difference_within_correction_bound(ledger_value: object, legacy_value: object) -> bool:
+    """Whether two minute totals differ by at most the correction bound."""
+
+    try:
+        return abs(float(ledger_value) - float(legacy_value)) <= SCOREKEEPER_CORRECTION_MINUTES_BOUND
+    except (TypeError, ValueError):
+        return False
 
 MATCHUP_REQUIRED_STREAMS = frozenset({
     "traditional_opponent_season",

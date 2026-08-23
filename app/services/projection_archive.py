@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -13,7 +13,7 @@ import re
 import threading
 from typing import Any, Callable
 
-from sqlalchemy import case, delete, func, inspect, insert, select, update
+from sqlalchemy import and_, case, delete, func, inspect, insert, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -26,9 +26,12 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.market_content import market_evidence_key
-from app.domain.statistics import MatchState, ScoringPeriod
-from app.domain.utc import assume_utc, utc_now
+from app.domain.nba_events import is_started_event
+from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
+from app.domain.utc import assume_utc, parse_utc_iso, utc_now
 from app.models.projection_archive import (
+    ClosingProjectionMembership,
+    ClosingProjectionSet,
     LatestPlayerProjection,
     MaterializationOutcome,
     ProjectionArchiveScopeLock,
@@ -45,6 +48,7 @@ from app.providers.dfs import (
     PlayerProjectionMarket,
     ProviderSnapshot,
     SnapshotStatus,
+    TeamEvidence,
 )
 from app.services.dfs_snapshot_cache import (
     deserialize_provider_snapshot,
@@ -61,9 +65,27 @@ PROJECTION_ARCHIVE_REQUIRED_TABLES = (
     "projection_observations",
     "projection_materialization_generations",
     "latest_player_projections",
+    "projection_closing_sets",
+    "projection_closing_memberships",
 )
 PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
+    "projection_archive_scope_locks": (
+        "active_generation_id",
+        "mapping_replayed_at",
+        "mapping_replayed_retrieved_at",
+    ),
     "projection_provider_polls": ("failure_reason", "promoted"),
+    "projection_observations": (
+        "source_observation_id",
+        "source_ordinal",
+        "athlete_provider_id",
+        "event_provider_id",
+        "statistic_provider_id",
+        "statistic_provider_label",
+        "resolution_state",
+        "unresolved_identities",
+    ),
+    "projection_materialization_generations": ("is_replay",),
     "latest_player_projections": ("confirmed_at",),
 }
 DEFAULT_PROJECTION_ARCHIVE_MAX_MARKETS = 10_000
@@ -122,7 +144,8 @@ def require_projection_archive_schema(engine: Engine) -> None:
         missing = (*missing_tables, *missing_columns)
         raise ConfigurationError(
             "Projection archive dependencies require migrations "
-            "040_projection_archive and 041_projection_archive_transitions; missing: "
+            "040_projection_archive, 041_projection_archive_transitions, "
+            "044_projection_closing_sets, and 045_projection_mapping_replay; missing: "
             + ", ".join(missing)
         )
 
@@ -147,6 +170,29 @@ class ProjectionPollResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ClosingProjectionSetResult:
+    """Observable result of one idempotent provider/game closing freeze."""
+
+    closing_set_id: str
+    provider: str
+    season: str
+    canonical_game_id: str
+    started_at: datetime
+    observation_count: int
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionReplayResult:
+    """Result of replaying one governed mapping over archived evidence."""
+
+    generation_id: str
+    changed: bool
+    observation_count: int
+    materialization_outcome: "MaterializationOutcome"
+
+
+@dataclass(frozen=True, slots=True)
 class _PreparedProjectionIngestion:
     snapshot: ProviderSnapshot
     query: NBAMarketQuery
@@ -161,6 +207,7 @@ class _PreparedProjectionIngestion:
     observation_rows: list[dict[str, Any]]
     materialization_checksum: str
     poll_id: str
+    duration_ms: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +224,7 @@ class _ProjectionPollWrite:
     snapshot_id: str
     generation_id: str
     observation_count: int
+    duration_ms: int | None
 
     @classmethod
     def from_ingestion(
@@ -201,6 +249,7 @@ class _ProjectionPollWrite:
             snapshot_id=snapshot_id,
             generation_id=generation_id,
             observation_count=prepared.observation_count,
+            duration_ms=prepared.duration_ms,
         )
 
 
@@ -266,7 +315,7 @@ class ProjectionArchiveReadScope:
 
     @property
     def query_key(self) -> str:
-        return _query_key(self.query)
+        return projection_query_key(self.query)
 
 
 def _digest(prefix: str, *values: object) -> str:
@@ -308,6 +357,28 @@ def _materialization_checksum(rows: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
+def _projection_closing_start_fence(
+    event: Mapping[str, Any],
+) -> datetime | None:
+    """Return the durable governed start fence for a started NBA event."""
+
+    if not is_started_event(event):
+        return None
+    for field in ("first_observed_started_at", "scheduled_at"):
+        value = event.get(field)
+        if value is None:
+            continue
+        try:
+            return (
+                assume_utc(value)
+                if isinstance(value, datetime)
+                else parse_utc_iso(str(value))
+            )
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
     """Remove derived statistic matches from the immutable source document."""
 
@@ -336,7 +407,7 @@ def _canonical_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
     )
 
 
-def _query_key(query: NBAMarketQuery) -> str:
+def projection_query_key(query: NBAMarketQuery) -> str:
     return _digest(
         "qry",
         query.season,
@@ -366,6 +437,7 @@ class ProjectionArchive:
         self.engine = engine
         self.max_markets = max_markets
         self.max_document_bytes = max_document_bytes
+        self.statistic_catalog = statistic_catalog
         self.market_categories = {
             statistic.id: statistic.market_category
             for statistic in statistic_catalog.statistics
@@ -379,6 +451,7 @@ class ProjectionArchive:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         if snapshot.status is not SnapshotStatus.COMPLETE:
             raise ValueError(
@@ -389,6 +462,7 @@ class ProjectionArchive:
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
         )
 
     def ingest_snapshot(
@@ -398,6 +472,7 @@ class ProjectionArchive:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         """Archive one Complete or Partial normalized provider observation."""
 
@@ -406,6 +481,7 @@ class ProjectionArchive:
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
         )
         return self._ingest_prepared(prepared)
 
@@ -416,6 +492,7 @@ class ProjectionArchive:
         query: NBAMarketQuery,
         accepted_at: datetime | None,
         poll_started_at: datetime | None,
+        duration_ms: int | None,
     ) -> _PreparedProjectionIngestion:
         """Validate and canonicalize one snapshot without touching the database."""
 
@@ -432,7 +509,7 @@ class ProjectionArchive:
         if poll_started is not None and poll_started > accepted:
             raise ValueError("projection poll cannot start after it completes")
         source = _source_snapshot(snapshot)
-        query_key = _query_key(query)
+        query_key = projection_query_key(query)
         observation_count = len(snapshot.markets)
         document = serialize_provider_snapshot(source, query, allow_partial=True)
         if len(document.encode("utf-8")) > self.max_document_bytes:
@@ -465,7 +542,16 @@ class ProjectionArchive:
             observation_rows=observation_rows,
             materialization_checksum=materialization_checksum,
             poll_id=poll_id,
+            duration_ms=self._normalize_duration_ms(duration_ms),
         )
+
+    @staticmethod
+    def _normalize_duration_ms(value: int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("projection poll duration_ms must be a non-negative integer")
+        return min(value, 7 * 24 * 60 * 60 * 1000)
 
     def _ingest_prepared(
         self,
@@ -607,25 +693,29 @@ class ProjectionArchive:
                 ProjectionMaterializationGeneration.generation_id == generation_id
             )
         ).scalar_one_or_none() is not None
-        observation_rows = tuple(
-            {
-                **row,
-                "snapshot_id": snapshot_id,
-                "generation_id": generation_id,
-                "source_poll_id": prepared.poll_id,
-                "observation_id": _digest(
-                    "obs", generation_id, row["ordinal"], row["market_reference"]
-                ),
-            }
-            for row in prepared.observation_rows
-        )
+        observation_rows = []
+        for row in prepared.observation_rows:
+            observation_id = _digest(
+                "obs", generation_id, row["ordinal"], row["market_reference"]
+            )
+            observation_rows.append(
+                {
+                    **row,
+                    "snapshot_id": snapshot_id,
+                    "generation_id": generation_id,
+                    "source_poll_id": prepared.poll_id,
+                    "source_observation_id": observation_id,
+                    "source_ordinal": row["ordinal"],
+                    "observation_id": observation_id,
+                }
+            )
         return _ProjectionTransitionWrite(
             snapshot_id=snapshot_id,
             generation_id=generation_id,
             provider_content_unchanged=provider_content_unchanged,
             snapshot_exists=existing is not None,
             generation_exists=generation_exists,
-            observation_rows=observation_rows,
+            observation_rows=tuple(observation_rows),
         )
 
     def _persist_generation_evidence(
@@ -685,6 +775,7 @@ class ProjectionArchive:
                 retrieved_at=snapshot.retrieved_at,
                 materialization_checksum=plan.materialization_checksum,
                 outcome=plan.outcome.value,
+                is_replay=False,
             )
         )
         if write.observation_rows:
@@ -731,6 +822,13 @@ class ProjectionArchive:
                     query_key=prepared.query_key,
                     generation_id=write.generation_id,
                 )
+            self._activate_generation(
+                connection,
+                provider=prepared.snapshot.provider,
+                season=prepared.query.season,
+                query_key=prepared.query_key,
+                generation_id=write.generation_id,
+            )
 
     @staticmethod
     def _transition_result(
@@ -768,6 +866,18 @@ class ProjectionArchive:
             season=prepared.query.season,
             query_key=prepared.query_key,
         )
+        unresolved_replay_fence = self._pre_decision_unresolved_fence(
+            connection,
+            prepared,
+            provider=snapshot.provider,
+            season=prepared.query.season,
+            query_key=prepared.query_key,
+        )
+        if unresolved_replay_fence is not None and (
+            promoted_through is None
+            or unresolved_replay_fence > promoted_through
+        ):
+            promoted_through = unresolved_replay_fence
         failed_through = self._failure_attempt_fence(
             connection,
             provider=snapshot.provider,
@@ -805,6 +915,7 @@ class ProjectionArchive:
         completed_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         failure_reason: str,
+        duration_ms: int | None = None,
     ) -> ProjectionPollResult:
         """Record bounded provider failure health without changing evidence or Latest."""
 
@@ -820,7 +931,7 @@ class ProjectionArchive:
         started = None if poll_started_at is None else assume_utc(poll_started_at)
         if started is not None and started > completed:
             raise ValueError("projection poll cannot start after it completes")
-        query_key = _query_key(query)
+        query_key = projection_query_key(query)
         poll_id = _digest(
             "pollf",
             normalized_provider,
@@ -830,6 +941,7 @@ class ProjectionArchive:
             completed.isoformat(),
         )
         table = ProviderPoll.__table__
+        normalized_duration_ms = self._normalize_duration_ms(duration_ms)
         with self._scope_transaction(
             normalized_provider, query.season, query_key
         ) as connection:
@@ -865,6 +977,7 @@ class ProjectionArchive:
                         snapshot_id=None,
                         generation_id=None,
                         observation_count=0,
+                        duration_ms=normalized_duration_ms,
                     )
                 )
             else:
@@ -872,6 +985,969 @@ class ProjectionArchive:
         return ProjectionPollResult(
             poll_id=poll_id,
             outcome=ProviderPollOutcome.FAILED,
+        )
+
+    def freeze_closing_projection_set(
+        self,
+        *,
+        provider: str,
+        query: NBAMarketQuery,
+        canonical_game_id: str,
+        started_at: datetime,
+        created_at: datetime | None = None,
+    ) -> ClosingProjectionSetResult:
+        """Freeze one provider/game's eligible state at the governed start fence.
+
+        The scope lock makes close/materialize races deterministic.  The
+        materialization replay is bounded by the poll completion fence, so a
+        pregame observation delivered after the game-start status cannot enter
+        a set even when its provider retrieval timestamp is older.
+        """
+
+        normalized_provider = provider.strip().casefold()
+        game_id = str(canonical_game_id).strip()
+        if not normalized_provider:
+            raise ValueError("projection closing provider is required")
+        if not game_id:
+            raise ValueError("projection closing game is required")
+        if not isinstance(query, NBAMarketQuery) or query.season is None:
+            raise ValueError("projection archive queries require a canonical season")
+        started = assume_utc(started_at)
+        created = assume_utc(created_at or datetime.now(timezone.utc))
+        if created < started:
+            raise ValueError("projection closing set cannot be created before game start")
+        query_key = projection_query_key(query)
+        with self._scope_transaction(
+            normalized_provider, query.season, query_key
+        ) as connection:
+            set_table = ClosingProjectionSet.__table__
+            existing = (
+                connection.execute(
+                    select(set_table).where(
+                        set_table.c.provider == normalized_provider,
+                        set_table.c.season == query.season,
+                        set_table.c.query_key == query_key,
+                        set_table.c.canonical_game_id == game_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is not None:
+                count = connection.execute(
+                    select(func.count()).select_from(
+                        ClosingProjectionMembership.__table__
+                    ).where(
+                        ClosingProjectionMembership.__table__.c.closing_set_id
+                        == existing["closing_set_id"]
+                    )
+                ).scalar_one()
+                return ClosingProjectionSetResult(
+                    closing_set_id=str(existing["closing_set_id"]),
+                    provider=normalized_provider,
+                    season=query.season,
+                    canonical_game_id=game_id,
+                    started_at=assume_utc(existing["started_at"]),
+                    observation_count=int(count),
+                    created=False,
+                )
+
+            closing_set_id = _digest(
+                "close",
+                normalized_provider,
+                query.season,
+                query_key,
+                game_id,
+                started.isoformat(),
+            )
+            rows = self._closing_materialization_rows(
+                connection,
+                provider=normalized_provider,
+                season=query.season,
+                query_key=query_key,
+                canonical_game_id=game_id,
+                started_at=started,
+            )
+            connection.execute(
+                insert(set_table).values(
+                    closing_set_id=closing_set_id,
+                    provider=normalized_provider,
+                    season=query.season,
+                    query_key=query_key,
+                    canonical_game_id=game_id,
+                    started_at=started,
+                    created_at=created,
+                )
+            )
+            if rows:
+                connection.execute(
+                    insert(ClosingProjectionMembership.__table__),
+                    [
+                        {
+                            "closing_set_id": closing_set_id,
+                            "market_reference": row["market_reference"],
+                            "observation_id": row["observation_id"],
+                            "generation_id": row["generation_id"],
+                        }
+                        for row in rows
+                    ],
+                )
+            return ClosingProjectionSetResult(
+                closing_set_id=closing_set_id,
+                provider=normalized_provider,
+                season=query.season,
+                canonical_game_id=game_id,
+                started_at=started,
+                observation_count=len(rows),
+                created=True,
+            )
+
+    @staticmethod
+    def _closing_materialization_rows(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        canonical_game_id: str,
+        started_at: datetime,
+    ) -> list[Any]:
+        """Replay the bounded promoted suffix committed before the start fence."""
+
+        generation_table = ProjectionMaterializationGeneration.__table__
+        snapshot_table = ProjectionProviderSnapshot.__table__
+        poll_table = ProviderPoll.__table__
+        observation_table = ProjectionObservation.__table__
+        generation_snapshot_poll = generation_table.join(
+            snapshot_table,
+            generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+        ).join(
+            poll_table,
+            generation_table.c.source_poll_id == poll_table.c.poll_id,
+        )
+        eligible = (
+            generation_table.c.provider == provider,
+            generation_table.c.season == season,
+            generation_table.c.query_key == query_key,
+            generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
+            poll_table.c.completed_at <= started_at,
+        )
+        baseline = (
+            connection.execute(
+                select(
+                    generation_table.c.generation_id,
+                    generation_table.c.retrieved_at,
+                    generation_table.c.created_at,
+                )
+                .select_from(generation_snapshot_poll)
+                .where(
+                    *eligible,
+                    snapshot_table.c.snapshot_status == SnapshotStatus.COMPLETE.value,
+                    generation_table.c.is_replay.is_(False),
+                )
+                .order_by(
+                    generation_table.c.retrieved_at.desc(),
+                    generation_table.c.created_at.desc(),
+                    generation_table.c.generation_id.desc(),
+                )
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        lower_bound = ()
+        if baseline is not None:
+            lower_bound = (
+                or_(
+                    generation_table.c.retrieved_at > baseline["retrieved_at"],
+                    and_(
+                        generation_table.c.retrieved_at
+                        == baseline["retrieved_at"],
+                        generation_table.c.created_at > baseline["created_at"],
+                    ),
+                    and_(
+                        generation_table.c.retrieved_at
+                        == baseline["retrieved_at"],
+                        generation_table.c.created_at == baseline["created_at"],
+                        generation_table.c.generation_id
+                        >= baseline["generation_id"],
+                    ),
+                ),
+            )
+        joined_rows = (
+            connection.execute(
+                select(
+                    generation_table.c.generation_id,
+                    generation_table.c.retrieved_at,
+                    generation_table.c.created_at,
+                    generation_table.c.is_replay,
+                    snapshot_table.c.snapshot_status,
+                    poll_table.c.completed_at,
+                    observation_table.c.observation_id,
+                    observation_table.c.market_reference,
+                    observation_table.c.canonical_game_id,
+                    observation_table.c.canonical_player_id,
+                    observation_table.c.canonical_player_name,
+                    observation_table.c.canonical_team_id,
+                    observation_table.c.canonical_statistic_id,
+                    observation_table.c.market_category,
+                    observation_table.c.targetable,
+                    observation_table.c.observed_at,
+                    observation_table.c.ordinal,
+                )
+                .select_from(
+                    generation_snapshot_poll.outerjoin(
+                        observation_table,
+                        and_(
+                            observation_table.c.generation_id
+                            == generation_table.c.generation_id,
+                            observation_table.c.canonical_game_id
+                            == canonical_game_id,
+                        ),
+                    )
+                )
+                .where(
+                    *eligible,
+                    *lower_bound,
+                )
+                .order_by(
+                    generation_table.c.retrieved_at,
+                    generation_table.c.created_at,
+                    generation_table.c.generation_id,
+                    observation_table.c.ordinal,
+                )
+            )
+            .mappings()
+            .all()
+        )
+        generations: list[dict[str, Any]] = []
+        for row in joined_rows:
+            generation_id = str(row["generation_id"])
+            if not generations or generations[-1]["generation_id"] != generation_id:
+                generations.append(
+                    {
+                        "generation_id": generation_id,
+                        "is_replay": bool(row["is_replay"]),
+                        "snapshot_status": row["snapshot_status"],
+                        "rows": [],
+                    }
+                )
+            if row["observation_id"] is not None:
+                generations[-1]["rows"].append(row)
+
+        state: dict[str, Any] = {}
+        for generation in generations:
+            rows = generation["rows"]
+            if (
+                generation["snapshot_status"] == SnapshotStatus.COMPLETE.value
+                and not generation["is_replay"]
+            ):
+                state.clear()
+            else:
+                for reference in {str(row["market_reference"]) for row in rows}:
+                    state.pop(reference, None)
+            selected: set[str] = set()
+            for row in rows:
+                if not row["targetable"]:
+                    continue
+                reference = str(row["market_reference"])
+                if reference in selected:
+                    continue
+                state[reference] = row
+                selected.add(reference)
+        return [state[key] for key in sorted(state)]
+    def replay_athlete_mapping(
+        self,
+        *,
+        provider: str,
+        provider_athlete_id: str,
+        canonical_player_id: int,
+        canonical_player_name: str,
+        canonical_team_id: int,
+        replayed_at: datetime | None = None,
+    ) -> ProjectionReplayResult | None:
+        """Replay a governed athlete decision without retrieving a provider board."""
+
+        if isinstance(canonical_player_id, bool) or not isinstance(
+            canonical_player_id, int
+        ):
+            raise ValueError("canonical projection player ID must be an integer")
+        if isinstance(canonical_team_id, bool) or not isinstance(canonical_team_id, int):
+            raise ValueError("canonical projection team ID must be an integer")
+        if not isinstance(canonical_player_name, str) or not canonical_player_name.strip():
+            raise ValueError("canonical projection player name is required")
+        return self._replay_mapping(
+            kind="athlete",
+            provider=provider,
+            identity=provider_athlete_id,
+            canonical={
+                "canonical_player_id": canonical_player_id,
+                "canonical_player_name": canonical_player_name.strip(),
+                "canonical_team_id": canonical_team_id,
+            },
+            replayed_at=replayed_at,
+        )
+
+    def replay_athlete_decision(self, result: Any) -> ProjectionReplayResult | None:
+        """Adapt an athlete repository decision to the archive replay seam."""
+
+        mapping = getattr(result, "mapping", None)
+        if mapping is None or not getattr(result, "persisted", False):
+            return None
+        if mapping.canonical_name is None or mapping.canonical_team_id is None:
+            return None
+        return self.replay_athlete_mapping(
+            provider=mapping.provider,
+            provider_athlete_id=mapping.provider_athlete_id,
+            canonical_player_id=mapping.canonical_player_id,
+            canonical_player_name=mapping.canonical_name,
+            canonical_team_id=mapping.canonical_team_id,
+        )
+
+    def replay_event_mapping(
+        self,
+        *,
+        provider: str,
+        provider_event_id: str,
+        canonical_game_id: str,
+        replayed_at: datetime | None = None,
+    ) -> ProjectionReplayResult | None:
+        """Replay a governed event decision without retrieving a provider board."""
+
+        if not isinstance(canonical_game_id, str):
+            raise ValueError("canonical projection game ID is required")
+        game_id = canonical_game_id.strip()
+        if not game_id:
+            raise ValueError("canonical projection game ID is required")
+        return self._replay_mapping(
+            kind="event",
+            provider=provider,
+            identity=provider_event_id,
+            canonical={"canonical_game_id": game_id},
+            replayed_at=replayed_at,
+        )
+
+    def replay_event_decision(self, result: Any) -> ProjectionReplayResult | None:
+        """Adapt an event repository decision to the archive replay seam."""
+
+        mapping = getattr(result, "mapping", None)
+        if mapping is None or not getattr(result, "persisted", False):
+            return None
+        return self.replay_event_mapping(
+            provider=mapping.provider,
+            provider_event_id=mapping.provider_event_id,
+            canonical_game_id=mapping.canonical_event_id,
+        )
+
+    def replay_statistic_mapping(
+        self,
+        *,
+        provider: str,
+        canonical_statistic_id: str,
+        market_category: str | None = None,
+        provider_statistic_id: str | None = None,
+        provider_statistic_label: str | None = None,
+        replayed_at: datetime | None = None,
+    ) -> ProjectionReplayResult | None:
+        """Replay a reviewed statistic mapping over archived observations."""
+
+        if (
+            provider_statistic_id is None
+            and provider_statistic_label is None
+        ):
+            raise ValueError(
+                "a provider statistic ID or label is required for projection replay"
+            )
+        if not isinstance(canonical_statistic_id, str):
+            raise ValueError("canonical projection statistic ID is required")
+        statistic_id = canonical_statistic_id.strip()
+        if not statistic_id:
+            raise ValueError("canonical projection statistic ID is required")
+        normalized_statistic_id = (
+            None
+            if provider_statistic_id is None
+            else str(provider_statistic_id).strip()
+        )
+        normalized_statistic_label = (
+            None
+            if provider_statistic_label is None
+            else str(provider_statistic_label).strip()
+        )
+        if normalized_statistic_id == "":
+            normalized_statistic_id = None
+        if normalized_statistic_label == "":
+            normalized_statistic_label = None
+        if normalized_statistic_id is None and normalized_statistic_label is None:
+            raise ValueError(
+                "a provider statistic ID or label is required for projection replay"
+            )
+        category = market_category or self.market_categories.get(statistic_id)
+        return self._replay_mapping(
+            kind="statistic",
+            provider=provider,
+            identity=normalized_statistic_id,
+            canonical={
+                "canonical_statistic_id": statistic_id,
+                "market_category": category,
+                "provider_statistic_label": normalized_statistic_label,
+            },
+            replayed_at=replayed_at,
+        )
+
+    def _replay_mapping(
+        self,
+        *,
+        kind: str,
+        provider: str,
+        identity: str | None,
+        canonical: dict[str, Any],
+        replayed_at: datetime | None,
+    ) -> ProjectionReplayResult | None:
+        if not isinstance(provider, str):
+            raise ValueError("projection replay provider is required")
+        normalized_provider = provider.strip().casefold()
+        if identity is not None and not isinstance(identity, str):
+            raise ValueError("projection replay provider identity is required")
+        normalized_identity = None if identity is None else identity.strip()
+        if not normalized_provider or (
+            not normalized_identity and kind != "statistic"
+        ):
+            raise ValueError("projection replay provider identity is required")
+        scopes = self._replay_scopes(normalized_provider)
+        result: ProjectionReplayResult | None = None
+        for season, query_key in scopes:
+            replay = self._replay_scope(
+                kind=kind,
+                provider=normalized_provider,
+                season=season,
+                query_key=query_key,
+                identity=normalized_identity,
+                canonical=canonical,
+                replayed_at=replayed_at,
+            )
+            if replay is not None:
+                result = replay
+        return result
+
+    def _replay_scopes(self, provider: str) -> tuple[tuple[str, str], ...]:
+        table = ProjectionMaterializationGeneration.__table__
+        with self.engine.connect() as connection:
+            return tuple(
+                connection.execute(
+                    select(table.c.season, table.c.query_key)
+                    .where(table.c.provider == provider)
+                    .distinct()
+                    .order_by(table.c.season, table.c.query_key)
+                ).all()
+            )
+
+    def _replay_scope(
+        self,
+        *,
+        kind: str,
+        provider: str,
+        season: str,
+        query_key: str,
+        identity: str | None,
+        canonical: dict[str, Any],
+        replayed_at: datetime | None,
+    ) -> ProjectionReplayResult | None:
+        with self._scope_transaction(provider, season, query_key) as connection:
+            current = self._current_materialization(
+                connection,
+                provider=provider,
+                season=season,
+                query_key=query_key,
+            )
+            if current is None:
+                return None
+            observation_table = ProjectionObservation.__table__
+            generation_table = ProjectionMaterializationGeneration.__table__
+            latest_table = LatestPlayerProjection.__table__
+            identity_predicate = self._mapping_identity_predicate(
+                observation_table,
+                kind=kind,
+                identity=identity,
+                canonical=canonical,
+                provider=provider,
+            )
+            source_rows = connection.execute(
+                select(observation_table)
+                .join(
+                    generation_table,
+                    generation_table.c.generation_id
+                    == observation_table.c.generation_id,
+                )
+                .where(
+                    observation_table.c.snapshot_id == current["snapshot_id"],
+                    generation_table.c.outcome
+                    == MaterializationOutcome.ADVANCED.value,
+                    generation_table.c.created_at <= current["created_at"],
+                    identity_predicate,
+                )
+                .order_by(
+                    generation_table.c.created_at,
+                    generation_table.c.generation_id,
+                    observation_table.c.observation_id,
+                )
+            ).mappings().all()
+            generation_rows = connection.execute(
+                select(observation_table).where(
+                    observation_table.c.generation_id == current["generation_id"],
+                    identity_predicate,
+                )
+            ).mappings().all()
+            latest_observation_ids = select(latest_table.c.observation_id).where(
+                latest_table.c.provider == provider,
+                latest_table.c.season == season,
+                latest_table.c.query_key == query_key,
+            )
+            current_latest_rows = connection.execute(
+                select(observation_table).where(
+                    observation_table.c.observation_id.in_(latest_observation_ids)
+                )
+            ).mappings().all()
+            latest_rows = connection.execute(
+                select(observation_table).where(
+                    observation_table.c.observation_id.in_(latest_observation_ids),
+                    identity_predicate,
+                )
+            ).mappings().all()
+            candidates: dict[str, dict[str, Any]] = {}
+            for rows in (source_rows, generation_rows, latest_rows):
+                for row in rows:
+                    candidates[str(row["source_observation_id"])] = dict(row)
+            if not candidates:
+                return None
+            source_markets = self._replay_source_markets(
+                connection, tuple(candidates.values())
+            )
+
+            changed_rows: list[dict[str, Any]] = []
+            replaced_references: set[str] = set()
+            for row in candidates.values():
+                if not self._observation_matches_mapping(
+                    row, kind=kind, identity=identity, canonical=canonical
+                ):
+                    continue
+                rematerialized = self._rematerialize_observation(
+                    row,
+                    kind=kind,
+                    canonical=canonical,
+                    source_market=source_markets[
+                        (str(row["snapshot_id"]), int(row["source_ordinal"]))
+                    ],
+                )
+                if self._replay_fields(row) != self._replay_fields(rematerialized):
+                    changed_rows.append(rematerialized)
+                    replaced_references.add(str(row["market_reference"]))
+
+            if not changed_rows:
+                latest_generation = str(current["generation_id"])
+                return ProjectionReplayResult(
+                    generation_id=latest_generation,
+                    changed=False,
+                    observation_count=0,
+                    materialization_outcome=MaterializationOutcome.UNCHANGED,
+                )
+
+            changed_rows.sort(
+                key=lambda row: (
+                    str(row["snapshot_id"]),
+                    int(row["ordinal"]),
+                    str(row["observation_id"]),
+                )
+            )
+            affected_references = replaced_references | {
+                str(row["market_reference"]) for row in changed_rows
+            }
+            latest_state = [
+                dict(row)
+                for row in current_latest_rows
+                if str(row["market_reference"]) not in affected_references
+            ]
+            changed_by_reference: dict[str, dict[str, Any]] = {}
+            for row in changed_rows:
+                reference = str(row["market_reference"])
+                previous = changed_by_reference.get(reference)
+                if previous is None or (
+                    row["targetable"]
+                    and not previous["targetable"]
+                ) or (
+                    row["targetable"] == previous["targetable"]
+                    and int(row["ordinal"]) < int(previous["ordinal"])
+                ):
+                    changed_by_reference[reference] = row
+            for row in changed_by_reference.values():
+                if row["targetable"]:
+                    latest_state.append(row)
+            latest_state.sort(
+                key=lambda row: (
+                    str(row["provider"]),
+                    str(row["canonical_game_id"]),
+                    int(row["canonical_player_id"]),
+                    str(row["market_reference"]),
+                )
+            )
+            checksum_rows = [
+                {
+                    "ordinal": index,
+                    **{
+                        field: row[field]
+                        for field in (
+                            "market_reference",
+                            "canonical_game_id",
+                            "canonical_player_id",
+                            "canonical_player_name",
+                            "canonical_team_id",
+                            "canonical_statistic_id",
+                            "market_category",
+                            "targetable",
+                        )
+                    },
+                }
+                for index, row in enumerate(latest_state)
+            ]
+            materialization_checksum = _materialization_checksum(checksum_rows)
+            generation_id = _digest(
+                "gen",
+                "replay",
+                current["snapshot_id"],
+                materialization_checksum,
+                assume_utc(current["retrieved_at"]).isoformat(),
+            )
+            existing_generation_id = connection.execute(
+                select(ProjectionMaterializationGeneration.generation_id).where(
+                    ProjectionMaterializationGeneration.snapshot_id
+                    == current["snapshot_id"],
+                    ProjectionMaterializationGeneration.materialization_checksum
+                    == materialization_checksum,
+                    ProjectionMaterializationGeneration.retrieved_at
+                    == current["retrieved_at"],
+                )
+            ).scalar_one_or_none()
+            requested_created_at = assume_utc(
+                replayed_at or datetime.now(timezone.utc)
+            )
+            created_at = max(
+                requested_created_at,
+                assume_utc(current["created_at"]) + timedelta(microseconds=1),
+            )
+            new_rows: list[dict[str, Any]]
+            if existing_generation_id is None:
+                new_rows = []
+                for ordinal, row in enumerate(changed_rows):
+                    new_row = dict(row)
+                    new_row.update(
+                        generation_id=generation_id,
+                        ordinal=ordinal,
+                        observation_id=_digest(
+                            "obs", "replay", generation_id, row["observation_id"]
+                        ),
+                    )
+                    new_rows.append(new_row)
+                connection.execute(
+                    insert(ProjectionMaterializationGeneration.__table__).values(
+                        generation_id=generation_id,
+                        provider=provider,
+                        season=season,
+                        query_key=query_key,
+                        snapshot_id=current["snapshot_id"],
+                        source_poll_id=current["source_poll_id"],
+                        created_at=created_at,
+                        retrieved_at=current["retrieved_at"],
+                        materialization_checksum=materialization_checksum,
+                        outcome=MaterializationOutcome.ADVANCED.value,
+                        is_replay=True,
+                    )
+                )
+                connection.execute(insert(observation_table), new_rows)
+            else:
+                generation_id = str(existing_generation_id)
+                existing_rows = connection.execute(
+                    select(observation_table).where(
+                        observation_table.c.generation_id == generation_id
+                    )
+                ).mappings().all()
+                desired = {
+                    (str(row["market_reference"]), self._replay_fields(row))
+                    for row in changed_by_reference.values()
+                }
+                new_rows = [
+                    dict(row)
+                    for row in existing_rows
+                    if (
+                        str(row["market_reference"]),
+                        self._replay_fields(row),
+                    )
+                    in desired
+                ]
+                if len(new_rows) != len(desired):
+                    raise RuntimeError(
+                        "existing projection materialization lacks replay observations"
+                    )
+            deleted_references = tuple(sorted(affected_references))
+            if deleted_references:
+                connection.execute(
+                    delete(latest_table).where(
+                        latest_table.c.provider == provider,
+                        latest_table.c.season == season,
+                        latest_table.c.query_key == query_key,
+                        latest_table.c.market_reference.in_(deleted_references),
+                    )
+                )
+            latest_values = []
+            for row in new_rows:
+                if not row["targetable"]:
+                    continue
+                selected = changed_by_reference[str(row["market_reference"])]
+                if self._replay_fields(row) != self._replay_fields(selected):
+                    continue
+                latest_values.append(self._latest_row_values(
+                    row,
+                    season=season,
+                    query_key=query_key,
+                    generation_id=generation_id,
+                    confirmed_at=row["observed_at"],
+                ))
+            if latest_values:
+                connection.execute(insert(latest_table), latest_values)
+            self._activate_generation(
+                connection,
+                provider=provider,
+                season=season,
+                query_key=query_key,
+                generation_id=generation_id,
+                mapping_replayed_at=created_at,
+                mapping_replayed_retrieved_at=current["retrieved_at"],
+            )
+            return ProjectionReplayResult(
+                generation_id=generation_id,
+                changed=True,
+                observation_count=len(new_rows),
+                materialization_outcome=MaterializationOutcome.ADVANCED,
+            )
+
+    @staticmethod
+    def _mapping_identity_predicate(
+        table: Any,
+        *,
+        kind: str,
+        identity: str | None,
+        canonical: Mapping[str, Any],
+        provider: str,
+    ) -> Any:
+        provider_predicate = table.c.provider == provider
+        if kind == "athlete":
+            return provider_predicate & (table.c.athlete_provider_id == identity)
+        if kind == "event":
+            return provider_predicate & (table.c.event_provider_id == identity)
+        predicates = []
+        if identity is not None:
+            predicates.append(table.c.statistic_provider_id == identity)
+        label = canonical.get("provider_statistic_label")
+        if label is not None:
+            predicates.append(
+                func.lower(table.c.statistic_provider_label) == str(label).casefold()
+            )
+        return provider_predicate & or_(*predicates)
+
+    @staticmethod
+    def _observation_matches_mapping(
+        row: Mapping[str, Any],
+        *,
+        kind: str,
+        identity: str | None,
+        canonical: Mapping[str, Any],
+    ) -> bool:
+        if kind == "athlete":
+            return row["athlete_provider_id"] == identity
+        if kind == "event":
+            return row["event_provider_id"] == identity
+        return (
+            (identity is not None and row["statistic_provider_id"] == identity)
+            or (
+                canonical.get("provider_statistic_label") is not None
+                and isinstance(row["statistic_provider_label"], str)
+                and row["statistic_provider_label"].casefold()
+                == str(canonical["provider_statistic_label"]).casefold()
+            )
+        )
+
+    def _rematerialize_observation(
+        self,
+        row: Mapping[str, Any],
+        *,
+        kind: str,
+        canonical: Mapping[str, Any],
+        source_market: PlayerProjectionMarket,
+    ) -> dict[str, Any]:
+        rematerialized = dict(row)
+        athlete_team_id = None
+        if kind == "athlete":
+            athlete_team_id = canonical["canonical_team_id"]
+            rematerialized.update(
+                canonical_player_id=canonical["canonical_player_id"],
+                canonical_team_id=canonical["canonical_team_id"],
+            )
+        elif kind == "event":
+            rematerialized["canonical_game_id"] = canonical["canonical_game_id"]
+        else:
+            rematerialized["canonical_statistic_id"] = canonical[
+                "canonical_statistic_id"
+            ]
+            rematerialized["market_category"] = canonical["market_category"]
+        if kind != "athlete" and source_market.athlete is not None:
+            athlete_team_id = source_market.athlete.team.canonical_id if (
+                source_market.athlete.team is not None
+            ) else None
+        if kind == "athlete" and rematerialized["canonical_player_name"] is None:
+            rematerialized["canonical_player_name"] = canonical["canonical_player_name"]
+        unresolved = ProjectionArchive._unresolved_identities(
+            canonical_player_id=rematerialized["canonical_player_id"],
+            canonical_player_name=rematerialized["canonical_player_name"],
+            canonical_game_id=rematerialized["canonical_game_id"],
+            canonical_statistic_id=rematerialized["canonical_statistic_id"],
+        )
+        rematerialized["resolution_state"] = (
+            "resolved" if not unresolved else "unresolved"
+        )
+        rematerialized["unresolved_identities"] = ",".join(unresolved)
+        rematerialized["targetable"] = bool(
+            rematerialized["market_status"] == MarketStatus.AVAILABLE.value
+            and rematerialized["market_variant"] == MarketVariant.STANDARD.value
+            and rematerialized["scoring_period"] == ScoringPeriod.FULL_GAME.value
+            and not unresolved
+            and rematerialized["canonical_team_id"] is not None
+            and rematerialized["market_category"] is not None
+        )
+        rematerialized["market_reference"] = market_reference(
+            self._market_with_replayed_identities(
+                source_market,
+                rematerialized,
+                athlete_team_id=athlete_team_id,
+            )
+        )
+        return rematerialized
+
+    @staticmethod
+    def _replay_source_markets(
+        connection: Any,
+        rows: tuple[Mapping[str, Any], ...],
+    ) -> dict[tuple[str, int], PlayerProjectionMarket]:
+        ordinals_by_snapshot: dict[str, set[int]] = {}
+        for row in rows:
+            ordinals_by_snapshot.setdefault(str(row["snapshot_id"]), set()).add(
+                int(row["source_ordinal"])
+            )
+        table = ProjectionProviderSnapshot.__table__
+        markets: dict[tuple[str, int], PlayerProjectionMarket] = {}
+        for snapshot in connection.execute(
+            select(table.c.snapshot_id, table.c.evidence_document).where(
+                table.c.snapshot_id.in_(ordinals_by_snapshot)
+            )
+        ).mappings():
+            snapshot_id = str(snapshot["snapshot_id"])
+            document = json.loads(str(snapshot["evidence_document"]))
+            raw_markets = document.get("markets")
+            if not isinstance(raw_markets, list):
+                raise RuntimeError(
+                    "projection replay snapshot has no immutable markets"
+                )
+            for source_ordinal in sorted(ordinals_by_snapshot[snapshot_id]):
+                if source_ordinal >= len(raw_markets):
+                    raise RuntimeError(
+                        "projection replay observation has no immutable source market"
+                    )
+                candidate_document = dict(document)
+                candidate_document["markets"] = [raw_markets[source_ordinal]]
+                candidate_snapshot = deserialize_provider_snapshot(
+                    json.dumps(candidate_document, separators=(",", ":"), sort_keys=True),
+                    allow_partial=True,
+                )
+                markets[(snapshot_id, source_ordinal)] = candidate_snapshot.markets[0]
+        if len(markets) != len({
+            (str(row["snapshot_id"]), int(row["source_ordinal"])) for row in rows
+        }):
+            raise RuntimeError("projection replay observation has no immutable source market")
+        return markets
+
+    def _market_with_replayed_identities(
+        self,
+        source_market: PlayerProjectionMarket,
+        row: Mapping[str, Any],
+        *,
+        athlete_team_id: int | None = None,
+    ) -> PlayerProjectionMarket:
+        athlete = source_market.athlete
+        if athlete is not None:
+            team = athlete.team
+            canonical_team_id = (
+                athlete_team_id
+                if athlete_team_id is not None
+                else row["canonical_team_id"]
+            )
+            if team is None and canonical_team_id is not None:
+                team = TeamEvidence(canonical_id=int(canonical_team_id))
+            elif team is not None and (
+                team.canonical_id is None and canonical_team_id is not None
+            ):
+                team = replace(team, canonical_id=int(canonical_team_id))
+            athlete = replace(
+                athlete,
+                canonical_id=row["canonical_player_id"],
+                name=athlete.name or row["canonical_player_name"],
+                team=team,
+            )
+        event = source_market.event
+        if event is not None:
+            event = replace(event, canonical_id=row["canonical_game_id"])
+        statistic = source_market.statistic
+        if statistic is not None:
+            statistic = replace(
+                statistic,
+                canonical_id=row["canonical_statistic_id"],
+            )
+        rematerialized = replace(
+            source_market,
+            athlete=athlete,
+            event=event,
+            statistic=statistic,
+            statistic_match=None,
+        )
+        canonical_statistic_id = row["canonical_statistic_id"]
+        canonical_statistic = self.statistic_catalog.by_id.get(
+            str(canonical_statistic_id)
+        ) if canonical_statistic_id is not None else None
+        if statistic is not None and canonical_statistic is not None:
+            rematerialized = replace(
+                rematerialized,
+                statistic_match=StatisticMatch(
+                    state=MatchState.CANONICAL,
+                    evidence=statistic,
+                    scoring_period=ScoringPeriod(str(row["scoring_period"])),
+                    canonical=canonical_statistic,
+                    provider=source_market.provider,
+                    unit=canonical_statistic.unit,
+                ),
+            )
+        return rematerialized
+
+    @staticmethod
+    def _replay_fields(row: Mapping[str, Any]) -> tuple[Any, ...]:
+        return tuple(
+            row[field]
+            for field in (
+                "canonical_game_id",
+                "canonical_player_id",
+                "canonical_player_name",
+                "canonical_team_id",
+                "canonical_statistic_id",
+                "market_category",
+                "targetable",
+                "resolution_state",
+                "unresolved_identities",
+            )
         )
 
     @contextmanager
@@ -1050,32 +2126,97 @@ class ProjectionArchive:
     ) -> Any | None:
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
+        lock_table = ProjectionArchiveScopeLock.__table__
+        active_generation_id = connection.execute(
+            select(lock_table.c.active_generation_id).where(
+                lock_table.c.provider == provider,
+                lock_table.c.season == season,
+                lock_table.c.query_key == query_key,
+            )
+        ).scalar_one_or_none()
+        statement = (
+            select(
+                generation_table.c.generation_id,
+                snapshot_table.c.snapshot_id,
+                generation_table.c.source_poll_id,
+                generation_table.c.created_at,
+                generation_table.c.retrieved_at,
+                generation_table.c.materialization_checksum,
+                snapshot_table.c.content_checksum,
+            )
+            .select_from(
+                generation_table.join(
+                    snapshot_table,
+                    generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+                )
+            )
+            .where(
+                generation_table.c.provider == provider,
+                generation_table.c.season == season,
+                generation_table.c.query_key == query_key,
+                generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
+            )
+        )
+        if active_generation_id is not None:
+            statement = statement.where(
+                generation_table.c.generation_id == active_generation_id
+            )
+        else:
+            statement = statement.order_by(
+                generation_table.c.retrieved_at.desc(),
+                generation_table.c.created_at.desc(),
+                generation_table.c.generation_id.desc(),
+            )
         return (
             connection.execute(
-                select(
-                    generation_table.c.generation_id,
-                    snapshot_table.c.snapshot_id,
-                    generation_table.c.retrieved_at,
-                    generation_table.c.materialization_checksum,
-                    snapshot_table.c.content_checksum,
-                )
-                .select_from(
-                    generation_table.join(
-                        snapshot_table,
-                        generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
-                    )
-                )
-                .where(
-                    generation_table.c.provider == provider,
-                    generation_table.c.season == season,
-                    generation_table.c.query_key == query_key,
-                    generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
-                )
-                .order_by(generation_table.c.retrieved_at.desc())
-                .limit(1)
+                statement.limit(1)
             )
             .mappings()
             .one_or_none()
+        )
+
+    @staticmethod
+    def _activate_generation(
+        connection: Any,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+        generation_id: str,
+        mapping_replayed_at: datetime | None = None,
+        mapping_replayed_retrieved_at: datetime | None = None,
+    ) -> None:
+        table = ProjectionArchiveScopeLock.__table__
+        values: dict[str, Any] = {"active_generation_id": generation_id}
+        existing = connection.execute(
+            select(
+                table.c.mapping_replayed_at,
+                table.c.mapping_replayed_retrieved_at,
+            ).where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+            )
+        ).mappings().one()
+        if mapping_replayed_at is not None:
+            prior = existing["mapping_replayed_at"]
+            if prior is None or assume_utc(mapping_replayed_at) > assume_utc(prior):
+                values["mapping_replayed_at"] = mapping_replayed_at
+        if mapping_replayed_retrieved_at is not None:
+            prior = existing["mapping_replayed_retrieved_at"]
+            if (
+                prior is None
+                or assume_utc(mapping_replayed_retrieved_at) > assume_utc(prior)
+            ):
+                values["mapping_replayed_retrieved_at"] = mapping_replayed_retrieved_at
+        connection.execute(
+            update(table)
+            .where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+            )
+            .values(**values)
         )
 
     @staticmethod
@@ -1112,7 +2253,7 @@ class ProjectionArchive:
         query_key: str,
     ) -> datetime | None:
         table = ProviderPoll.__table__
-        return connection.execute(
+        poll_fence = connection.execute(
             select(func.max(table.c.retrieved_at)).where(
                 table.c.provider == provider,
                 table.c.season == season,
@@ -1120,6 +2261,50 @@ class ProjectionArchive:
                 table.c.promoted.is_(True),
             )
         ).scalar_one()
+        lock_table = ProjectionArchiveScopeLock.__table__
+        replay_fence = connection.execute(
+            select(lock_table.c.mapping_replayed_retrieved_at).where(
+                lock_table.c.provider == provider,
+                lock_table.c.season == season,
+                lock_table.c.query_key == query_key,
+            )
+        ).scalar_one_or_none()
+        fences = tuple(
+            assume_utc(value)
+            for value in (poll_fence, replay_fence)
+            if value is not None
+        )
+        return max(fences) if fences else None
+
+    @staticmethod
+    def _pre_decision_unresolved_fence(
+        connection: Any,
+        prepared: _PreparedProjectionIngestion,
+        *,
+        provider: str,
+        season: str,
+        query_key: str,
+    ) -> datetime | None:
+        """Keep pre-decision unresolved cache evidence from erasing recovery."""
+
+        if not any(
+            row["resolution_state"] == "unresolved"
+            for row in prepared.observation_rows
+        ):
+            return None
+        table = ProjectionArchiveScopeLock.__table__
+        replayed_at = connection.execute(
+            select(table.c.mapping_replayed_at).where(
+                table.c.provider == provider,
+                table.c.season == season,
+                table.c.query_key == query_key,
+            )
+        ).scalar_one_or_none()
+        if replayed_at is None or assume_utc(prepared.snapshot.retrieved_at) >= assume_utc(
+            replayed_at
+        ):
+            return None
+        return assume_utc(replayed_at)
 
     @staticmethod
     def _failure_attempt_fence(
@@ -1158,6 +2343,7 @@ class ProjectionArchive:
                 snapshot_id=request.snapshot_id,
                 generation_id=request.generation_id,
                 observation_count=request.observation_count,
+                duration_ms=request.duration_ms,
             )
         )
 
@@ -1182,6 +2368,12 @@ class ProjectionArchive:
                 if market.team is not None and market.team.canonical_id is not None
                 else athlete_team_id
             )
+            unresolved_identities = self._unresolved_identities(
+                canonical_player_id=canonical_player_id,
+                canonical_player_name=canonical_player_name,
+                canonical_game_id=canonical_game_id,
+                canonical_statistic_id=canonical_statistic_id,
+            )
             targetable = (
                 market.status is MarketStatus.AVAILABLE
                 and market.variant is MarketVariant.STANDARD
@@ -1197,6 +2389,24 @@ class ProjectionArchive:
                     "ordinal": ordinal,
                     "provider": snapshot.provider,
                     "provider_market_id": market.market_id,
+                    "athlete_provider_id": (
+                        None
+                        if market.athlete is None
+                        else market.athlete.provider_id
+                    ),
+                    "event_provider_id": (
+                        None if market.event is None else market.event.provider_id
+                    ),
+                    "statistic_provider_id": (
+                        None
+                        if market.statistic is None
+                        else market.statistic.provider_id
+                    ),
+                    "statistic_provider_label": (
+                        None
+                        if market.statistic is None
+                        else market.statistic.label
+                    ),
                     "market_reference": reference,
                     "canonical_game_id": canonical_game_id,
                     "canonical_player_id": canonical_player_id,
@@ -1207,11 +2417,32 @@ class ProjectionArchive:
                     "market_variant": market.variant.value,
                     "scoring_period": market.scoring_period.value,
                     "targetable": targetable,
+                    "resolution_state": (
+                        "resolved" if not unresolved_identities else "unresolved"
+                    ),
+                    "unresolved_identities": ",".join(unresolved_identities),
                     "observed_at": snapshot.retrieved_at,
                     "canonical_player_name": canonical_player_name,
                 }
             )
         return rows
+
+    @staticmethod
+    def _unresolved_identities(
+        *,
+        canonical_player_id: int | None,
+        canonical_player_name: str | None,
+        canonical_game_id: str | None,
+        canonical_statistic_id: str | None,
+    ) -> tuple[str, ...]:
+        unresolved: list[str] = []
+        if canonical_player_id is None or canonical_player_name is None:
+            unresolved.append("athlete")
+        if canonical_game_id is None:
+            unresolved.append("event")
+        if canonical_statistic_id is None:
+            unresolved.append("statistic")
+        return tuple(unresolved)
 
     @staticmethod
     def _canonical_statistic_id(market: PlayerProjectionMarket) -> str | None:
@@ -1272,25 +2503,44 @@ class ProjectionArchive:
         season: str,
         query_key: str,
         generation_id: str,
+        confirmed_at: datetime | None = None,
     ) -> None:
         connection.execute(
-            insert(LatestPlayerProjection.__table__).values(
-                provider=row["provider"],
+            insert(LatestPlayerProjection.__table__),
+            ProjectionArchive._latest_row_values(
+                row,
                 season=season,
                 query_key=query_key,
-                canonical_game_id=row["canonical_game_id"],
-                canonical_player_id=row["canonical_player_id"],
-                market_reference=row["market_reference"],
-                observation_id=row["observation_id"],
                 generation_id=generation_id,
-                canonical_team_id=row["canonical_team_id"],
-                canonical_player_name=row["canonical_player_name"],
-                canonical_statistic_id=row["canonical_statistic_id"],
-                market_category=row["market_category"],
-                observed_at=row["observed_at"],
-                confirmed_at=row["observed_at"],
-            )
+                confirmed_at=confirmed_at,
+            ),
         )
+
+    @staticmethod
+    def _latest_row_values(
+        row: dict[str, Any],
+        *,
+        season: str,
+        query_key: str,
+        generation_id: str,
+        confirmed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "provider": row["provider"],
+            "season": season,
+            "query_key": query_key,
+            "canonical_game_id": row["canonical_game_id"],
+            "canonical_player_id": row["canonical_player_id"],
+            "market_reference": row["market_reference"],
+            "observation_id": row["observation_id"],
+            "generation_id": generation_id,
+            "canonical_team_id": row["canonical_team_id"],
+            "canonical_player_name": row["canonical_player_name"],
+            "canonical_statistic_id": row["canonical_statistic_id"],
+            "market_category": row["market_category"],
+            "observed_at": row["observed_at"],
+            "confirmed_at": confirmed_at or row["observed_at"],
+        }
 
     @staticmethod
     def _plan_partial_transition(
@@ -1416,7 +2666,11 @@ class ProjectionArchive:
                 return
             predicates.append(table.c.market_reference.in_(references))
         predicates.append(table.c.confirmed_at < confirmed_at)
-        connection.execute(update(table).where(*predicates).values(confirmed_at=confirmed_at))
+        connection.execute(
+            update(table)
+            .where(*predicates)
+            .values(observed_at=confirmed_at, confirmed_at=confirmed_at)
+        )
 
 
 class LatestProjectionPlayerPoolReader:
@@ -1431,6 +2685,7 @@ class LatestProjectionPlayerPoolReader:
         required_providers: Iterable[str] | None = None,
         live_max_age: timedelta = PROJECTION_LIVE_MAX_AGE,
         failure_fallback_max_age: timedelta = PROJECTION_FAILURE_FALLBACK_MAX_AGE,
+        event_reader: Any | None = None,
     ) -> None:
         scopes = (
             (scope,)
@@ -1477,9 +2732,34 @@ class LatestProjectionPlayerPoolReader:
         self._failure_fallback_max_age_seconds = exact_seconds(
             failure_fallback_max_age
         )
+        self.event_reader = event_reader
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
-        return self.get_pool(season=season, game_ids=(game_id,))
+        pool, _is_closing = self.get_pool_for_game_with_closing_state(
+            season=season, game_id=game_id
+        )
+        return pool
+
+    def get_pool_for_game_with_closing_state(
+        self, *, season: str, game_id: str
+    ) -> tuple[PlayerPool, bool]:
+        if season != self.scope.query.season:
+            raise ValueError("projection archive read season is outside its scope")
+        requested_games = (str(game_id),)
+        started_games = self._started_games(season, requested_games)
+        return (
+            self._pool_for_requested_games(
+                season=season,
+                requested_games=requested_games,
+                started_games=started_games,
+            ),
+            bool(started_games),
+        )
+
+    def is_closing_game(self, *, season: str, game_id: str) -> bool:
+        """Return whether the governed event has crossed its start fence."""
+
+        return bool(self._started_games(season, (str(game_id),)))
 
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
         if season != self.scope.query.season:
@@ -1487,6 +2767,34 @@ class LatestProjectionPlayerPoolReader:
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested_games:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
+        started_games = self._started_games(season, requested_games)
+        return self._pool_for_requested_games(
+            season=season,
+            requested_games=requested_games,
+            started_games=started_games,
+        )
+
+    def _pool_for_requested_games(
+        self,
+        *,
+        season: str,
+        requested_games: tuple[str, ...],
+        started_games: dict[str, datetime],
+    ) -> PlayerPool:
+        if started_games:
+            return self._get_pool_with_closing_sets(
+                season=season,
+                requested_games=requested_games,
+                started_games=started_games,
+            )
+        return self._get_live_pool(season=season, requested_games=requested_games)
+
+    def _get_live_pool(
+        self,
+        *,
+        season: str,
+        requested_games: tuple[str, ...],
+    ) -> PlayerPool:
         read = self._read_pool_state(season, requested_games)
         poll_state = self._latest_provider_polls(read.polls)
         evidence = self._classify_eligible_evidence(
@@ -1526,6 +2834,242 @@ class LatestProjectionPlayerPoolReader:
             rows=rows,
             evidence=evidence,
         )
+        return PlayerPool(players, team_counts, freshness, game_states)
+
+    def _started_games(
+        self, season: str, requested_games: tuple[str, ...]
+    ) -> dict[str, datetime]:
+        reader = self.event_reader
+        if reader is None:
+            return {}
+        get_events_by_ids = getattr(reader, "get_events_by_ids", None)
+        if not callable(get_events_by_ids):
+            return {}
+        events = get_events_by_ids(season, requested_games)
+        started: dict[str, datetime] = {}
+        for event in events:
+            game_id = str(event.get("nba_game_id", ""))
+            if game_id not in requested_games:
+                continue
+            fence = _projection_closing_start_fence(event)
+            if fence is not None:
+                started[game_id] = fence
+        return started
+
+    def _get_pool_with_closing_sets(
+        self,
+        *,
+        season: str,
+        requested_games: tuple[str, ...],
+        started_games: dict[str, datetime],
+    ) -> PlayerPool:
+        live_games = tuple(game for game in requested_games if game not in started_games)
+        live_pool = (
+            self._get_live_pool(season=season, requested_games=live_games)
+            if live_games
+            else None
+        )
+        closing_pool = self._read_closing_pool(
+            season=season,
+            requested_games=tuple(started_games),
+        )
+        if live_pool is None:
+            return closing_pool
+        return self._combine_pools(live_pool, closing_pool)
+
+    @staticmethod
+    def _combine_pools(*pools: PlayerPool) -> PlayerPool:
+        contributions: dict[int, dict[str, Any]] = {}
+        team_counts: dict[int, int] = {}
+        game_states: dict[str, Mapping[str, Any]] = {}
+        freshnesses = [pool.freshness for pool in pools]
+        for pool in pools:
+            game_states.update(pool.game_states)
+            for player in pool.players:
+                entry = contributions.setdefault(
+                    player.canonical_player_id,
+                    {
+                        "name": player.name,
+                        "team_id": player.team_id,
+                        "categories": set(),
+                        "provenance": {},
+                    },
+                )
+                entry["categories"].update(player.market_categories)
+                for provider, categories in player.provenance.items():
+                    entry["provenance"].setdefault(provider, set()).update(categories)
+        players = tuple(
+            PoolPlayer(
+                canonical_player_id=player_id,
+                name=entry["name"],
+                team_id=entry["team_id"],
+                market_categories=tuple(sorted(entry["categories"])),
+                provenance={
+                    provider: tuple(sorted(categories))
+                    for provider, categories in sorted(entry["provenance"].items())
+                },
+            )
+            for player_id, entry in sorted(contributions.items())
+        )
+        for player in players:
+            team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
+        states = {freshness.get("state") for freshness in freshnesses}
+        if "live" in states:
+            state = "live"
+        elif "closing" in states:
+            state = "closing"
+        else:
+            state = "missing"
+        authoritative = [
+            freshness
+            for freshness in freshnesses
+            if freshness.get("state") == state
+        ]
+        observed = [
+            freshness.get("observed_at")
+            for freshness in authoritative
+            if freshness.get("observed_at") is not None
+        ]
+        retrieved = [
+            freshness.get("retrieved_at")
+            for freshness in authoritative
+            if freshness.get("retrieved_at") is not None
+        ]
+        providers: dict[str, dict[str, Any]] = {}
+        for freshness in authoritative:
+            for provider, value in freshness.get("providers", {}).items():
+                current = providers.get(provider)
+                if current is None or (
+                    value.get("retrieved_at") is not None
+                    and (
+                        current.get("retrieved_at") is None
+                        or value["retrieved_at"] < current["retrieved_at"]
+                    )
+                ):
+                    providers[provider] = dict(value)
+        freshness: dict[str, Any] = {
+            "state": state,
+            "observed_at": min(observed) if observed else None,
+            "retrieved_at": min(retrieved) if retrieved else None,
+            "providers": dict(sorted(providers.items())),
+        }
+        if len(states) == 1 and state != "closing":
+            statuses = [
+                value["status"] for value in authoritative if "status" in value
+            ]
+            if statuses and len(set(statuses)) == 1:
+                freshness["status"] = statuses[0]
+        return PlayerPool(players, team_counts, freshness, game_states)
+
+    def _read_closing_pool(
+        self, *, season: str, requested_games: tuple[str, ...]
+    ) -> PlayerPool:
+        set_table = ClosingProjectionSet.__table__
+        membership_table = ClosingProjectionMembership.__table__
+        observation_table = ProjectionObservation.__table__
+        providers = tuple(scope.provider for scope in self.scopes)
+        with self.engine.connect() as connection:
+            if self.engine.dialect.name == "postgresql":
+                connection = connection.execution_options(
+                    isolation_level="REPEATABLE READ"
+                )
+            with connection.begin():
+                sets = tuple(
+                    connection.execute(
+                        select(set_table).where(
+                            set_table.c.provider.in_(providers),
+                            set_table.c.season == season,
+                            set_table.c.query_key == self.scope.query_key,
+                            set_table.c.canonical_game_id.in_(requested_games),
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                rows = tuple(
+                    connection.execute(
+                        select(
+                            membership_table.c.closing_set_id,
+                            membership_table.c.market_reference,
+                            membership_table.c.generation_id,
+                            observation_table.c.observation_id,
+                            observation_table.c.provider,
+                            observation_table.c.canonical_game_id,
+                            observation_table.c.canonical_player_id,
+                            observation_table.c.canonical_player_name,
+                            observation_table.c.canonical_team_id,
+                            observation_table.c.canonical_statistic_id,
+                            observation_table.c.market_category,
+                            observation_table.c.observed_at.label("confirmed_at"),
+                        )
+                        .select_from(
+                            membership_table.join(
+                                observation_table,
+                                membership_table.c.observation_id
+                                == observation_table.c.observation_id,
+                            )
+                        )
+                        .where(
+                            membership_table.c.closing_set_id.in_(
+                                [row["closing_set_id"] for row in sets]
+                            ),
+                            observation_table.c.targetable.is_(True),
+                        )
+                        .order_by(
+                            observation_table.c.provider,
+                            observation_table.c.canonical_player_id,
+                            membership_table.c.market_reference,
+                        )
+                    )
+                    .mappings()
+                    .all()
+                    if sets
+                    else ()
+                )
+        game_states: dict[str, dict[str, Any]] = {}
+        rows_by_game: dict[str, list[Any]] = {}
+        for row in rows:
+            rows_by_game.setdefault(str(row["canonical_game_id"]), []).append(row)
+        for game_id in requested_games:
+            game_rows = rows_by_game.get(game_id, [])
+            game_states[game_id] = (
+                {
+                    "state": "closing",
+                    "observed_at": min(
+                        assume_utc(row["confirmed_at"]) for row in game_rows
+                    ).isoformat(),
+                }
+                if game_rows
+                else {"state": "missing", "observed_at": None}
+            )
+        if not rows:
+            freshness = PlayerPool.missing_projection_freshness()
+            freshness["providers"] = {
+                provider: {"status": "missing", "retrieved_at": None}
+                for provider in sorted(providers)
+            }
+            return PlayerPool((), {}, freshness, game_states)
+        observed = min(assume_utc(row["confirmed_at"]) for row in rows).isoformat()
+        freshness = {
+            "state": "closing",
+            "observed_at": observed,
+            "retrieved_at": observed,
+            "providers": {},
+        }
+        for provider in sorted(providers):
+            provider_rows = [row for row in rows if row["provider"] == provider]
+            freshness["providers"][provider] = {
+                "status": "closing" if provider_rows else "missing",
+                "retrieved_at": (
+                    min(assume_utc(row["confirmed_at"]) for row in provider_rows).isoformat()
+                    if provider_rows
+                    else None
+                ),
+            }
+        players = self._players_from_rows(list(rows))
+        team_counts: dict[int, int] = {}
+        for player in players:
+            team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
         return PlayerPool(players, team_counts, freshness, game_states)
 
     def _empty_pool(
@@ -1614,7 +3158,7 @@ class LatestProjectionPlayerPoolReader:
         provider_observed_at = dict(evidence.empty_provider_observed_at)
         for row in rows:
             provider = str(row["provider"])
-            row_observed_at = assume_utc(row["confirmed_at"])
+            row_observed_at = assume_utc(row["observed_at"])
             provider_observed_at[provider] = min(
                 provider_observed_at.get(provider, row_observed_at),
                 row_observed_at,
@@ -1819,7 +3363,7 @@ class LatestProjectionPlayerPoolReader:
     def _state_for_rows(rows: list[Any]) -> dict[str, Any]:
         if not rows:
             return {"state": "missing", "observed_at": None}
-        observed_at = min(assume_utc(row["confirmed_at"]) for row in rows)
+        observed_at = min(assume_utc(row["observed_at"]) for row in rows)
         return {"state": "live", "observed_at": observed_at.isoformat()}
 
 
@@ -1835,8 +3379,10 @@ class ProjectionSelectionPlayerPoolReader:
         season: str,
         game_id: str,
     ) -> PlayerPool | None:
-        pool = self.reader.get_pool_for_game(season=season, game_id=game_id)
-        if pool.freshness.get("state") == "missing":
+        pool, is_closing = self.reader.get_pool_for_game_with_closing_state(
+            season=season, game_id=game_id
+        )
+        if pool.freshness.get("state") == "missing" and not is_closing:
             return None
         return pool
 
@@ -1869,7 +3415,7 @@ class ProjectionRecordingService:
                 "projection snapshot provider is outside the configured recording scope: "
                 f"received {normalized_provider!r}"
             )
-        if _query_key(query) != scope.query_key:
+        if projection_query_key(query) != scope.query_key:
             raise ValueError(
                 "projection snapshot query is outside the configured recording scope"
             )
@@ -1882,12 +3428,14 @@ class ProjectionRecordingService:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         return self._record_snapshot(
             snapshot,
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
             require_complete=False,
         )
 
@@ -1898,6 +3446,7 @@ class ProjectionRecordingService:
         query: NBAMarketQuery,
         accepted_at: datetime | None,
         poll_started_at: datetime | None,
+        duration_ms: int | None,
         require_complete: bool,
     ) -> ProjectionArchiveResult:
         require_projection_archive_schema(self.archive.engine)
@@ -1911,6 +3460,7 @@ class ProjectionRecordingService:
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
         )
 
     def record_complete_snapshot(
@@ -1920,12 +3470,14 @@ class ProjectionRecordingService:
         query: NBAMarketQuery,
         accepted_at: datetime | None = None,
         poll_started_at: datetime | None = None,
+        duration_ms: int | None = None,
     ) -> ProjectionArchiveResult:
         return self._record_snapshot(
             snapshot,
             query=query,
             accepted_at=accepted_at,
             poll_started_at=poll_started_at,
+            duration_ms=duration_ms,
             require_complete=True,
         )
 
@@ -1937,6 +3489,7 @@ class ProjectionRecordingService:
         completed_at: datetime | None = None,
         poll_started_at: datetime | None = None,
         failure_reason: str,
+        duration_ms: int | None = None,
     ) -> ProjectionPollResult:
         require_projection_archive_schema(self.archive.engine)
         self._scope_for(provider, query)
@@ -1946,16 +3499,80 @@ class ProjectionRecordingService:
             completed_at=completed_at,
             poll_started_at=poll_started_at,
             failure_reason=failure_reason,
+            duration_ms=duration_ms,
         )
+
+    def freeze_closing_projection_sets(
+        self,
+        *,
+        events: Iterable[Mapping[str, Any]],
+        query: NBAMarketQuery,
+        created_at: datetime,
+    ) -> tuple[ClosingProjectionSetResult, ...]:
+        """Idempotently close configured provider scopes for started games."""
+
+        require_projection_archive_schema(self.archive.engine)
+        created = assume_utc(created_at)
+        query_key = projection_query_key(query)
+        scopes = {
+            provider: self._scope_for(provider, query)
+            for provider in sorted(self.scopes)
+        }
+        started_events = tuple(
+            event
+            for event in events
+            if str(event.get("nba_game_id", "")).strip()
+            and _projection_closing_start_fence(event) is not None
+        )
+        game_ids = tuple(
+            dict.fromkeys(str(event["nba_game_id"]).strip() for event in started_events)
+        )
+        existing: set[tuple[str, str]] = set()
+        if game_ids and scopes:
+            table = ClosingProjectionSet.__table__
+            with self.archive.engine.connect() as connection:
+                existing = {
+                    (str(row["provider"]), str(row["canonical_game_id"]))
+                    for row in connection.execute(
+                        select(table.c.provider, table.c.canonical_game_id).where(
+                            table.c.season == query.season,
+                            table.c.query_key == query_key,
+                            table.c.provider.in_(tuple(scopes)),
+                            table.c.canonical_game_id.in_(game_ids),
+                        )
+                    ).mappings()
+                }
+        results: list[ClosingProjectionSetResult] = []
+        for event in started_events:
+            game_id = str(event.get("nba_game_id", "")).strip()
+            fence = _projection_closing_start_fence(event)
+            if not game_id or fence is None:
+                continue
+            for provider, scope in scopes.items():
+                if (provider, game_id) in existing:
+                    continue
+                results.append(
+                    self.archive.freeze_closing_projection_set(
+                        provider=provider,
+                        query=scope.query,
+                        canonical_game_id=game_id,
+                        started_at=fence,
+                        created_at=created,
+                    )
+                )
+        return tuple(results)
 
 
 __all__ = [
+    "ClosingProjectionSetResult",
     "LatestProjectionPlayerPoolReader",
     "ProjectionArchive",
     "ProjectionArchiveReadScope",
     "ProjectionArchiveResult",
     "ProjectionPollResult",
+    "ProjectionReplayResult",
     "ProjectionRecordingService",
     "ProjectionSelectionPlayerPoolReader",
+    "projection_query_key",
     "require_projection_archive_schema",
 ]

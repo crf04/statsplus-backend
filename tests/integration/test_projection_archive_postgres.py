@@ -1,6 +1,7 @@
 """PostgreSQL production-fence coverage for projection transitions (#105)."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
@@ -24,6 +25,8 @@ from app.dependencies import build_dependencies
 from app.models import Base
 from app.migrations import run_migrations
 from app.models.projection_archive import (
+    ClosingProjectionMembership,
+    ClosingProjectionSet,
     LatestPlayerProjection,
     ProjectionArchiveScopeLock,
     ProjectionMaterializationGeneration,
@@ -72,10 +75,125 @@ def projection_pg_engine():
         pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration tests")
     engine = create_engine(url)
     Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
+    run_migrations(engine)
     yield engine
     Base.metadata.drop_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS schema_migrations")
     engine.dispose()
+
+
+def test_concurrent_postgres_close_and_late_materialization_keep_one_fenced_set(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    initial = _snapshot(catalog, OBSERVED_AT, "20.5")
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    initial_result = archive.ingest_snapshot(
+        initial,
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    barrier = Barrier(2)
+
+    def close_set():
+        worker_engine = create_engine(database_url)
+        try:
+            barrier.wait(timeout=10)
+            return ProjectionArchive(worker_engine, catalog).freeze_closing_projection_set(
+                provider="dabble",
+                query=query,
+                canonical_game_id=GAME_ID,
+                started_at=start_at,
+                created_at=start_at,
+            )
+        finally:
+            worker_engine.dispose()
+
+    def late_materialization():
+        worker_engine = create_engine(database_url)
+        try:
+            barrier.wait(timeout=10)
+            return ProjectionArchive(worker_engine, catalog).ingest_snapshot(
+                _snapshot(catalog, start_at - timedelta(minutes=1), "21.5"),
+                query=query,
+                accepted_at=start_at + timedelta(minutes=1),
+            )
+        finally:
+            worker_engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        close_result, late_result = tuple(
+            executor.map(lambda task: task(), (close_set, late_materialization))
+        )
+
+    with projection_pg_engine.connect() as connection:
+        sets = connection.execute(select(ClosingProjectionSet)).all()
+        memberships = connection.execute(select(ClosingProjectionMembership)).all()
+        observations = connection.execute(
+            select(ProjectionObservation.observation_id, ProjectionObservation.observed_at)
+        ).all()
+    assert close_result.observation_count == 1
+    assert late_result.materialization_outcome == "advanced"
+    assert len(sets) == 1
+    assert len(memberships) == 1
+    initial_observation_id = next(
+        observation_id
+        for observation_id, observed_at in observations
+        if observed_at == initial.retrieved_at
+    )
+    assert memberships[0].observation_id == initial_observation_id
+    assert initial_result.snapshot_id != late_result.snapshot_id
+
+
+def test_two_concurrent_postgres_closers_share_one_immutable_set(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    archive.ingest_snapshot(
+        _snapshot(catalog, OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    barrier = Barrier(2)
+
+    def close_set(_worker):
+        worker_engine = create_engine(database_url)
+        try:
+            barrier.wait(timeout=10)
+            return ProjectionArchive(
+                worker_engine, catalog
+            ).freeze_closing_projection_set(
+                provider="dabble",
+                query=query,
+                canonical_game_id=GAME_ID,
+                started_at=start_at,
+                created_at=start_at,
+            )
+        finally:
+            worker_engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(close_set, range(2)))
+
+    assert len({result.closing_set_id for result in results}) == 1
+    assert sorted(result.created for result in results) == [False, True]
+    with projection_pg_engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ClosingProjectionSet)
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(ClosingProjectionMembership)
+        ).scalar_one() == 1
 
 
 def _snapshot(catalog, retrieved_at, threshold):
@@ -941,6 +1059,233 @@ def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empt
     assert empty_selection.status_code == 404
 
 
+def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
+    authenticated_postgres_projection_routes,
+):
+    context = authenticated_postgres_projection_routes
+    unresolved = _snapshot(context.catalog, OBSERVED_AT, "20.5")
+    unresolved_market = replace(
+        unresolved.markets[0],
+        athlete=replace(
+            unresolved.markets[0].athlete,
+            provider_id="athlete-unresolved",
+            canonical_id=None,
+        ),
+    )
+    unresolved = replace(unresolved, markets=(unresolved_market,))
+    context.archive.ingest_snapshot(
+        unresolved,
+        query=context.query,
+        accepted_at=OBSERVED_AT,
+    )
+
+    initial_slate = context.client.get(
+        "/api/games/slate?date=2026-01-02", headers=context.headers
+    )
+    initial_matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
+    )
+    assert initial_slate.status_code == initial_matchup.status_code == 200
+    assert initial_slate.get_json()["games"][0]["away_team"][
+        "targetable_player_count"
+    ] == 0
+    assert initial_matchup.get_json()["players"] == []
+
+    replayed_at = OBSERVED_AT + timedelta(minutes=10)
+    replay = context.archive.replay_athlete_mapping(
+        provider="dabble",
+        provider_athlete_id="athlete-unresolved",
+        canonical_player_id=7,
+        canonical_player_name="Player 7",
+        canonical_team_id=10,
+        replayed_at=replayed_at,
+    )
+    assert replay is not None
+    assert replay.changed is True
+    context.route_now[0] = replayed_at
+
+    recovered_slate = context.client.get(
+        "/api/games/slate?date=2026-01-02", headers=context.headers
+    )
+    recovered_matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
+    )
+    recovered_selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
+        headers=context.headers,
+    )
+    assert (
+        recovered_slate.status_code
+        == recovered_matchup.status_code
+        == recovered_selection.status_code
+        == 200
+    )
+    assert recovered_slate.get_json()["games"][0]["away_team"][
+        "targetable_player_count"
+    ] == 1
+    assert recovered_matchup.get_json()["players"][0]["canonical_id"] == 7
+    assert recovered_selection.get_json()["player_id"] == 7
+
+
+def test_concurrent_postgres_mapping_replay_advances_one_generation(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    unresolved = _snapshot(catalog, OBSERVED_AT, "20.5")
+    unresolved = replace(
+        unresolved,
+        markets=(
+            replace(
+                unresolved.markets[0],
+                athlete=replace(
+                    unresolved.markets[0].athlete,
+                    provider_id="athlete-concurrent",
+                    canonical_id=None,
+                ),
+            ),
+        ),
+    )
+    ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
+        unresolved,
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    archives = [
+        ProjectionArchive(create_engine(database_url), catalog)
+        for _ in range(2)
+    ]
+    barrier = Barrier(2)
+    for archive in archives:
+        original = archive._replay_scope
+
+        def synchronized_replay_scope(*, _original=original, **kwargs):
+            barrier.wait(timeout=10)
+            return _original(**kwargs)
+
+        archive._replay_scope = synchronized_replay_scope
+
+    def replay(archive):
+        return archive.replay_athlete_mapping(
+            provider="dabble",
+            provider_athlete_id="athlete-concurrent",
+            canonical_player_id=7,
+            canonical_player_name="Player 7",
+            canonical_team_id=10,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(replay, archive) for archive in archives]
+        results = [future.result(timeout=20) for future in futures]
+
+    assert sorted(result.changed for result in results) == [False, True]
+    assert results[0].generation_id == results[1].generation_id
+    with projection_pg_engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 2
+        assert connection.execute(
+            select(func.count()).select_from(LatestPlayerProjection)
+        ).scalar_one() == 1
+    for archive in archives:
+        archive.engine.dispose()
+
+
+def test_postgres_mapping_replay_serializes_with_inflight_snapshot_ingestion(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+
+    def unresolved_snapshot(retrieved_at, threshold):
+        snapshot = _snapshot(catalog, retrieved_at, threshold)
+        return replace(
+            snapshot,
+            markets=(
+                replace(
+                    snapshot.markets[0],
+                    athlete=replace(
+                        snapshot.markets[0].athlete,
+                        provider_id="athlete-ingest-race",
+                        canonical_id=None,
+                    ),
+                ),
+            ),
+        )
+
+    ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
+        unresolved_snapshot(OBSERVED_AT, "20.5"),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    replay_archive = ProjectionArchive(create_engine(database_url), catalog)
+    ingestion_archive = ProjectionArchive(create_engine(database_url), catalog)
+    replay_lock_acquired = Event()
+    ingestion_submitted = Event()
+    original_scope_transaction = replay_archive._scope_transaction
+
+    @contextmanager
+    def synchronized_scope_transaction(*args, **kwargs):
+        with original_scope_transaction(*args, **kwargs) as connection:
+            replay_lock_acquired.set()
+            assert ingestion_submitted.wait(timeout=10)
+            yield connection
+
+    replay_archive._scope_transaction = synchronized_scope_transaction
+    replayed_at = OBSERVED_AT + timedelta(minutes=10)
+    inflight = unresolved_snapshot(
+        OBSERVED_AT + timedelta(minutes=5),
+        "21.5",
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replay_future = executor.submit(
+            replay_archive.replay_athlete_mapping,
+            provider="dabble",
+            provider_athlete_id="athlete-ingest-race",
+            canonical_player_id=7,
+            canonical_player_name="Player 7",
+            canonical_team_id=10,
+            replayed_at=replayed_at,
+        )
+        assert replay_lock_acquired.wait(timeout=10)
+        ingestion_submitted.set()
+        ingestion_future = executor.submit(
+            ingestion_archive.ingest_snapshot,
+            inflight,
+            query=query,
+            accepted_at=replayed_at + timedelta(minutes=1),
+        )
+        replay = replay_future.result(timeout=20)
+        ingestion = ingestion_future.result(timeout=20)
+
+    assert replay is not None and replay.changed is True
+    assert ingestion.materialization_outcome == "older_not_promoted"
+    with projection_pg_engine.connect() as connection:
+        recovered = connection.execute(
+            select(
+                LatestPlayerProjection.canonical_player_id,
+                LatestPlayerProjection.generation_id,
+                ProjectionArchiveScopeLock.active_generation_id,
+            ).join(
+                ProjectionArchiveScopeLock,
+                (ProjectionArchiveScopeLock.provider == LatestPlayerProjection.provider)
+                & (ProjectionArchiveScopeLock.season == LatestPlayerProjection.season)
+                & (
+                    ProjectionArchiveScopeLock.query_key
+                    == LatestPlayerProjection.query_key
+                ),
+            )
+        ).one()
+    assert recovered[0] == 7
+    assert recovered[1] == recovered[2]
+    replay_archive.engine.dispose()
+    ingestion_archive.engine.dispose()
+
+
 def test_authenticated_postgres_routes_expire_disabled_provider_history(
     authenticated_postgres_projection_routes,
 ):
@@ -1287,7 +1632,7 @@ def test_postgres_migration_upgrades_an_existing_v40_projection_schema(
         latest_times = connection.execute(text(
             "SELECT DISTINCT observed_at, confirmed_at FROM latest_player_projections"
         )).one()
-        assert latest_times.observed_at == OBSERVED_AT
+        assert latest_times.observed_at == unchanged_at
         assert latest_times.confirmed_at == unchanged_at
         before_replay = tuple(
             connection.execute(select(func.count()).select_from(model)).scalar_one()
