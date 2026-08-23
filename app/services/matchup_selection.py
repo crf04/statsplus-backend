@@ -19,10 +19,15 @@ from app.services.player_game_log_values import (
     validate_player_game_log_components,
 )
 from app.services.player_pool import PoolPlayer, SingleGamePlayerPoolReader
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_snapshot,
+)
 from app.services.statistic_catalog import StatisticCatalog
 
 
 _WIRE_PRECISION = 6
+_PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 
 
 class EventCatalogReader(Protocol):
@@ -124,37 +129,35 @@ class MatchupSelectionService:
                 "The stored Player Pool categories are incompatible with the current "
                 "Statistic Catalog."
             )
-        log_freshness = self._call_with_snapshot(
+        log_freshness = call_with_snapshot(
             self.player_logs.get_read_freshness,
             season,
             publication_snapshot=publication_snapshot,
         )
-        rate = self._call_with_snapshot(
+        rate = call_with_snapshot(
             self.player_logs.get_season_rate,
             season,
             player_id,
             publication_snapshot=publication_snapshot,
         )
-        h2h_records = self.player_logs.list_h2h_rows(
+        h2h_records = call_with_snapshot(
+            self.player_logs.list_h2h_rows,
             season,
             player_id,
             opponent_team_id,
-            **self._snapshot_kwargs(
-                self.player_logs.list_h2h_rows, publication_snapshot
-            ),
+            publication_snapshot=publication_snapshot,
         )
         h2h_rated = self._rate_rows(h2h_records, markets, {player_id: rate})
 
         peer_ids = self.archetypes.list_peer_ids(player_id)
-        archetype_records = self.player_logs.list_archetype_rows(
+        archetype_records = call_with_snapshot(
+            self.player_logs.list_archetype_rows,
             season,
             peer_ids,
             opponent_team_id,
-            **self._snapshot_kwargs(
-                self.player_logs.list_archetype_rows, publication_snapshot
-            ),
+            publication_snapshot=publication_snapshot,
         )
-        summaries = self._call_with_snapshot(
+        summaries = call_with_snapshot(
             self.player_logs.get_player_summaries,
             season,
             peer_ids,
@@ -189,30 +192,12 @@ class MatchupSelectionService:
             snapshot = getattr(self.publication_reader, "read_snapshot", None)
         if not callable(snapshot):
             return None
-        return snapshot(("player_game_logs",), season=season)
-
-    @staticmethod
-    def _snapshot_kwargs(method, snapshot) -> dict[str, Any]:
-        if snapshot is None:
-            return {}
-        try:
-            import inspect
-
-            parameters = inspect.signature(method).parameters.values()
-            if any(
-                parameter.name == "publication_snapshot"
-                or parameter.kind == inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
-            ):
-                return {"publication_snapshot": snapshot}
-        except (TypeError, ValueError):
-            pass
-        return {}
-
-    @classmethod
-    def _call_with_snapshot(cls, method, *args, publication_snapshot=None, **kwargs):
-        kwargs.update(cls._snapshot_kwargs(method, publication_snapshot))
-        return method(*args, **kwargs)
+        keyword = {}
+        if accepts_keyword(snapshot, "projection_only_keys"):
+            # One card resolves its own rows from the projection, so the
+            # season-wide game-log payload is never worth shipping.
+            keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        return snapshot(("player_game_logs",), season=season, **keyword)
 
     def _event(self, season: str, game_id: str) -> Mapping[str, Any]:
         if self.event_catalog is None:

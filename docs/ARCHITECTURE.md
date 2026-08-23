@@ -1521,7 +1521,11 @@ projection path: its one snapshot names `player_game_logs` as projection-only,
 so that stream's payload value is never fetched (the one capture statement
 guards the column behind a per-row `CASE` on stream key) while the other
 publication streams in the same generation stay hydrated, and the summaries read resolves
-the game's player pool from one indexed query. Composition and rollback write the
+the game's player pool from one indexed query. The selection read does the same
+for one card: its snapshot is projection-only, and the head-to-head and
+archetype tables each resolve their opponent's rows from one query on the
+projection's `(publication_id, opponent_team_id, player_id, game_date)` index.
+Composition and rollback write the
 projection in the publication transaction, while migration 036 backfills
 existing valid versions; the projection therefore preserves exact active and
 rollback generation semantics without a season-wide cold decode. A valid
