@@ -47,10 +47,23 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _register_request_headers(app)
     _initialize_dependencies(app)
     _assemble_dependencies(app)
+    _verify_schema_is_current(app)
     _register_error_handlers(app)
     _register_blueprints(app)
 
     return app
+
+
+def _verify_schema_is_current(app: "Flask") -> None:
+    """Fail closed on boot when a real deployment schema is behind the code."""
+
+    from app.startup_schema_guard import verify_schema_is_current
+
+    settings = app.extensions["runtime_settings"]
+    engine = getattr(app.extensions["dependencies"], "engine", None)
+    if engine is None:
+        return
+    verify_schema_is_current(engine, settings)
 
 
 def _register_request_headers(app: "Flask") -> None:

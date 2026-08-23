@@ -2453,18 +2453,146 @@ def test_database_first_projection_routes_never_call_dfs_providers(
 ):
     context = projection_route_context
 
+    # The cutover makes the database-only reader the sole source, so every
+    # authenticated read route -- Slate, Matchup, and Matchup Selection -- must
+    # serve without touching any DFS/projection provider or the legacy pool.
+    assert (
+        context.assembled.slate_service.player_pool
+        is context.assembled.projection_player_pool_reader
+    )
+    assert (
+        context.assembled.matchup_service.player_pool
+        is context.assembled.projection_player_pool_reader
+    )
+    assert (
+        context.assembled.matchup_selection_service.player_pool.reader
+        is context.assembled.projection_player_pool_reader
+    )
+
     slate = context.client.get("/api/games/slate?date=2026-01-15")
+    matchup = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
     selection = context.client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
     )
 
     assert slate.status_code == 200
+    assert matchup.status_code == 200
     assert selection.status_code == 503
     assert context.projection_provider_calls == {
         "dabble": 0,
         "prizepicks": 0,
         "underdog": 0,
     }
+
+
+def test_read_gate_off_routes_serve_honest_empty_without_a_legacy_fallback(
+    tmp_path, monkeypatch
+):
+    """With PROJECTION_ARCHIVE_READ_ENABLED off there is no legacy fallback.
+
+    The staged-rollout gate is the operator's activation switch.  Before it is
+    flipped, an application database still boots and every read route behaves
+    honestly: Slate and Matchup return 200 with zero targetable players and no
+    projection state, and Matchup Selection returns 503 provider_unavailable --
+    never a provider-driven or stored-snapshot legacy pool.
+    """
+
+    database_url = f"sqlite:///{tmp_path / 'read-gate-off.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        database={"url": database_url},
+        features=FeatureSettings(projection_archive_read_enabled=False),
+        providers=ProviderSettings(dfs_enabled_providers=("dabble", "prizepicks")),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    monkeypatch.setattr("app.utils.db.get_engine", lambda _settings=None: engine)
+    monkeypatch.setattr(
+        "app.providers.nba_stats.NBAStatsAdapter", lambda **_kwargs: _NoProvider()
+    )
+    monkeypatch.setattr(
+        "app.providers.pbp_stats.PBPStatsAdapter", lambda **_kwargs: _NoProvider()
+    )
+    monkeypatch.setattr(
+        "app.providers.pbp_game_logs.PBPGameLogAdapter", lambda **_kwargs: _NoProvider()
+    )
+
+    assembled = build_dependencies(settings)
+    # The cutover leaves no reader when the gate is off: no legacy fallback.
+    assert assembled.projection_player_pool_reader is None
+    assert assembled.slate_service.player_pool is None
+    assert assembled.matchup_service.player_pool is None
+    assert assembled.matchup_selection_service.player_pool is None
+
+    catalog = StatisticCatalog.load_default()
+    event_catalog = _event_catalog(engine, settings)
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    player_logs = _player_logs(engine, catalog)
+    player_diets = _player_diets(engine)
+    team_matchups = _team_matchups(engine)
+    dependencies = replace(
+        assembled,
+        slate_service=SlateService(
+            event_catalog,
+            settings=settings,
+            player_pool=None,
+            injuries=None,
+            clock=lambda: NOW,
+        ),
+        matchup_service=MatchupService(
+            event_catalog=event_catalog,
+            player_pool=None,
+            player_logs=player_logs,
+            player_diets=player_diets,
+            team_matchups=team_matchups,
+            stats_freshness=stats_freshness,
+            settings=settings,
+            injuries=None,
+            clock=lambda: NOW,
+        ),
+        matchup_selection_service=MatchupSelectionService(
+            event_catalog=event_catalog,
+            player_pool=None,
+            player_logs=player_logs,
+            archetypes=assembled.matchup_selection_service.archetypes,
+            statistic_catalog=catalog,
+            settings=settings,
+            publication_reader=assembled.publication_reader,
+        ),
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": dependencies,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    client = app.test_client()
+
+    slate = client.get("/api/games/slate?date=2026-01-15")
+    matchup = client.get(f"/api/games/matchup?game_id={GAME_ID}")
+    selection = client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    assert slate.status_code == 200
+    slate_game = slate.get_json()["games"][0]
+    assert "projection_state" not in slate_game
+    assert slate_game["away_team"]["targetable_player_count"] == 0
+    assert slate_game["home_team"]["targetable_player_count"] == 0
+    assert slate.get_json()["freshness"]["pool"]["status"] == "unavailable"
+
+    assert matchup.status_code == 200
+    assert matchup.get_json()["players"] == []
+
+    assert selection.status_code == 503
+    assert selection.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_authenticated_projection_routes_cover_partial_failure_and_recovery(

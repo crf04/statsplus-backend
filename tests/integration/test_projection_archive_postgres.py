@@ -246,6 +246,24 @@ def _snapshot(catalog, retrieved_at, threshold):
     )
 
 
+def _provider_snapshot(catalog, retrieved_at, threshold, *, provider, player_id):
+    """A single-market complete snapshot attributed to a specific provider."""
+
+    base = _snapshot(catalog, retrieved_at, threshold)
+    market = replace(
+        base.markets[0],
+        provider=provider,
+        market_id=f"{provider}-market-{player_id}",
+        athlete=replace(
+            base.markets[0].athlete,
+            canonical_id=player_id,
+            name=f"Player {player_id}",
+        ),
+        statistic_match=replace(base.markets[0].statistic_match, provider=provider),
+    )
+    return replace(base, provider=provider, markets=(market,))
+
+
 def _two_market_snapshot(catalog, retrieved_at, *, player_ids, thresholds):
     base = _snapshot(catalog, retrieved_at, thresholds[0])
     markets = tuple(
@@ -1323,6 +1341,72 @@ def test_authenticated_postgres_routes_expire_disabled_provider_history(
     assert expired.status_code == 200
     assert expired.get_json()["freshness"]["pool"]["state"] == "missing"
     assert expired_selection.status_code == 503
+
+
+def test_authenticated_postgres_routes_union_a_newly_registered_provider(
+    authenticated_postgres_projection_routes,
+):
+    """A newly enabled provider contributes through the same archive contract.
+
+    No code path is added for it: recording its normalized evidence and adding
+    it to the enabled set is enough for the database-only reader to union its
+    players alongside the incumbent provider, proving the cutover's read model
+    inherits every registered provider automatically.
+    """
+
+    context = authenticated_postgres_projection_routes
+    archive = context.archive
+    headers = context.headers
+
+    # The incumbent provider alone offers Player 7.
+    archive.ingest_snapshot(
+        _provider_snapshot(
+            context.catalog, OBSERVED_AT, "20.5", provider="dabble", player_id=7
+        ),
+        query=context.query,
+        accepted_at=OBSERVED_AT,
+    )
+    incumbent = context.build_route_graph(("dabble",))
+    incumbent_matchup = incumbent.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
+    )
+    assert incumbent_matchup.status_code == 200
+    incumbent_ids = {
+        player["canonical_id"] for player in incumbent_matchup.get_json()["players"]
+    }
+    assert incumbent_ids == {7}
+
+    # Enabling prizepicks and recording its evidence unions Player 8 without any
+    # incumbent contribution being lost.
+    newly_registered_at = OBSERVED_AT + timedelta(minutes=1)
+    context.route_now[0] = newly_registered_at
+    archive.ingest_snapshot(
+        _provider_snapshot(
+            context.catalog,
+            newly_registered_at,
+            "18.5",
+            provider="prizepicks",
+            player_id=8,
+        ),
+        query=context.query,
+        accepted_at=newly_registered_at,
+    )
+    unioned = context.build_route_graph(("dabble", "prizepicks"))
+    unioned_matchup = unioned.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=headers
+    )
+    assert unioned_matchup.status_code == 200
+    body = unioned_matchup.get_json()
+    assert {player["canonical_id"] for player in body["players"]} == {7, 8}
+    assert set(body["freshness"]["pool"]["providers"]) == {"dabble", "prizepicks"}
+    assert body["freshness"]["pool"]["providers"]["prizepicks"]["status"] == "fresh"
+
+    unioned_selection = unioned.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=8",
+        headers=headers,
+    )
+    assert unioned_selection.status_code == 200
+    assert unioned_selection.get_json()["player_id"] == 8
 
 
 def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fences(

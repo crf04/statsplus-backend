@@ -80,6 +80,10 @@ def provider_telemetry():
     body["recent_provider_events"] = snapshot_recent_events(limit=50)
     body["recent_board_events"] = snapshot_recent_board_events(limit=50)
     body["recent_board_request_events"] = snapshot_recent_board_request_events(limit=50)
+    # The #110 cutover unwired the legacy request-time PlayerPoolService, the
+    # only emitter of these events, so this list is now permanently empty. It is
+    # retained for diagnostics-shape stability and removed with the legacy table
+    # in #111.
     body["recent_player_pool_events"] = snapshot_recent_player_pool_events(limit=50)
     body["recent_player_game_log_events"] = snapshot_recent_player_game_log_events(
         limit=50

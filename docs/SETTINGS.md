@@ -96,7 +96,27 @@ failure writes. `PROJECTION_ARCHIVE_READ_PROVIDER` defaults to `dabble` only as
 a deprecated compatibility/default recorder identity; it does not authorize
 recording, make that provider required, enable its read contribution, or grant
 six-hour failure fallback. When enabled on an application database, one
-database-only reader is used by Slate, Matchup, and Matchup Selection.
+database-only reader is the sole source used by Slate, Matchup, and Matchup
+Selection; the #110 cutover removed the legacy request-time reader, so there is
+no per-request fallback and, because nothing constructs the legacy writer, no
+production path refreshes `player_pool_snapshots`.
+
+**#110 cutover rollout step (required manual action).** The code cutover ships
+the database-only read path but leaves `PROJECTION_ARCHIVE_READ_ENABLED`
+defaulting `false`, so the reader is dormant until an operator flips it. To
+activate:
+
+1. Confirm the application database has the projection archive schema
+   (migrations `040`–`046`) and that the scheduled collector has recorded at
+   least one Complete provider snapshot.
+2. Set `PROJECTION_ARCHIVE_READ_ENABLED=true` in the Railway environment and
+   redeploy. Until this flip, Slate/Matchup return honest-empty (zero
+   targetable, no `projection_state`) and Matchup Selection returns
+   `503 provider_unavailable`.
+3. Verify with the authenticated production smoke: a Slate request returns
+   non-empty targetable counts and `projection_state`, matching the AC7 smoke.
+4. Legacy `player_pool_snapshots` removal is deferred to #111; there is no
+   pre-flip data migration.
 Dependency assembly also exposes the named projection recording service on
 application databases so an operator-owned collector can submit an already
 retrieved Complete or Partial
@@ -238,6 +258,19 @@ when `DATABASE_URL` still points at the bundled SQLite fixture, Firebase
 credentials are absent/invalid, `CORS_ALLOWED_ORIGINS` is not explicitly set,
 `DFS_ENABLED_PROVIDERS` is omitted, or the local bypass is enabled. This prevents the process from starting with a
 configuration that cannot enforce its security contract.
+
+Production and staging startup also fail closed when the live database schema
+is behind the code. `create_app()` compares the applied migration head in
+`schema_migrations` against the head the code expects and raises
+`SchemaBehindError` when the database is behind, so a release that ships ahead
+of an un-applied migration cannot serve traffic (see the Schema maintenance
+section in `docs/ARCHITECTURE.md`). This guard is not part of the typed
+settings model: it reads the one operational escape hatch `ALLOW_SCHEMA_DRIFT`
+straight from the environment. `ALLOW_SCHEMA_DRIFT` defaults to enforcing;
+setting it to a truthy value downgrades the fatal drift error to a loud warning
+for emergencies only and should be removed once `python scripts/migrate.py` has
+migrated the database. The guard is inert for local/testing environments, the
+read-only demo fixture, and databases that record no migration head.
 Firebase may use a service-account file, hosted JSON, or the complete
 three-field credential set. A configured file path must exist when it is the
 only credential source; valid JSON or all three fields take precedence when a

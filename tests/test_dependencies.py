@@ -159,21 +159,18 @@ def test_board_receives_cached_providers_governed_mappings_and_the_catalog(monke
         dependencies.matchup_selection_service.event_catalog
         is dependencies.event_catalog_service
     )
-    selection_pool = dependencies.matchup_selection_service.player_pool
-    assert selection_pool is not dependencies.slate_service.player_pool
-    assert selection_pool.snapshot_repository is not None
-    assert not hasattr(selection_pool, "board_service")
-    assert not hasattr(selection_pool, "provider_registry")
-    assert not hasattr(selection_pool, "get_pool")
+    # The #110 cutover removed every request-time legacy Player Pool.  With the
+    # database-only archive read gate off there is no fallback reader, so Slate,
+    # Matchup, and Matchup Selection expose no player pool at all rather than a
+    # provider-driven or stored-snapshot legacy source.
+    assert dependencies.slate_service.player_pool is None
+    assert dependencies.matchup_service.player_pool is None
+    assert dependencies.matchup_selection_service.player_pool is None
     assert (
         dependencies.matchup_selection_service.player_logs.engine is dependencies.engine
     )
     assert (
         dependencies.matchup_service.event_catalog is dependencies.event_catalog_service
-    )
-    assert (
-        dependencies.matchup_service.player_pool.snapshot_repository
-        is dependencies.matchup_selection_service.player_pool.snapshot_repository
     )
     assert dependencies.matchup_service.player_diets is dependencies.player_diet_service
     assert dependencies.matchup_service.player_logs.engine is dependencies.engine

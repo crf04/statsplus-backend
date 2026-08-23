@@ -1389,3 +1389,67 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
 
     assert response.status_code == 200
     assert response.get_json()["games"][0]["away_team"]["targetable_player_count"] == 0
+
+
+def test_legacy_player_pool_writes_are_fenced_after_cutover(tmp_path):
+    """The #110 cutover disables legacy player_pool_snapshots refreshes.
+
+    Once the ``dfs_boards`` publication stream is activated, every persistence
+    method on the legacy repository refuses to write so no production path can
+    refresh the retired payload before the #111 table drop.
+    """
+
+    from app.services.collection_control import ControlPlaneError, PublicationService
+    from app.services.database_first_activation import LegacyWriteFence
+    from app.models.collection_control import PublicationStream
+
+    database_url = f"sqlite:///{tmp_path / 'fenced-pool.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    PublicationService(engine).register_default_streams()
+
+    fence = LegacyWriteFence(engine)
+    repository = PlayerPoolSnapshotRepository(engine, write_fence=fence)
+    scope = PlayerPoolSnapshotScope.create("2025-26", ("0022500001",))
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+    # While the stream is inactive the legacy writer still works, so a rollout
+    # that has not yet flipped the fence keeps its additive behavior.
+    assert repository.try_acquire_refresh(
+        scope, owner="worker", now=now, lease_seconds=60
+    )
+
+    with engine.begin() as connection:
+        connection.execute(
+            update(PublicationStream.__table__)
+            .where(PublicationStream.__table__.c.stream_key == "dfs_boards")
+            .values(enabled=True)
+        )
+
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        repository.replace_owned(
+            scope,
+            owner="worker",
+            payload={"players": [], "team_counts": {}, "freshness": {}},
+            retrieved_at=now,
+            now=now,
+        )
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        repository.finish_failure_owned(scope, owner="worker", now=now)
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        repository.try_acquire_refresh(
+            PlayerPoolSnapshotScope.create("2025-26", ("0022500002",)),
+            owner="worker",
+            now=now,
+            lease_seconds=60,
+        )
+
+    # A non-conforming fence is a programming error, not a silent no-op.
+    misconfigured = PlayerPoolSnapshotRepository(engine, write_fence=object())
+    with pytest.raises(TypeError, match="assert_writable"):
+        misconfigured.try_acquire_refresh(
+            PlayerPoolSnapshotScope.create("2025-26", ("0022500003",)),
+            owner="worker",
+            now=now,
+            lease_seconds=60,
+        )
