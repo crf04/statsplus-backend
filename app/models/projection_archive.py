@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 
 from . import Base
@@ -52,6 +53,7 @@ class ProjectionArchiveScopeLock(Base):
     query_key = Column(String(72), primary_key=True)
     active_generation_id = Column(String(72), nullable=True)
     mapping_replayed_at = Column(DateTime(timezone=True), nullable=True)
+    mapping_replayed_retrieved_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class ProviderPoll(Base):
@@ -159,8 +161,10 @@ class ProjectionObservation(Base):
         ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    source_observation_id = Column(String(72), nullable=False)
-    source_ordinal = Column(Integer, nullable=False)
+    source_observation_id = Column(
+        String(72), nullable=False, server_default=""
+    )
+    source_ordinal = Column(Integer, nullable=False, server_default="0")
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     provider_market_id = Column(String(255), nullable=True)
@@ -199,10 +203,7 @@ class ProjectionObservation(Base):
             "canonical_player_id",
             "canonical_statistic_id",
         ),
-        Index(
-            "ix_projection_observations_source_identity",
-            "source_observation_id",
-        ),
+        Index("ix_projection_observations_snapshot_id", "snapshot_id"),
         Index(
             "ix_projection_observations_provider_athlete",
             "provider",
@@ -222,6 +223,11 @@ class ProjectionObservation(Base):
             "ix_projection_observations_provider_statistic_label",
             "provider",
             "statistic_provider_label",
+        ),
+        Index(
+            "ix_projection_observations_provider_statistic_label_lower",
+            "provider",
+            func.lower(statistic_provider_label),
         ),
     )
 

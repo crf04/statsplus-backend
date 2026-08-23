@@ -627,19 +627,31 @@ mapping transaction commits. Statistic Catalog corrections use the same seam.
 Replay acquires the existing provider/season/query scope fence, creates or
 reactivates the deterministic generation for the resulting materialization, and
 batch-replaces only affected Latest references in that transaction. Dense replay
-ordinals are generation-local. The provider-reported athlete name remains the
-observation name, while canonical IDs and the content-derived reference of an
+ordinals are generation-local. A provider-reported athlete name remains the
+observation name when present; a missing provider name falls back to the
+approved canonical name. Canonical IDs and the content-derived reference of an
 ID-less market are recomputed from the immutable source market. It reuses the
 accepted poll and immutable source snapshot, so source observations, checksums,
 and retrieval timestamps are not rewritten. A replayed Latest pointer is
-confirmed at the mapping replay time, when its stored evidence becomes newly
-usable. The scope lock records both the active generation and that replay time;
+activated at mapping replay time, while its eligibility confirmation remains
+the source observation time so the provider board's live window is not reset.
+The scope lock records both the active generation, the replay wall clock, and
+the source retrieval fence;
 an in-flight snapshot retrieved before the mapping decision remains auditable as
-non-promoted evidence and cannot erase the recovery, while a snapshot genuinely
-retrieved afterward may advance normally. Repeated replay is a no-op. A replay
-failure after an athlete or event mapping commit is logged without changing the
-durable operator decision, and neither request-time reads nor mapping decisions
-call a provider.
+non-promoted evidence and cannot erase the recovery when its observations still
+carry the pre-decision unresolved identity; evidence with a newer source
+retrieval identity may advance normally. Replay preserves the source
+`observed_at` for public freshness and does not extend the provider board's
+15-minute live window; `confirmed_at` remains the internal eligibility clock.
+Ordinary newer promoted polls may advance the Latest read-model `observed_at`,
+but replay itself never does so beyond its source observation.
+Repeated replay is a no-op. A replay failure after an athlete or event mapping
+commit is logged without changing the durable operator decision, and neither
+request-time reads nor mapping decisions call a provider. Replay scope
+enumeration is provider-wide and has no game filter. Therefore, if a mapping is
+approved after a game's closing set is frozen by sibling #108, replay rewrites
+the live Latest rows for that provider scope while the frozen membership keeps
+the pre-decision observations; this is the intended rule.
 
 ### Matchup injury snapshots
 

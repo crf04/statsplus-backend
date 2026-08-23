@@ -107,6 +107,10 @@ query contracts. Migration `043_projection_collection_control` adds the
 collector lease/state tables and Provider Poll duration field; migration
 `044_projection_closing_sets` adds the durable event start field and closing
 tables.
+Migration `043_projection_collection_control` adds the collector lease/state
+tables and the Provider Poll duration field; migration
+`044_projection_closing_sets` adds the durable event start field and closing
+tables.
 Migration `045_projection_mapping_replay` adds typed unresolved Projection
 Observation identity evidence, immutable source-observation lineage, the active
 generation/replay-time scope fence, and the database-only mapping replay

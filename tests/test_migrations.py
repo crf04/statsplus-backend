@@ -287,7 +287,11 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         column["name"]
         for column in inspector.get_columns("projection_archive_scope_locks")
     }
-    assert {"active_generation_id", "mapping_replayed_at"} <= lock_columns
+    assert {
+        "active_generation_id",
+        "mapping_replayed_at",
+        "mapping_replayed_retrieved_at",
+    } <= lock_columns
     observation_indexes = {
         index["name"]
         for index in inspector.get_indexes("projection_observations")
@@ -297,8 +301,16 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "ix_projection_observations_provider_event",
         "ix_projection_observations_provider_statistic_id",
         "ix_projection_observations_provider_statistic_label",
-        "ix_projection_observations_source_identity",
+        "ix_projection_observations_snapshot_id",
     } <= observation_indexes
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'index' AND name = "
+                "'ix_projection_observations_provider_statistic_label_lower'"
+            )
+        ).scalar_one() == "ix_projection_observations_provider_statistic_label_lower"
     assert ("source_poll_id",) not in {
         tuple(constraint["column_names"])
         for constraint in inspector.get_unique_constraints(
@@ -2256,8 +2268,8 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (41, "041_projection_archive_transitions"),
         (42, "042_team_matchup_provider_provenance"),
         (43, "043_projection_collection_control"),
-            (44, "044_projection_closing_sets"),
-            (45, "045_projection_mapping_replay"),
+        (44, "044_projection_closing_sets"),
+        (45, "045_projection_mapping_replay"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 

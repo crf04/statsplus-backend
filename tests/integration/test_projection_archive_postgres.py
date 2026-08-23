@@ -1,6 +1,7 @@
 """PostgreSQL production-fence coverage for projection transitions (#105)."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
@@ -1090,7 +1091,7 @@ def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
     ] == 0
     assert initial_matchup.get_json()["players"] == []
 
-    replayed_at = OBSERVED_AT + timedelta(minutes=30)
+    replayed_at = OBSERVED_AT + timedelta(minutes=10)
     replay = context.archive.replay_athlete_mapping(
         provider="dabble",
         provider_athlete_id="athlete-unresolved",
@@ -1222,20 +1223,18 @@ def test_postgres_mapping_replay_serializes_with_inflight_snapshot_ingestion(
     database_url = projection_pg_engine.url.render_as_string(hide_password=False)
     replay_archive = ProjectionArchive(create_engine(database_url), catalog)
     ingestion_archive = ProjectionArchive(create_engine(database_url), catalog)
-    barrier = Barrier(2)
-    original_replay = replay_archive._replay_scope
-    original_ingest = ingestion_archive._ingest_prepared
+    replay_lock_acquired = Event()
+    ingestion_submitted = Event()
+    original_scope_transaction = replay_archive._scope_transaction
 
-    def synchronized_replay_scope(**kwargs):
-        barrier.wait(timeout=10)
-        return original_replay(**kwargs)
+    @contextmanager
+    def synchronized_scope_transaction(*args, **kwargs):
+        with original_scope_transaction(*args, **kwargs) as connection:
+            replay_lock_acquired.set()
+            assert ingestion_submitted.wait(timeout=10)
+            yield connection
 
-    def synchronized_ingest(prepared):
-        barrier.wait(timeout=10)
-        return original_ingest(prepared)
-
-    replay_archive._replay_scope = synchronized_replay_scope
-    ingestion_archive._ingest_prepared = synchronized_ingest
+    replay_archive._scope_transaction = synchronized_scope_transaction
     replayed_at = OBSERVED_AT + timedelta(minutes=10)
     inflight = unresolved_snapshot(
         OBSERVED_AT + timedelta(minutes=5),
@@ -1252,6 +1251,8 @@ def test_postgres_mapping_replay_serializes_with_inflight_snapshot_ingestion(
             canonical_team_id=10,
             replayed_at=replayed_at,
         )
+        assert replay_lock_acquired.wait(timeout=10)
+        ingestion_submitted.set()
         ingestion_future = executor.submit(
             ingestion_archive.ingest_snapshot,
             inflight,
@@ -1262,10 +1263,7 @@ def test_postgres_mapping_replay_serializes_with_inflight_snapshot_ingestion(
         ingestion = ingestion_future.result(timeout=20)
 
     assert replay is not None and replay.changed is True
-    assert ingestion.materialization_outcome in {
-        "advanced",
-        "older_not_promoted",
-    }
+    assert ingestion.materialization_outcome == "older_not_promoted"
     with projection_pg_engine.connect() as connection:
         recovered = connection.execute(
             select(

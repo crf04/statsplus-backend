@@ -338,10 +338,12 @@ existing `404 resource_not_found`; never-polled or failed-without-successful-
 evidence scopes remain missing and keep the documented `503 provider_unavailable`.
 Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
-duplicating unchanged provider evidence. The response `observed_at` comes from
-the accepted poll linked to that generation, not necessarily the older
-representative content snapshot retained for checksum verification. Only absent current evidence produces `missing` with zero
-targetable players. For a multi-game live request with both live and missing games,
+duplicating unchanged provider evidence. The response `observed_at` and
+provider `retrieved_at` come from each selected Latest row's `observed_at`, never
+from its replay/promotion `confirmed_at`; an ordinary newer promoted poll
+advances that read-model timestamp, while replay retains the source observation
+time. Aggregate times are the oldest included source observations. Only absent current evidence produces `missing` with zero
+targetable players. For a multi-game request with both live and missing games,
 `freshness.pool.status` is explicitly `partial`, and each game's
 `projection_state` remains authoritative; the pool retains `state: live`
 because it contains live rows. Aggregate and per-provider observation times
@@ -362,12 +364,14 @@ This is an internal database operation: it does not add a route, change any
 Slate, Matchup, or Matchup Selection payload, call a provider, or rewrite the
 source snapshot and its observations. It preserves the provider-reported player
 name, recomputes an ID-less market reference from the rematerialized identities,
-and confirms affected Latest pointers at replay time. They therefore receive a
-new 15-minute live window even though response `observed_at` continues to name
-the original provider retrieval. A snapshot fetched before that decision cannot
-promote after replay and erase the recovered state; evidence fetched after the
-decision may promote normally. Until replay succeeds, unresolved observations
-remain archive evidence only and do not contribute to Latest or Player Pool.
+and retains the source `observed_at`/`retrieved_at` for public freshness. Replay
+does not grant a new live window: affected rows expire with the provider board,
+while `confirmed_at` remains an internal eligibility clock. A snapshot fetched
+before that decision whose observations still carry the pre-decision unresolved
+identity cannot promote after replay and erase the recovered state; evidence
+with a newer source retrieval identity may promote normally. Until replay
+succeeds, unresolved observations remain archive evidence only and do not
+contribute to Latest or Player Pool.
 Late valid polls remain archived but do not refresh eligibility or mask a newer
 failure; the failure attempt's actual start time (or its completion time when
 the start is unavailable) fences evidence retrieved earlier, even when that

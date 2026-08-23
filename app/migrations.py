@@ -1592,6 +1592,13 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
         connection.execute(text(
             f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_at {timestamp_type}"
         ))
+    if "mapping_replayed_retrieved_at" not in lock_columns:
+        timestamp_type = DateTime(timezone=True).compile(
+            dialect=connection.dialect
+        )
+        connection.execute(text(
+            f"ALTER TABLE {lock_name} ADD COLUMN mapping_replayed_retrieved_at {timestamp_type}"
+        ))
 
     observation_name = connection.dialect.identifier_preparer.quote(
         ProjectionObservation.__tablename__
@@ -1688,11 +1695,36 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
         "ix_projection_observations_provider_event",
         "ix_projection_observations_provider_statistic_id",
         "ix_projection_observations_provider_statistic_label",
-        "ix_projection_observations_source_identity",
+        "ix_projection_observations_provider_statistic_label_lower",
+        "ix_projection_observations_snapshot_id",
     }
+    if connection.dialect.name == "sqlite":
+        existing_indexes = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA index_list('projection_observations')"
+            )
+        }
+    else:
+        existing_indexes = {
+            index["name"]
+            for index in inspect(connection).get_indexes(
+                ProjectionObservation.__tablename__
+            )
+        }
+    if "ix_projection_observations_source_identity" in existing_indexes:
+        index_name = connection.dialect.identifier_preparer.quote(
+            "ix_projection_observations_source_identity"
+        )
+        connection.execute(text(
+            f"DROP INDEX {index_name}"
+        ))
     for index in ProjectionObservation.__table__.indexes:
         if index.name in replay_index_names:
-            index.create(connection, checkfirst=True)
+            ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
+            connection.exec_driver_sql(
+                ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+            )
 
     if not _projection_source_poll_is_unique(connection):
         return
