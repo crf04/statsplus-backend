@@ -2263,7 +2263,7 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-5:] == [
+    assert history[-6:] == [
         (40, "040_projection_archive"),
         (41, "041_projection_archive_transitions"),
         (42, "042_team_matchup_provider_provenance"),
