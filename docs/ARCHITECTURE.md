@@ -1095,8 +1095,13 @@ production backfill consumes the complete raw
 `/get-game-stats` document through a dedicated adapter seam
 (`PBPGameLogAdapter.fetch_game_stats`) rather than the projected player-only
 DataFrame, so team-summary rows and unknown additive keys always reach the
-archive. An accepted raw observation carries at most one team-summary row per
-governed Home/Away side, and may omit one only where the side's diagnostics
+archive. The wire's explicit game, season, and team identities are fenced to
+the governed event; the single tolerated disagreement is the exactly swapped
+team pair (the wire labels the governed away team `Home`), which is read in
+governed orientation — `stats` and `team_results` envelopes, identities, and
+abbreviations swapped — with the provider's document retained unchanged as the
+observation. An accepted raw observation carries at most one team-summary row
+per governed Home/Away side, and may omit one only where the side's diagnostics
 prove a zero team-only residual (see below); the team row is the sparse
 residual authority and is never a fallback.
 
