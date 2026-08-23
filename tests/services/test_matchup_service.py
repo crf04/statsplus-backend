@@ -1,15 +1,24 @@
 """Stored matchup composition at the application-service seam."""
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
+import re
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine, event, text
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
+from app.migrations import run_migrations
+from app.services.collection_control import PublicationService
 from app.services.matchup import MatchupService
-from app.services.database_first_activation import PublicationRead
+from app.services.database_first_activation import (
+    DatabaseFirstPublicationReader,
+    PublicationRead,
+)
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
     PlayerDietResult,
@@ -18,10 +27,12 @@ from app.services.player_diet import (
 )
 from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
+    PlayerGameLogRepository,
     PlayerSeasonLogSummary,
     PlayerSeasonRate,
 )
 from app.services.player_pool import PlayerPool, PoolPlayer
+from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.team_matchup_query import (
     LeagueMatchupMetric,
@@ -1072,3 +1083,239 @@ def test_unknown_game_is_404_while_an_empty_schedule_surface_is_503():
 
     with pytest.raises(ProviderUnavailableError):
         _service(events=RecordedEvents(events=[], count=0)).get_matchup(game_id=GAME_ID)
+
+
+def _log_row(*, game_id: str, game_date: str, points: int, minutes: float):
+    return {
+        "season": SEASON,
+        "season_type": "Regular Season",
+        "player_id": 2544,
+        "game_id": game_id,
+        "player_name": "LeBron James",
+        "game_date": game_date,
+        "team_id": LAL,
+        "team_tricode": "LAL",
+        "opponent_team_id": BOS,
+        "opponent_team_tricode": "BOS",
+        "is_home": False,
+        "minutes": minutes,
+        "points": points,
+        "rebounds": 8,
+        "assists": 7,
+        "field_goals_made": 9,
+        "field_goals_attempted": 18,
+        "three_pointers_made": 3,
+        "three_pointers_attempted": 7,
+        "free_throws_made": 4,
+        "free_throws_attempted": 5,
+        "offensive_rebounds": 2,
+        "defensive_rebounds": 6,
+        "turnovers": 4,
+        "steals": 2,
+        "blocks": 1,
+        "personal_fouls": 2,
+    }
+
+
+def _published_matchup_service(tmp_path, rows):
+    """Build a matchup service over one real activated player-log publication."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'matchup-logs.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
+    publications.register_stream(
+        "player_game_logs",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    publication = publications.compose(
+        "player_game_logs",
+        season=SEASON,
+        cutoff=RETRIEVED_AT,
+        payload={"rows": list(rows)},
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: NOW,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    service = MatchupService(
+        event_catalog=RecordedEvents(),
+        player_pool=RecordedPool(
+            PlayerPool(
+                players=(
+                    PoolPlayer(
+                        2544,
+                        "LeBron James",
+                        LAL,
+                        ("PTS", "FGA"),
+                        {"prizepicks": ("PTS", "FGA")},
+                    ),
+                ),
+                team_counts={LAL: 1},
+                freshness={
+                    "status": "fresh",
+                    "retrieved_at": RETRIEVED_AT.isoformat(),
+                    "providers": {},
+                },
+            )
+        ),
+        player_logs=repository,
+        player_diets=RecordedDiets(),
+        team_matchups=RecordedTeamWindows(_window(), _window(last_15=True)),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(RETRIEVED_AT)),
+        injuries=None,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+        ),
+        clock=lambda: NOW,
+        publication_reader=reader,
+    )
+    return engine, service, publication
+
+
+def test_matchup_reads_player_logs_through_the_indexed_projection(tmp_path):
+    """The matchup generation never ships the season-wide game-log payload."""
+
+    engine, service, _ = _published_matchup_service(
+        tmp_path,
+        (
+            _log_row(
+                game_id="0022500001",
+                game_date="2026-01-02",
+                points=25,
+                minutes=35.0,
+            ),
+            _log_row(
+                game_id="0022500002",
+                game_date="2026-01-05",
+                points=31,
+                minutes=37.0,
+            ),
+        ),
+    )
+    statements = []
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda _conn, _cursor, statement, _parameters, _context, _many: (
+            statements.append(statement)
+        ),
+    )
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    assert payload["players"][0]["canonical_id"] == 2544
+    assert payload["players"][0]["season_scoring"] == 28.0
+    assert payload["players"][0]["last_10_minutes"] == [35.0, 37.0]
+    assert payload["provenance"]["player_game_logs"]["status"] == "active"
+    # Freshness reads only the payload-less metadata this generation carries.
+    assert payload["freshness"]["player_game_logs"]["retrieved_at"] == (
+        RETRIEVED_AT.isoformat()
+    )
+    assert any(
+        "publication_player_game_logs" in statement for statement in statements
+    )
+    # The one generation query still hydrates its other streams, so the payload
+    # column may only appear behind the guard that excludes this stream.
+    for statement in statements:
+        if "publication_versions.payload" not in statement:
+            continue
+        assert re.search(
+            r"CASE WHEN \(publication_versions\.stream_key IN [^)]*\)\)? "
+            r"THEN publication_versions\.payload",
+            statement,
+        ), statement
+
+
+def test_matchup_serves_the_projection_rather_than_the_publication_payload(
+    tmp_path,
+):
+    """Only the indexed rows can explain the document this request returns."""
+
+    engine, service, publication = _published_matchup_service(
+        tmp_path,
+        (
+            _log_row(
+                game_id="0022500001",
+                game_date="2026-01-02",
+                points=25,
+                minutes=35.0,
+            ),
+        ),
+    )
+    # Re-render the payload with a different scoring fact and keep it
+    # self-consistent, so a payload-reading path would return 99 points.
+    divergent = json.dumps(
+        {
+            "rows": [
+                _log_row(
+                    game_id="0022500001",
+                    game_date="2026-01-02",
+                    points=99,
+                    minutes=35.0,
+                )
+            ]
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_versions SET payload = :payload, "
+                "checksum = :checksum WHERE publication_id = :publication_id"
+            ),
+            {
+                "payload": divergent,
+                "checksum": hashlib.sha256(divergent.encode()).hexdigest(),
+                "publication_id": publication.publication_id,
+            },
+        )
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    assert payload["players"][0]["season_scoring"] == 25.0
+
+
+def test_matchup_without_the_projection_degrades_without_a_legacy_fallback(
+    tmp_path,
+):
+    engine, service, publication = _published_matchup_service(
+        tmp_path,
+        (
+            _log_row(
+                game_id="0022500001",
+                game_date="2026-01-02",
+                points=25,
+                minutes=35.0,
+            ),
+        ),
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM publication_player_game_logs "
+                "WHERE publication_id = :publication_id"
+            ),
+            {"publication_id": publication.publication_id},
+        )
+
+    payload = service.get_matchup(game_id=GAME_ID)
+
+    assert payload["provenance"]["player_game_logs"] == {
+        **payload["provenance"]["player_game_logs"],
+        "status": "unavailable",
+        "unavailable_reason": "publication_projection_missing",
+    }
+    assert payload["players"][0]["season_scoring"] is None
+    assert payload["players"][0]["last_10_minutes"] == []
