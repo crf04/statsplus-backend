@@ -633,6 +633,57 @@ def test_a_recorded_board_reaches_latest_projections_pool_and_closing_sets(
     }
 
 
+def test_a_recorded_period_scoped_market_is_retained_but_excluded_from_targetable(
+    tmp_path,
+):
+    """The Underdog board records an explicit first-half market.
+
+    A period-scoped label resolves to its specific period (never full game), so
+    the market is archived as evidence but is excluded from the targetable
+    Latest set -- proving the exclusion conjunct end-to-end, not just at the
+    unit seam.
+    """
+
+    provider = "underdog"
+    catalog = _catalog(tmp_path)
+    engine, _archive_obj, recorder = _archive(tmp_path, provider, catalog)
+    snapshot = _governed(_snapshot(provider), catalog)
+
+    period_scoped = [
+        market
+        for market in snapshot.markets
+        if market.scoring_period is ScoringPeriod.FIRST_HALF
+    ]
+    assert len(period_scoped) == 1
+    period_market = period_scoped[0]
+    # The period-scoped label is resolved to its specific period and retained
+    # verbatim as evidence -- it is never promoted to full game.
+    assert period_market.scoring_period_label == "first_half"
+
+    recorder.record_snapshot(
+        snapshot, query=QUERY, accepted_at=OBSERVED_AT + timedelta(minutes=1)
+    )
+
+    with engine.connect() as connection:
+        observed = set(
+            connection.execute(
+                select(ProjectionObservation.provider_market_id)
+            ).scalars()
+        )
+        latest = set(
+            connection.execute(
+                select(LatestPlayerProjection.market_reference)
+            ).scalars()
+        )
+
+    # Retained as evidence: the first-half market is archived as an observation.
+    assert period_market.market_id in observed
+    # Excluded from the targetable pool: it never enters Latest.
+    assert market_reference(period_market) not in latest
+    # The board still reaches Latest through its full-game markets.
+    assert latest
+
+
 def test_the_recorded_fourth_provider_proves_both_price_scopes_and_an_unpriced_side():
     snapshot = _snapshot(FOURTH_PROVIDER_NAME)
     scopes = {
