@@ -331,3 +331,42 @@ def test_selection_without_the_projection_has_no_legacy_fallback(tmp_path):
     assert payload["freshness"]["player_game_logs"]["status"] == "unavailable"
     assert payload["h2h"] == {"thin": True, "rows": []}
     assert payload["archetype"] == {"thin": True, "rows": []}
+
+
+def test_projection_and_payload_reads_render_the_same_card(tmp_path):
+    """The projection is the payload's rows indexed, so the card cannot differ.
+
+    The route fixtures under ``tests/routes`` wire no publication reader and
+    therefore only prove the legacy path; this pins the projection path to the
+    hydrated-payload path over a shape with several opponents and a peer.
+    """
+
+    rows = (
+        *_default_rows(),
+        _log_row(
+            game_id="0022500004",
+            game_date="2026-01-09",
+            points=12,
+            minutes=22.5,
+        ),
+        _log_row(
+            player_id=PEER_ID,
+            player_name="Paul George",
+            game_id="0022500005",
+            game_date="2026-01-12",
+            points=17,
+            minutes=28.0,
+            opponent_team_id=1610612744,
+        ),
+    )
+    _, service, reader, _ = _published_selection_service(tmp_path, rows)
+
+    via_projection = service.get_selection(game_id=GAME_ID, player_id=2544)
+    assert reader.snapshots[-1].read("player_game_logs").payload is None
+
+    hydrated = reader._reader.snapshot(("player_game_logs",), season=SEASON)
+    assert hydrated.read("player_game_logs").payload is not None
+    service._publication_snapshot = lambda season: hydrated
+    via_payload = service.get_selection(game_id=GAME_ID, player_id=2544)
+
+    assert via_projection == via_payload

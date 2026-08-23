@@ -1041,11 +1041,24 @@ class PlayerGameLogRepository:
             canonical_season, publication_snapshot=publication_snapshot
         )
         if publication_rows is not None:
+            # A rendered payload carries its rows in composition order, so the
+            # card's newest-first contract is imposed here exactly as the
+            # indexed and legacy statements impose it.
             return tuple(
-                record
-                for record in publication_rows
-                if record.player_id in player_ids
-                and record.opponent_team_id == opponent_team_id
+                sorted(
+                    (
+                        record
+                        for record in publication_rows
+                        if record.player_id in player_ids
+                        and record.opponent_team_id == opponent_team_id
+                    ),
+                    key=lambda record: (
+                        record.game_date,
+                        -record.player_id,
+                        record.game_id,
+                    ),
+                    reverse=True,
+                )
             )
         if not self._season_is_readable(canonical_season):
             return ()
