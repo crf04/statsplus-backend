@@ -2010,10 +2010,12 @@ def _add_projection_observation_prices(connection: Connection) -> None:
 
     The columns are additive and defaulted, so every row archived before this
     migration reads as ``unpriced``: the price a provider published was never
-    recorded on those rows and cannot be recovered from them, and claiming a
-    price that was not archived would be worse than saying none was.  The
-    source document each row points at is untouched, so its checksum keeps the
-    meaning it was written with.
+    recorded in these columns.  This backfill deliberately does not read the
+    referenced source document -- a per-row parse of every archived document
+    is out of scope for a schema migration -- so the true price stays recoverable
+    from that document, which is exactly what the mapping-replay path does when
+    it recomputes targetability.  The source document each row points at is
+    untouched, so its checksum keeps the meaning it was written with.
     """
 
     from app.models.projection_archive import ProjectionObservation
