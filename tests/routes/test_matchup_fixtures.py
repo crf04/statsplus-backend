@@ -2252,7 +2252,6 @@ def projection_route_context(tmp_path, monkeypatch):
             template.scopes,
             clock=lambda: route_now[0],
             required_providers=template.required_providers,
-            closing_archive=template.closing_archive,
             event_reader=template.event_reader,
         )
         route_settings = dependencies.settings
@@ -2780,14 +2779,25 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
     assert live.status_code == 200
     assert live.get_json()["freshness"]["pool"]["state"] == "live"
 
+    start_seen_at = NOW + timedelta(minutes=1)
     with context.engine.begin() as connection:
         connection.execute(
             EventCatalogEntry.__table__
             .update()
             .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
-            .values(status_text="Q1", status_code=2)
+            .values(
+                status_text="Q1",
+                status_code=2,
+                first_observed_started_at=start_seen_at,
+            )
         )
-    start_seen_at = NOW + timedelta(minutes=1)
+    assembled.projection_recorder.freeze_closing_projection_sets(
+        events=assembled.event_catalog_service.get_events_by_ids(
+            SEASON, (GAME_ID,)
+        ),
+        query=query,
+        created_at=start_seen_at,
+    )
     context.route_now[0] = start_seen_at
     started = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
     started_selection = context.client.get(
@@ -2795,6 +2805,11 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
     )
     assert started.status_code == started_selection.status_code == 200
     assert started.get_json()["freshness"]["pool"]["state"] == "closing"
+    assert started.get_json()["freshness"]["pool"]["providers"] == {
+        "dabble": {"status": "closing", "retrieved_at": NOW.isoformat()},
+        "prizepicks": {"status": "missing", "retrieved_at": None},
+        "underdog": {"status": "missing", "retrieved_at": None},
+    }
     assert started_selection.get_json()["freshness"]["player_pool"]["state"] == "closing"
     assert started.get_json()["players"]
 

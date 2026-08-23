@@ -13,7 +13,7 @@ import re
 import threading
 from typing import Any, Callable
 
-from sqlalchemy import case, delete, func, inspect, insert, select, update
+from sqlalchemy import and_, case, delete, func, inspect, insert, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -328,6 +328,28 @@ def _materialization_checksum(rows: list[dict[str, Any]]) -> str:
     return sha256(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ).hexdigest()
+
+
+def _projection_closing_start_fence(
+    event: Mapping[str, Any],
+) -> datetime | None:
+    """Return the durable governed start fence for a started NBA event."""
+
+    if not is_started_event(event):
+        return None
+    for field in ("first_observed_started_at", "scheduled_at"):
+        value = event.get(field)
+        if value is None:
+            continue
+        try:
+            return (
+                assume_utc(value)
+                if isinstance(value, datetime)
+                else parse_utc_iso(str(value))
+            )
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _source_snapshot(snapshot: ProviderSnapshot) -> ProviderSnapshot:
@@ -942,7 +964,7 @@ class ProjectionArchive:
         created = assume_utc(created_at or datetime.now(timezone.utc))
         if created < started:
             raise ValueError("projection closing set cannot be created before game start")
-        query_key = _query_key(query)
+        query_key = projection_query_key(query)
         with self._scope_transaction(
             normalized_provider, query.season, query_key
         ) as connection:
@@ -1038,13 +1060,68 @@ class ProjectionArchive:
         canonical_game_id: str,
         started_at: datetime,
     ) -> list[Any]:
-        """Replay promoted generations that committed before the start fence."""
+        """Replay the bounded promoted suffix committed before the start fence."""
 
         generation_table = ProjectionMaterializationGeneration.__table__
         snapshot_table = ProjectionProviderSnapshot.__table__
         poll_table = ProviderPoll.__table__
         observation_table = ProjectionObservation.__table__
-        generations = (
+        generation_snapshot_poll = generation_table.join(
+            snapshot_table,
+            generation_table.c.snapshot_id == snapshot_table.c.snapshot_id,
+        ).join(
+            poll_table,
+            generation_table.c.source_poll_id == poll_table.c.poll_id,
+        )
+        eligible = (
+            generation_table.c.provider == provider,
+            generation_table.c.season == season,
+            generation_table.c.query_key == query_key,
+            generation_table.c.outcome == MaterializationOutcome.ADVANCED.value,
+            poll_table.c.completed_at <= started_at,
+        )
+        baseline = (
+            connection.execute(
+                select(
+                    generation_table.c.generation_id,
+                    generation_table.c.retrieved_at,
+                    generation_table.c.created_at,
+                )
+                .select_from(generation_snapshot_poll)
+                .where(
+                    *eligible,
+                    snapshot_table.c.snapshot_status == SnapshotStatus.COMPLETE.value,
+                )
+                .order_by(
+                    generation_table.c.retrieved_at.desc(),
+                    generation_table.c.created_at.desc(),
+                    generation_table.c.generation_id.desc(),
+                )
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        lower_bound = ()
+        if baseline is not None:
+            lower_bound = (
+                or_(
+                    generation_table.c.retrieved_at > baseline["retrieved_at"],
+                    and_(
+                        generation_table.c.retrieved_at
+                        == baseline["retrieved_at"],
+                        generation_table.c.created_at > baseline["created_at"],
+                    ),
+                    and_(
+                        generation_table.c.retrieved_at
+                        == baseline["retrieved_at"],
+                        generation_table.c.created_at == baseline["created_at"],
+                        generation_table.c.generation_id
+                        >= baseline["generation_id"],
+                    ),
+                ),
+            )
+        joined_rows = (
             connection.execute(
                 select(
                     generation_table.c.generation_id,
@@ -1052,47 +1129,6 @@ class ProjectionArchive:
                     generation_table.c.created_at,
                     snapshot_table.c.snapshot_status,
                     poll_table.c.completed_at,
-                )
-                .select_from(
-                    generation_table
-                    .join(
-                        snapshot_table,
-                        generation_table.c.snapshot_id
-                        == snapshot_table.c.snapshot_id,
-                    )
-                    .join(
-                        poll_table,
-                        generation_table.c.source_poll_id == poll_table.c.poll_id,
-                    )
-                )
-                .where(
-                    generation_table.c.provider == provider,
-                    generation_table.c.season == season,
-                    generation_table.c.query_key == query_key,
-                    generation_table.c.outcome.in_(
-                        (
-                            MaterializationOutcome.ADVANCED.value,
-                        )
-                    ),
-                    poll_table.c.completed_at <= started_at,
-                )
-                .order_by(
-                    generation_table.c.retrieved_at,
-                    generation_table.c.created_at,
-                    generation_table.c.generation_id,
-                )
-            )
-            .mappings()
-            .all()
-        )
-        if not generations:
-            return []
-
-        generation_ids = [str(row["generation_id"]) for row in generations]
-        observations = (
-            connection.execute(
-                select(
-                    observation_table.c.generation_id,
                     observation_table.c.observation_id,
                     observation_table.c.market_reference,
                     observation_table.c.canonical_game_id,
@@ -1105,26 +1141,48 @@ class ProjectionArchive:
                     observation_table.c.observed_at,
                     observation_table.c.ordinal,
                 )
+                .select_from(
+                    generation_snapshot_poll.outerjoin(
+                        observation_table,
+                        and_(
+                            observation_table.c.generation_id
+                            == generation_table.c.generation_id,
+                            observation_table.c.canonical_game_id
+                            == canonical_game_id,
+                        ),
+                    )
+                )
                 .where(
-                    observation_table.c.generation_id.in_(generation_ids),
-                    observation_table.c.canonical_game_id == canonical_game_id,
+                    *eligible,
+                    *lower_bound,
                 )
                 .order_by(
-                    observation_table.c.generation_id,
+                    generation_table.c.retrieved_at,
+                    generation_table.c.created_at,
+                    generation_table.c.generation_id,
                     observation_table.c.ordinal,
                 )
             )
             .mappings()
             .all()
         )
-        by_generation: dict[str, list[Any]] = {}
-        for row in observations:
-            by_generation.setdefault(str(row["generation_id"]), []).append(row)
+        generations: list[dict[str, Any]] = []
+        for row in joined_rows:
+            generation_id = str(row["generation_id"])
+            if not generations or generations[-1]["generation_id"] != generation_id:
+                generations.append(
+                    {
+                        "generation_id": generation_id,
+                        "snapshot_status": row["snapshot_status"],
+                        "rows": [],
+                    }
+                )
+            if row["observation_id"] is not None:
+                generations[-1]["rows"].append(row)
 
         state: dict[str, Any] = {}
         for generation in generations:
-            generation_id = str(generation["generation_id"])
-            rows = by_generation.get(generation_id, [])
+            rows = generation["rows"]
             if generation["snapshot_status"] == SnapshotStatus.COMPLETE.value:
                 state.clear()
             else:
@@ -1699,7 +1757,6 @@ class LatestProjectionPlayerPoolReader:
         required_providers: Iterable[str] | None = None,
         live_max_age: timedelta = PROJECTION_LIVE_MAX_AGE,
         failure_fallback_max_age: timedelta = PROJECTION_FAILURE_FALLBACK_MAX_AGE,
-        closing_archive: ProjectionArchive | None = None,
         event_reader: Any | None = None,
     ) -> None:
         scopes = (
@@ -1747,7 +1804,6 @@ class LatestProjectionPlayerPoolReader:
         self._failure_fallback_max_age_seconds = exact_seconds(
             failure_fallback_max_age
         )
-        self.closing_archive = closing_archive
         self.event_reader = event_reader
 
     def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool:
@@ -1765,7 +1821,7 @@ class LatestProjectionPlayerPoolReader:
         if not requested_games:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})
         started_games = self._started_games(season, requested_games)
-        if started_games and self.closing_archive is not None:
+        if started_games:
             return self._get_pool_with_closing_sets(
                 season=season,
                 requested_games=requested_games,
@@ -1823,45 +1879,21 @@ class LatestProjectionPlayerPoolReader:
     def _started_games(
         self, season: str, requested_games: tuple[str, ...]
     ) -> dict[str, datetime]:
-        if self.closing_archive is None:
-            return {}
         reader = self.event_reader
         if reader is None:
             return {}
-        get_events = reader if callable(reader) else getattr(reader, "get_events", None)
-        if not callable(get_events):
+        get_events_by_ids = getattr(reader, "get_events_by_ids", None)
+        if not callable(get_events_by_ids):
             return {}
-        events = get_events(season)
-        requested = set(requested_games)
+        events = get_events_by_ids(season, requested_games)
         started: dict[str, datetime] = {}
-        now = assume_utc(self.clock())
         for event in events:
             game_id = str(event.get("nba_game_id", ""))
-            if game_id not in requested or not is_started_event(event):
+            if game_id not in requested_games:
                 continue
-            fence = now
-            for field in ("started_at", "actual_start_at"):
-                value = event.get(field)
-                if value is None:
-                    continue
-                try:
-                    fence = parse_utc_iso(str(value))
-                except (TypeError, ValueError):
-                    pass
-                else:
-                    break
-            started[game_id] = fence
-        if not started:
-            return {}
-        for game_id, started_at in started.items():
-            for scope in self.scopes:
-                self.closing_archive.freeze_closing_projection_set(
-                    provider=scope.provider,
-                    query=scope.query,
-                    canonical_game_id=game_id,
-                    started_at=started_at,
-                    created_at=now,
-                )
+            fence = _projection_closing_start_fence(event)
+            if fence is not None:
+                started[game_id] = fence
         return started
 
     def _get_pool_with_closing_sets(
@@ -1921,18 +1953,30 @@ class LatestProjectionPlayerPoolReader:
         )
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
+        states = {freshness.get("state") for freshness in freshnesses}
+        if "live" in states:
+            state = "live"
+        elif "closing" in states:
+            state = "closing"
+        else:
+            state = "missing"
+        authoritative = [
+            freshness
+            for freshness in freshnesses
+            if freshness.get("state") == state
+        ]
         observed = [
             freshness.get("observed_at")
-            for freshness in freshnesses
+            for freshness in authoritative
             if freshness.get("observed_at") is not None
         ]
         retrieved = [
             freshness.get("retrieved_at")
-            for freshness in freshnesses
+            for freshness in authoritative
             if freshness.get("retrieved_at") is not None
         ]
         providers: dict[str, dict[str, Any]] = {}
-        for freshness in freshnesses:
+        for freshness in authoritative:
             for provider, value in freshness.get("providers", {}).items():
                 current = providers.get(provider)
                 if current is None or (
@@ -1943,23 +1987,18 @@ class LatestProjectionPlayerPoolReader:
                     )
                 ):
                     providers[provider] = dict(value)
-        states = {freshness.get("state") for freshness in freshnesses}
-        if states == {"closing"}:
-            state = "closing"
-        elif "live" in states:
-            state = "live"
-        else:
-            state = "missing"
         freshness: dict[str, Any] = {
             "state": state,
             "observed_at": min(observed) if observed else None,
             "retrieved_at": min(retrieved) if retrieved else None,
             "providers": dict(sorted(providers.items())),
         }
-        for key in ("status",):
-            values = [freshness_value[key] for freshness_value in freshnesses if key in freshness_value]
-            if values and len(set(values)) == 1 and state != "closing":
-                freshness[key] = values[0]
+        if len(states) == 1 and state != "closing":
+            statuses = [
+                value["status"] for value in authoritative if "status" in value
+            ]
+            if statuses and len(set(statuses)) == 1:
+                freshness["status"] = statuses[0]
         return PlayerPool(players, team_counts, freshness, game_states)
 
     def _read_closing_pool(
@@ -2060,7 +2099,7 @@ class LatestProjectionPlayerPoolReader:
         for provider in sorted(providers):
             provider_rows = [row for row in rows if row["provider"] == provider]
             freshness["providers"][provider] = {
-                "status": "fresh" if provider_rows else "missing",
+                "status": "closing" if provider_rows else "missing",
                 "retrieved_at": (
                     min(assume_utc(row["confirmed_at"]) for row in provider_rows).isoformat()
                     if provider_rows
@@ -2502,6 +2541,36 @@ class ProjectionRecordingService:
             failure_reason=failure_reason,
             duration_ms=duration_ms,
         )
+
+    def freeze_closing_projection_sets(
+        self,
+        *,
+        events: Iterable[Mapping[str, Any]],
+        query: NBAMarketQuery,
+        created_at: datetime,
+    ) -> tuple[ClosingProjectionSetResult, ...]:
+        """Idempotently close configured provider scopes for started games."""
+
+        require_projection_archive_schema(self.archive.engine)
+        created = assume_utc(created_at)
+        results: list[ClosingProjectionSetResult] = []
+        for event in events:
+            game_id = str(event.get("nba_game_id", "")).strip()
+            fence = _projection_closing_start_fence(event)
+            if not game_id or fence is None:
+                continue
+            for provider in sorted(self.scopes):
+                scope = self._scope_for(provider, query)
+                results.append(
+                    self.archive.freeze_closing_projection_set(
+                        provider=provider,
+                        query=scope.query,
+                        canonical_game_id=game_id,
+                        started_at=fence,
+                        created_at=created,
+                    )
+                )
+        return tuple(results)
 
 
 __all__ = [

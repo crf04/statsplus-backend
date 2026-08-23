@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event as sqlalchemy_event, func, select
 
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.migrations import run_migrations
@@ -917,17 +917,17 @@ def test_closing_set_freezes_the_last_pre_start_observation_and_is_idempotent(tm
         accepted_at=initial_at,
     )
 
+    late = archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, start_at - timedelta(minutes=1), "28.5"),
+        query=query,
+        accepted_at=start_at + timedelta(minutes=1),
+    )
     first = archive.freeze_closing_projection_set(
         provider="dabble",
         query=query,
         canonical_game_id=GAME_ID,
         started_at=start_at,
-        created_at=start_at,
-    )
-    late = archive.ingest_complete_snapshot(
-        _closing_snapshot(catalog, start_at - timedelta(minutes=1), "28.5"),
-        query=query,
-        accepted_at=start_at + timedelta(minutes=1),
+        created_at=start_at + timedelta(minutes=1),
     )
     repeated = archive.freeze_closing_projection_set(
         provider="dabble",
@@ -977,6 +977,51 @@ def test_closing_set_freezes_the_last_pre_start_observation_and_is_idempotent(tm
     assert set_count == 1
 
 
+def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing-join.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    for offset, threshold in ((0, "27.5"), (1, "28.5")):
+        observed_at = OBSERVED_AT + timedelta(minutes=offset)
+        archive.ingest_complete_snapshot(
+            _closing_snapshot(catalog, observed_at, threshold),
+            query=query,
+            accepted_at=observed_at,
+        )
+
+    statements = []
+
+    def capture_statement(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    sqlalchemy_event.listen(engine, "before_cursor_execute", capture_statement)
+    try:
+        archive.freeze_closing_projection_set(
+            provider="dabble",
+            query=query,
+            canonical_game_id=GAME_ID,
+            started_at=OBSERVED_AT + timedelta(minutes=2),
+            created_at=OBSERVED_AT + timedelta(minutes=2),
+        )
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", capture_statement)
+
+    observation_reads = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+        and "projection_observations" in statement
+    ]
+    assert observation_reads
+    assert all("generation_id IN" not in statement for statement in observation_reads)
+    assert any(
+        "projection_materialization_generations.retrieved_at >" in statement
+        for statement in observation_reads
+    )
+
+
 def test_started_reader_uses_closing_state_for_actual_start_and_final_status(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-status.sqlite3'}")
     run_migrations(engine)
@@ -991,24 +1036,58 @@ def test_started_reader_uses_closing_state_for_actual_start_and_final_status(tmp
     )
     event = {
         "nba_game_id": GAME_ID,
+        "scheduled_at": (OBSERVED_AT + timedelta(minutes=5)).isoformat(),
         "status_text": "Delayed",
         "status_code": 1,
+        "first_observed_started_at": None,
     }
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            return (event,) if GAME_ID in game_ids else ()
+
     now = [OBSERVED_AT + timedelta(minutes=4)]
     reader = LatestProjectionPlayerPoolReader(
         engine,
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: now[0],
-        closing_archive=archive,
-        event_reader=lambda _season: (event,),
+        event_reader=ScopedEvents(),
     )
 
     delayed = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert delayed.freshness["state"] == "live"
-    event.update(status_text="Q1", status_code=2)
+    post_start = archive.ingest_complete_snapshot(
+        replace(
+            _closing_snapshot(
+                catalog,
+                OBSERVED_AT + timedelta(minutes=6),
+            ),
+            markets=(),
+            coverage=CoverageEvidence(expected_total=0),
+        ),
+        query=query,
+        accepted_at=OBSERVED_AT + timedelta(minutes=6),
+    )
+    assert post_start.materialization_outcome == "advanced"
+    event.update(
+        status_text="Q1",
+        status_code=2,
+        first_observed_started_at=(
+            OBSERVED_AT + timedelta(minutes=5)
+        ).isoformat(),
+    )
     now[0] = OBSERVED_AT + timedelta(minutes=5)
+    ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    ).freeze_closing_projection_sets(
+        events=(event,),
+        query=query,
+        created_at=now[0],
+    )
     started = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
     assert started.freshness["state"] == "closing"
+    assert started.freshness["providers"]["dabble"]["status"] == "closing"
     assert started.game_states[GAME_ID]["state"] == "closing"
     assert started.players[0].canonical_player_id == 2544
     observed = started.freshness["observed_at"]
@@ -1021,19 +1100,62 @@ def test_started_reader_uses_closing_state_for_actual_start_and_final_status(tmp
     assert [player.canonical_player_id for player in final.players] == [2544]
 
 
+def test_closing_writer_falls_back_to_schedule_for_legacy_started_event(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-start-fallback.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    scheduled_at = OBSERVED_AT + timedelta(minutes=5)
+    archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, OBSERVED_AT),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+
+    results = ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    ).freeze_closing_projection_sets(
+        events=(
+            {
+                "nba_game_id": GAME_ID,
+                "scheduled_at": scheduled_at.isoformat(),
+                "status_text": "Final",
+                "status_code": 3,
+                "first_observed_started_at": None,
+            },
+        ),
+        query=query,
+        created_at=scheduled_at + timedelta(hours=2),
+    )
+
+    assert len(results) == 1
+    assert results[0].started_at == scheduled_at
+
+
 def test_started_reader_reports_missing_without_synthesizing_a_player(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-closing-missing.sqlite3'}")
     run_migrations(engine)
-    archive = ProjectionArchive(engine, StatisticCatalog.load_default())
     query = NBAMarketQuery(season=SEASON)
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            return (
+                {
+                    "nba_game_id": GAME_ID,
+                    "scheduled_at": OBSERVED_AT.isoformat(),
+                    "status_text": "Final",
+                    "status_code": 3,
+                    "first_observed_started_at": OBSERVED_AT.isoformat(),
+                },
+            ) if GAME_ID in game_ids else ()
+
     reader = LatestProjectionPlayerPoolReader(
         engine,
         ProjectionArchiveReadScope(provider="dabble", query=query),
         clock=lambda: OBSERVED_AT,
-        closing_archive=archive,
-        event_reader=lambda _season: (
-            {"nba_game_id": GAME_ID, "status_text": "Final", "status_code": 3},
-        ),
+        event_reader=ScopedEvents(),
     )
 
     pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
@@ -1047,3 +1169,141 @@ def test_started_reader_reports_missing_without_synthesizing_a_player(tmp_path):
     )
     assert selection_pool is not None
     assert selection_pool.players == ()
+
+
+def test_started_reader_is_read_only_and_uses_scoped_event_lookup(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-read-only.sqlite3'}")
+    run_migrations(engine)
+    query = NBAMarketQuery(season=SEASON)
+
+    class ScopedEvents:
+        calls = []
+
+        def get_events_by_ids(self, season, game_ids):
+            self.calls.append((season, tuple(game_ids)))
+            assert season == SEASON
+            assert tuple(game_ids) == (GAME_ID,)
+            return (
+                {
+                    "nba_game_id": GAME_ID,
+                    "scheduled_at": OBSERVED_AT.isoformat(),
+                    "status_text": "Q1",
+                    "status_code": 2,
+                    "first_observed_started_at": (
+                        OBSERVED_AT + timedelta(minutes=5)
+                    ).isoformat(),
+                },
+            )
+
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+        event_reader=ScopedEvents(),
+    )
+
+    pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+
+    assert pool.freshness["state"] == "missing"
+    assert reader.event_reader.calls == [(SEASON, (GAME_ID,))]
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ClosingProjectionSet)
+        ).scalar_one() == 0
+
+
+def test_mixed_live_closing_and_missing_games_keep_state_specific_freshness(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-mixed-state.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    live_game_id = "0022500502"
+    missing_game_id = "0022500503"
+    start_at = OBSERVED_AT + timedelta(minutes=5)
+    live_at = OBSERVED_AT + timedelta(minutes=9)
+    archive.ingest_complete_snapshot(
+        _closing_snapshot(catalog, OBSERVED_AT),
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+    closing_event = {
+        "nba_game_id": GAME_ID,
+        "scheduled_at": start_at.isoformat(),
+        "status_text": "Q1",
+        "status_code": 2,
+        "first_observed_started_at": start_at.isoformat(),
+    }
+    ProjectionRecordingService(
+        archive,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+    ).freeze_closing_projection_sets(
+        events=(closing_event,),
+        query=query,
+        created_at=start_at,
+    )
+    live_source = _closing_snapshot(catalog, live_at, "30.5")
+    live_market = replace(
+        live_source.markets[0],
+        market_id="live-market",
+        event=EventEvidence(canonical_id=live_game_id),
+    )
+    archive.ingest_complete_snapshot(
+        replace(live_source, markets=(live_market,)),
+        query=query,
+        accepted_at=live_at,
+    )
+    events = (
+        closing_event,
+        {
+            "nba_game_id": live_game_id,
+            "scheduled_at": (OBSERVED_AT + timedelta(hours=1)).isoformat(),
+            "status_text": "Scheduled",
+            "status_code": 1,
+            "first_observed_started_at": None,
+        },
+        {
+            "nba_game_id": missing_game_id,
+            "scheduled_at": start_at.isoformat(),
+            "status_text": "Q1",
+            "status_code": 2,
+            "first_observed_started_at": start_at.isoformat(),
+        },
+    )
+
+    class ScopedEvents:
+        def get_events_by_ids(self, _season, game_ids):
+            requested = set(game_ids)
+            return tuple(
+                event for event in events if event["nba_game_id"] in requested
+            )
+
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+        event_reader=ScopedEvents(),
+    )
+
+    pool = reader.get_pool(
+        season=SEASON,
+        game_ids=(GAME_ID, live_game_id, missing_game_id),
+    )
+
+    assert pool.game_states == {
+        GAME_ID: {"state": "closing", "observed_at": OBSERVED_AT.isoformat()},
+        live_game_id: {"state": "live", "observed_at": live_at.isoformat()},
+        missing_game_id: {"state": "missing", "observed_at": None},
+    }
+    assert pool.freshness == {
+        "state": "live",
+        "observed_at": live_at.isoformat(),
+        "retrieved_at": live_at.isoformat(),
+        "providers": {
+            "dabble": {
+                "status": "fresh",
+                "retrieved_at": live_at.isoformat(),
+            }
+        },
+    }
+    assert pool.players

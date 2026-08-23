@@ -12,7 +12,12 @@ from app.models.projection_collection import (
     ProjectionCollectionLease,
     ProjectionCollectionProviderState,
 )
-from app.providers.dfs import CoverageEvidence, ProviderSnapshot, SnapshotStatus
+from app.providers.dfs import (
+    CoverageEvidence,
+    NBAMarketQuery,
+    ProviderSnapshot,
+    SnapshotStatus,
+)
 from app.services.projection_collection import (
     ProjectionCollectionCoordinator,
     ProjectionCollectionSettings,
@@ -84,6 +89,7 @@ class FakeRecorder:
     def __init__(self):
         self.snapshots = []
         self.failures = []
+        self.closing_events = []
 
     def record_snapshot(self, snapshot, **kwargs):
         self.snapshots.append((snapshot.provider, kwargs))
@@ -92,6 +98,10 @@ class FakeRecorder:
     def record_failed_poll(self, **kwargs):
         self.failures.append(kwargs)
         return SimpleNamespace(poll_id="internal", outcome="failed")
+
+    def freeze_closing_projection_sets(self, **kwargs):
+        self.closing_events.append(kwargs)
+        return ()
 
 
 class BrokenBoard:
@@ -157,6 +167,78 @@ def test_no_work_never_calls_a_provider_for_offseason_or_terminal_events(tmp_pat
     )
     assert stale.run(providers=("dabble",)).status == "no_work"
     assert stale_board.calls == []
+
+
+def test_terminal_event_is_closed_by_collector_without_a_provider_poll(tmp_path):
+    board = FakeBoard()
+    recorder = FakeRecorder()
+    started_at = NOW - timedelta(hours=1)
+    event = _event(
+        scheduled_at=NOW - timedelta(hours=1),
+        status_text="Final",
+        status_code=3,
+    )
+    event["first_observed_started_at"] = started_at.isoformat()
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[event],
+        board=board,
+        recorder=recorder,
+    )
+
+    result = coordinator.run(providers=("dabble",))
+
+    assert result.status == "no_work"
+    assert board.calls == []
+    assert recorder.closing_events == [
+        {
+            "events": (event,),
+            "query": NBAMarketQuery(season=SEASON),
+            "created_at": NOW,
+        }
+    ]
+
+
+def test_collector_closes_a_game_observed_started_during_the_poll(tmp_path):
+    event = _event(scheduled_at=NOW + timedelta(hours=1))
+
+    class TransitionBoard(FakeBoard):
+        def get_board(self, query, *, providers):
+            event.update(
+                status_text="Q1",
+                status_code=2,
+                first_observed_started_at=NOW.isoformat(),
+            )
+            return super().get_board(query, providers=providers)
+
+    board = TransitionBoard(
+        {
+            "dabble": SimpleNamespace(
+                provider="dabble",
+                status="complete",
+                snapshot=_snapshot("dabble"),
+                reason=None,
+            )
+        }
+    )
+    recorder = FakeRecorder()
+    coordinator, _ = _coordinator(
+        tmp_path,
+        events=[event],
+        board=board,
+        recorder=recorder,
+    )
+
+    result = coordinator.run(providers=("dabble",))
+
+    assert result.status == "complete"
+    assert recorder.closing_events == [
+        {
+            "events": (event,),
+            "query": NBAMarketQuery(season=SEASON),
+            "created_at": NOW,
+        }
+    ]
 
 
 def test_past_scheduled_time_does_not_stop_polling_until_governed_status_starts(tmp_path):
