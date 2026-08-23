@@ -62,7 +62,8 @@ COUNT_FIELDS = (
     "personal_fouls",
 )
 #: The ``team_results`` ``FullGame`` diagnostic count vocabulary an accepted raw
-#: observation must carry completely.  These are the provider wire spellings of
+#: observation must carry, where an omitted (never null) key is accepted only
+#: as the zero its declared authority proves.  These are the provider wire spellings of
 #: the governed count primitives (``COUNT_FIELDS`` without the derived
 #: ``FGM``/``FGA`` composites).  ``Points`` is independently provable from
 #: retained scoring components, but every other primitive has no in-row
@@ -98,7 +99,8 @@ ASSIST_LOCATION_FIELDS = (
 #: count rejects the candidate atomically.  Because that proof depends on the
 #: diagnostics, an accepted raw observation must carry the ``team_results``
 #: Home and Away ``FullGame`` envelopes with every governed diagnostic count
-#: (``LEDGER_GOVERNED_DIAGNOSTIC_COUNTS``) present, well-formed, and reconciling
+#: (``LEDGER_GOVERNED_DIAGNOSTIC_COUNTS``) present or provably omitted as a
+#: zero, well-formed, and reconciling
 #: with the declared team authority; a missing envelope, a missing/null/malformed
 #: diagnostic field, or a reconciliation failure rejects the candidate atomically.
 #: Identity, minutes, row presence, and malformed values stay strict: they are
@@ -1100,8 +1102,9 @@ def _sum_team_facts(
     team-summary residual; both are sparse, so an omitted additive counter is
     an observed zero.  ``provider_total`` (the ``team_results`` envelope) is
     diagnostic and corruption-evidence only: an accepted raw observation
-    requires the complete governed diagnostic count vocabulary present,
-    well-formed, and reconciling with the declared team authority, and the
+    requires the governed diagnostic count vocabulary present (or omitted only
+    where the declared authority is zero), well-formed, and reconciling with
+    the declared team authority, and the
     diagnostics never populate a typed fact.  ``require_team_row`` is set for
     accepted raw observations: a complete game may never omit a side's
     team-summary row.
@@ -1131,24 +1134,25 @@ def _sum_team_facts(
             values[field_name] = player_sums[field_name] + residual
     # Team-results payloads are diagnostic and corruption-evidence only: they
     # never populate a typed fact, and the complete team total is the declared
-    # authority.  An accepted raw observation supplies the full diagnostic
-    # envelope, so every governed diagnostic count must be present, well-formed,
-    # and reconcile with that authority; a missing, null, or malformed field
-    # cannot prove a sparse omission and rejects the candidate atomically.
+    # authority.  Every governed diagnostic count must be present, well-formed,
+    # and reconcile with that authority; a null or malformed field, or an
+    # omission against a nonzero authority, rejects the candidate atomically.
     if provider_total is not None:
         field_by_wire_name = {
             names[0]: field_name for field_name, names in _TEAM_ROW_ALIASES.items()
         }
         for wire_name in LEDGER_GOVERNED_DIAGNOSTIC_COUNTS:
-            if total.get(wire_name) is None:
+            if wire_name not in total:
                 # The team_results envelope is sparse like every other PBP
-                # row: an omitted diagnostic is the observed zero when, and
-                # only when, the declared authority for that count is itself
-                # zero (no participating player and no residual carries it).
-                # A nonzero authority cannot be proven by an omission.
+                # row: an omitted key is the observed zero when, and only
+                # when, the declared authority for that count is itself zero
+                # (no participating player and no residual carries it).  A
+                # nonzero authority cannot be proven by an omission, and an
+                # explicit null is malformed evidence, never an omission.
                 field_name = field_by_wire_name.get(wire_name)
                 if field_name is not None and values.get(field_name) == 0:
                     continue
+            if total.get(wire_name) is None:
                 raise LedgerValidationError(
                     f"team_results diagnostics are missing the {wire_name} count"
                 )

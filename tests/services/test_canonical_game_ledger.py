@@ -2004,6 +2004,28 @@ def test_omitted_team_diagnostic_is_the_zero_the_authority_proves():
     with pytest.raises(LedgerValidationError, match="missing the Blocks count"):
         canonical_game_from_pbp(contradictory, event=event, participant_ids_by_team=participants)
 
+    # An explicit null is malformed evidence, never an omission, even at zero.
+    explicit_null = _raw_observation_with_unknown_fields()
+    for row in explicit_null["stats"]["Home"]["FullGame"]:
+        row.pop("Blocks", None)
+    explicit_null["team_results"]["Home"]["FullGame"]["Blocks"] = None
+    with pytest.raises(LedgerValidationError, match="missing the Blocks count"):
+        canonical_game_from_pbp(explicit_null, event=event, participant_ids_by_team=participants)
+
+
+@pytest.mark.parametrize("wire_name", ("Steals", "Blocks", "Turnovers", "Fouls"))
+def test_every_zero_authority_diagnostic_omission_is_accepted(wire_name):
+    payload = _raw_observation_with_unknown_fields()
+    event = {**_event(), "scheduled_at": "2024-11-16T00:30:00+00:00"}
+    participants = {1610612747: (2544, 203507), 1610612759: (201935,)}
+    for row in payload["stats"]["Away"]["FullGame"]:
+        row.pop(wire_name, None)
+    del payload["team_results"]["Away"]["FullGame"][wire_name]
+    game = canonical_game_from_pbp(payload, event=event, participant_ids_by_team=participants)
+    away = next(fact for fact in game.team_facts if fact.team_id == 1610612759)
+    field = {"Steals": "steals", "Blocks": "blocks", "Turnovers": "turnovers", "Fouls": "personal_fouls"}[wire_name]
+    assert getattr(away, field) == 0
+
 
 def test_explicit_zero_required_count_remains_valid(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'explicit_zero.sqlite3'}")
