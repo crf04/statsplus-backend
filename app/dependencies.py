@@ -461,6 +461,15 @@ def build_dependencies(
             max_markets=settings.providers.projection_archive_max_markets,
         )
     )
+    if projection_archive is not None:
+        if athlete_mapping_repository is not None:
+            athlete_mapping_repository.set_projection_replay(
+                projection_archive.replay_athlete_decision
+            )
+        if event_mapping_repository is not None:
+            event_mapping_repository.set_projection_replay(
+                projection_archive.replay_event_decision
+            )
     projection_query = NBAMarketQuery(season=settings.nba.current_season)
     projection_read_scopes = tuple(
         ProjectionArchiveReadScope(
@@ -565,6 +574,8 @@ def build_dependencies(
         settings=settings,
         nba_stats_adapter=nba_stats_provider,
         game_logs_source=game_logs_source,
+        player_diets=player_diet_service,
+        team_matchups=team_matchup_query_service,
     )
     stored_player_pool_reader = (
         StoredPlayerPoolReader(player_pool_snapshot_repository)

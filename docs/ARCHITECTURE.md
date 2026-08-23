@@ -599,6 +599,12 @@ builds a season-sized generation-ID parameter list, and a delayed provider
 delivery can remain immutable archive evidence without entering a set after
 the game-start boundary. Repeating a close returns the original set and cannot
 move its start time.
+Mapping replay generations are explicit deltas even when they reuse a Complete
+source snapshot and poll. They are never eligible as the Complete baseline;
+the closing fold applies their affected references like a Partial generation,
+so a pre-start mapping decision cannot truncate an otherwise complete frozen
+board. A Partial poll between the Complete baseline and a replay delta is
+folded in the same ordering.
 Enabling a provider after a game has closed does not backfill its closing set;
 that provider reads `missing` for the game permanently.
 
@@ -614,6 +620,44 @@ keeps scheduled missing-pool behavior and returns `resource_not_found` for a
 player outside a started game's derived empty pool. No request path calls a
 projection provider, takes an ingestion scope write lock, or creates a closing
 set.
+Projection Observations retain typed provider identities and an explicit
+'resolved'/'unresolved' state in migration 045. Each rematerialized row also
+retains its original observation ID and source ordinal, so later athlete, event,
+or statistic decisions start from the same immutable provider market while
+preserving earlier decisions. Provider-plus-identity indexes bound the history
+lookup to observations affected by the decision. A valid normalized market is
+archived even when its athlete, event, or statistic identity is unresolved; only
+fully resolved, targetable rows enter Latest or Player Pool. An approved athlete
+or event mapping invokes the archive's database-only replay seam after the
+mapping transaction commits. Statistic Catalog corrections use the same seam.
+Replay acquires the existing provider/season/query scope fence, creates or
+reactivates the deterministic generation for the resulting materialization, and
+batch-replaces only affected Latest references in that transaction. Dense replay
+ordinals are generation-local. A provider-reported athlete name remains the
+observation name when present; a missing provider name falls back to the
+approved canonical name. Canonical IDs and the content-derived reference of an
+ID-less market are recomputed from the immutable source market. It reuses the
+accepted poll and immutable source snapshot, so source observations, checksums,
+and retrieval timestamps are not rewritten. A replayed Latest pointer is
+activated at mapping replay time, while its eligibility confirmation remains
+the source observation time so the provider board's live window is not reset.
+The scope lock records both the active generation, the replay wall clock, and
+the source retrieval fence;
+an in-flight snapshot retrieved before the mapping decision remains auditable as
+non-promoted evidence and cannot erase the recovery when its observations still
+carry the pre-decision unresolved identity; evidence with a newer source
+retrieval identity may advance normally. Replay preserves the source
+`observed_at` for public freshness and does not extend the provider board's
+15-minute live window; `confirmed_at` remains the internal eligibility clock.
+Ordinary newer promoted polls may advance the Latest read-model `observed_at`,
+but replay itself never does so beyond its source observation.
+Repeated replay is a no-op. A replay failure after an athlete or event mapping
+commit is logged without changing the durable operator decision, and neither
+request-time reads nor mapping decisions call a provider. Replay scope
+enumeration is provider-wide and has no game filter. Therefore, if a mapping is
+approved after a game's closing set is frozen by sibling #108, replay rewrites
+the live Latest rows for that provider scope while the frozen membership keeps
+the pre-decision observations; this is the intended rule.
 
 ### Matchup injury snapshots
 
@@ -1566,13 +1610,20 @@ league denominator. Player Diets remain raw and Season-only, while Matchup
 Scores cross that Season evidence with each independently stored team window.
 The score implementation remains inside `MatchupService`, beside the stored
 inputs it serializes; it has no provider boundary and performs no request-time
-fallback. Request-local indexes traverse each stored window's league/team
+fallback. The play-types crossing is the one exception: it lives in
+`app.domain.play_type_matchup` so the Log Workspace rating scores the same
+definition instead of a second copy of it. Request-local indexes traverse each stored window's league/team
 metrics once, and a per-player/window memo shares primitive scores across a
 posted primitive row and every combo that consumes it. Components unavailable
 from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
 score applies each raw observed share to the slice's fractional matchup
 difference, so the unobserved residual in an admitted rounded partition has a
-neutral baseline without share normalization or fabricated evidence. A slice
+neutral baseline without share normalization or fabricated evidence. Every
+Base except play types must arrive as a whole partition; Synergy publishes a
+player's play-type row only where the sample is large enough to rate, so a
+play-type Diet is complete when every observed slice is governed, and its
+cell is marked thin when the observed shares cover less than 0.85 of the
+player's possessions. A slice
 with exact league/opponent `0/0` is likewise a neutral structural zero; nonzero
 opponent evidence against a non-positive league denominator fails closed, and
 an all-structural-zero component remains absent. A
@@ -1746,7 +1797,12 @@ identities degrade only their Base as
 `unavailable/provider_invalid_response`; validation is repeated at repository
 publication as a direct-caller guard. Play types store provider possession
 share and possession volume directly; they never reuse the legacy
-percentage-of-points transform. Shot
+percentage-of-points transform. Synergy repeats a traded player once per team
+stint, so the collector combines a player's stints for a play type into the one
+fact its identity allows: volume and games played add, and the share is total
+possessions over the team possessions each stint's own share recovers. A stint
+whose share is not positive has no recoverable denominator and degrades the
+Base rather than being dropped. Shot
 types store provider FGA frequency and FGA. Shot zones store five nonoverlapping
 display slices, using the provider's aggregate `Corner 3` and excluding its
 duplicating left/right children and Backcourt. Assist-location volume uses the
@@ -2038,9 +2094,9 @@ a single missing metric fails. Integer counts — the four traditional opponent
 counts and the six assist surfaces — compare exactly; the single documented
 tolerance `MATCHUP_PARITY_TOLERANCE` (`1e-9`) applies only to floating
 denominators (the nominal game length derived from retained effective team
-minutes; the legacy PBP assist window value, normalized from seconds, is
-likewise read as the nominal length it establishes when within the separate
-0.05-minute evidence band) and
+minutes; the legacy window value from either aggregate provider, normalized
+from seconds, is likewise read as the nominal length it establishes when
+within the separate 0.05-minute evidence band) and
 to the per-48 rates recomputed from counts and denominators. The ledger
 publication's served per-48 and competition-rank fields are also bound to
 those recomputed values; a missing or incorrect served value is a hard

@@ -338,10 +338,12 @@ existing `404 resource_not_found`; never-polled or failed-without-successful-
 evidence scopes remain missing and keep the documented `503 provider_unavailable`.
 Changes to canonical statistic
 resolution or category authority can retire or add eligible Latest rows without
-duplicating unchanged provider evidence. The response `observed_at` comes from
-the accepted poll linked to that generation, not necessarily the older
-representative content snapshot retained for checksum verification. Only absent current evidence produces `missing` with zero
-targetable players. For a multi-game live request with both live and missing games,
+duplicating unchanged provider evidence. The response `observed_at` and
+provider `retrieved_at` come from each selected Latest row's `observed_at`, never
+from its replay/promotion `confirmed_at`; an ordinary newer promoted poll
+advances that read-model timestamp, while replay retains the source observation
+time. Aggregate times are the oldest included source observations. Only absent current evidence produces `missing` with zero
+targetable players. For a multi-game request with both live and missing games,
 `freshness.pool.status` is explicitly `partial`, and each game's
 `projection_state` remains authoritative; the pool retains `state: live`
 because it contains live rows. Aggregate and per-provider observation times
@@ -355,6 +357,21 @@ query content even though its retrieval time is newer; it confirms existing
 Latest references without duplicating observations while the immutable snapshot
 remains the content authority. Enabled providers are unioned; an unpolled or
 disabled provider expires independently and cannot erase another contribution.
+An approved athlete, event, or statistic mapping may replay matching unresolved
+observations into a deterministic materialization generation, or reactivate an
+existing generation when a decision returns to an earlier materialized state.
+This is an internal database operation: it does not add a route, change any
+Slate, Matchup, or Matchup Selection payload, call a provider, or rewrite the
+source snapshot and its observations. It preserves the provider-reported player
+name, recomputes an ID-less market reference from the rematerialized identities,
+and retains the source `observed_at`/`retrieved_at` for public freshness. Replay
+does not grant a new live window: affected rows expire with the provider board,
+while `confirmed_at` remains an internal eligibility clock. A snapshot fetched
+before that decision whose observations still carry the pre-decision unresolved
+identity cannot promote after replay and erase the recovered state; evidence
+with a newer source retrieval identity may promote normally. Until replay
+succeeds, unresolved observations remain archive evidence only and do not
+contribute to Latest or Player Pool.
 Late valid polls remain archived but do not refresh eligibility or mask a newer
 failure; the failure attempt's actual start time (or its completion time when
 the start is unavailable) fences evidence retrieved earlier, even when that
@@ -915,6 +932,18 @@ Both paths
 return the same whole-minute presentation and the same composite/fantasy
 averages, and any season cut over to the database must satisfy strict parity.
 
+Play-type matchup rating (#37): every `game_logs` row carries `PLAYTYPE_RTG`,
+the play-type matchup between the player's Season Synergy Diet Share and that
+game's opponent's Season play-type window, rounded to one decimal place. The
+scale is centered on the league: `100` is a league-average matchup, above `100`
+is a favorable one, and below `100` an unfavorable one. It uses the same
+definition as the Matchup page's play-types `PTS` score, so
+`PLAYTYPE_RTG = 100 x (1 + m)` for that score `m`. A row whose player or
+opponent has no usable play-type facts carries `null`; the read-only demo
+database has none, so every row carries `null` there. `playstyle_RTG_min` /
+`playstyle_RTG_max` filter on this column, and a non-default range excludes
+`null` rows rather than treating them as neutral.
+
 Explicit contract amendment (#66): plus/minus is removed from the game-log
 contract. `PLUS_MINUS` is no longer a supported `self_filters[STAT]`, the
 averages no longer include a `PLUS_MINUS` cell, and response rows carry no
@@ -951,8 +980,8 @@ Query parameters:
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
-| `playstyle_RTG_min` | No | Finite numeric lower bound. Default `0` |
-| `playstyle_RTG_max` | No | Finite numeric upper bound. Default `200` |
+| `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
+| `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
 | `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment |
 
 Example:
