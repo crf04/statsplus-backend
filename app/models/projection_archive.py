@@ -160,6 +160,10 @@ class ProjectionObservation(Base):
     ordinal = Column(Integer, nullable=False)
     provider = Column(String(64), nullable=False)
     provider_market_id = Column(String(255), nullable=True)
+    athlete_provider_id = Column(String(255), nullable=True)
+    event_provider_id = Column(String(255), nullable=True)
+    statistic_provider_id = Column(String(255), nullable=True)
+    statistic_provider_label = Column(String(255), nullable=True)
     market_reference = Column(String(72), nullable=False)
     canonical_game_id = Column(String(32), nullable=True)
     canonical_player_id = Column(Integer, nullable=True)
@@ -171,6 +175,12 @@ class ProjectionObservation(Base):
     market_variant = Column(String(32), nullable=False)
     scoring_period = Column(String(32), nullable=False)
     targetable = Column(Boolean, nullable=False, default=False, server_default="0")
+    resolution_state = Column(
+        String(32), nullable=False, default="resolved", server_default="resolved"
+    )
+    unresolved_identities = Column(
+        String(64), nullable=False, default="", server_default=""
+    )
     observed_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
@@ -206,7 +216,6 @@ class ProjectionMaterializationGeneration(Base):
         String(72),
         ForeignKey("projection_provider_polls.poll_id", ondelete="RESTRICT"),
         nullable=False,
-        unique=True,
     )
     created_at = Column(DateTime(timezone=True), nullable=False)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)

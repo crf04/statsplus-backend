@@ -107,6 +107,9 @@ query contracts. Migration `043_projection_collection_control` adds the
 collector lease/state tables and Provider Poll duration field; migration
 `044_projection_closing_sets` adds the durable event start field and closing
 tables.
+Migration `045_projection_mapping_replay` adds typed unresolved Projection
+Observation identity evidence and the database-only mapping replay generation
+seam.
 The reader retains scopes for every supported archive provider (`dabble`,
 `prizepicks`, and `underdog`) independently of the enabled registry. A provider
 removed from `DFS_ENABLED_PROVIDERS` therefore ages out through the 15-minute

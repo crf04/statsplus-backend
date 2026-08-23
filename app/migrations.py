@@ -1491,6 +1491,23 @@ def _rebuild_projection_transition_tables_sqlite(
                 expressions.append("NULL AS failure_reason")
             elif column == "duration_ms":
                 expressions.append("NULL AS duration_ms")
+            elif column in {
+                "athlete_provider_id",
+                "event_provider_id",
+                "statistic_provider_id",
+                "statistic_provider_label",
+            }:
+                expressions.append(f"NULL AS {column}")
+            elif column == "resolution_state":
+                expressions.append(
+                    "CASE WHEN canonical_player_id IS NULL "
+                    "OR canonical_player_name IS NULL "
+                    "OR canonical_game_id IS NULL "
+                    "OR canonical_statistic_id IS NULL "
+                    "THEN 'unresolved' ELSE 'resolved' END AS resolution_state"
+                )
+            elif column == "unresolved_identities":
+                expressions.append("'' AS unresolved_identities")
             else:
                 raise RuntimeError(
                     f"migration 041 cannot backfill projection column {column}"
@@ -1514,6 +1531,156 @@ def _rebuild_projection_transition_tables_sqlite(
     violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
     if violations:
         raise RuntimeError("migration 041 left invalid projection foreign keys")
+
+
+def _projection_source_poll_is_unique(connection: Connection) -> bool:
+    """Return whether old projection generations forbid replay generations."""
+
+    if connection.dialect.name == "sqlite":
+        indexes = connection.exec_driver_sql(
+            "PRAGMA index_list('projection_materialization_generations')"
+        ).mappings().all()
+        for index in indexes:
+            if not index["unique"]:
+                continue
+            columns = connection.exec_driver_sql(
+                f"PRAGMA index_info('{index['name']}')"
+            ).mappings().all()
+            if [column["name"] for column in columns] == ["source_poll_id"]:
+                return True
+        return False
+    return any(
+        tuple(constraint.get("column_names") or ()) == ("source_poll_id",)
+        for constraint in inspect(connection).get_unique_constraints(
+            "projection_materialization_generations"
+        )
+    )
+
+
+def _upgrade_projection_mapping_replay(connection: Connection) -> None:
+    """Add typed identity evidence and permit generations to reuse one poll."""
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionMaterializationGeneration,
+        ProjectionObservation,
+        ProviderPoll,
+    )
+
+    observation_name = connection.dialect.identifier_preparer.quote(
+        ProjectionObservation.__tablename__
+    )
+    observation_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionObservation.__tablename__
+        )
+    }
+    additions = (
+        ("athlete_provider_id", "VARCHAR(255)"),
+        ("event_provider_id", "VARCHAR(255)"),
+        ("statistic_provider_id", "VARCHAR(255)"),
+        ("statistic_provider_label", "VARCHAR(255)"),
+        ("resolution_state", "VARCHAR(32) NOT NULL DEFAULT 'resolved'"),
+        ("unresolved_identities", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    )
+    for name, definition in additions:
+        if name not in observation_columns:
+            connection.execute(text(
+                f"ALTER TABLE {observation_name} ADD COLUMN {name} {definition}"
+            ))
+
+    connection.execute(text(
+        f"UPDATE {observation_name} SET resolution_state = CASE "
+        "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
+        "OR canonical_game_id IS NULL OR canonical_statistic_id IS NULL "
+        "THEN 'unresolved' ELSE 'resolved' END, "
+        "unresolved_identities = CASE "
+        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+        "AND canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
+        "THEN 'athlete,event,statistic' "
+        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+        "AND canonical_game_id IS NULL THEN 'athlete,event' "
+        "WHEN (canonical_player_id IS NULL OR canonical_player_name IS NULL) "
+        "AND canonical_statistic_id IS NULL THEN 'athlete,statistic' "
+        "WHEN canonical_game_id IS NULL AND canonical_statistic_id IS NULL "
+        "THEN 'event,statistic' "
+        "WHEN canonical_player_id IS NULL OR canonical_player_name IS NULL "
+        "THEN 'athlete' "
+        "WHEN canonical_game_id IS NULL THEN 'event' "
+        "WHEN canonical_statistic_id IS NULL THEN 'statistic' ELSE '' END"
+    ))
+
+    snapshot_rows = connection.execute(text(
+        "SELECT snapshot_id, evidence_document "
+        "FROM projection_provider_snapshots"
+    )).mappings()
+    for snapshot in snapshot_rows:
+        try:
+            markets = json.loads(snapshot["evidence_document"])["markets"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(markets, list):
+            continue
+        for ordinal, market in enumerate(markets):
+            if not isinstance(market, dict):
+                continue
+            athlete = market.get("athlete") or {}
+            event = market.get("event") or {}
+            statistic = market.get("statistic") or {}
+            values = {
+                "athlete_provider_id": athlete.get("provider_id"),
+                "event_provider_id": event.get("provider_id"),
+                "statistic_provider_id": statistic.get("provider_id"),
+                "statistic_provider_label": statistic.get("label"),
+            }
+            connection.execute(
+                text(
+                    f"UPDATE {observation_name} SET "
+                    "athlete_provider_id = :athlete_provider_id, "
+                    "event_provider_id = :event_provider_id, "
+                    "statistic_provider_id = :statistic_provider_id, "
+                    "statistic_provider_label = :statistic_provider_label "
+                    "WHERE snapshot_id = :snapshot_id AND ordinal = :ordinal"
+                ),
+                {**values, "snapshot_id": snapshot["snapshot_id"], "ordinal": ordinal},
+            )
+
+    if not _projection_source_poll_is_unique(connection):
+        return
+    if connection.dialect.name == "sqlite":
+        _rebuild_projection_transition_tables_sqlite(
+            connection,
+            (
+                # The helper preserves the foreign-key-connected cluster while
+                # using the current model, whose generation source poll is not
+                # unique after this migration.
+                ProviderPoll.__table__,
+                ProjectionMaterializationGeneration.__table__,
+                ProjectionObservation.__table__,
+                LatestPlayerProjection.__table__,
+            ),
+        )
+        return
+    generation_name = connection.dialect.identifier_preparer.quote(
+        ProjectionMaterializationGeneration.__tablename__
+    )
+    for constraint in inspect(connection).get_unique_constraints(
+        ProjectionMaterializationGeneration.__tablename__
+    ):
+        if tuple(constraint.get("column_names") or ()) != ("source_poll_id",):
+            continue
+        constraint_name = constraint.get("name")
+        if not constraint_name:
+            raise RuntimeError(
+                "projection generation source poll uniqueness has no constraint name"
+            )
+        name = connection.dialect.identifier_preparer.quote(constraint_name)
+        connection.execute(text(
+            f"ALTER TABLE {generation_name} DROP CONSTRAINT {name}"
+        ))
+
+
 def _bind_manifests_to_event_catalog_publications(
     connection: Connection,
 ) -> None:
@@ -1822,6 +1989,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         44,
         "044_projection_closing_sets",
         _create_projection_closing_sets,
+    ),
+    Migration(
+        45,
+        "045_projection_mapping_replay",
+        _upgrade_projection_mapping_replay,
     ),
 )
 
