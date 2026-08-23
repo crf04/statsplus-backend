@@ -92,6 +92,95 @@ def test_user_model_ddl_applies_to_postgres(pg_engine):
     assert "idx_users_created_at" in indexes
 
 
+def test_saved_filter_set_ddl_applies_to_postgres(pg_engine):
+    """The functional uniqueness index must be creatable on Postgres."""
+    with pg_engine.connect() as connection:
+        columns = connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'saved_filter_sets'"
+            )
+        ).scalars().all()
+        indexes = connection.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE tablename = 'saved_filter_sets'"
+            )
+        ).scalars().all()
+
+    assert set(columns) == {
+        "id",
+        "firebase_uid",
+        "name",
+        "query_string",
+        "created_at",
+        "updated_at",
+    }
+    # Postgres renders the indexed expression with an explicit cast, e.g.
+    # ``lower((name)::text)``, so match the function call loosely rather than
+    # the exact source spelling.
+    assert any(
+        "UNIQUE INDEX uq_saved_filter_sets_owner_name" in definition
+        and "lower(" in definition
+        for definition in indexes
+    )
+
+
+def test_saved_filter_sets_round_trip_on_postgres(user_service):
+    user_service.create_or_update_user(FIREBASE_USER)
+
+    created = user_service.create_saved_filter_set(
+        FIREBASE_USER["uid"],
+        name="Jokic at home",
+        query_string="player=Nikola+Jokic&location_filter=Home",
+    )
+    renamed = user_service.rename_saved_filter_set(
+        FIREBASE_USER["uid"], created["id"], name="Jokic home splits"
+    )
+
+    assert renamed["name"] == "Jokic home splits"
+    assert user_service.list_saved_filter_sets(FIREBASE_USER["uid"]) == [renamed]
+
+    user_service.delete_saved_filter_set(FIREBASE_USER["uid"], created["id"])
+    assert user_service.list_saved_filter_sets(FIREBASE_USER["uid"]) == []
+
+
+def test_postgres_refuses_a_duplicate_saved_filter_set_name_ignoring_case(
+    user_service,
+):
+    from app.errors import ConflictError
+
+    user_service.create_or_update_user(FIREBASE_USER)
+    user_service.create_saved_filter_set(
+        FIREBASE_USER["uid"], name="Jokic at home", query_string="player=Jokic"
+    )
+
+    with pytest.raises(ConflictError):
+        user_service.create_saved_filter_set(
+            FIREBASE_USER["uid"], name="JOKIC AT HOME", query_string="player=Jokic"
+        )
+
+
+def test_deleting_a_postgres_account_cascades_to_its_saved_filter_sets(
+    pg_engine, user_service
+):
+    user_service.create_or_update_user(FIREBASE_USER)
+    user_service.create_saved_filter_set(
+        FIREBASE_USER["uid"], name="Doomed", query_string="player=Jokic"
+    )
+
+    with pg_engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM users WHERE firebase_uid = :uid"),
+            {"uid": FIREBASE_USER["uid"]},
+        )
+
+    with pg_engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT COUNT(*) FROM saved_filter_sets")
+        ).scalar() == 0
+
+
 # --- UserService round trips ----------------------------------------------
 
 

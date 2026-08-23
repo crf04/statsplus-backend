@@ -182,6 +182,109 @@ def deactivate_account():
         })
     raise OperationFailedError("Failed to deactivate account.")
 
+def _authenticated_uid():
+    """Return the caller's Firebase UID or refuse the request."""
+    current_user = get_current_user()
+    if not current_user:
+        raise AuthenticationRequiredError()
+    return current_user['uid']
+
+
+def _saved_filter_set_body():
+    """Return the submitted JSON object for a saved filter set write."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise InvalidInputError("No saved filter set data was provided.")
+    return data
+
+
+@user_bp.route('/saved-filter-sets', methods=['GET'])
+@require_auth
+@route_error_boundary("Failed to retrieve saved filter sets.")
+def list_saved_filter_sets():
+    """
+    List the caller's Saved Filter Sets, newest first.
+
+    Returns:
+        JSON response with the caller's saved filter sets
+    """
+    return jsonify({
+        'success': True,
+        'saved_filter_sets': user_service.list_saved_filter_sets(
+            _authenticated_uid()
+        )
+    })
+
+@user_bp.route('/saved-filter-sets', methods=['POST'])
+@require_auth
+@route_error_boundary("Failed to save the filter set.")
+def create_saved_filter_set():
+    """
+    Save the submitted Log Workspace query string under a name.
+
+    Expected JSON body:
+        {
+            "name": "Jokic at home",
+            "query_string": "player=Nikola+Jokic&location_filter=Home"
+        }
+
+    Returns:
+        JSON response with the created saved filter set
+    """
+    firebase_uid = _authenticated_uid()
+    data = _saved_filter_set_body()
+
+    created = user_service.create_saved_filter_set(
+        firebase_uid,
+        name=data.get('name'),
+        query_string=data.get('query_string')
+    )
+    return jsonify({'success': True, 'saved_filter_set': created}), 201
+
+@user_bp.route('/saved-filter-sets/<int:saved_filter_set_id>', methods=['PATCH'])
+@require_auth
+@route_error_boundary("Failed to rename the saved filter set.")
+def rename_saved_filter_set(saved_filter_set_id):
+    """
+    Rename one of the caller's Saved Filter Sets.
+
+    Expected JSON body:
+        {
+            "name": "New name"
+        }
+
+    The saved query string is immutable.
+
+    Returns:
+        JSON response with the updated saved filter set
+    """
+    firebase_uid = _authenticated_uid()
+    data = _saved_filter_set_body()
+
+    updated = user_service.rename_saved_filter_set(
+        firebase_uid,
+        saved_filter_set_id,
+        name=data.get('name')
+    )
+    return jsonify({'success': True, 'saved_filter_set': updated})
+
+@user_bp.route('/saved-filter-sets/<int:saved_filter_set_id>', methods=['DELETE'])
+@require_auth
+@route_error_boundary("Failed to delete the saved filter set.")
+def delete_saved_filter_set(saved_filter_set_id):
+    """
+    Delete one of the caller's Saved Filter Sets.
+
+    Returns:
+        JSON response confirming the deletion
+    """
+    user_service.delete_saved_filter_set(_authenticated_uid(), saved_filter_set_id)
+
+    return jsonify({
+        'success': True,
+        'message': 'Saved filter set deleted'
+    })
+
 @user_bp.route('/admin/stats', methods=['GET'])
 @require_admin
 @route_error_boundary("Failed to retrieve admin statistics.")
