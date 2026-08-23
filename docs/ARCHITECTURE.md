@@ -1472,7 +1472,9 @@ league denominator. Player Diets remain raw and Season-only, while Matchup
 Scores cross that Season evidence with each independently stored team window.
 The score implementation remains inside `MatchupService`, beside the stored
 inputs it serializes; it has no provider boundary and performs no request-time
-fallback. Request-local indexes traverse each stored window's league/team
+fallback. The play-types crossing is the one exception: it lives in
+`app.domain.play_type_matchup` so the Log Workspace rating scores the same
+definition instead of a second copy of it. Request-local indexes traverse each stored window's league/team
 metrics once, and a per-player/window memo shares primitive scores across a
 posted primitive row and every combo that consumes it. Components unavailable
 from the stored Diet/sheet taxonomy are omitted instead of estimated. The Diet
@@ -1652,7 +1654,12 @@ identities degrade only their Base as
 `unavailable/provider_invalid_response`; validation is repeated at repository
 publication as a direct-caller guard. Play types store provider possession
 share and possession volume directly; they never reuse the legacy
-percentage-of-points transform. Shot
+percentage-of-points transform. Synergy repeats a traded player once per team
+stint, so the collector combines a player's stints for a play type into the one
+fact its identity allows: volume and games played add, and the share is total
+possessions over the team possessions each stint's own share recovers. A stint
+whose share is not positive has no recoverable denominator and degrades the
+Base rather than being dropped. Shot
 types store provider FGA frequency and FGA. Shot zones store five nonoverlapping
 display slices, using the provider's aggregate `Corner 3` and excluding its
 duplicating left/right children and Backcourt. Assist-location volume uses the
