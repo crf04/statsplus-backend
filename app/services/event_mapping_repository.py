@@ -607,6 +607,7 @@ class EventMappingRepository:
         clock: Any | None = None,
         match_window: timedelta | float | None = None,
         settings: Any | None = None,
+        projection_replay: Any | None = None,
     ) -> None:
         self.engine = engine
         if is_demo_database_url(str(getattr(engine, "url", ""))):
@@ -614,6 +615,7 @@ class EventMappingRepository:
                 "The bundled demo database is read-only and cannot store event mappings."
             )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._projection_replay = projection_replay
         # The window a governed decision is rechecked against is deployment
         # policy, so it is resolved once here -- at the composition point that
         # already configures the resolver -- and used by every in-lock recheck.
@@ -622,6 +624,11 @@ class EventMappingRepository:
         # accept evidence a narrower configuration has already called a
         # different fixture.
         self.match_window = event_match_window(match_window, settings)
+
+    def set_projection_replay(self, projection_replay: Any | None) -> None:
+        """Attach the database-only projection replay callback after assembly."""
+
+        self._projection_replay = projection_replay
 
     @contextmanager
     def _transaction(self, provider: str, provider_id: str):
@@ -1506,12 +1513,15 @@ class EventMappingRepository:
                 # to name, so the choice is recorded as an explicit candidate.
                 self._insert_candidates(connection, int(decision["id"]), (selected,))
             mapping = self._select_mapping(connection, provider, provider_id)
-            return EventMappingPersistenceResult(
+            result = EventMappingPersistenceResult(
                 state.value,
                 True,
                 mapping=self._mapping_record(mapping),
                 decision=self._decision_result(connection, decision),
             )
+        if self._projection_replay is not None:
+            self._projection_replay(result)
+        return result
 
     # -- SQL helpers -------------------------------------------------------
 

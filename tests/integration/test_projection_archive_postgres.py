@@ -1058,6 +1058,137 @@ def test_authenticated_postgres_routes_cover_partial_unchanged_and_complete_empt
     assert empty_selection.status_code == 404
 
 
+def test_authenticated_routes_recover_an_unresolved_market_after_mapping_replay(
+    authenticated_postgres_projection_routes,
+):
+    context = authenticated_postgres_projection_routes
+    unresolved = _snapshot(context.catalog, OBSERVED_AT, "20.5")
+    unresolved_market = replace(
+        unresolved.markets[0],
+        athlete=replace(
+            unresolved.markets[0].athlete,
+            provider_id="athlete-unresolved",
+            canonical_id=None,
+        ),
+    )
+    unresolved = replace(unresolved, markets=(unresolved_market,))
+    context.archive.ingest_snapshot(
+        unresolved,
+        query=context.query,
+        accepted_at=OBSERVED_AT,
+    )
+
+    initial_slate = context.client.get(
+        "/api/games/slate?date=2026-01-02", headers=context.headers
+    )
+    initial_matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
+    )
+    assert initial_slate.status_code == initial_matchup.status_code == 200
+    assert initial_slate.get_json()["games"][0]["away_team"][
+        "targetable_player_count"
+    ] == 0
+    assert initial_matchup.get_json()["players"] == []
+
+    replay = context.archive.replay_athlete_mapping(
+        provider="dabble",
+        provider_athlete_id="athlete-unresolved",
+        canonical_player_id=7,
+        canonical_player_name="Player 7",
+        canonical_team_id=10,
+    )
+    assert replay is not None
+    assert replay.changed is True
+
+    recovered_slate = context.client.get(
+        "/api/games/slate?date=2026-01-02", headers=context.headers
+    )
+    recovered_matchup = context.client.get(
+        f"/api/games/matchup?game_id={GAME_ID}", headers=context.headers
+    )
+    recovered_selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7",
+        headers=context.headers,
+    )
+    assert (
+        recovered_slate.status_code
+        == recovered_matchup.status_code
+        == recovered_selection.status_code
+        == 200
+    )
+    assert recovered_slate.get_json()["games"][0]["away_team"][
+        "targetable_player_count"
+    ] == 1
+    assert recovered_matchup.get_json()["players"][0]["player_id"] == 7
+    assert recovered_selection.get_json()["player_id"] == 7
+
+
+def test_concurrent_postgres_mapping_replay_advances_one_generation(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    query = NBAMarketQuery(season=SEASON)
+    unresolved = _snapshot(catalog, OBSERVED_AT, "20.5")
+    unresolved = replace(
+        unresolved,
+        markets=(
+            replace(
+                unresolved.markets[0],
+                athlete=replace(
+                    unresolved.markets[0].athlete,
+                    provider_id="athlete-concurrent",
+                    canonical_id=None,
+                ),
+            ),
+        ),
+    )
+    ProjectionArchive(projection_pg_engine, catalog).ingest_snapshot(
+        unresolved,
+        query=query,
+        accepted_at=OBSERVED_AT,
+    )
+
+    database_url = projection_pg_engine.url.render_as_string(hide_password=False)
+    archives = [
+        ProjectionArchive(create_engine(database_url), catalog)
+        for _ in range(2)
+    ]
+    barrier = Barrier(2)
+    for archive in archives:
+        original = archive._replay_scope
+
+        def synchronized_replay_scope(*, _original=original, **kwargs):
+            barrier.wait(timeout=10)
+            return _original(**kwargs)
+
+        archive._replay_scope = synchronized_replay_scope
+
+    def replay(archive):
+        return archive.replay_athlete_mapping(
+            provider="dabble",
+            provider_athlete_id="athlete-concurrent",
+            canonical_player_id=7,
+            canonical_player_name="Player 7",
+            canonical_team_id=10,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(replay, archive) for archive in archives]
+        results = [future.result(timeout=20) for future in futures]
+
+    assert sorted(result.changed for result in results) == [False, True]
+    assert results[0].generation_id == results[1].generation_id
+    with projection_pg_engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(ProjectionMaterializationGeneration)
+        ).scalar_one() == 2
+        assert connection.execute(
+            select(func.count()).select_from(LatestPlayerProjection)
+        ).scalar_one() == 1
+    for archive in archives:
+        archive.engine.dispose()
+
+
 def test_authenticated_postgres_routes_expire_disabled_provider_history(
     authenticated_postgres_projection_routes,
 ):

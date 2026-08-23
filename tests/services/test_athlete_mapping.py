@@ -4081,6 +4081,34 @@ def _manual_map_pp_15(
     )
 
 
+def test_manual_athlete_mapping_replays_projection_after_commit(mapping_db):
+    engine, now = mapping_db
+    replay_calls = []
+
+    def replay(result):
+        assert AthleteMappingRepository(engine).get_mapping(
+            "prizepicks", "pp-15"
+        ).canonical_player_id == 15
+        replay_calls.append(result)
+
+    repository = AthleteMappingRepository(
+        engine,
+        clock=lambda: now,
+        projection_replay=replay,
+    )
+    result = repository.approve(
+        "prizepicks",
+        "pp-15",
+        15,
+        season="2024-25",
+        operator_id="ops@example.com",
+        reason="verified source identity",
+        provider_evidence=_approved_evidence(),
+    )
+
+    assert replay_calls == [result]
+
+
 def _agreeing_manual_observation(
     repository: AthleteMappingRepository, *, observed_at: datetime | None = None
 ):

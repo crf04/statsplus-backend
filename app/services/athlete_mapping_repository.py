@@ -482,6 +482,7 @@ class AthleteMappingRepository:
         engine: Engine,
         *,
         clock: Any | None = None,
+        projection_replay: Any | None = None,
     ) -> None:
         self.engine = engine
         if is_demo_database_url(str(getattr(engine, "url", ""))):
@@ -489,6 +490,12 @@ class AthleteMappingRepository:
                 "The bundled demo database is read-only and cannot store athlete mappings."
             )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._projection_replay = projection_replay
+
+    def set_projection_replay(self, projection_replay: Any | None) -> None:
+        """Attach the database-only projection replay callback after assembly."""
+
+        self._projection_replay = projection_replay
 
     @contextmanager
     def _transaction(self, provider: str, provider_id: str):
@@ -1431,12 +1438,15 @@ class AthleteMappingRepository:
                 # the audit has to name it as an inactive selection.
                 self._insert_candidates(connection, int(decision["id"]), (selected,))
             mapping = self._select_mapping(connection, provider, provider_id)
-            return MappingPersistenceResult(
+            result = MappingPersistenceResult(
                 state.value,
                 True,
                 mapping=self._mapping_record(mapping),
                 decision=self._decision_result(connection, decision),
             )
+        if self._projection_replay is not None:
+            self._projection_replay(result)
+        return result
 
     # -- SQL helpers -------------------------------------------------------
 
