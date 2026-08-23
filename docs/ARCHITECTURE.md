@@ -599,6 +599,12 @@ builds a season-sized generation-ID parameter list, and a delayed provider
 delivery can remain immutable archive evidence without entering a set after
 the game-start boundary. Repeating a close returns the original set and cannot
 move its start time.
+Mapping replay generations are explicit deltas even when they reuse a Complete
+source snapshot and poll. They are never eligible as the Complete baseline;
+the closing fold applies their affected references like a Partial generation,
+so a pre-start mapping decision cannot truncate an otherwise complete frozen
+board. A Partial poll between the Complete baseline and a replay delta is
+folded in the same ordering.
 Enabling a provider after a game has closed does not backfill its closing set;
 that provider reads `missing` for the game permanently.
 

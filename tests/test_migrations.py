@@ -283,6 +283,13 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "resolution_state",
         "unresolved_identities",
     } <= observation_columns
+    generation_columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "projection_materialization_generations"
+        )
+    }
+    assert "is_replay" in generation_columns
     lock_columns = {
         column["name"]
         for column in inspector.get_columns("projection_archive_scope_locks")
@@ -343,6 +350,10 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
             "older_generation": "older_not_promoted",
             "same_generation": "same_time_not_promoted",
         }
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM projection_materialization_generations "
+            "WHERE is_replay = 1"
+        )).scalar_one() == 0
         assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         backfilled = connection.execute(text(
             "SELECT athlete_provider_id, event_provider_id, "

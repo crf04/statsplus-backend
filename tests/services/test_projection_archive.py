@@ -1024,6 +1024,101 @@ def test_closing_replay_joins_observations_without_generation_id_bind_list(tmp_p
     )
 
 
+@pytest.mark.parametrize("insert_partial", [False, True])
+def test_closing_set_retains_complete_board_across_replay_delta(
+    tmp_path, insert_partial
+):
+    engine = create_engine(
+        f"sqlite:///{tmp_path / f'projection-closing-replay-{insert_partial}.sqlite3'}"
+    )
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    initial = _closing_snapshot(catalog, OBSERVED_AT, "27.5")
+    replay_market = replace(
+        initial.markets[0],
+        market_id="unresolved-replay-market",
+        athlete=AthleteEvidence(
+            provider_id="athlete-closing-replay",
+            name="Provider Player",
+            team=TeamEvidence(canonical_id=1610612747, abbreviation="LAL"),
+        ),
+    )
+    carried_market = _closing_snapshot(catalog, OBSERVED_AT, "28.5").markets[0]
+    initial = replace(
+        initial,
+        markets=(replay_market, carried_market),
+        coverage=CoverageEvidence(
+            fetched_count=2,
+            eligible_count=2,
+            normalized_count=2,
+            expected_total=2,
+        ),
+    )
+    archive.ingest_snapshot(initial, query=query, accepted_at=OBSERVED_AT)
+
+    partial_at = OBSERVED_AT + timedelta(minutes=1)
+    if insert_partial:
+        archive.ingest_snapshot(
+            replace(
+                initial,
+                status=SnapshotStatus.PARTIAL,
+                markets=(replay_market,),
+                coverage=CoverageEvidence(
+                    fetched_count=1,
+                    eligible_count=1,
+                    normalized_count=1,
+                    expected_total=2,
+                ),
+                retrieved_at=partial_at,
+            ),
+            query=query,
+            accepted_at=partial_at,
+        )
+
+    replayed_at = partial_at + timedelta(minutes=1)
+    replay = archive.replay_athlete_mapping(
+        provider="dabble",
+        provider_athlete_id="athlete-closing-replay",
+        canonical_player_id=2544,
+        canonical_player_name="Mapped Player",
+        canonical_team_id=1610612747,
+        replayed_at=replayed_at,
+    )
+    assert replay is not None
+
+    frozen = archive.freeze_closing_projection_set(
+        provider="dabble",
+        query=query,
+        canonical_game_id=GAME_ID,
+        started_at=replayed_at + timedelta(minutes=1),
+        created_at=replayed_at + timedelta(minutes=1),
+    )
+
+    assert frozen.observation_count == 2
+    with engine.connect() as connection:
+        memberships = connection.execute(
+            select(
+                ClosingProjectionMembership.generation_id,
+                ProjectionObservation.canonical_player_id,
+            )
+            .join(
+                ProjectionObservation,
+                ProjectionObservation.observation_id
+                == ClosingProjectionMembership.observation_id,
+            )
+            .where(
+                ClosingProjectionMembership.closing_set_id == frozen.closing_set_id
+            )
+        ).all()
+    assert len(memberships) == 2
+    assert any(
+        generation_id == replay.generation_id and canonical_player_id == 2544
+        for generation_id, canonical_player_id in memberships
+    )
+
+
 def test_started_reader_uses_closing_state_for_actual_start_and_final_status(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-status.sqlite3'}")
     run_migrations(engine)

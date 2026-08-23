@@ -85,6 +85,7 @@ PROJECTION_ARCHIVE_REQUIRED_COLUMNS = {
         "resolution_state",
         "unresolved_identities",
     ),
+    "projection_materialization_generations": ("is_replay",),
     "latest_player_projections": ("confirmed_at",),
 }
 DEFAULT_PROJECTION_ARCHIVE_MAX_MARKETS = 10_000
@@ -143,7 +144,7 @@ def require_projection_archive_schema(engine: Engine) -> None:
         missing = (*missing_tables, *missing_columns)
         raise ConfigurationError(
             "Projection archive dependencies require migrations "
-            "040_projection_archive, 041_projection_archive_transitions, and "
+            "040_projection_archive, 041_projection_archive_transitions, "
             "044_projection_closing_sets, and 045_projection_mapping_replay; missing: "
             + ", ".join(missing)
         )
@@ -774,6 +775,7 @@ class ProjectionArchive:
                 retrieved_at=snapshot.retrieved_at,
                 materialization_checksum=plan.materialization_checksum,
                 outcome=plan.outcome.value,
+                is_replay=False,
             )
         )
         if write.observation_rows:
@@ -1141,6 +1143,7 @@ class ProjectionArchive:
                 .where(
                     *eligible,
                     snapshot_table.c.snapshot_status == SnapshotStatus.COMPLETE.value,
+                    generation_table.c.is_replay.is_(False),
                 )
                 .order_by(
                     generation_table.c.retrieved_at.desc(),
@@ -1177,6 +1180,7 @@ class ProjectionArchive:
                     generation_table.c.generation_id,
                     generation_table.c.retrieved_at,
                     generation_table.c.created_at,
+                    generation_table.c.is_replay,
                     snapshot_table.c.snapshot_status,
                     poll_table.c.completed_at,
                     observation_table.c.observation_id,
@@ -1223,6 +1227,7 @@ class ProjectionArchive:
                 generations.append(
                     {
                         "generation_id": generation_id,
+                        "is_replay": bool(row["is_replay"]),
                         "snapshot_status": row["snapshot_status"],
                         "rows": [],
                     }
@@ -1233,7 +1238,10 @@ class ProjectionArchive:
         state: dict[str, Any] = {}
         for generation in generations:
             rows = generation["rows"]
-            if generation["snapshot_status"] == SnapshotStatus.COMPLETE.value:
+            if (
+                generation["snapshot_status"] == SnapshotStatus.COMPLETE.value
+                and not generation["is_replay"]
+            ):
                 state.clear()
             else:
                 for reference in {str(row["market_reference"]) for row in rows}:
@@ -1649,6 +1657,7 @@ class ProjectionArchive:
                         retrieved_at=current["retrieved_at"],
                         materialization_checksum=materialization_checksum,
                         outcome=MaterializationOutcome.ADVANCED.value,
+                        is_replay=True,
                     )
                 )
                 connection.execute(insert(observation_table), new_rows)

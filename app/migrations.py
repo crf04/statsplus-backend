@@ -13,6 +13,7 @@ import json
 from typing import Callable, Final
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Integer,
@@ -1512,6 +1513,8 @@ def _rebuild_projection_transition_tables_sqlite(
                 )
             elif column == "unresolved_identities":
                 expressions.append("'' AS unresolved_identities")
+            elif column == "is_replay":
+                expressions.append("0 AS is_replay")
             else:
                 raise RuntimeError(
                     f"migration 041 cannot backfill projection column {column}"
@@ -1571,6 +1574,23 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
         ProjectionObservation,
         ProviderPoll,
     )
+
+    generation_name = connection.dialect.identifier_preparer.quote(
+        ProjectionMaterializationGeneration.__tablename__
+    )
+    generation_columns = {
+        column["name"]
+        for column in inspect(connection).get_columns(
+            ProjectionMaterializationGeneration.__tablename__
+        )
+    }
+    if "is_replay" not in generation_columns:
+        boolean_type = Boolean().compile(dialect=connection.dialect)
+        default = "FALSE" if connection.dialect.name == "postgresql" else "0"
+        connection.execute(text(
+            f"ALTER TABLE {generation_name} ADD COLUMN is_replay "
+            f"{boolean_type} NOT NULL DEFAULT {default}"
+        ))
 
     lock_name = connection.dialect.identifier_preparer.quote(
         ProjectionArchiveScopeLock.__tablename__
@@ -1742,9 +1762,6 @@ def _upgrade_projection_mapping_replay(connection: Connection) -> None:
             ),
         )
         return
-    generation_name = connection.dialect.identifier_preparer.quote(
-        ProjectionMaterializationGeneration.__tablename__
-    )
     for constraint in inspect(connection).get_unique_constraints(
         ProjectionMaterializationGeneration.__tablename__
     ):

@@ -255,6 +255,7 @@ class ProjectionMaterializationGeneration(Base):
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
     materialization_checksum = Column(String(64), nullable=False)
     outcome = Column(String(32), nullable=False)
+    is_replay = Column(Boolean, nullable=False, default=False, server_default="false")
 
     __table_args__ = (
         UniqueConstraint(
