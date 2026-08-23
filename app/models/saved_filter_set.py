@@ -19,6 +19,12 @@ from sqlalchemy.sql import func
 from . import Base
 
 
+# The stored width and the accepted width are the same limit; the service
+# validates against these so a column can never quietly outgrow its check.
+SAVED_FILTER_SET_NAME_MAX_LENGTH = 100
+SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH = 2048
+
+
 class SavedFilterSet(Base):
     """A named, account-private Log Workspace query string."""
 
@@ -32,23 +38,27 @@ class SavedFilterSet(Base):
         nullable=False,
         comment="Owning account; saved sets are never shared between accounts",
     )
-    name = Column(String(100), nullable=False, comment="User-chosen label")
+    name = Column(
+        String(SAVED_FILTER_SET_NAME_MAX_LENGTH),
+        nullable=False,
+        comment="User-chosen label",
+    )
     query_string = Column(
-        String(2048),
+        String(SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH),
         nullable=False,
         comment="Bare Log Workspace URL query string, without a leading '?'",
     )
 
+    # No server default: like every sibling model, the writing service supplies
+    # both timestamps, so there is one clock rather than two.
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
         comment="When the filter set was saved",
     )
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
         comment="When the filter set was last renamed",
     )
 

@@ -95,6 +95,38 @@ def test_the_table_is_owned_by_an_account_and_cascades_on_delete(
     assert foreign_keys[0]["options"].get("ondelete") == "CASCADE"
 
 
+def test_the_validated_lengths_are_the_stored_column_lengths():
+    """One source for each limit, so a column can never outgrow its check."""
+
+    columns = SavedFilterSet.__table__.c
+
+    assert columns.name.type.length == SAVED_FILTER_SET_NAME_MAX_LENGTH
+    assert (
+        columns.query_string.type.length == SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH
+    )
+
+
+def test_only_the_service_writes_the_timestamps(saved_filter_sets):
+    """One timestamp mechanism, matching the sibling models.
+
+    Every sibling model leaves ``created_at``/``updated_at`` without a server
+    default and has the writing service supply them, so a second, database-side
+    mechanism would be the only way the two could disagree.
+    """
+
+    columns = SavedFilterSet.__table__.c
+    assert columns.created_at.server_default is None
+    assert columns.updated_at.server_default is None
+    assert columns.updated_at.onupdate is None
+
+    created = saved_filter_sets.create_saved_filter_set(
+        OWNER, name="Timestamped", query_string=QUERY_STRING
+    )
+
+    assert created["created_at"] is not None
+    assert created["created_at"] == created["updated_at"]
+
+
 def test_deleting_an_account_removes_its_saved_filter_sets(saved_filter_set_engine):
     _seed(saved_filter_set_engine, OWNER, 2)
     _seed(saved_filter_set_engine, OTHER, 1, name_prefix="Other")
@@ -210,6 +242,82 @@ def test_a_duplicate_name_is_refused_case_insensitively(saved_filter_sets):
         )
 
     assert len(saved_filter_sets.list_saved_filter_sets(OWNER)) == 1
+
+
+def _let_the_first_uniqueness_check_pass(monkeypatch):
+    """Simulate a competing writer committing between check and commit.
+
+    The pre-insert ``SELECT`` cannot see a row another transaction has not
+    committed yet, so the first check reports the name as free.  Every later
+    call -- including the service's recovery re-check after the database
+    refuses the insert -- sees the real state.
+    """
+
+    real = UserService._saved_filter_set_name_taken
+    calls = []
+
+    def racing(session, firebase_uid, name, *, exclude_id=None):
+        calls.append(name)
+        if len(calls) == 1:
+            return False
+        return real(session, firebase_uid, name, exclude_id=exclude_id)
+
+    monkeypatch.setattr(
+        UserService, "_saved_filter_set_name_taken", staticmethod(racing)
+    )
+    return calls
+
+
+def test_a_name_taken_between_the_check_and_the_commit_is_a_conflict(
+    saved_filter_sets, monkeypatch
+):
+    saved_filter_sets.create_saved_filter_set(
+        OWNER, name="Jokic at home", query_string=QUERY_STRING
+    )
+    calls = _let_the_first_uniqueness_check_pass(monkeypatch)
+
+    with pytest.raises(ConflictError) as conflict:
+        saved_filter_sets.create_saved_filter_set(
+            OWNER, name="jokic AT home", query_string=QUERY_STRING
+        )
+
+    # The database index refused the insert and the service translated it
+    # rather than letting an IntegrityError become a 500.
+    assert conflict.value.status_code == 409
+    assert calls == ["jokic AT home", "jokic AT home"]
+    assert len(saved_filter_sets.list_saved_filter_sets(OWNER)) == 1
+
+
+def test_a_name_taken_between_the_check_and_a_rename_is_a_conflict(
+    saved_filter_sets, monkeypatch
+):
+    saved_filter_sets.create_saved_filter_set(
+        OWNER, name="Taken", query_string=QUERY_STRING
+    )
+    renamed = saved_filter_sets.create_saved_filter_set(
+        OWNER, name="Free", query_string=QUERY_STRING
+    )
+    calls = _let_the_first_uniqueness_check_pass(monkeypatch)
+
+    with pytest.raises(ConflictError) as conflict:
+        saved_filter_sets.rename_saved_filter_set(OWNER, renamed["id"], name="taken")
+
+    assert conflict.value.status_code == 409
+    assert calls == ["taken", "taken"]
+    assert sorted(
+        item["name"] for item in saved_filter_sets.list_saved_filter_sets(OWNER)
+    ) == ["Free", "Taken"]
+
+
+def test_an_integrity_failure_that_is_not_a_duplicate_name_is_not_a_conflict(
+    saved_filter_sets,
+):
+    """A dangling owner is a server defect, not a name the caller can fix."""
+
+    with pytest.raises(IntegrityError):
+        saved_filter_sets.create_saved_filter_set(
+            "ghost-uid", name="Orphan", query_string=QUERY_STRING
+        )
 
 
 def test_a_duplicate_name_in_another_account_is_allowed(saved_filter_sets):

@@ -10,20 +10,26 @@ from datetime import datetime, timedelta, timezone
 import logging
 import re
 from sqlalchemy import func
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.errors import ConflictError, InvalidInputError, ResourceNotFoundError
 from app.models import get_session, SavedFilterSet, User
+from app.models.saved_filter_set import (
+    SAVED_FILTER_SET_NAME_MAX_LENGTH,
+    SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
+)
 from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
 
 USER_LOGIN_TOUCH_INTERVAL = timedelta(minutes=15)
 
-SAVED_FILTER_SET_NAME_MAX_LENGTH = 100
-SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH = 2048
 SAVED_FILTER_SET_LIMIT = 100
+
+SAVED_FILTER_SET_DUPLICATE_NAME_MESSAGE = (
+    "A saved filter set with that name already exists."
+)
 
 # A bare query string never carries a scheme, so anything shaped like
 # ``scheme://`` is a whole URL rather than the value this feature stores.
@@ -366,6 +372,35 @@ class UserService:
             query = query.filter(SavedFilterSet.id != exclude_id)
         return session.query(query.exists()).scalar()
 
+    def _commit_unique_name(
+        self,
+        session,
+        firebase_uid: str,
+        name: str,
+        *,
+        exclude_id: Optional[int] = None,
+    ) -> None:
+        """Commit a write whose only conflict can be a duplicate name.
+
+        The pre-insert check cannot see a row a competing transaction has not
+        committed yet, so ``uq_saved_filter_sets_owner_name`` is the real
+        arbiter.  Re-reading after the rollback tells a lost uniqueness race
+        (the caller's 409) apart from any other integrity failure, such as an
+        owner that no longer exists, which stays a server error.
+        """
+
+        try:
+            session.commit()
+        except IntegrityError as error:
+            session.rollback()
+            if self._saved_filter_set_name_taken(
+                session, firebase_uid, name, exclude_id=exclude_id
+            ):
+                raise ConflictError(
+                    SAVED_FILTER_SET_DUPLICATE_NAME_MESSAGE, detail=error
+                ) from error
+            raise
+
     @staticmethod
     def _owned_saved_filter_set(
         session,
@@ -425,6 +460,10 @@ class UserService:
                 .filter(SavedFilterSet.firebase_uid == firebase_uid)
                 .count()
             )
+            # Advisory under concurrency: the cap has no database backstop, so
+            # two simultaneous writes can both observe room and leave the
+            # account one over. Deliberate -- a bookmark limit does not justify
+            # locking or a counter table.
             if held >= SAVED_FILTER_SET_LIMIT:
                 raise ConflictError(
                     "An account may hold at most "
@@ -433,9 +472,7 @@ class UserService:
             if self._saved_filter_set_name_taken(
                 session, firebase_uid, validated_name
             ):
-                raise ConflictError(
-                    "A saved filter set with that name already exists."
-                )
+                raise ConflictError(SAVED_FILTER_SET_DUPLICATE_NAME_MESSAGE)
 
             now = datetime.now(timezone.utc)
             saved_filter_set = SavedFilterSet(
@@ -446,7 +483,7 @@ class UserService:
                 updated_at=now,
             )
             session.add(saved_filter_set)
-            session.commit()
+            self._commit_unique_name(session, firebase_uid, validated_name)
             return saved_filter_set.to_dict()
         except Exception:
             session.rollback()
@@ -479,13 +516,14 @@ class UserService:
                 validated_name,
                 exclude_id=saved_filter_set.id,
             ):
-                raise ConflictError(
-                    "A saved filter set with that name already exists."
-                )
+                raise ConflictError(SAVED_FILTER_SET_DUPLICATE_NAME_MESSAGE)
 
+            renamed_id = saved_filter_set.id
             saved_filter_set.name = validated_name
             saved_filter_set.updated_at = datetime.now(timezone.utc)
-            session.commit()
+            self._commit_unique_name(
+                session, firebase_uid, validated_name, exclude_id=renamed_id
+            )
             return saved_filter_set.to_dict()
         except Exception:
             session.rollback()
