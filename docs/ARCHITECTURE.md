@@ -134,8 +134,11 @@ two-sided odds — because that is a fact about the sides, which stay in the
 archived source document. A market that offers no priced side is evidence
 rather than something to select from: it is archived, and it is excluded from
 `targetable`, from Latest Player Projections, from the database-first Player
-Pool, and from closing membership, including when a mapping replay recomputes
-the decision from the stored row.
+Pool, and from closing membership. A mapping replay recomputes that decision
+from the observation's own archived source document — not from the stored price
+columns — so a row archived before migration 046 (whose columns were
+backfilled to `unpriced`) keeps the price its document still carries, and its
+targetability, across the replay.
 
 The canonical archive document carries the triple as schema version 2. A
 document is read back and re-encoded in the version it declares, so every

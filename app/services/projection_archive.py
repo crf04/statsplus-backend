@@ -44,7 +44,6 @@ from app.models.projection_archive import (
 from app.providers.dfs import (
     MarketStatus,
     MarketVariant,
-    PriceKind,
     NBAMarketQuery,
     PlayerProjectionMarket,
     ProviderSnapshot,
@@ -1818,11 +1817,25 @@ class ProjectionArchive:
             "resolved" if not unresolved else "unresolved"
         )
         rematerialized["unresolved_identities"] = ",".join(unresolved)
+        # The price is a fact of the archived source document, not of the
+        # observation row: migration 046 backfilled every pre-046 row's price
+        # columns to 'unpriced', but the document those rows point at still
+        # carries the published price.  Re-derive the triple from the decoded
+        # source market so a legacy Underdog/Dabble row keeps its price -- and
+        # its targetability -- across a mapping replay, while a legacy
+        # PrizePicks row (no priced selection) still correctly flips per P2.
+        rematerialized["price_kind"] = source_market.price_kind.value
+        rematerialized["price_value"] = (
+            None
+            if source_market.price_value is None
+            else str(source_market.price_value)
+        )
+        rematerialized["price_scope"] = source_market.price_scope.value
         rematerialized["targetable"] = bool(
             rematerialized["market_status"] == MarketStatus.AVAILABLE.value
             and rematerialized["market_variant"] == MarketVariant.STANDARD.value
             and rematerialized["scoring_period"] == ScoringPeriod.FULL_GAME.value
-            and rematerialized["price_kind"] != PriceKind.UNPRICED.value
+            and source_market.is_priced
             and not unresolved
             and rematerialized["canonical_team_id"] is not None
             and rematerialized["market_category"] is not None

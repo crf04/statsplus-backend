@@ -2611,3 +2611,111 @@ def test_archived_observations_carry_the_canonical_price_and_gate_targetability(
         market_reference(entry_priced),
         market_reference(selection_priced),
     }
+
+
+def test_legacy_backfilled_row_replays_targetable_from_its_priced_document(tmp_path):
+    """A pre-046 row whose price columns were backfilled to 'unpriced' must not
+    lose targetability on replay: the archived document still carries the price,
+    so the mapping-replay gate reads that, not the backfilled column."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-price-replay.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    statistic = catalog.by_id["points"]
+    evidence = StatisticEvidence(provider_id="pts", canonical_id=statistic.id)
+    market = PlayerProjectionMarket(
+        provider="underdog",
+        market_id="legacy-underdog-line",
+        athlete=AthleteEvidence(
+            provider_id="athlete-unresolved",
+            name="Provider Player",
+            team=TeamEvidence(canonical_id=None),
+        ),
+        event=EventEvidence(provider_id="event-1", canonical_id=GAME_ID),
+        team=TeamEvidence(canonical_id=10),
+        statistic=evidence,
+        statistic_match=StatisticMatch(
+            state=MatchState.CANONICAL,
+            evidence=evidence,
+            scoring_period=ScoringPeriod.FULL_GAME,
+            canonical=statistic,
+            provider="underdog",
+        ),
+        threshold=MarketThreshold("20.5", "count"),
+        status=MarketStatus.AVAILABLE,
+        variant=MarketVariant.STANDARD,
+        scoring_period=ScoringPeriod.FULL_GAME,
+        selections=(
+            Selection(
+                selection_id="higher",
+                direction=SelectionDirection.HIGHER,
+                american_price=-112,
+            ),
+            Selection(
+                selection_id="lower",
+                direction=SelectionDirection.LOWER,
+                american_price=100,
+            ),
+        ),
+    )
+    snapshot = ProviderSnapshot(
+        provider="underdog",
+        status=SnapshotStatus.COMPLETE,
+        markets=(market,),
+        coverage=CoverageEvidence(
+            fetched_count=1,
+            eligible_count=1,
+            normalized_count=1,
+            expected_total=1,
+        ),
+        retrieved_at=OBSERVED_AT,
+    )
+    archive = ProjectionArchive(engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    ingested = archive.ingest_snapshot(snapshot, query=query, accepted_at=OBSERVED_AT)
+
+    # Simulate the migration-046 backfill on a row archived before this branch:
+    # the price columns default to 'unpriced' even though the referenced source
+    # document still carries the American prices.
+    observations = ProjectionObservation.__table__
+    with engine.begin() as connection:
+        connection.execute(
+            observations.update()
+            .where(observations.c.generation_id == ingested.generation_id)
+            .values(price_kind="unpriced", price_value=None, price_scope="selection")
+        )
+
+    def underdog_reader():
+        return LatestProjectionPlayerPoolReader(
+            engine,
+            ProjectionArchiveReadScope(provider="underdog", query=query),
+            clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+        )
+
+    replayed = archive.replay_athlete_mapping(
+        provider="underdog",
+        provider_athlete_id="athlete-unresolved",
+        canonical_player_id=7,
+        canonical_player_name="Mapped Player",
+        canonical_team_id=10,
+        replayed_at=OBSERVED_AT - timedelta(minutes=1),
+    )
+
+    assert replayed.changed is True
+    pool = underdog_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert [player.canonical_player_id for player in pool.players] == [7]
+    with engine.connect() as connection:
+        replay_row = connection.execute(
+            select(observations).where(
+                observations.c.generation_id == replayed.generation_id
+            )
+        ).mappings().one()
+        latest = connection.execute(
+            select(LatestPlayerProjection.__table__)
+        ).mappings().one()
+    # The replay row recovers the true price from the document, and stays
+    # targetable because a priced, fully-resolved market is an offering.
+    assert replay_row["targetable"] is True
+    assert replay_row["price_kind"] == "american"
+    assert replay_row["price_scope"] == "selection"
+    assert latest.generation_id == replayed.generation_id
