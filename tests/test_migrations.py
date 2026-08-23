@@ -1943,6 +1943,25 @@ def test_migration_cli_redacts_database_password(monkeypatch, capsys):
     assert "postgresql://migration_user:***@example.invalid/stats" in output
 
 
+def test_migration_cli_propagates_failures_as_a_nonzero_exit(monkeypatch):
+    """A failing migration must not return a success status.
+
+    ``scripts/migrate.py`` runs as the Railway pre-deploy command; the deploy is
+    fail-closed only if a failed migration exits non-zero.  ``main`` returns 0
+    solely on success, so an exception from ``run_migrations`` propagates out of
+    ``main`` (the module wraps it in ``SystemExit`` at import-as-script time),
+    never a zero status.
+    """
+
+    def _boom(_url):
+        raise RuntimeError("migration failed")
+
+    monkeypatch.setattr(migrate, "_run", _boom)
+
+    with pytest.raises(RuntimeError, match="migration failed"):
+        migrate.main(["--database-url", "sqlite:////tmp/statsplus-fail.sqlite3"])
+
+
 def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
     """An existing mapping database gains the table without losing decisions."""
     from app.migrations import MIGRATIONS
