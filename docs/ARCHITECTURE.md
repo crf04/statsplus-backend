@@ -423,8 +423,53 @@ attempt timing. Query status filters are sorted exactly as the
 Provider Snapshot codec sorts them, so caller order cannot split one archive
 scope. `observation_count` always means the number of normalized observations
 present in that accepted snapshot, including unchanged attempts; it is not the
-number of newly inserted rows. Provider polling and scheduling remain outside
-this slice.
+number of newly inserted rows.
+
+Provider polling is coordinated by `ProjectionCollectionCoordinator`, which is
+constructed once in application dependencies for the dedicated collector
+process. The long-lived Railway loop builds settings, Redis/cache clients, and
+provider executors once, then invokes that same coordinator on each five-minute
+wake; the one-shot command builds one dependency graph for its single attempt.
+It reads the canonical Event Catalog before taking the collector lease, so
+offseason/no-due runs do not call a provider. The default board-wide
+policy is every 30 minutes beginning 24 hours before the earliest non-postponed,
+non-started event and every five minutes in the final two hours. Both intervals
+and the horizon are configurable. A past scheduled timestamp does not stop the
+poll during the bounded delayed-game window: governed event status
+(live/final/postponed), rather than tip-off time, closes an active event's
+collection window. A still-scheduled row more than the configured horizon past
+tip-off is ignored as stale so an abandoned catalog row cannot pin offseason
+collection forever. Each wake derives dueness from the last poll plus the
+*current* interval, so crossing into the final two hours immediately adopts the
+five-minute cadence instead of waiting out an earlier 30-minute deadline. The
+one-shot `scripts/collect_projections.py` command uses this coordinator, not a
+second ingestion path or an admin refresh route, and exits nonzero when board
+collection fails for every due provider. Code-less Event Catalog rows use
+recognized live clock text such as `Q3 5:22` as started while unknown clock text
+remains conservatively pregame.
+
+Migration 043 adds one singleton `projection_collection_leases` row and
+per-provider `projection_collection_provider_states`. PostgreSQL locks and
+fences the lease row using database time, so process-clock skew cannot steal a
+live lease or write future poll/backoff state that suppresses the scheduled
+collector. Dueness is derived from database-timed `last_poll_at` and
+`backoff_until`; no separate poll-deadline column is stored. The owner renews
+that lease around board and per-provider work; an expiry or takeover returns
+the bounded `busy/lease_lost` outcome. SQLite uses
+`BEGIN IMMEDIATE` for local tests but is not evidence for the production
+locking contract. A busy or overlapping run is a safe no-op. Provider outcomes
+are persisted independently through the existing archive recorder, with
+bounded exponential backoff/circuit-open state for failures and a bounded
+Provider Poll duration. Stale-if-error cache fallback is failure health rather
+than a successful poll, board-wide defects and omitted outcomes create bounded
+failure rows, and no failed provider is retried faster than the current healthy
+cadence. A failure from one provider cannot suppress another provider's
+attempt. The coordinator's adaptive policy is intended to be woken by a
+dedicated Railway service every five minutes.
+Admin diagnostics expose only provider-safe last-poll/last-changed timestamps,
+bounded freshness, failure/backoff state, active/unresolved counts, and lease
+state; they never expose raw payloads or source identifiers. Request-time
+readers remain database-only and never invoke the coordinator or a provider.
 Each newer changed Complete snapshot replaces that provider/query's eligible
 set in `latest_player_projections`, so suspended, unresolved, omitted, and
 content-reidentified markets cannot leave an older latest pointer behind. An

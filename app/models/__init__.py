@@ -90,6 +90,10 @@ from .projection_archive import (  # noqa: E402
     ProjectionProviderSnapshot,
     ProviderPoll,
 )
+from .projection_collection import (  # noqa: E402
+    ProjectionCollectionLease,
+    ProjectionCollectionProviderState,
+)
 from .player_game_log import (  # noqa: E402
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -162,6 +166,8 @@ __all__ = [
     'PlayerPoolSnapshot',
     'ProjectionArchiveScopeLock',
     'ProviderPoll',
+    'ProjectionCollectionLease',
+    'ProjectionCollectionProviderState',
     'ProjectionProviderSnapshot',
     'ProjectionObservation',
     'ProjectionMaterializationGeneration',

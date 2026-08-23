@@ -2198,6 +2198,33 @@ def projection_route_context(tmp_path, monkeypatch):
         "app.providers.pbp_game_logs.PBPGameLogAdapter",
         lambda **_kwargs: _NoProvider(),
     )
+    projection_provider_calls = {
+        "dabble": 0,
+        "prizepicks": 0,
+        "underdog": 0,
+    }
+
+    class ProjectionProviderGuard:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def get_snapshot(self, *_args, **_kwargs):
+            projection_provider_calls[self.provider] += 1
+            raise AssertionError(
+                f"database-first route called {self.provider} projection provider"
+            )
+
+    for adapter, provider in (
+        ("app.providers.dabble.DabbleAdapter", "dabble"),
+        ("app.providers.prizepicks.PrizePicksAdapter", "prizepicks"),
+        ("app.providers.underdog.UnderdogAdapter", "underdog"),
+    ):
+        monkeypatch.setattr(
+            adapter,
+            lambda *args, _provider=provider, **kwargs: ProjectionProviderGuard(
+                _provider
+            ),
+        )
     assembled = build_dependencies(settings)
     assert isinstance(
         assembled.projection_player_pool_reader,
@@ -2279,6 +2306,7 @@ def projection_route_context(tmp_path, monkeypatch):
         route_client=route_client,
         client=client,
         pool=pool,
+        projection_provider_calls=projection_provider_calls,
     )
 
 
@@ -2401,6 +2429,25 @@ def test_authenticated_projection_routes_distinguish_missing_and_complete_empty(
     assert expired_empty_slate.get_json()["games"][0]["projection_state"] == {
         "state": "missing",
         "observed_at": None,
+    }
+
+
+def test_database_first_projection_routes_never_call_dfs_providers(
+    projection_route_context,
+):
+    context = projection_route_context
+
+    slate = context.client.get("/api/games/slate?date=2026-01-15")
+    selection = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=2544"
+    )
+
+    assert slate.status_code == 200
+    assert selection.status_code == 503
+    assert context.projection_provider_calls == {
+        "dabble": 0,
+        "prizepicks": 0,
+        "underdog": 0,
     }
 
 

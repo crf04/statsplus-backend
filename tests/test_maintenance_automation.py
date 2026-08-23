@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import yaml
 
@@ -26,6 +27,11 @@ def test_ci_uses_node_24_github_actions():
 
     assert "actions/checkout@" in workflow and "# v7." in workflow
     assert "actions/setup-python@" in workflow and "# v7." in workflow
+    action_refs = re.findall(
+        r"uses: actions/(?:checkout|setup-python)@([^\s]+)", workflow
+    )
+    assert len(action_refs) == 4
+    assert all(re.fullmatch(r"[0-9a-f]{40}", ref) for ref in action_refs)
 
 
 def test_security_workflow_audits_lock_and_scans_secrets():

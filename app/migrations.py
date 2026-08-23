@@ -1228,6 +1228,29 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     LatestPlayerProjection.__table__.create(connection, checkfirst=True)
 
 
+def _create_projection_collection_tables(connection: Connection) -> None:
+    """Create the fenced projection collector lease and provider state."""
+
+    from app.models.projection_archive import ProviderPoll
+    from app.models.projection_collection import (
+        ProjectionCollectionLease,
+        ProjectionCollectionProviderState,
+    )
+
+    ProjectionCollectionLease.__table__.create(connection, checkfirst=True)
+    ProjectionCollectionProviderState.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns(ProviderPoll.__tablename__)}
+    if "duration_ms" not in existing:
+        preparer = connection.dialect.identifier_preparer
+        type_sql = "INTEGER"
+        connection.execute(
+            text(
+                f"ALTER TABLE {preparer.quote(ProviderPoll.__tablename__)} "
+                f"ADD COLUMN {preparer.quote('duration_ms')} {type_sql}"
+            )
+        )
+
+
 def _v40_projection_poll_promoted_predicate(
     *,
     poll_ref: str,
@@ -1430,6 +1453,8 @@ def _rebuild_projection_transition_tables_sqlite(
                 )
             elif column == "failure_reason":
                 expressions.append("NULL AS failure_reason")
+            elif column == "duration_ms":
+                expressions.append("NULL AS duration_ms")
             else:
                 raise RuntimeError(
                     f"migration 041 cannot backfill projection column {column}"
@@ -1751,6 +1776,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         42,
         "042_team_matchup_provider_provenance",
         _add_team_matchup_provider_provenance,
+    ),
+    Migration(
+        43,
+        "043_projection_collection_control",
+        _create_projection_collection_tables,
     ),
 )
 
