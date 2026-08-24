@@ -369,14 +369,14 @@ class TeamFilterRankingService:
             )
         except (TypeError, ValueError):
             return None
-        source = (
-            self.governance_resolver
-            if self.governance_resolver is not None
-            else self.publication_reader
-        )
+        if self.governance_resolver is None:
+            # There is no second source for governed game sets: the
+            # publication reader implements none of the resolver protocols, so
+            # pretending it could serve would only refuse more obscurely.
+            return None
         try:
             return resolve_governed_team_game_ids(
-                source,
+                self.governance_resolver,
                 read.season,
                 cutoff,
                 window=_WINDOW,
@@ -402,15 +402,17 @@ __all__ = [
 class PlayerDietReader:
     """The one Diet capability the game-log path needs.
 
-    ``PlayerDietService`` also owns provider-backed refresh, and it holds the
-    NBA Stats adapter to do it.  Injecting the whole service would leave that
-    adapter reachable from the game-log graph; this narrows it to the read.
+    ``PlayerDietService`` owns provider-backed refresh and holds the NBA Stats
+    and PBP adapters to do it, so wrapping the service would narrow the
+    interface while leaving those adapters reachable through the wrapper.  This
+    binds the service's own repository instead, which owns an engine and no
+    provider, so the adapters are unreachable rather than merely unexposed.
     """
 
     __slots__ = ("_diets",)
 
-    def __init__(self, diets) -> None:
-        self._diets = diets
+    def __init__(self, diet_repository) -> None:
+        self._diets = diet_repository
 
     def get_for_players(self, season: str, player_ids):
         return self._diets.get_for_players(season, player_ids)

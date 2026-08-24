@@ -570,10 +570,11 @@ def build_dependencies(
         redis_client=redis_client,
         settings=settings,
         game_logs_source=game_logs_source,
-        # Read-only Diet access: the full service owns a provider-backed
-        # refresh, so injecting it would leave NBA Stats reachable from here.
+        # Read-only Diet access over the service's own repository: the full
+        # service owns a provider-backed refresh, so injecting it -- or a
+        # wrapper around it -- would leave the adapters reachable from here.
         player_diets=(
-            PlayerDietReader(player_diet_service)
+            PlayerDietReader(player_diet_service.repository)
             if player_diet_service is not None
             else None
         ),

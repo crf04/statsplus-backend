@@ -773,3 +773,158 @@ def test_a_failed_refresh_leaves_the_prior_publication_ranking(tmp_path):
         )
 
     assert service.ranked_teams("OPP_PTS", SEASON)[:2] == ["GSW", "LAL"]
+
+
+def _governed_league_events():
+    """Fifteen Regular Season games pairing the whole canonical league once."""
+
+    teams = list(NBA_TEAM_ID_TO_TRICODE)
+    events, by_team = [], {}
+    for index in range(0, len(teams), 2):
+        home, away = teams[index], teams[index + 1]
+        game_id = f"00225000{index // 2:03d}"
+        events.append({
+            "nba_game_id": game_id,
+            "home_team_id": home,
+            "away_team_id": away,
+            "phase": "Regular Season",
+            "status": "Final",
+            "status_code": 3,
+            "scheduled_at": (RETRIEVED_AT - timedelta(days=1)).isoformat(),
+        })
+        by_team[home] = frozenset({game_id})
+        by_team[away] = frozenset({game_id})
+    return events, by_team
+
+
+def _publish_governed_nba_stream(tmp_path):
+    """Seed an NBA publication whose rows match a real Event Catalog."""
+
+    from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'governed.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
+    events, games_by_team = _governed_league_events()
+    catalog_payload = json.dumps(
+        {"events": events}, separators=(",", ":"), sort_keys=True
+    )
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id=EVENT_CATALOG_ID,
+            season=SEASON,
+            catalog_type="event",
+            cutoff=RETRIEVED_AT,
+            version="event-v1",
+            checksum=catalog_checksum,
+            payload=catalog_payload,
+            complete=True,
+            published_at=RETRIEVED_AT - timedelta(minutes=1),
+            expires_at=None,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=MANIFEST_ID,
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            collect_before=RETRIEVED_AT + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="team-filter-manifest-checksum",
+            event_catalog_publication_id=EVENT_CATALOG_ID,
+            event_catalog_checksum=catalog_checksum,
+            status="active",
+            created_at=RETRIEVED_AT,
+        ))
+    stream_key = NBA_PUBLICATION_STREAMS["play_types"].format(window="season")
+    metric_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY["play_types"]))
+    publications.register_stream(
+        stream_key,
+        provider="nba",
+        owner="residential_collector",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    allowed = {"LAL": (22.0, 10.0), "GSW": (30.0, 20.0)}
+    rows = []
+    for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items():
+        points, possessions = allowed.get(tricode, (10.0, 20.0))
+        per48 = {key: 1.0 for key in metric_keys}
+        per48["Transition_PTS"] = points
+        per48["Transition_POSS"] = possessions
+        rows.append({
+            "team_id": team_id,
+            "team_tricode": tricode,
+            "game_ids": sorted(games_by_team[team_id]),
+            "game_count": len(games_by_team[team_id]),
+            "per48": per48,
+            "league_average": {key: 1.0 for key in metric_keys},
+            "population_sigma": {key: 0.5 for key in metric_keys},
+            "competition_rank": {key: 1 for key in metric_keys},
+        })
+    encoded = json.dumps({"rows": rows}, separators=(",", ":"), sort_keys=True)
+    with engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=f"publication-{stream_key}",
+            stream_key=stream_key,
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            version=1,
+            status="active",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            manifest_id=MANIFEST_ID,
+            event_catalog_publication_id=EVENT_CATALOG_ID,
+            event_catalog_checksum=catalog_checksum,
+            created_at=RETRIEVED_AT,
+            fence=1,
+        ))
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key=stream_key,
+            active_publication_id=f"publication-{stream_key}",
+            previous_publication_id=None,
+            fence=1,
+            updated_at=RETRIEVED_AT,
+        ))
+    return engine, TeamFilterRankingService(
+        DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT),
+        governance_resolver=ActiveManifestLedgerGovernanceReader(engine),
+    )
+
+
+def test_a_publication_matching_the_real_event_catalog_ranks(tmp_path):
+    """The production resolver, not a stub, admits a governed publication."""
+
+    _engine, service = _publish_governed_nba_stream(tmp_path)
+
+    ranked = service.ranked_teams("Transition", SEASON)
+
+    assert len(ranked) == len(NBA_TEAM_ID_TO_TRICODE)
+    assert ranked[:2] == ["LAL", "GSW"]
+
+
+def test_a_publication_claiming_an_ungoverned_game_is_refused(tmp_path):
+    """The production resolver rejects rows the Event Catalog never held."""
+
+    engine, service = _publish_governed_nba_stream(tmp_path)
+    stream_key = NBA_PUBLICATION_STREAMS["play_types"].format(window="season")
+    with engine.begin() as connection:
+        row = connection.execute(
+            PublicationVersion.__table__.select().where(
+                PublicationVersion.stream_key == stream_key
+            )
+        ).mappings().one()
+        payload = json.loads(row["payload"])
+        payload["rows"][0]["game_ids"] = ["0022599999"]
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        connection.execute(
+            PublicationVersion.__table__.update().where(
+                PublicationVersion.publication_id == row["publication_id"]
+            ).values(
+                payload=encoded,
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            )
+        )
+
+    assert service.ranked_teams("Transition", SEASON) == []

@@ -3597,10 +3597,15 @@ The authoritative local and CI gate is `./scripts/check.sh`.
 - The game-log request path is fully synchronous and bounded: the route
   parses query parameters into one typed `GameLogQuery`, and the service runs
   under Flask's threaded gunicorn model (`--workers 4 --threads 2`). That path
-  makes no NBA Stats call of its own: player logs come from the injected
-  game-log source and Team Filters rank from Season publications, so the only
-  NBA Stats reach left under it is the governed Event Catalog the live source
-  joins against.  Wherever an NBA Stats call is made, it goes through
+  makes no provider call of its own: player logs come from the injected
+  game-log source and Team Filters rank from Season publications.  The only
+  provider clients still reachable from `GameService` sit under the retained
+  live PBP game-log source -- the PBP adapter itself and the NBA Stats adapter
+  owned by the governed Event Catalog it joins against -- and a structural test
+  asserts that every reach lies there and nowhere else.  Diet facts arrive
+  through a read-only reader bound to the Diet repository, not the
+  refresh-capable service that owns the adapters.  Wherever an NBA Stats call
+  is made, it goes through
   `NBAStatsAdapter`, which applies a
   process-shared `threading.BoundedSemaphore` sized by
   `NBA_STATS_MAX_CONCURRENCY` (default 10) and shares the provider timeout from
