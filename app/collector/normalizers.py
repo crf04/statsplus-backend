@@ -649,11 +649,11 @@ def _zone_response(
                     if any(value is not None for value in side_values):
                         if not all(value is not None for value in side_values):
                             raise ProviderContractError("provider_schema_changed")
-                        # Per-48 values arrive rounded to two decimals, so
-                        # each side carries up to half a hundredth of error.
+                        # Per-48 values arrive rounded to one decimal, so
+                        # each side carries up to half a tenth of error.
                         if (
-                            abs(_number(left_makes) + _number(right_makes) - _number(makes)) > 0.011
-                            or abs(_number(left_attempts) + _number(right_attempts) - _number(attempts)) > 0.011
+                            abs(_number(left_makes) + _number(right_makes) - _number(makes)) > 0.11
+                            or abs(_number(left_attempts) + _number(right_attempts) - _number(attempts)) > 0.11
                         ):
                             raise ProviderContractError("value_invariant_failed")
                 elif all(value is not None for value in side_values):
