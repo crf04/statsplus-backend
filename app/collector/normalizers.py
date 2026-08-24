@@ -639,28 +639,18 @@ def _zone_response(
                 side_values = (
                     left_makes, left_attempts, right_makes, right_attempts
                 )
-                # The live endpoint reports the combined corner alongside its
-                # left/right split; the two are the same evidence, so a
-                # combined value is accepted only when the sides are absent or
-                # sum to it exactly, and a lone partial split stays drift.
-                if makes is not None or attempts is not None:
-                    if makes is None or attempts is None:
+                # The endpoint's combined corner is authoritative when it is
+                # present.  The side columns are not additive components of
+                # it under every per-mode (live Per48 reports a combined value
+                # near the sides' mean, not their sum), so they are consulted
+                # only when the combined columns are absent, and a lone
+                # partial split stays drift.
+                if makes is None and attempts is None:
+                    if all(value is not None for value in side_values):
+                        makes = _number(left_makes) + _number(right_makes)
+                        attempts = _number(left_attempts) + _number(right_attempts)
+                    else:
                         raise ProviderContractError("provider_schema_changed")
-                    if any(value is not None for value in side_values):
-                        if not all(value is not None for value in side_values):
-                            raise ProviderContractError("provider_schema_changed")
-                        # Per-48 values arrive rounded to one decimal, so
-                        # each side carries up to half a tenth of error.
-                        if (
-                            abs(_number(left_makes) + _number(right_makes) - _number(makes)) > 0.11
-                            or abs(_number(left_attempts) + _number(right_attempts) - _number(attempts)) > 0.11
-                        ):
-                            raise ProviderContractError("value_invariant_failed")
-                elif all(value is not None for value in side_values):
-                    makes = _number(left_makes) + _number(right_makes)
-                    attempts = _number(left_attempts) + _number(right_attempts)
-                else:
-                    raise ProviderContractError("provider_schema_changed")
             if makes is None or attempts is None:
                 raise ProviderContractError("provider_schema_changed")
             values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}

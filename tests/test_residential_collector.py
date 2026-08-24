@@ -247,19 +247,23 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
     assert bound["TEAM_ID"].tolist() == [1610612737]
     assert bound["GP"].tolist() == [15]
     assert bound["MIN"].tolist() == [725]
-    # A combined corner beside its split is the live shape; it only fails
-    # when the sides do not sum to it.
-    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
-        normalize_opponent_zone_response(
-            pd.DataFrame(
-                [values + [5, 8]],
-                columns=pd.MultiIndex.from_tuples(
-                    columns
-                    + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
-                ),
+    # A combined corner beside its split is the live shape; the combined
+    # value is authoritative.
+    combined = normalize_opponent_zone_response(
+        pd.DataFrame(
+            [values + [5, 8]],
+            columns=pd.MultiIndex.from_tuples(
+                columns
+                + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
             ),
-            season="2025-26", cutoff=NOW, team_id=1610612737,
-        )
+        ),
+        season="2025-26", cutoff=NOW, team_id=1610612737,
+    )
+    assert {
+        (record["category"], record["FGM"], record["FGA"])
+        for record in combined.payload["records"]
+        if record["category"] == "Corner 3"
+    } == {("Corner 3", 5, 8)}
     wrong_team_values = list(values)
     wrong_team_values[0] = 1610612738
     with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
@@ -442,20 +446,23 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     } == {"11/01/2025"}
 
 
-def test_zone_response_accepts_the_live_combined_corner_beside_its_split():
-    # The live LeagueDashTeamShotLocations row reports "Corner 3" both
-    # combined and as its left/right sides; they are one piece of evidence.
-    def row(combined_fgm=4, combined_fga=8, right_fgm=2, right_fga=4):
-        return pd.DataFrame([{
+def test_zone_response_prefers_the_combined_corner_over_its_sides():
+    # The live row reports "Corner 3" both combined and split; the split is
+    # not an additive decomposition under Per48, so the combined value wins
+    # whenever it is present and the sides are only summed in its absence.
+    def row(**overrides):
+        base = {
             "TEAM_ID": 1610612737, "GP": 15, "MIN": 725,
             **{f"{zone}_OPP_{stat}": value
                for zone in ("Restricted Area", "In The Paint (Non-RA)",
                             "Mid-Range", "Above the Break 3")
                for stat, value in (("FGM", 4), ("FGA", 8))},
-            "Corner 3_OPP_FGM": combined_fgm, "Corner 3_OPP_FGA": combined_fga,
-            "Left Corner 3_OPP_FGM": 2, "Left Corner 3_OPP_FGA": 4,
-            "Right Corner 3_OPP_FGM": right_fgm, "Right Corner 3_OPP_FGA": right_fga,
-        }])
+            "Corner 3_OPP_FGM": 40.8, "Corner 3_OPP_FGA": 112.2,
+            "Left Corner 3_OPP_FGM": 41.8, "Left Corner 3_OPP_FGA": 113.3,
+            "Right Corner 3_OPP_FGM": 39.6, "Right Corner 3_OPP_FGA": 110.8,
+        }
+        base.update(overrides)
+        return pd.DataFrame([{k: v for k, v in base.items() if v is not None}])
 
     observation = normalize_opponent_zone_response(
         row(), season="2025-26", cutoff=NOW, team_id=1610612737
@@ -464,23 +471,27 @@ def test_zone_response_accepts_the_live_combined_corner_beside_its_split():
         record for record in observation.payload["records"]
         if record["category"] == "Corner 3"
     )
-    assert (corner["FGM"], corner["FGA"]) == (4, 8)
-    # Rounded per-48 sides may miss the combined value by a tenth.
-    tolerated = normalize_opponent_zone_response(
-        row(combined_fgm=4.1), season="2025-26", cutoff=NOW,
-        team_id=1610612737,
+    assert (corner["FGM"], corner["FGA"]) == (40.8, 112.2)
+
+    # Without the combined columns the sides are summed.
+    summed = normalize_opponent_zone_response(
+        row(**{"Corner 3_OPP_FGM": None, "Corner 3_OPP_FGA": None,
+               "Left Corner 3_OPP_FGM": 2, "Left Corner 3_OPP_FGA": 4,
+               "Right Corner 3_OPP_FGM": 2, "Right Corner 3_OPP_FGA": 4}),
+        season="2025-26", cutoff=NOW, team_id=1610612737,
     )
     corner = next(
-        record for record in tolerated.payload["records"]
+        record for record in summed.payload["records"]
         if record["category"] == "Corner 3"
     )
-    assert corner["FGM"] == 4.1
+    assert (corner["FGM"], corner["FGA"]) == (4, 8)
 
-    # A combined value the sides do not sum to is contradictory evidence.
-    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
+    # A lone partial split remains schema drift.
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
         normalize_opponent_zone_response(
-            row(combined_fgm=5), season="2025-26", cutoff=NOW,
-            team_id=1610612737,
+            row(**{"Corner 3_OPP_FGM": None, "Corner 3_OPP_FGA": None,
+                   "Right Corner 3_OPP_FGM": None}),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
         )
 
 
