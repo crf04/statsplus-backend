@@ -1,4 +1,4 @@
-"""Pass a captured publication generation only to seams that accept it."""
+"""Pass a request's read scope only to seams that accept it."""
 
 from __future__ import annotations
 
@@ -19,14 +19,18 @@ def accepts_keyword(method: Any, name: str) -> bool:
     )
 
 
-def call_with_snapshot(method, *args, publication_snapshot=None, **kwargs):
-    """Keep injected legacy test seams compatible with the snapshot kwarg."""
+def call_with_read_scope(
+    method, *args, publication_snapshot=None, connection=None, **kwargs
+):
+    """Keep injected legacy test seams compatible with the read-scope kwargs."""
 
-    if publication_snapshot is None:
-        return method(*args, **kwargs)
-    if accepts_keyword(method, "publication_snapshot"):
-        kwargs["publication_snapshot"] = publication_snapshot
+    for name, value in (
+        ("publication_snapshot", publication_snapshot),
+        ("connection", connection),
+    ):
+        if value is not None and accepts_keyword(method, name):
+            kwargs[name] = value
     return method(*args, **kwargs)
 
 
-__all__ = ["accepts_keyword", "call_with_snapshot"]
+__all__ = ["accepts_keyword", "call_with_read_scope"]

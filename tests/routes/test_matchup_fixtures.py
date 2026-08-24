@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine, func, select
+from sqlalchemy import event as sqlalchemy_event
 
 from app import create_app
 from app.dependencies import build_dependencies
@@ -1057,6 +1058,105 @@ def _injuries(engine):
         permission_granted=True,
         clock=lambda: NOW,
     )
+
+
+def _request_scope_fixture(tmp_path, name):
+    """Build matchup and selection services over one real seeded database."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / name}")
+    run_migrations(engine)
+    settings = RuntimeSettings(
+        environment="testing",
+        auth=AuthenticationSettings(firebase_admin_disabled=True),
+        cache=CacheSettings(enabled=False),
+        nba=NBASeasonSettings(current_season=SEASON),
+    )
+    catalog = StatisticCatalog.load_default()
+    stats_freshness = StatsFreshnessRepository(engine)
+    stats_freshness.record_success(NOW)
+    player_logs = _player_logs(engine, catalog)
+    player_pool = _player_pool(engine)
+    player_diets = _player_diets(engine)
+    team_matchups = _team_matchups(engine)
+
+    def matchup(*, engine_for_request):
+        return MatchupService(
+            event_catalog=_event_catalog(engine, settings),
+            player_pool=player_pool,
+            player_logs=player_logs,
+            player_diets=player_diets,
+            team_matchups=team_matchups,
+            stats_freshness=stats_freshness,
+            settings=settings,
+            injuries=None,
+            clock=lambda: NOW,
+            engine=engine_for_request,
+        )
+
+    def selection(*, engine_for_request):
+        return MatchupSelectionService(
+            event_catalog=_event_catalog(engine, settings),
+            player_pool=player_pool,
+            player_logs=player_logs,
+            archetypes=PlayerArchetypeRepository(engine),
+            statistic_catalog=catalog,
+            settings=settings,
+            engine=engine_for_request,
+        )
+
+    return engine, matchup, selection
+
+
+def _checkout_counter(engine):
+    checkouts = []
+    sqlalchemy_event.listen(
+        engine, "checkout", lambda *_arguments: checkouts.append(1)
+    )
+    return checkouts
+
+
+def test_matchup_reads_share_one_pooled_connection(tmp_path):
+    """Every read the matchup composes rides one checkout, not one each."""
+
+    engine, matchup, _selection = _request_scope_fixture(
+        tmp_path, "matchup-request-scope.sqlite3"
+    )
+    default_path = matchup(engine_for_request=None)
+    scoped = matchup(engine_for_request=engine)
+
+    checkouts = _checkout_counter(engine)
+
+    # A repository called without a connection still opens its own.
+    default_document = default_path.get_matchup(game_id=GAME_ID)
+    assert len(checkouts) > 1
+
+    checkouts.clear()
+    scoped_document = scoped.get_matchup(game_id=GAME_ID)
+
+    assert len(checkouts) == 1
+    assert scoped_document == default_document
+
+
+def test_selection_reads_share_one_pooled_connection(tmp_path):
+    """The selection card composes its reads on the same one connection."""
+
+    engine, _matchup, selection = _request_scope_fixture(
+        tmp_path, "selection-request-scope.sqlite3"
+    )
+    default_path = selection(engine_for_request=None)
+    scoped = selection(engine_for_request=engine)
+
+    checkouts = _checkout_counter(engine)
+
+    # A repository called without a connection still opens its own.
+    default_document = default_path.get_selection(game_id=GAME_ID, player_id=2544)
+    assert len(checkouts) > 1
+
+    checkouts.clear()
+    scoped_document = scoped.get_selection(game_id=GAME_ID, player_id=2544)
+
+    assert len(checkouts) == 1
+    assert scoped_document == default_document
 
 
 def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp_path):

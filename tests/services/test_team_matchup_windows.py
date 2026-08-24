@@ -305,9 +305,9 @@ class _CountingTeamMatchupRepository(TeamMatchupRepository):
         super().__init__(engine)
         self.snapshot_calls = []
 
-    def get_snapshot(self, scope):
+    def get_snapshot(self, scope, **read_scope):
         self.snapshot_calls.append(scope)
-        return super().get_snapshot(scope)
+        return super().get_snapshot(scope, **read_scope)
 
 
 def _one_game_for_every_team(played_on: date) -> list[dict]:

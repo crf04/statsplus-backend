@@ -9,12 +9,13 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import func, insert, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.domain.freshness import exact_seconds
 from app.domain.nba_events import is_postponed_event, is_started_event
 from app.domain.utc import assume_utc
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
+from app.services.request_reads import read_connection
 
 DEFAULT_FAILURE_SUMMARY = "The event catalog refresh could not complete."
 
@@ -110,9 +111,11 @@ class EventCatalogRepository:
             # Never obscure the original provider or persistence exception.
             return
 
-    def list_events(self, season: str) -> list[dict[str, Any]]:
+    def list_events(
+        self, season: str, *, connection: Connection | None = None
+    ) -> list[dict[str, Any]]:
         table = EventCatalogEntry.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             rows = connection.execute(select(table).where(
                 table.c.season == season).order_by(table.c.scheduled_at, table.c.nba_game_id)).mappings()
             return [self._serialize(row) for row in rows]
@@ -137,11 +140,13 @@ class EventCatalogRepository:
             ).mappings()
             return [self._serialize(row) for row in rows]
 
-    def count_events(self, season: str) -> int:
+    def count_events(
+        self, season: str, *, connection: Connection | None = None
+    ) -> int:
         """Count actual persisted events for one season."""
 
         table = EventCatalogEntry.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             return int(
                 connection.execute(
                     select(func.count()).select_from(table).where(table.c.season == season)
@@ -166,9 +171,16 @@ class EventCatalogRepository:
             ).mappings()
             return [self._serialize(row) for row in rows]
 
-    def freshness(self, season: str, observed_at: datetime, max_age: timedelta) -> dict[str, Any]:
+    def freshness(
+        self,
+        season: str,
+        observed_at: datetime,
+        max_age: timedelta,
+        *,
+        connection: Connection | None = None,
+    ) -> dict[str, Any]:
         table = EventCatalogRefresh.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             row = connection.execute(select(table).where(
                 table.c.season == season)).mappings().one_or_none()
         success = row["last_success_at"] if row else None

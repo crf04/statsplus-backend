@@ -8,6 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
+
 from app.config.settings import RuntimeSettings
 from app.domain.freshness import (
     exact_age_seconds,
@@ -59,8 +62,9 @@ from app.services.team_matchup_query import (
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
-    call_with_snapshot,
+    call_with_read_scope,
 )
+from app.services.request_reads import request_read_scope
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -283,6 +287,7 @@ class MatchupService:
         clock: Callable[[], datetime] | None = None,
         database_only: bool = False,
         publication_reader: DatabaseFirstPublicationReader | None = None,
+        engine: Engine | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
@@ -294,6 +299,9 @@ class MatchupService:
         self.injuries = injuries
         self.database_only = bool(database_only)
         self.publication_reader = publication_reader
+        # One request checks out one connection for every read it composes;
+        # without an engine each seam keeps opening its own.
+        self._engine = engine
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._schedule_max_age = time_window_timedelta(
             settings.catalog.slate_schedule_max_age_hours,
@@ -302,16 +310,35 @@ class MatchupService:
         )
 
     def get_matchup(self, *, game_id: str) -> dict[str, Any]:
+        with request_read_scope(self._engine) as (connection, session):
+            return self._compose_matchup(
+                game_id=game_id, connection=connection, session=session
+            )
+
+    def _compose_matchup(
+        self,
+        *,
+        game_id: str,
+        connection: Connection | None,
+        session: Session | None,
+    ) -> dict[str, Any]:
         season = self.settings.nba.current_season
         observed_at = assume_utc(self._clock())
-        publication_snapshot = self._publication_snapshot(season)
-        event, events = self._event(season, game_id)
-        schedule_freshness = self._schedule_freshness(season, observed_at=observed_at)
+        publication_snapshot = self._publication_snapshot(season, session=session)
+        event, events = self._event(season, game_id, connection=connection)
+        schedule_freshness = self._schedule_freshness(
+            season, observed_at=observed_at, connection=connection
+        )
 
         pool = (
             None
             if self.player_pool is None
-            else self.player_pool.get_pool_for_game(season=season, game_id=game_id)
+            else call_with_read_scope(
+                self.player_pool.get_pool_for_game,
+                season=season,
+                game_id=game_id,
+                connection=connection,
+            )
         )
         if pool is None:
             pool = PlayerPool((), {}, PlayerPool.unavailable_freshness())
@@ -325,19 +352,24 @@ class MatchupService:
             for player in pool_players
             if player.canonical_player_id not in injury_result.out_player_ids
         )
-        summaries = call_with_snapshot(
+        summaries = call_with_read_scope(
             self.player_logs.get_player_summaries,
             season,
             tuple(player.canonical_player_id for player in players),
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
-        log_freshness = call_with_snapshot(
+        log_freshness = call_with_read_scope(
             self.player_logs.get_read_freshness,
             season,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         diets = self._diets(
-            season, players, publication_snapshot=publication_snapshot
+            season,
+            players,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
         slate_date = self._event_date(event)
@@ -348,12 +380,14 @@ class MatchupService:
             window_games=None,
             as_of=team_as_of,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         last_15_window = self._team_window(
             season,
             window_games=15,
             as_of=team_as_of,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         windows = {"season": season_window, "last_15": last_15_window}
         metric_indexes = {
@@ -406,7 +440,7 @@ class MatchupService:
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
-                "stats": self._stats_freshness(events),
+                "stats": self._stats_freshness(events, connection=connection),
                 "team_matchups": {
                     name: self._team_window_freshness(
                         window,
@@ -427,7 +461,7 @@ class MatchupService:
             ),
         }
 
-    def _publication_snapshot(self, season: str):
+    def _publication_snapshot(self, season: str, *, session: Session | None = None):
         if self.publication_reader is None:
             return None
         snapshot = getattr(self.publication_reader, "snapshot", None)
@@ -440,6 +474,8 @@ class MatchupService:
             # The season-wide game-log payload is never needed here: the
             # summaries read resolves this game's players from the projection.
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if session is not None and accepts_keyword(snapshot, "session"):
+            keyword["session"] = session
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     def _publication_metadata(
@@ -494,13 +530,21 @@ class MatchupService:
         return unavailable_injury_result("disabled")
 
     def _event(
-        self, season: str, game_id: str
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
     ) -> tuple[Mapping[str, Any], Sequence[Mapping[str, Any]]]:
-        if self.event_catalog is None or self.event_catalog.count_events(season) == 0:
+        if self.event_catalog is None or call_with_read_scope(
+            self.event_catalog.count_events, season, connection=connection
+        ) == 0:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
-        events = self.event_catalog.get_events(season)
+        events = call_with_read_scope(
+            self.event_catalog.get_events, season, connection=connection
+        )
         for event in events:
             if str(event.get("nba_game_id")) == game_id:
                 classification = resolve_stored_event_classification(
@@ -515,11 +559,20 @@ class MatchupService:
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
     def _schedule_freshness(
-        self, season: str, *, observed_at: datetime
+        self,
+        season: str,
+        *,
+        observed_at: datetime,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
         if self.event_catalog is None:
             return {"status": "missing", "retrieved_at": None}
-        observed = self.event_catalog.get_freshness(season, now=observed_at)
+        observed = call_with_read_scope(
+            self.event_catalog.get_freshness,
+            season,
+            now=observed_at,
+            connection=connection,
+        )
         retrieved_at = observed.get("last_success_at")
         if retrieved_at is None:
             return {"status": "missing", "retrieved_at": None}
@@ -542,15 +595,17 @@ class MatchupService:
         window_games: int | None,
         as_of: date | None,
         publication_snapshot=None,
+        connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
         if self.team_matchups is None:
             return None
-        return call_with_snapshot(
+        return call_with_read_scope(
             self.team_matchups.get_latest_window,
             season,
             window_games=window_games,
             as_of=as_of,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
     def _diets(
@@ -559,14 +614,16 @@ class MatchupService:
         players: Sequence[PoolPlayer],
         *,
         publication_snapshot=None,
+        connection: Connection | None = None,
     ) -> PlayerDietResult:
         if self.player_diets is None:
             return PlayerDietResult(season, {}, ())
-        return call_with_snapshot(
+        return call_with_read_scope(
             self.player_diets.get_for_players,
             season,
             tuple(player.canonical_player_id for player in players),
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
     @classmethod
@@ -1454,9 +1511,14 @@ class MatchupService:
         )
 
     def _stats_freshness(
-        self, events: Sequence[Mapping[str, Any]]
+        self,
+        events: Sequence[Mapping[str, Any]],
+        *,
+        connection: Connection | None = None,
     ) -> dict[str, Any]:
-        completed = self.stats_freshness.get().last_successful_completion
+        completed = call_with_read_scope(
+            self.stats_freshness.get, connection=connection
+        ).last_successful_completion
         status = "missing"
         if completed is not None:
             completed = assume_utc(completed)

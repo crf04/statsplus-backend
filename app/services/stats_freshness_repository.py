@@ -11,6 +11,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from app.domain.utc import assume_utc
 from app.models.stats_freshness import StatsRefresh
+from app.services.request_reads import read_connection
 
 
 STATS_SURFACE = "stats_tables"
@@ -62,9 +63,9 @@ class StatsFreshnessRepository:
                 insert(table).values(surface=self.surface, last_success_at=value)
             )
 
-    def get(self) -> StatsFreshness:
+    def get(self, *, connection: Connection | None = None) -> StatsFreshness:
         table = StatsRefresh.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             value = connection.execute(
                 select(table.c.last_success_at).where(
                     table.c.surface == self.surface

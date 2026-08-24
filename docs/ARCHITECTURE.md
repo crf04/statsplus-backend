@@ -1715,6 +1715,21 @@ GET /api/games/matchup?game_id
   → backend-shaped league/team metrics, availability, and freshness
 ```
 
+Both assemblies serve the reads they compose on one pooled connection.
+`MatchupService` and `MatchupSelectionService` take the application engine,
+open one connection for the request, bind the publication snapshot's session to
+it, and pass it to each read seam as an optional `connection=`. Every stored
+read seam these two routes touch keeps its previous per-call
+`engine.connect()` as the default, so a repository called without a connection
+is unchanged and wirings without an engine (the demo database and injected test
+collaborators) keep today's behavior. Two seams stay on the default path
+deliberately: `LatestProjectionPlayerPoolReader` owns its connection's
+`REPEATABLE READ` isolation and explicit transactions, and
+`MatchupInjuryService` writes a refreshed snapshot inside the same call.
+Sharing one connection changes no read semantics — on READ COMMITTED each
+statement still takes its own snapshot — it removes the checkout and reset
+`ROLLBACK` round trip that each repository call previously paid.
+
 `MatchupService` has no NBA Stats, PBP Stats, DFS provider, or live Player Pool
 dependency for statistical reads. Injury Reports retain the existing
 `MatchupInjuryService` live/snapshot contract in both assemblies; activating

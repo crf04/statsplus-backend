@@ -10,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 from requests import exceptions as request_errors
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.freshness import (
@@ -135,8 +135,12 @@ class EventCatalogService:
             raise ValueError("at least one explicit canonical NBA season is required")
         return tuple(sorted({validate_canonical_season(value) for value in values}))
 
-    def get_events(self, season: str) -> list[dict[str, Any]]:
-        return self.repository.list_events(validate_canonical_season(season))
+    def get_events(
+        self, season: str, *, connection: Connection | None = None
+    ) -> list[dict[str, Any]]:
+        return self.repository.list_events(
+            validate_canonical_season(season), connection=connection
+        )
 
     def get_events_by_ids(
         self, season: str, game_ids: Iterable[str]
@@ -145,8 +149,12 @@ class EventCatalogService:
             validate_canonical_season(season), game_ids
         )
 
-    def count_events(self, season: str) -> int:
-        return self.repository.count_events(validate_canonical_season(season))
+    def count_events(
+        self, season: str, *, connection: Connection | None = None
+    ) -> int:
+        return self.repository.count_events(
+            validate_canonical_season(season), connection=connection
+        )
 
     def get_events_between(
         self, season: str, starts_at: datetime, ends_at: datetime
@@ -157,8 +165,19 @@ class EventCatalogService:
             assume_utc(ends_at),
         )
 
-    def get_freshness(self, season: str, *, now: datetime | None = None) -> dict[str, Any]:
-        return self.repository.freshness(validate_canonical_season(season), assume_utc(now or self._clock()), self.max_age)
+    def get_freshness(
+        self,
+        season: str,
+        *,
+        now: datetime | None = None,
+        connection: Connection | None = None,
+    ) -> dict[str, Any]:
+        return self.repository.freshness(
+            validate_canonical_season(season),
+            assume_utc(now or self._clock()),
+            self.max_age,
+            connection=connection,
+        )
 
     def is_fresh(self, season: str, *, now: datetime | None = None) -> bool:
         return bool(self.get_freshness(season, now=now)["fresh"])
