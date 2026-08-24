@@ -446,6 +446,33 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     } == {"11/01/2025"}
 
 
+def test_exact_window_opponent_breakdown_collapses_to_one_team_row():
+    # With a date window the opponent shot chart reports one row per opponent
+    # faced; the season shape is a single aggregate row, so the counts are
+    # summed and the per-opponent game column dropped.
+    breakdown = pd.DataFrame([
+        {"TEAM_ID": 1610612765, "TEAM_NAME": "Washington Wizards", "GP": 15,
+         "G": 2, "FG2M": 0, "FG2A": 1, "FG3M": 15, "FG3A": 30, "MIN": 96.0},
+        {"TEAM_ID": 1610612765, "TEAM_NAME": "Minnesota Timberwolves", "GP": 15,
+         "G": 1, "FG2M": 3, "FG2A": 5, "FG3M": 14, "FG3A": 28, "MIN": 48.0},
+    ])
+    collapsed = _StandaloneNBAProvider._collapse_opponent_breakdown(
+        breakdown, team_id=1610612765
+    )
+    assert len(collapsed.index) == 1
+    assert "G" not in collapsed.columns
+    row = collapsed.iloc[0]
+    assert (row["FG2M"], row["FG2A"], row["FG3M"], row["FG3A"], row["MIN"]) == (
+        3, 6, 29, 58, 144.0,
+    )
+
+    # A single-row season response passes through untouched.
+    season = pd.DataFrame([{"TEAM_ID": 1610612765, "GP": 82, "FG2M": 100, "FG2A": 200}])
+    assert _StandaloneNBAProvider._collapse_opponent_breakdown(
+        season, team_id=1610612765
+    ).equals(season)
+
+
 def test_zone_response_prefers_the_combined_corner_over_its_sides():
     # The live row reports "Corner 3" both combined and split; the split is
     # not an additive decomposition under Per48, so the combined value wins
