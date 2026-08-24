@@ -560,14 +560,22 @@ def build_dependencies(
         stored_game_logs_source,
         player_game_log_repository,
     )
+    from app.services.team_filter_rankings import TeamFilterRankingService
+
     game_service = GameService(
         engine,
         redis_client=redis_client,
         settings=settings,
-        nba_stats_adapter=nba_stats_provider,
         game_logs_source=game_logs_source,
         player_diets=player_diet_service,
         team_matchups=team_matchup_query_service,
+        team_filter_rankings=(
+            TeamFilterRankingService(
+                publication_reader, season=settings.nba.current_season
+            )
+            if publication_reader is not None
+            else None
+        ),
     )
     matchup_player_pool_reader = projection_player_pool_reader
     selection_player_pool_reader = (

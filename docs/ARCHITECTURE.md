@@ -908,6 +908,30 @@ the live PBP and stored read paths can never disagree.  The stored source
 rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
 makes the Stage 3 parity seam a real equivalence check.
 
+### Team Filter Season Rankings
+
+`teams_against[]` filters rank the 30 opponents from the durable window-aware
+team matchup publications, always at the Season window
+(`app.services.team_filter_rankings`).  One map names, per Team Filter, the
+publication base and the per-48 metric keys it ranks:
+`traditional_opponent_season` covers the opponent box set (`OPP_STOCKS` sums
+the published blocks and steals), `grouped_shot_types_opponent_season` covers
+the catch-and-shoot, pull-up, and under-10-feet filters (their points columns
+are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
+`synergy_play_types_opponent_season` ranks points per possession, and
+`assist_locations_season` ranks the published location counters.
+
+There is no governed-window parameter and no request-time provider call: the
+game service holds no NBA Stats adapter, so the previous dated
+`fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branch and its daily
+Redis key are gone along with the legacy `general_opponent_stats`,
+`catch_and_shoot`, `pullups`, `less_than_10_ft`, `team_play_types`, and
+`processed_team_assists` reads.  `date_filter` trims the player's own game
+logs and never reshapes a ranking, so a date-plus-Team-Filter request stays
+valid and season-ranked.  A stale newest publication still serves its last-good
+ranking; an unavailable publication ranks nothing, which resolves to an empty
+opponent set rather than a new error case.
+
 `players_on[]` and `players_off[]` are game-level appearance filters, not PBP
 lineup-stint filters. For every named player, the same game-log source supplies
 season rows. `players_on[]` intersects `(game_id, team)` pairs across the

@@ -2041,7 +2041,6 @@ def test_authenticated_slate_matchup_selection_journey_uses_one_activated_genera
     game_service = GameService(
         engine,
         settings=settings,
-        nba_stats_adapter=_NoProvider(),
         game_logs_source=StoredGameLogsSource(player_logs),
     )
     game_service.get_player_id = lambda _player_name: 2544

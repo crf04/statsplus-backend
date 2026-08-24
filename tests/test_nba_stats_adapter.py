@@ -11,19 +11,14 @@ import time
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 import requests
 from nba_api.stats import endpoints
 from nba_api.stats.endpoints.playergamelogs import PlayerGameLogs
-from sqlalchemy import create_engine
 
 from app.config.settings import (
-    AuthenticationSettings,
-    CacheSettings,
-    DatabaseSettings,
     NBASeasonSettings,
     ProviderSettings,
     RuntimeSettings,
@@ -48,7 +43,6 @@ from app.services.nba_stats_adapter import (
     parse_recorded_player_diet,
 )
 from app.utils.telemetry import ProviderResponseError
-from app.services.game_service import GameService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "nba_stats_player_game_logs.json"
 PLAYOFF_FIXTURE_PATH = (
@@ -165,108 +159,39 @@ def test_adapter_enforces_concurrency_bound_with_concurrent_calls(monkeypatch):
     assert probe.max_active <= 2
     assert len(frames) == 8
     assert all(isinstance(frame, pd.DataFrame) for frame in frames)
-
-
-def test_http_game_log_requests_share_gate_across_app_service_instances(monkeypatch):
-    """Prove the advertised worker bound at the Flask HTTP seam."""
-    from app import create_app
-    from app.routes import game_routes
-    from app.routes._service_proxy import CurrentAppService
-
-    # Some earlier route tests replace attributes on the module-level proxy.
-    # Use a fresh proxy so this process-wide concurrency test exercises only
-    # the dependency graphs assembled below.
-    monkeypatch.setattr(game_routes, "game_service", CurrentAppService("game"))
+def test_separately_constructed_adapters_share_one_process_gate(monkeypatch):
+    """Two adapters built independently still honour one process-wide bound."""
 
     probe = _ConcurrencyProbe(hold=0.05)
-    settings = RuntimeSettings(
-        environment="testing",
-        database=DatabaseSettings(),
-        auth=AuthenticationSettings(firebase_admin_disabled=True),
-        cache=CacheSettings(enabled=False),
-        providers=ProviderSettings(nba_stats_max_concurrency=2),
-        nba={"current_season": "2024-25"},
-    )
-
-    class ProbePlayerGameLogs:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def get_data_frames(self):
-            def frame():
-                values = {column: [1] for column in GAME_LOG_REQUIRED_COLUMNS}
-                values.update(
-                    {
-                        "GAME_DATE": ["2024-01-01"],
-                        "PLAYER_NAME": ["LeBron James"],
-                        "MATCHUP": ["BOS vs. LAL"],
-                        "MIN": [30],
-                        "PTS": [25],
-                        "REB": [8],
-                        "AST": [7],
-                        "FGM": [9],
-                        "FGA": [16],
-                        "FG3M": [3],
-                        "FG3A": [7],
-                        "FTM": [4],
-                        "FTA": [5],
-                        "NBA_FANTASY_PTS": [44.2],
-                    }
-                )
-                return pd.DataFrame(values)
-
-            return [probe.run(frame)]
-
+    settings = _settings(max_concurrency=2)
     monkeypatch.setattr(
-        endpoints.playergamelogs, "PlayerGameLogs", ProbePlayerGameLogs
+        endpoints.playergamelogs,
+        "PlayerGameLogs",
+        _probe_endpoint(probe),
     )
 
-    # Separate apps create separate GameService/NBAStatsAdapter instances,
-    # while the shared process setting gives both adapters one semaphore.
-    apps = []
-    for _ in range(2):
-        service = GameService(
-            create_engine("sqlite://"),
-            redis_client=False,
-            settings=settings,
-            nba_stats_adapter=InjectedNBAStatsAdapter(settings=settings),
-        )
-        monkeypatch.setattr(service, "get_player_id", lambda name: 2544)
-        dependencies = SimpleNamespace(settings=settings, game_service=service)
-        apps.append(
-            create_app(
-                {
-                    "RUNTIME_SETTINGS": settings,
-                    "DEPENDENCIES": dependencies,
-                    "TESTING": True,
-                    "SKIP_FIREBASE_INIT": True,
-                    "SKIP_TABLE_CREATE": True,
-                }
-            )
-        )
-
-    def request(app):
-        with app.test_client() as client:
-            return client.get(
-                "/api/games/game_logs?player_name=LeBron%20James"
-            )
+    adapters = [
+        InjectedNBAStatsAdapter(settings=settings),
+        InjectedNBAStatsAdapter(settings=settings),
+    ]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        responses = [
+        frames = [
             future.result()
-            for future in (
-                pool.submit(request, apps[index % len(apps)])
+            for future in [
+                pool.submit(
+                    adapters[index % len(adapters)].fetch_player_game_logs,
+                    index,
+                    "2024-25",
+                )
                 for index in range(8)
-            )
+            ]
         ]
 
-    assert all(response.status_code == 200 for response in responses)
+    assert len(frames) == 8
     assert probe.calls == 8
     assert probe.max_active <= settings.providers.nba_stats_max_concurrency
-    service_adapters = [
-        app.extensions["request_services"]["game"].nba_stats for app in apps
-    ]
-    assert service_adapters[0]._bound is service_adapters[1]._bound
+    assert adapters[0]._bound is adapters[1]._bound
 
 
 def test_adapter_passes_configured_timeout_to_provider(monkeypatch):
@@ -1257,45 +1182,3 @@ def test_player_shot_zones_accept_the_recorded_multilevel_provider_schema(monkey
 
     assert frame.loc[0, ("", "PLAYER_ID")] == 1630639
     assert frame.loc[0, ("Corner 3", "FGA")] == 32
-
-
-def test_game_service_uses_injected_fake_without_provider_patching(tmp_path):
-    raw_frame = _recorded_provider_frame()
-    normalized_frame = normalize_player_game_logs(raw_frame)
-
-    class FakeNBAStatsAdapter:
-        def __init__(self):
-            self.calls: list[dict] = []
-
-        def get_player_game_logs(
-            self, *, player_id, season, season_type="Regular Season"
-        ):
-            self.calls.append(
-                {
-                    "player_id": player_id,
-                    "season": season,
-                    "season_type": season_type,
-                }
-            )
-            return normalized_frame.copy()
-
-    fake = FakeNBAStatsAdapter()
-    engine = create_engine(f"sqlite:///{tmp_path / 'players.sqlite3'}")
-    pd.DataFrame([{"full_name": "LeBron James", "id": 2544}]).to_sql(
-        "player_information", engine, index=False
-    )
-
-    service = GameService(
-        engine,
-        redis_client=False,
-        settings=_test_settings(),
-        nba_stats_adapter=fake,
-    )
-
-    logs, next_team = service._get_game_logs("LeBron James", "2025-26")
-
-    assert next_team is None
-    assert list(logs["PRA"]) == [47, 48, 40, 37, 48, 39]
-    assert fake.calls == [
-        {"player_id": 2544, "season": "2025-26", "season_type": "Regular Season"}
-    ]

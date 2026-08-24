@@ -283,7 +283,7 @@ def _make_service(monkeypatch, mock_db_engine, mock_redis_client):
     def fake_logs(player_name, season):
         return _game_logs_frame(), None
 
-    def fake_filter_teams(team_filter, rank, date_filter=None):
+    def fake_filter_teams(team_filter, rank):
         return ["LAL"]
 
     monkeypatch.setattr(service, "_get_game_logs", fake_logs)
@@ -338,7 +338,7 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
 ):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
 
-    def empty_filter_teams(team_filter, rank, date_filter=None):
+    def empty_filter_teams(team_filter, rank):
         return []
 
     monkeypatch.setattr(service, "filter_teams", empty_filter_teams)
@@ -355,16 +355,127 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
     assert result["averages"] == []
 
 
-def test_route_accepts_schema_valid_empty_provider_frame(
+class _StubRankings:
+    """Season Rankings that record every filter they were asked to rank."""
+
+    def __init__(self, ranked):
+        self.ranked = list(ranked)
+        self.calls = []
+
+    def ranked_teams(self, team_filter):
+        self.calls.append(team_filter)
+        return list(self.ranked)
+
+
+def _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ranked):
+    """Build a service whose Team Filters rank from Season publications."""
+
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        team_filter_rankings=_StubRankings(ranked),
+    )
+    monkeypatch.setattr(
+        service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None)
+    )
+    return service
+
+
+def test_a_date_filter_trims_the_logs_while_rankings_stay_season_wide(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """A date-plus-Team-Filter request stays valid and season-ranked."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+    query = GameLogQuery(
+        season_filter="2024-25",
+        date_filter="2024-01-16",
+        teams_against=["OPP_PTS"],
+        rank_filter=[2],
+    )
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    # MIA and LAL rank; the date keeps only the later of the two games.
+    assert [row["MATCHUP"] for row in result["game_logs"]] == ["BOS @ MIA"]
+    assert service.team_filter_rankings.calls == ["OPP_PTS"]
+
+
+def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+
+    def matchups(**filters):
+        query = GameLogQuery(
+            season_filter="2024-25",
+            teams_against=["OPP_PTS"],
+            rank_filter=[1],
+            **filters,
+        )
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    assert matchups() == ["BOS @ MIA"]
+    assert matchups(date_filter="2024-01-01") == ["BOS @ MIA"]
+
+
+def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(
     client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
 ):
-    """A real provider-shaped empty frame is a successful no-result query."""
+    """The wire contract for a previously valid Filter Set URL is unchanged."""
+
+    from app.routes import game_routes
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["LAL", "MIA", "CHI"]
+    )
+    dependencies.game_service = service
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            lambda player_name, query: GameService.get_filtered_logs(
+                service, player_name, query
+            ),
+        )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&date_filter=2024-01-01&teams_against[]=OPP_PTS&rank_filter[]=1"
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [row["MATCHUP"] for row in body["game_logs"]] == ["BOS vs. LAL"]
+    assert body["next_game"] is None
+    GameLogResponse.model_validate(body)
+
+
+def test_route_accepts_schema_valid_empty_source_frame(
+    client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
+):
+    """A real source-shaped empty frame is a successful no-result query."""
 
     from app.routes import game_routes
     from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS
 
-    class EmptyNBAAdapter:
-        def fetch_player_game_logs(self, player_id, season, **kwargs):
+    class EmptyGameLogsSource:
+        def cached(self, season):
+            return False
+
+        def get_player_logs(self, player_id, season, **kwargs):
             return pd.DataFrame(columns=GAME_LOG_REQUIRED_COLUMNS)
 
         def record_cache_hit(self, operation):
@@ -377,13 +488,13 @@ def test_route_accepts_schema_valid_empty_provider_frame(
             environment="testing",
             nba=NBASeasonSettings(current_season="2024-25"),
         ),
+        game_logs_source=EmptyGameLogsSource(),
     )
     dependencies.game_service = service
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
         service = game_routes.game_service._resolve()
         monkeypatch.setattr(service, "get_player_id", lambda name: 1)
-        monkeypatch.setattr(service, "nba_stats", EmptyNBAAdapter())
         monkeypatch.setattr(
             game_routes.game_service,
             "get_filtered_logs",

@@ -549,3 +549,45 @@ def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, t
         build_dependencies(settings, statistic_catalog_path=definition_path)
 
     constructor.assert_not_called()
+
+
+def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
+    """The Team Filter read path can only reach Season publications (#198)."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+    )
+    from app.services.team_filter_rankings import TeamFilterRankingService
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///:memory:"},
+        )
+    )
+    game_service = dependencies.game_service
+
+    # The provider adapter is still built for other callers, but nothing on
+    # the game service holds it, so a request-time NBA Stats call is
+    # unreachable rather than merely unused.
+    assert not hasattr(game_service, "nba_stats")
+    assert dependencies.nba_stats_provider not in vars(game_service).values()
+
+    rankings = game_service.team_filter_rankings
+    assert isinstance(rankings, TeamFilterRankingService)
+    assert isinstance(
+        rankings.publication_reader, DatabaseFirstPublicationReader
+    )
+    assert set(vars(rankings)) == {"publication_reader", "season"}
