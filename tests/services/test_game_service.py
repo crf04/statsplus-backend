@@ -71,9 +71,9 @@ class _StubRankings:
         self.ranked = list(ranked)
         self.calls = []
 
-    def ranked_teams(self, team_filter, season):
-        self.calls.append((team_filter, season))
-        return list(self.ranked)
+    def rank_all(self, team_filters, season):
+        self.calls.append((tuple(team_filters), season))
+        return {team_filter: list(self.ranked) for team_filter in team_filters}
 
 
 @pytest.fixture
@@ -346,7 +346,7 @@ def test_every_team_filter_category_ranks_from_the_same_seam(service):
         assert run(service.filter_teams(team_filter, 1, "2025-26")) == ["GSW"]
 
     assert service.team_filter_rankings.calls == [
-        (team_filter, "2025-26")
+        ((team_filter,), "2025-26")
         for team_filter in (
             "OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists"
         )

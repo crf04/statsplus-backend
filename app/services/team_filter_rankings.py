@@ -59,22 +59,33 @@ class TeamFilterRanking:
     denominator: str | None = None
 
     def value(self, per48: Mapping[str, float]) -> float | None:
-        """Score one team, or ``None`` when the publication cannot evidence it."""
+        """Score one team, or ``None`` when the team has no rate to rank.
 
-        try:
-            total = sum(
-                coefficient * float(per48[key])
-                for key, coefficient in self.numerator
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
+        A metric this ranking needs must be present: its absence is a corrupt
+        payload that got past the decode boundary, and it raises rather than
+        quietly scoring the team.  ``None`` is the narrower, legitimate case of
+        a rate whose denominator is zero -- a team that never faced this play
+        type has no points-per-possession, which is not the same as allowing
+        none.
+        """
+
+        total = sum(
+            coefficient * _finite(per48[key])
+            for key, coefficient in self.numerator
+        )
         if self.denominator is None:
             return total
-        try:
-            divisor = float(per48[self.denominator])
-        except (KeyError, TypeError, ValueError):
-            return None
+        divisor = _finite(per48[self.denominator])
         return total / divisor if divisor > 0 else None
+
+
+def _finite(value) -> float:
+    """Coerce one published metric, refusing a non-numeric cell."""
+
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError("a published per-48 metric must be finite")
+    return number
 
 
 def _shot_type(slice_key: str, stat_key: str) -> TeamFilterRanking:
@@ -144,49 +155,89 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
 
 
 class TeamFilterRankingService:
-    """Rank opponents for one Team Filter from its Season publication."""
+    """Rank opponents for Team Filters from their Season publications."""
 
     def __init__(self, publication_reader) -> None:
         self.publication_reader = publication_reader
 
     def ranked_teams(self, team_filter: str, season: str) -> list[str]:
-        """Return the thirty team tricodes for one season, most-allowed first.
+        """Return the thirty team tricodes for one season, most-allowed first."""
 
-        A publication that is unavailable, does not carry the canonical league,
-        or cannot score every team ranks nothing.  The caller resolves that
-        into an empty opponent set rather than a new error or a provider call.
+        return self.rank_all((team_filter,), season)[team_filter]
+
+    def rank_all(self, team_filters, season: str) -> dict[str, list[str]]:
+        """Rank several Team Filters from one publication generation.
+
+        Every filter in a request is answered from a single snapshot, so a
+        multi-filter Filter Set can never intersect two generations that never
+        coexisted, and two filters sharing a base cost one read rather than two.
         """
 
-        ranking = TEAM_FILTER_RANKINGS.get(team_filter)
-        if ranking is None:
-            raise ValueError(f"Unsupported team filter: {team_filter!r}")
-        rows = self._rows(ranking.base, season)
+        requested = tuple(team_filters)
+        rankings = {}
+        for team_filter in requested:
+            if team_filter not in TEAM_FILTER_RANKINGS:
+                raise ValueError(f"Unsupported team filter: {team_filter!r}")
+        bases = {TEAM_FILTER_RANKINGS[name].base for name in requested}
+        rows_by_base = self._rows_by_base(bases, season)
+        for team_filter in requested:
+            ranking = TEAM_FILTER_RANKINGS[team_filter]
+            rankings[team_filter] = self._rank(
+                team_filter, ranking, rows_by_base[ranking.base]
+            )
+        return rankings
+
+    @staticmethod
+    def _rank(team_filter: str, ranking: TeamFilterRanking, rows) -> list[str]:
         if rows is None:
             return []
         scored = []
         for row in rows:
-            value = ranking.value(row.per48)
-            if value is None:
+            try:
+                value = ranking.value(row.per48)
+            except (KeyError, TypeError, ValueError):
+                # The publication proved its own taxonomy at decode, so a
+                # metric that cannot be read here is invalid evidence for the
+                # whole surface rather than for one team.
                 logger.warning(
-                    "Team Filter %s cannot score team %s from its Season "
-                    "publication; refusing a partial ranking",
+                    "Team Filter %s cannot read its metrics from the Season "
+                    "publication; refusing to rank",
                     team_filter,
-                    row.team_id,
                 )
                 return []
+            if value is None:
+                # A team with no rate for this filter is simply not ranked by
+                # it; the other twenty-nine remain a complete answer.
+                logger.debug(
+                    "Team %s has no %s rate in the Season publication",
+                    row.team_tricode,
+                    team_filter,
+                )
+                continue
             scored.append((value, row.team_tricode))
         # Descending by value; the tricode breaks ties so one publication
         # always produces one ranking.
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [tricode for _value, tricode in scored]
 
-    def _rows(self, base: str, season: str):
-        """Read one Season publication, including a stale last-good one."""
+    def _rows_by_base(self, bases, season: str) -> dict:
+        """Read every needed Season publication in one generation."""
 
         if self.publication_reader is None:
-            return None
-        stream_key = _STREAM_KEY_BY_BASE[base]
-        read = self.publication_reader.read(stream_key, season=season)
+            return {base: None for base in bases}
+        stream_by_base = {base: _STREAM_KEY_BY_BASE[base] for base in bases}
+        reads = self.publication_reader.read_many(
+            tuple(stream_by_base.values()), season=season
+        )
+        return {
+            base: self._league_rows(reads[stream_key], stream_key)
+            for base, stream_key in stream_by_base.items()
+        }
+
+    @staticmethod
+    def _league_rows(read, stream_key: str):
+        """Return the canonical thirty rows, or ``None`` to refuse ranking."""
+
         if not read.available or read.decoded is None:
             logger.info(
                 "Team Filter rankings unavailable for %s: status=%s reason=%s",
@@ -196,13 +247,17 @@ class TeamFilterRankingService:
             )
             return None
         rows = read.decoded
-        if {row.team_id for row in rows} != set(NBA_TEAM_ID_TO_TRICODE):
-            # NBA-owned streams already proved this at decode; the ledger-owned
-            # traditional and assist-location streams do not, and a partial
-            # league would rank a plausible but wrong top-N.
+        # NBA-owned streams already proved the canonical league and its
+        # identities at decode; the ledger-owned traditional and
+        # assist-location streams did not, and a partial or mislabelled league
+        # would rank a plausible but wrong top-N.
+        if {row.team_id for row in rows} != set(NBA_TEAM_ID_TO_TRICODE) or any(
+            row.team_tricode != NBA_TEAM_ID_TO_TRICODE[row.team_id]
+            for row in rows
+        ):
             logger.warning(
-                "%s publication does not carry the canonical league; refusing "
-                "a partial Team Filter ranking",
+                "%s publication does not carry the canonical league identities;"
+                " refusing a partial Team Filter ranking",
                 stream_key,
             )
             return None

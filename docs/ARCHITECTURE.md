@@ -926,10 +926,18 @@ game service holds no NBA Stats adapter, so the previous dated
 `fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branch and its daily
 Redis key are gone along with the legacy `general_opponent_stats`,
 `catch_and_shoot`, `pullups`, `less_than_10_ft`, `team_play_types`, and
-`processed_team_assists` reads.  The rankings are read for the request's own
-`season_filter`, so a historical request never borrows the current season's
-rankings, and the read is not cached in Redis: an activation, a rollback, or a
-season rollover must never be shadowed by a previous generation.
+`processed_team_assists` reads.  Every Team Filter in one request is answered
+from a single publication snapshot, so two filters can never intersect two
+generations that never coexisted, and two filters sharing a base cost one read.
+The read is not cached in Redis: an activation, a rollback, or a season
+rollover must never be shadowed by a previous generation.
+
+The rankings are read for the request's own `season_filter`.  A publication
+stream carries one pointer, so only the published season can rank: a request
+for any other season ranks nothing rather than borrowing the published season's
+rankings and attributing them to the wrong year.  A Team Filter on a historical
+season therefore resolves to an empty opponent set until that season is
+published.
 
 `date_filter` trims the player's own game logs and never reshapes a ranking,
 so a date-plus-Team-Filter request stays valid and season-ranked.  A ranking is

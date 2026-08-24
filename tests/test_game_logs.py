@@ -273,21 +273,34 @@ def _game_logs_frame():
     return pd.DataFrame(rows, columns=columns)
 
 
+class _StubRankings:
+    """Season Rankings that record every filter they were asked to rank."""
+
+    def __init__(self, ranked):
+        self.ranked = list(ranked)
+        self.calls = []
+
+    def rank_all(self, team_filters, season):
+        self.calls.append((tuple(team_filters), season))
+        return {team_filter: list(self.ranked) for team_filter in team_filters}
+
+
 def _make_service(monkeypatch, mock_db_engine, mock_redis_client):
     settings = RuntimeSettings(
         environment="testing",
         nba=NBASeasonSettings(current_season="2024-25"),
     )
-    service = GameService(mock_db_engine, mock_redis_client, settings=settings)
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=settings,
+        team_filter_rankings=_StubRankings(["LAL"]),
+    )
 
     def fake_logs(player_name, season):
         return _game_logs_frame(), None
 
-    def fake_filter_teams(team_filter, rank, season):
-        return ["LAL"]
-
     monkeypatch.setattr(service, "_get_game_logs", fake_logs)
-    monkeypatch.setattr(service, "filter_teams", fake_filter_teams)
     return service
 
 
@@ -338,10 +351,7 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
 ):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
 
-    def empty_filter_teams(team_filter, rank, season):
-        return []
-
-    monkeypatch.setattr(service, "filter_teams", empty_filter_teams)
+    service.team_filter_rankings = _StubRankings([])
 
     query = GameLogQuery(
         season_filter="2024-25",
@@ -353,18 +363,6 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
 
     assert result["game_logs"] == []
     assert result["averages"] == []
-
-
-class _StubRankings:
-    """Season Rankings that record every filter they were asked to rank."""
-
-    def __init__(self, ranked):
-        self.ranked = list(ranked)
-        self.calls = []
-
-    def ranked_teams(self, team_filter, season):
-        self.calls.append((team_filter, season))
-        return list(self.ranked)
 
 
 def _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ranked):
@@ -404,7 +402,7 @@ def test_a_date_filter_trims_the_logs_while_rankings_stay_season_wide(
 
     # MIA and LAL rank; the date keeps only the later of the two games.
     assert [row["MATCHUP"] for row in result["game_logs"]] == ["BOS @ MIA"]
-    assert service.team_filter_rankings.calls == [("OPP_PTS", "2024-25")]
+    assert service.team_filter_rankings.calls == [(("OPP_PTS",), "2024-25")]
 
 
 def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
@@ -446,7 +444,7 @@ def test_a_historical_season_never_borrows_current_season_rankings(
 
     service.get_filtered_logs("LeBron James", query)
 
-    assert service.team_filter_rankings.calls == [("OPP_PTS", "2023-24")]
+    assert service.team_filter_rankings.calls == [(("OPP_PTS",), "2023-24")]
 
 
 def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(

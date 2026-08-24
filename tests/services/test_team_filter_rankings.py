@@ -71,22 +71,29 @@ class _StubReader:
     def __init__(self, reads):
         self._reads = reads
         self.calls = []
+        self.snapshots = 0
 
-    def read(self, stream_key, *, season=None):
-        self.calls.append((stream_key, season))
-        if stream_key in self._reads:
-            return self._reads[stream_key]
-        return PublicationRead(
-            stream_key=stream_key,
-            publication_id=None,
-            season=season,
-            cutoff=None,
-            version=None,
-            status="missing",
-            freshness="missing",
-            age_seconds=None,
-            payload=None,
-        )
+    def read_many(self, stream_keys, *, season=None):
+        keys = tuple(stream_keys)
+        self.snapshots += 1
+        self.calls.extend((stream_key, season) for stream_key in keys)
+        return {
+            stream_key: self._reads.get(
+                stream_key,
+                PublicationRead(
+                    stream_key=stream_key,
+                    publication_id=None,
+                    season=season,
+                    cutoff=None,
+                    version=None,
+                    status="missing",
+                    freshness="missing",
+                    age_seconds=None,
+                    payload=None,
+                ),
+            )
+            for stream_key in keys
+        }
 
 
 def _service(reads):
@@ -198,14 +205,31 @@ def test_play_type_filter_ranks_points_per_possession():
     assert service.ranked_teams("Transition", SEASON)[:2] == ["LAL", "GSW"]
 
 
-def test_a_play_type_without_possessions_refuses_the_whole_ranking():
-    """One unscoreable team must not silently shrink the league."""
+def test_a_team_that_never_faced_a_play_type_is_not_ranked_by_it():
+    """Zero possessions is real data: that team has no rate, the rest do."""
 
     service = _service(
         _play_type_reads({"LAL": (22.0, 0.0), "GSW": (30.0, 30.0)})
     )
 
-    assert service.ranked_teams("Transition", SEASON) == []
+    ranked = service.ranked_teams("Transition", SEASON)
+
+    assert "LAL" not in ranked
+    assert ranked[0] == "GSW"
+    assert len(ranked) == len(NBA_TEAM_ID_TO_TRICODE) - 1
+
+
+def test_a_publication_missing_a_ranked_metric_refuses_to_rank():
+    """A taxonomy that got past decode is invalid evidence for the surface."""
+
+    reads = {
+        "synergy_play_types_opponent_season": _read(
+            "synergy_play_types_opponent_season",
+            _league(lambda tricode: {"Transition_PTS": 10.0}),
+        )
+    }
+
+    assert _service(reads).ranked_teams("Transition", SEASON) == []
 
 
 def test_assist_location_filter_ranks_the_published_location_counter():
@@ -294,6 +318,38 @@ def test_a_publication_carrying_an_unknown_team_refuses_to_rank():
     assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
 
 
+def test_a_publication_mislabelling_a_canonical_team_refuses_to_rank():
+    """Canonical IDs with a wrong tricode would rank a name that is not real."""
+
+    full = _traditional_reads()["traditional_opponent_season"].decoded
+    mislabelled = _row(full[0].team_id, "XXX", dict(full[0].per48))
+    reads = {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season", (mislabelled, *full[1:])
+        )
+    }
+
+    assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
+
+
+def test_one_request_reads_each_needed_stream_once():
+    """Several filters over one base cost one read, from one generation."""
+
+    service = _service({**_traditional_reads(), **_shot_type_reads({})})
+    reader = service.publication_reader
+
+    rankings = service.rank_all(
+        ("OPP_PTS", "OPP_REB", "C&S PTS", "OPP_PTS"), SEASON
+    )
+
+    assert reader.snapshots == 1
+    assert sorted(stream for stream, _season in reader.calls) == [
+        "grouped_shot_types_opponent_season",
+        "traditional_opponent_season",
+    ]
+    assert set(rankings) == {"OPP_PTS", "OPP_REB", "C&S PTS"}
+
+
 def test_an_unavailable_publication_ranks_nothing():
     assert _service({}).ranked_teams("OPP_PTS", SEASON) == []
 
@@ -376,8 +432,19 @@ def test_a_real_partial_publication_refuses_to_rank(tmp_path):
 
 
 def test_a_real_publication_for_another_season_ranks_nothing(tmp_path):
-    service = _publish_traditional(tmp_path, now=RETRIEVED_AT)
+    """A stream has one pointer, so only the published season can rank.
 
+    This is the specified outcome, not an oversight: a request for a season
+    with no Season publication ranks nothing rather than borrowing the
+    published season's rankings and attributing them to the wrong year.
+    """
+
+    service = _publish_traditional(tmp_path, now=RETRIEVED_AT)
+    read = service.publication_reader.read(
+        "traditional_opponent_season", season="2024-25"
+    )
+
+    assert read.unavailable_reason == "publication_season_mismatch"
     assert service.ranked_teams("OPP_PTS", "2024-25") == []
 
 

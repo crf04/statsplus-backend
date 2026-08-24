@@ -981,7 +981,7 @@ Query parameters:
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
 | `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
-| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications (#198); a request-time provider call is no longer made for any combination of filters |
+| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings |
 | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |

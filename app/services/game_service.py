@@ -408,15 +408,18 @@ class GameService:
             full_game_logs, player_name, query.season_filter
         )
 
-        # Resolve opponent filters into one intersecting team set.
+        # Resolve opponent filters into one intersecting team set, read from
+        # one publication generation so two filters cannot disagree about which
+        # season and which activation they ranked.
         resolved_teams = None
         if query.teams_against:
+            rankings = self._season_rankings(
+                query.teams_against, query.season_filter
+            )
             for index, team_filter in enumerate(query.teams_against):
                 matching = set(
-                    self.filter_teams(
-                        team_filter,
-                        query.rank_filter[index],
-                        query.season_filter,
+                    self._select_rank(
+                        rankings[team_filter], query.rank_filter[index]
                     )
                 )
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
@@ -459,15 +462,25 @@ class GameService:
         rollover must never be shadowed by a previous generation's ranking.
         """
 
-        if team_filter not in TEAM_FILTER_RANKINGS:
-            raise ValueError(f"Unsupported team filter: {team_filter!r}")
+        ranked = self._season_rankings((team_filter,), season)[team_filter]
+        return self._select_rank(ranked, rank_filter)
+
+    def _season_rankings(self, team_filters, season):
+        """Rank every requested Team Filter from one publication generation."""
+
+        for team_filter in team_filters:
+            if team_filter not in TEAM_FILTER_RANKINGS:
+                raise ValueError(f"Unsupported team filter: {team_filter!r}")
         if self.team_filter_rankings is None:
             logger.warning(
-                "Team Filter %s cannot rank without Season publications",
-                team_filter,
+                "Team Filters %s cannot rank without Season publications",
+                list(team_filters),
             )
-            return []
-        ranked = self.team_filter_rankings.ranked_teams(team_filter, season)
+            return {team_filter: [] for team_filter in team_filters}
+        return self.team_filter_rankings.rank_all(tuple(team_filters), season)
+
+    @staticmethod
+    def _select_rank(ranked, rank_filter):
         if rank_filter >= 0:
             return ranked[:rank_filter]
         return ranked[rank_filter:]
