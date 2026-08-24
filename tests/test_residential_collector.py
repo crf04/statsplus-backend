@@ -465,6 +465,17 @@ def test_zone_response_accepts_the_live_combined_corner_beside_its_split():
         if record["category"] == "Corner 3"
     )
     assert (corner["FGM"], corner["FGA"]) == (4, 8)
+    # Rounded per-48 sides may miss the combined value by a hundredth.
+    tolerated = normalize_opponent_zone_response(
+        row(combined_fgm=4.01), season="2025-26", cutoff=NOW,
+        team_id=1610612737,
+    )
+    corner = next(
+        record for record in tolerated.payload["records"]
+        if record["category"] == "Corner 3"
+    )
+    assert corner["FGM"] == 4.01
+
     # A combined value the sides do not sum to is contradictory evidence.
     with pytest.raises(ProviderContractError, match="value_invariant_failed"):
         normalize_opponent_zone_response(
