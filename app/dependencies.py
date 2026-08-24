@@ -570,9 +570,7 @@ def build_dependencies(
         player_diets=player_diet_service,
         team_matchups=team_matchup_query_service,
         team_filter_rankings=(
-            TeamFilterRankingService(
-                publication_reader, season=settings.nba.current_season
-            )
+            TeamFilterRankingService(publication_reader)
             if publication_reader is not None
             else None
         ),

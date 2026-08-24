@@ -5,6 +5,11 @@ aggregate taken from the durable window-aware team matchup publications.  There
 is no governed-window parameter and no request-time provider call: the Season
 stream is the only source, and a stale newest publication still serves its
 last-good values rather than degrading the ranking.
+
+A ranking is all thirty opponents or nothing.  NBA-owned streams already prove
+the canonical league at their decode boundary; the ledger-owned traditional and
+assist-location streams do not, so this module proves it for every base rather
+than presenting a partial league as a complete ranking.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
     PLAY_TYPES,
@@ -140,41 +146,47 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
 class TeamFilterRankingService:
     """Rank opponents for one Team Filter from its Season publication."""
 
-    def __init__(self, publication_reader, *, season: str) -> None:
+    def __init__(self, publication_reader) -> None:
         self.publication_reader = publication_reader
-        self.season = season
 
-    def ranked_teams(self, team_filter: str) -> list[str]:
-        """Return every evidenced team tricode, most-allowed first.
+    def ranked_teams(self, team_filter: str, season: str) -> list[str]:
+        """Return the thirty team tricodes for one season, most-allowed first.
 
-        An unavailable publication ranks nothing.  The caller resolves that
+        A publication that is unavailable, does not carry the canonical league,
+        or cannot score every team ranks nothing.  The caller resolves that
         into an empty opponent set rather than a new error or a provider call.
         """
 
         ranking = TEAM_FILTER_RANKINGS.get(team_filter)
         if ranking is None:
             raise ValueError(f"Unsupported team filter: {team_filter!r}")
-        rows = self._rows(ranking.base)
+        rows = self._rows(ranking.base, season)
         if rows is None:
             return []
         scored = []
         for row in rows:
             value = ranking.value(row.per48)
             if value is None:
-                continue
+                logger.warning(
+                    "Team Filter %s cannot score team %s from its Season "
+                    "publication; refusing a partial ranking",
+                    team_filter,
+                    row.team_id,
+                )
+                return []
             scored.append((value, row.team_tricode))
         # Descending by value; the tricode breaks ties so one publication
         # always produces one ranking.
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [tricode for _value, tricode in scored]
 
-    def _rows(self, base: str):
+    def _rows(self, base: str, season: str):
         """Read one Season publication, including a stale last-good one."""
 
         if self.publication_reader is None:
             return None
         stream_key = _STREAM_KEY_BY_BASE[base]
-        read = self.publication_reader.read(stream_key, season=self.season)
+        read = self.publication_reader.read(stream_key, season=season)
         if not read.available or read.decoded is None:
             logger.info(
                 "Team Filter rankings unavailable for %s: status=%s reason=%s",
@@ -183,7 +195,18 @@ class TeamFilterRankingService:
                 read.unavailable_reason,
             )
             return None
-        return read.decoded
+        rows = read.decoded
+        if {row.team_id for row in rows} != set(NBA_TEAM_ID_TO_TRICODE):
+            # NBA-owned streams already proved this at decode; the ledger-owned
+            # traditional and assist-location streams do not, and a partial
+            # league would rank a plausible but wrong top-N.
+            logger.warning(
+                "%s publication does not carry the canonical league; refusing "
+                "a partial Team Filter ranking",
+                stream_key,
+            )
+            return None
+        return rows
 
 
 __all__ = [

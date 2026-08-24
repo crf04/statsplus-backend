@@ -1,9 +1,10 @@
 """Concurrency and timeout tests for the bounded NBA Stats adapter (#10).
 
-The game-log flow now runs as a synchronous Flask/threaded workload with all
-``stats.nba.com`` calls funnelled through :class:`NBAStatsAdapter`.  These tests
-prove that the provider callers explicitly enforce the configured
-``NBA_STATS_MAX_CONCURRENCY`` bound and reuse the configured timeout.
+Every remaining ``stats.nba.com`` caller goes through :class:`NBAStatsAdapter`,
+which runs as a synchronous Flask/threaded workload.  These tests prove that
+the adapter enforces the configured ``NBA_STATS_MAX_CONCURRENCY`` bound across
+separately constructed instances and reuses the configured timeout.  The
+game-log route is no longer one of those callers (#198).
 """
 
 import threading

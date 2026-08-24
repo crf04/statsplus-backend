@@ -590,4 +590,4 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     assert isinstance(
         rankings.publication_reader, DatabaseFirstPublicationReader
     )
-    assert set(vars(rankings)) == {"publication_reader", "season"}
+    assert set(vars(rankings)) == {"publication_reader"}

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine
 
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.migrations import run_migrations
 from app.models.catalogs import SUPPORTED_TEAM_FILTERS
 from app.services.collection_control import PublicationService
@@ -21,6 +22,9 @@ from app.services.team_filter_rankings import (
 
 SEASON = "2025-26"
 RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+TRICODE_TO_TEAM_ID = {
+    tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+}
 
 
 def _row(team_id, tricode, per48):
@@ -33,6 +37,15 @@ def _row(team_id, tricode, per48):
         league_average={},
         population_sigma={},
         competition_rank={},
+    )
+
+
+def _league(per48_for):
+    """Build the canonical thirty rows from one per-team metric builder."""
+
+    return tuple(
+        _row(team_id, tricode, per48_for(tricode))
+        for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
     )
 
 
@@ -77,7 +90,7 @@ class _StubReader:
 
 
 def _service(reads):
-    return TeamFilterRankingService(_StubReader(reads), season=SEASON)
+    return TeamFilterRankingService(_StubReader(reads))
 
 
 # --- catalog ---------------------------------------------------------------
@@ -89,137 +102,126 @@ def test_every_supported_team_filter_has_one_ranking_definition():
 
 def test_an_unsupported_team_filter_is_rejected():
     with pytest.raises(ValueError, match="Unsupported team filter"):
-        _service({}).ranked_teams("NOT_A_FILTER")
+        _service({}).ranked_teams("NOT_A_FILTER", SEASON)
 
 
 # --- ranking per publication base ------------------------------------------
 
 
 def _traditional_reads():
-    def per48(points, blocks, steals):
+    """LAL/GSW/BOS carry distinct values; every other team is baseline."""
+
+    ranked = {"GSW": (120.0, 9.0, 3.0), "LAL": (110.0, 4.0, 6.0), "BOS": (100.0, 2.0, 2.0)}
+
+    def per48(tricode):
+        points, blocks, steals = ranked.get(tricode, (1.0, 0.5, 0.5))
         values = {metric: 1.0 for metric in TEAM_METRICS}
         values.update(points=points, blocks=blocks, steals=steals)
         return values
 
     return {
         "traditional_opponent_season": _read(
-            "traditional_opponent_season",
-            (
-                _row(1610612747, "LAL", per48(110.0, 4.0, 6.0)),
-                _row(1610612744, "GSW", per48(120.0, 9.0, 3.0)),
-                _row(1610612738, "BOS", per48(100.0, 2.0, 2.0)),
-            ),
+            "traditional_opponent_season", _league(per48)
         )
     }
 
 
 def test_traditional_filter_ranks_the_most_allowed_opponent_first():
-    assert _service(_traditional_reads()).ranked_teams("OPP_PTS") == [
-        "GSW",
-        "LAL",
-        "BOS",
-    ]
+    ranked = _service(_traditional_reads()).ranked_teams("OPP_PTS", SEASON)
+
+    assert len(ranked) == len(NBA_TEAM_ID_TO_TRICODE)
+    assert ranked[:3] == ["GSW", "LAL", "BOS"]
 
 
 def test_stocks_filter_sums_the_two_published_primitives():
-    # GSW 9+3=12, LAL 4+6=10, BOS 2+2=4.
-    assert _service(_traditional_reads()).ranked_teams("OPP_STOCKS") == [
-        "GSW",
-        "LAL",
-        "BOS",
-    ]
+    # GSW 9+3=12, LAL 4+6=10, BOS 2+2=4, every other team 1.0.
+    ranked = _service(_traditional_reads()).ranked_teams("OPP_STOCKS", SEASON)
+
+    assert ranked[:3] == ["GSW", "LAL", "BOS"]
 
 
-def _shot_type_rows(values):
+def _shot_type_reads(values):
     """Build shot-type rows from ``{tricode: (fg2m, fg3m)}`` pairs."""
 
-    return tuple(
-        _row(
-            1610612737 + index,
-            tricode,
-            {
-                "catch_and_shoot_FG2M": fg2m,
-                "catch_and_shoot_FG3M": fg3m,
-                "catch_and_shoot_FG2A": fg2m,
-                "catch_and_shoot_FG3A": fg3m,
-                "pullups_FG2M": fg2m,
-                "pullups_FG3M": fg3m,
-                "pullups_FG2A": fg2m,
-                "pullups_FG3A": fg3m,
-                "less_than_10_ft_FG2M": fg2m,
-                "less_than_10_ft_FG3M": 0.0,
-                "less_than_10_ft_FG2A": fg2m,
-                "less_than_10_ft_FG3A": 0.0,
-            },
+    def per48(tricode):
+        fg2m, fg3m = values.get(tricode, (0.0, 0.0))
+        return {
+            "catch_and_shoot_FG2M": fg2m,
+            "catch_and_shoot_FG3M": fg3m,
+            "catch_and_shoot_FG2A": fg2m,
+            "catch_and_shoot_FG3A": fg3m,
+            "pullups_FG2M": fg2m,
+            "pullups_FG3M": fg3m,
+            "pullups_FG2A": fg2m,
+            "pullups_FG3A": fg3m,
+            "less_than_10_ft_FG2M": fg2m,
+            "less_than_10_ft_FG3M": 0.0,
+            "less_than_10_ft_FG2A": fg2m,
+            "less_than_10_ft_FG3A": 0.0,
+        }
+
+    return {
+        "grouped_shot_types_opponent_season": _read(
+            "grouped_shot_types_opponent_season", _league(per48)
         )
-        for index, (tricode, (fg2m, fg3m)) in enumerate(values.items())
-    )
+    }
 
 
 def test_catch_and_shoot_points_are_derived_from_the_made_shot_counts():
-    reads = {
-        "grouped_shot_types_opponent_season": _read(
-            "grouped_shot_types_opponent_season",
-            # LAL 2*2+3*8=28 beats GSW 2*10+3*2=26 on points while GSW leads
-            # on made twos, so the derived column is not a relabelled count.
-            _shot_type_rows({"LAL": (2.0, 8.0), "GSW": (10.0, 2.0)}),
+    # LAL 2*2+3*8=28 beats GSW 2*10+3*2=26 on points while GSW leads on made
+    # twos, so the derived column is not a relabelled count.
+    service = _service(_shot_type_reads({"LAL": (2.0, 8.0), "GSW": (10.0, 2.0)}))
+
+    assert service.ranked_teams("C&S PTS", SEASON)[:2] == ["LAL", "GSW"]
+    assert service.ranked_teams("PU 2s", SEASON)[:2] == ["GSW", "LAL"]
+    assert service.ranked_teams("Less Than 10 ft", SEASON)[:2] == ["GSW", "LAL"]
+
+
+def _play_type_reads(values):
+    def per48(tricode):
+        points, possessions = values.get(tricode, (10.0, 20.0))
+        return {"Transition_PTS": points, "Transition_POSS": possessions}
+
+    return {
+        "synergy_play_types_opponent_season": _read(
+            "synergy_play_types_opponent_season", _league(per48)
         )
     }
-    service = _service(reads)
-
-    assert service.ranked_teams("C&S PTS") == ["LAL", "GSW"]
-    assert service.ranked_teams("PU 2s") == ["GSW", "LAL"]
-    assert service.ranked_teams("Less Than 10 ft") == ["GSW", "LAL"]
 
 
 def test_play_type_filter_ranks_points_per_possession():
-    rows = (
-        _row(
-            1610612747,
-            "LAL",
-            {"Transition_PTS": 22.0, "Transition_POSS": 20.0},
-        ),
-        _row(
-            1610612744,
-            "GSW",
-            {"Transition_PTS": 30.0, "Transition_POSS": 30.0},
-        ),
-    )
-    reads = {
-        "synergy_play_types_opponent_season": _read(
-            "synergy_play_types_opponent_season", rows
-        )
-    }
-
     # GSW allows more transition points, LAL allows more per possession.
-    assert _service(reads).ranked_teams("Transition") == ["LAL", "GSW"]
-
-
-def test_a_play_type_without_possessions_is_not_ranked():
-    rows = (
-        _row(1610612747, "LAL", {"Transition_PTS": 22.0, "Transition_POSS": 0.0}),
-        _row(1610612744, "GSW", {"Transition_PTS": 30.0, "Transition_POSS": 30.0}),
+    service = _service(
+        _play_type_reads({"LAL": (22.0, 20.0), "GSW": (30.0, 30.0)})
     )
-    reads = {
-        "synergy_play_types_opponent_season": _read(
-            "synergy_play_types_opponent_season", rows
-        )
-    }
 
-    assert _service(reads).ranked_teams("Transition") == ["GSW"]
+    assert service.ranked_teams("Transition", SEASON)[:2] == ["LAL", "GSW"]
+
+
+def test_a_play_type_without_possessions_refuses_the_whole_ranking():
+    """One unscoreable team must not silently shrink the league."""
+
+    service = _service(
+        _play_type_reads({"LAL": (22.0, 0.0), "GSW": (30.0, 30.0)})
+    )
+
+    assert service.ranked_teams("Transition", SEASON) == []
 
 
 def test_assist_location_filter_ranks_the_published_location_counter():
-    rows = (
-        _row(1610612747, "LAL", {"two_point_assists": 12.0}),
-        _row(1610612744, "GSW", {"two_point_assists": 18.0}),
-        _row(1610612738, "BOS", {"two_point_assists": 15.0}),
-    )
+    values = {"GSW": 18.0, "BOS": 15.0, "LAL": 12.0}
     reads = {
-        "assist_locations_season": _read("assist_locations_season", rows)
+        "assist_locations_season": _read(
+            "assist_locations_season",
+            _league(
+                lambda tricode: {"two_point_assists": values.get(tricode, 1.0)}
+            ),
+        )
     }
 
-    assert _service(reads).ranked_teams("TwoPtAssists") == ["GSW", "BOS", "LAL"]
+    ranked = _service(reads).ranked_teams("TwoPtAssists", SEASON)
+
+    assert ranked[:3] == ["GSW", "BOS", "LAL"]
 
 
 def test_every_filter_reads_only_its_own_season_stream():
@@ -227,7 +229,7 @@ def test_every_filter_reads_only_its_own_season_stream():
     reader = service.publication_reader
 
     for team_filter in SUPPORTED_TEAM_FILTERS:
-        service.ranked_teams(team_filter)
+        service.ranked_teams(team_filter, SEASON)
 
     assert {season for _stream, season in reader.calls} == {SEASON}
     assert {stream for stream, _season in reader.calls} == {
@@ -238,7 +240,17 @@ def test_every_filter_reads_only_its_own_season_stream():
     }
 
 
-# --- last-good and unavailable reads ---------------------------------------
+def test_the_requested_season_is_the_season_that_is_read():
+    service = _service({})
+
+    service.ranked_teams("OPP_PTS", "2024-25")
+
+    assert service.publication_reader.calls == [
+        ("traditional_opponent_season", "2024-25")
+    ]
+
+
+# --- last-good, partial, and unavailable reads -----------------------------
 
 
 def test_a_stale_publication_still_serves_its_last_good_ranking():
@@ -250,23 +262,52 @@ def test_a_stale_publication_still_serves_its_last_good_ranking():
         )
     }
 
-    assert _service(reads).ranked_teams("OPP_PTS") == ["GSW", "LAL", "BOS"]
+    assert _service(reads).ranked_teams("OPP_PTS", SEASON)[:3] == [
+        "GSW",
+        "LAL",
+        "BOS",
+    ]
+
+
+def test_a_publication_missing_teams_refuses_to_rank():
+    """A partial league would rank a plausible but wrong top-N."""
+
+    full = _traditional_reads()["traditional_opponent_season"].decoded
+    reads = {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season", full[:29]
+        )
+    }
+
+    assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
+
+
+def test_a_publication_carrying_an_unknown_team_refuses_to_rank():
+    full = _traditional_reads()["traditional_opponent_season"].decoded
+    intruder = _row(1610619999, "INT", dict(full[0].per48))
+    reads = {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season", (*full[:29], intruder)
+        )
+    }
+
+    assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
 
 
 def test_an_unavailable_publication_ranks_nothing():
-    assert _service({}).ranked_teams("OPP_PTS") == []
+    assert _service({}).ranked_teams("OPP_PTS", SEASON) == []
 
 
 def test_no_publication_reader_ranks_nothing():
-    service = TeamFilterRankingService(None, season=SEASON)
+    service = TeamFilterRankingService(None)
 
-    assert service.ranked_teams("OPP_PTS") == []
+    assert service.ranked_teams("OPP_PTS", SEASON) == []
 
 
 # --- one real publication generation ---------------------------------------
 
 
-def _publish_traditional(tmp_path, *, now):
+def _publish_traditional(tmp_path, *, now, tricodes=None):
     """Compose one real active ``traditional_opponent_season`` publication."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'rankings.sqlite3'}")
@@ -280,10 +321,11 @@ def _publish_traditional(tmp_path, *, now):
         publication_strategy="replace",
         enabled=True,
     )
+    points = {"GSW": 120.0, "LAL": 110.0, "BOS": 100.0}
 
-    def payload_row(team_id, tricode, points):
+    def payload_row(team_id, tricode):
         metrics = {metric: 1.0 for metric in TEAM_METRICS}
-        metrics["points"] = points
+        metrics["points"] = points.get(tricode, 50.0)
         return {
             "team_id": team_id,
             "team_tricode": tricode,
@@ -297,26 +339,46 @@ def _publish_traditional(tmp_path, *, now):
             "team_minutes": 240.0,
         }
 
+    published = (
+        NBA_TEAM_ID_TO_TRICODE.items()
+        if tricodes is None
+        else [(TRICODE_TO_TEAM_ID[tricode], tricode) for tricode in tricodes]
+    )
     publications.compose(
         "traditional_opponent_season",
         season=SEASON,
         cutoff=RETRIEVED_AT,
         payload={
             "rows": [
-                payload_row(1610612747, "LAL", 110.0),
-                payload_row(1610612744, "GSW", 120.0),
-                payload_row(1610612738, "BOS", 100.0),
+                payload_row(team_id, tricode) for team_id, tricode in published
             ]
         },
     )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: now)
-    return TeamFilterRankingService(reader, season=SEASON)
+    return TeamFilterRankingService(reader)
 
 
-def test_a_real_active_publication_ranks_its_teams(tmp_path):
+def test_a_real_active_publication_ranks_the_whole_league(tmp_path):
     service = _publish_traditional(tmp_path, now=RETRIEVED_AT)
 
-    assert service.ranked_teams("OPP_PTS") == ["GSW", "LAL", "BOS"]
+    ranked = service.ranked_teams("OPP_PTS", SEASON)
+
+    assert len(ranked) == len(NBA_TEAM_ID_TO_TRICODE)
+    assert ranked[:3] == ["GSW", "LAL", "BOS"]
+
+
+def test_a_real_partial_publication_refuses_to_rank(tmp_path):
+    service = _publish_traditional(
+        tmp_path, now=RETRIEVED_AT, tricodes=("GSW", "LAL", "BOS")
+    )
+
+    assert service.ranked_teams("OPP_PTS", SEASON) == []
+
+
+def test_a_real_publication_for_another_season_ranks_nothing(tmp_path):
+    service = _publish_traditional(tmp_path, now=RETRIEVED_AT)
+
+    assert service.ranked_teams("OPP_PTS", "2024-25") == []
 
 
 def test_a_refresh_that_never_landed_serves_the_last_good_ranking(tmp_path):
@@ -330,4 +392,4 @@ def test_a_refresh_that_never_landed_serves_the_last_good_ranking(tmp_path):
     )
 
     assert read.freshness == "stale"
-    assert service.ranked_teams("OPP_PTS") == ["GSW", "LAL", "BOS"]
+    assert service.ranked_teams("OPP_PTS", SEASON)[:3] == ["GSW", "LAL", "BOS"]

@@ -926,11 +926,19 @@ game service holds no NBA Stats adapter, so the previous dated
 `fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branch and its daily
 Redis key are gone along with the legacy `general_opponent_stats`,
 `catch_and_shoot`, `pullups`, `less_than_10_ft`, `team_play_types`, and
-`processed_team_assists` reads.  `date_filter` trims the player's own game
-logs and never reshapes a ranking, so a date-plus-Team-Filter request stays
-valid and season-ranked.  A stale newest publication still serves its last-good
-ranking; an unavailable publication ranks nothing, which resolves to an empty
-opponent set rather than a new error case.
+`processed_team_assists` reads.  The rankings are read for the request's own
+`season_filter`, so a historical request never borrows the current season's
+rankings, and the read is not cached in Redis: an activation, a rollback, or a
+season rollover must never be shadowed by a previous generation.
+
+`date_filter` trims the player's own game logs and never reshapes a ranking,
+so a date-plus-Team-Filter request stays valid and season-ranked.  A ranking is
+all thirty opponents or nothing: NBA-owned streams prove the canonical league
+at their decode boundary, and the ledger-owned traditional and assist-location
+streams are proved here, so a partial publication refuses rather than ranking a
+plausible but wrong top-N.  A stale newest publication still serves its
+last-good ranking; an unavailable, partial, or unscoreable publication ranks
+nothing, which resolves to an empty opponent set rather than a new error case.
 
 `players_on[]` and `players_off[]` are game-level appearance filters, not PBP
 lineup-stint filters. For every named player, the same game-log source supplies
@@ -976,8 +984,10 @@ class NBAStatsProvider(Protocol):
 
 The production adapter owns endpoint construction, timeout, concurrency,
 telemetry, response normalization, and provider error translation. Tests inject
-the protocol into `GameService` or `PlayerService` rather than patching
-`nba_api`.
+the protocol into `PlayerService` rather than patching `nba_api`. `GameService`
+no longer takes the adapter at all: after the #198 cutover its player logs come
+from the injected game-log source and its Team Filters from Season
+publications, so no request-time NBA Stats call is reachable from it.
 
 `get_season_player_game_logs` is the legacy season-wide NBA durable-log seam.
 Each call fetches one explicit phase for the whole season, retains canonical

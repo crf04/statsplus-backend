@@ -413,7 +413,11 @@ class GameService:
         if query.teams_against:
             for index, team_filter in enumerate(query.teams_against):
                 matching = set(
-                    self.filter_teams(team_filter, query.rank_filter[index])
+                    self.filter_teams(
+                        team_filter,
+                        query.rank_filter[index],
+                        query.season_filter,
+                    )
                 )
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
             resolved_teams = resolved_teams or set()
@@ -445,37 +449,16 @@ class GameService:
         )
         return result.model_dump()
 
-    def filter_teams(self, team_filter, rank_filter):
+    def filter_teams(self, team_filter, rank_filter, season):
         """Select the top-N or bottom-N opponents by Season Rankings.
 
-        The rankings are whole-Regular-Season aggregates, so ``date_filter``
-        deliberately takes no part here: a date trims the player's own logs
-        without reshaping which opponents rank where.
+        The rankings are whole-Regular-Season aggregates for the requested
+        season, so ``date_filter`` deliberately takes no part here: a date
+        trims the player's own logs without reshaping which opponents rank
+        where.  The read is not cached: an activation, a rollback, or a season
+        rollover must never be shadowed by a previous generation's ranking.
         """
 
-        if self.cache.enabled:
-            from ..utils.cache_config import CACHE_PREFIXES
-
-            cache_key = self.cache._generate_key(
-                CACHE_PREFIXES['computed'],
-                False,  # include_date
-                'filter_teams_season_rankings',
-                team_filter, rank_filter,
-            )
-            cached_result = self.cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug("Cache hit for team filter: %s", team_filter)
-                return cached_result
-
-            result = self._filter_teams_uncached(team_filter, rank_filter)
-            self.cache.set(
-                cache_key, result, self.cache._get_ttl('intraday_computed')
-            )
-            return result
-
-        return self._filter_teams_uncached(team_filter, rank_filter)
-
-    def _filter_teams_uncached(self, team_filter, rank_filter):
         if team_filter not in TEAM_FILTER_RANKINGS:
             raise ValueError(f"Unsupported team filter: {team_filter!r}")
         if self.team_filter_rankings is None:
@@ -484,7 +467,7 @@ class GameService:
                 team_filter,
             )
             return []
-        ranked = self.team_filter_rankings.ranked_teams(team_filter)
+        ranked = self.team_filter_rankings.ranked_teams(team_filter, season)
         if rank_filter >= 0:
             return ranked[:rank_filter]
         return ranked[rank_filter:]

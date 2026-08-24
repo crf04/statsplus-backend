@@ -71,8 +71,8 @@ class _StubRankings:
         self.ranked = list(ranked)
         self.calls = []
 
-    def ranked_teams(self, team_filter):
-        self.calls.append(team_filter)
+    def ranked_teams(self, team_filter, season):
+        self.calls.append((team_filter, season))
         return list(self.ranked)
 
 
@@ -328,31 +328,34 @@ def test_games_to_exclude_unions_every_named_player(service, game_logs, monkeypa
 
 
 def test_ranking_returns_the_top_teams_first(service):
-    assert run(service.filter_teams("Transition", 2)) == ["GSW", "LAL"]
+    assert run(service.filter_teams("Transition", 2, "2025-26")) == ["GSW", "LAL"]
 
 
 def test_negative_rank_filter_returns_the_worst_teams(service):
-    assert run(service.filter_teams("Transition", -2)) == ["LAL", "BOS"]
+    assert run(service.filter_teams("Transition", -2, "2025-26")) == ["LAL", "BOS"]
 
 
 def test_a_rank_filter_wider_than_the_league_returns_every_ranked_team(service):
-    assert run(service.filter_teams("TwoPtAssists", 30)) == ["GSW", "LAL", "BOS"]
-    assert run(service.filter_teams("TwoPtAssists", -30)) == ["GSW", "LAL", "BOS"]
+    assert run(service.filter_teams("TwoPtAssists", 30, "2025-26")) == ["GSW", "LAL", "BOS"]
+    assert run(service.filter_teams("TwoPtAssists", -30, "2025-26")) == ["GSW", "LAL", "BOS"]
 
 
 def test_every_team_filter_category_ranks_from_the_same_seam(service):
     for team_filter in ("OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft",
                         "TwoPtAssists"):
-        assert run(service.filter_teams(team_filter, 1)) == ["GSW"]
+        assert run(service.filter_teams(team_filter, 1, "2025-26")) == ["GSW"]
 
     assert service.team_filter_rankings.calls == [
-        "OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists"
+        (team_filter, "2025-26")
+        for team_filter in (
+            "OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists"
+        )
     ]
 
 
 def test_an_unsupported_team_filter_is_rejected(service):
     with pytest.raises(ValueError, match="Unsupported team filter"):
-        run(service.filter_teams("NOT_A_FILTER", 1))
+        run(service.filter_teams("NOT_A_FILTER", 1, "2025-26"))
 
 
 def test_rankings_are_unavailable_without_season_publications(game_engine, monkeypatch):
@@ -363,4 +366,4 @@ def test_rankings_are_unavailable_without_season_publications(game_engine, monke
     )
     service = game_service_module.GameService(game_engine)
 
-    assert run(service.filter_teams("OPP_PTS", 5)) == []
+    assert run(service.filter_teams("OPP_PTS", 5, "2025-26")) == []
