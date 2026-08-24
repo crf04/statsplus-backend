@@ -639,11 +639,23 @@ def _zone_response(
                 side_values = (
                     left_makes, left_attempts, right_makes, right_attempts
                 )
+                # The live endpoint reports the combined corner alongside its
+                # left/right split; the two are the same evidence, so a
+                # combined value is accepted only when the sides are absent or
+                # sum to it exactly, and a lone partial split stays drift.
                 if makes is not None or attempts is not None:
-                    if makes is None or attempts is None or any(
-                        value is not None for value in side_values
-                    ):
+                    if makes is None or attempts is None:
                         raise ProviderContractError("provider_schema_changed")
+                    if any(value is not None for value in side_values):
+                        if not all(value is not None for value in side_values):
+                            raise ProviderContractError("provider_schema_changed")
+                        if (
+                            _number(left_makes) + _number(right_makes)
+                            != _number(makes)
+                            or _number(left_attempts) + _number(right_attempts)
+                            != _number(attempts)
+                        ):
+                            raise ProviderContractError("value_invariant_failed")
                 elif all(value is not None for value in side_values):
                     makes = _number(left_makes) + _number(right_makes)
                     attempts = _number(left_attempts) + _number(right_attempts)
