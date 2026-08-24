@@ -219,7 +219,9 @@ class ResidentialScopeExecutor:
                     self.provider, "fetch_opponent_shooting_zone",
                     parameters.get("date_from"), date_to=parameters.get("date_to"),
                     season=work.season, season_type="Regular Season",
-                    team_id=int(team_id), last_n_games=15 if window == "l15" else None,
+                    # The endpoint refuses an empty LastNGames; the season
+                    # window is its explicit zero, not an omitted parameter.
+                    team_id=int(team_id), last_n_games=15 if window == "l15" else 0,
                     per_mode_detailed=str(parameters.get("per_mode", "Per48")),
                 )
                 yield normalize_opponent_zone_response(
