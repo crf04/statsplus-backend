@@ -1,5 +1,7 @@
 """Season Rankings for every game-log Team Filter, read from publications."""
 
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -7,6 +9,16 @@ from sqlalchemy import create_engine
 from sqlalchemy import event as sqlalchemy_event
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_STREAMS,
+    NBA_PUBLICATION_TAXONOMY,
+)
+from app.models.collection_control import (
+    CatalogPublication,
+    CollectionManifest,
+    PublicationPointer,
+    PublicationVersion,
+)
 from app.migrations import run_migrations
 from app.models.catalogs import SUPPORTED_TEAM_FILTERS
 from app.services.collection_control import PublicationService
@@ -588,3 +600,146 @@ def _publish_two_streams(tmp_path):
         )
     reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
     return engine, TeamFilterRankingService(reader)
+
+
+# --- one real NBA-owned publication generation -----------------------------
+
+MANIFEST_ID = "team-filter-manifest"
+EVENT_CATALOG_ID = "team-filter-event-catalog"
+
+
+def _publish_nba_streams(tmp_path, values):
+    """Seed real active grouped-shot and Synergy Season publications.
+
+    NBA-owned streams carry publication authority, so this exercises the
+    registration, taxonomy, decoder, and authority path that a stubbed
+    pre-decoded read cannot reach.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'nba-filters.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
+    catalog_payload = json.dumps({"events": []}, separators=(",", ":"), sort_keys=True)
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id=EVENT_CATALOG_ID,
+            season=SEASON,
+            catalog_type="event",
+            cutoff=RETRIEVED_AT,
+            version="event-v1",
+            checksum=catalog_checksum,
+            payload=catalog_payload,
+            complete=True,
+            published_at=RETRIEVED_AT - timedelta(minutes=1),
+            expires_at=None,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=MANIFEST_ID,
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            collect_before=RETRIEVED_AT + timedelta(days=1),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="team-filter-manifest-checksum",
+            event_catalog_publication_id=EVENT_CATALOG_ID,
+            event_catalog_checksum=catalog_checksum,
+            status="active",
+            created_at=RETRIEVED_AT,
+        ))
+    for base, template in NBA_PUBLICATION_STREAMS.items():
+        stream_key = template.format(window="season")
+        metric_keys = tuple(sorted(NBA_PUBLICATION_TAXONOMY[base]))
+        publications.register_stream(
+            stream_key,
+            provider="nba",
+            owner="residential_collector",
+            required_observations=(),
+            publication_strategy="replace",
+            enabled=True,
+        )
+        payload = {"rows": [
+            {
+                "team_id": team_id,
+                "team_tricode": tricode,
+                "game_ids": ["0022500001"],
+                "game_count": 1,
+                "per48": {
+                    key: values.get(base, {}).get(tricode, {}).get(key, 1.0)
+                    for key in metric_keys
+                },
+                "league_average": {key: 1.0 for key in metric_keys},
+                "population_sigma": {key: 0.5 for key in metric_keys},
+                "competition_rank": {key: 1 for key in metric_keys},
+            }
+            for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+        ]}
+        encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        publication_id = f"publication-{stream_key}"
+        with engine.begin() as connection:
+            connection.execute(PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key=stream_key,
+                season=SEASON,
+                cutoff=RETRIEVED_AT,
+                version=1,
+                status="active",
+                checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+                payload=encoded,
+                manifest_id=MANIFEST_ID,
+                event_catalog_publication_id=EVENT_CATALOG_ID,
+                event_catalog_checksum=catalog_checksum,
+                created_at=RETRIEVED_AT,
+                fence=1,
+            ))
+            connection.execute(PublicationPointer.__table__.insert().values(
+                stream_key=stream_key,
+                active_publication_id=publication_id,
+                previous_publication_id=None,
+                fence=1,
+                updated_at=RETRIEVED_AT,
+            ))
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
+    return TeamFilterRankingService(reader)
+
+
+def test_real_grouped_shot_and_synergy_publications_rank(tmp_path):
+    service = _publish_nba_streams(tmp_path, {
+        "shot_types": {
+            "LAL": {"catch_and_shoot_FG3M": 9.0, "catch_and_shoot_FG2M": 2.0},
+            "GSW": {"catch_and_shoot_FG3M": 4.0, "catch_and_shoot_FG2M": 3.0},
+        },
+        # LAL allows fewer transition points than GSW but more per
+        # possession, so the real decoder path still ranks a rate.
+        "play_types": {
+            "LAL": {"Transition_PTS": 22.0, "Transition_POSS": 10.0},
+            "GSW": {"Transition_PTS": 30.0, "Transition_POSS": 20.0},
+        },
+    })
+
+    shot_ranking = service.ranked_teams("C&S 3s", SEASON)
+    play_ranking = service.ranked_teams("Transition", SEASON)
+
+    assert len(shot_ranking) == len(NBA_TEAM_ID_TO_TRICODE)
+    assert shot_ranking[:2] == ["LAL", "GSW"]
+    assert len(play_ranking) == len(NBA_TEAM_ID_TO_TRICODE)
+    assert play_ranking[:2] == ["LAL", "GSW"]
+
+
+def test_a_failed_refresh_leaves_the_prior_publication_ranking(tmp_path):
+    """A refresh that never composes cannot disturb the active pointer."""
+
+    from app.services.collection_control import ControlPlaneError
+
+    engine, service = _publish_two_streams(tmp_path)
+    publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
+
+    with pytest.raises(ControlPlaneError):
+        publications.compose(
+            "traditional_opponent_season",
+            season=SEASON,
+            cutoff=RETRIEVED_AT + timedelta(days=1),
+            payload={"rows": [{"team_id": 1610612747}]},
+        )
+
+    assert service.ranked_teams("OPP_PTS", SEASON)[:2] == ["GSW", "LAL"]

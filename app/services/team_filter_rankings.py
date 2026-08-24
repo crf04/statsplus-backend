@@ -181,7 +181,11 @@ class TeamFilterRankingService:
         self.publication_reader = publication_reader
 
     def ranked_teams(self, team_filter: str, season: str) -> list[str]:
-        """Return the thirty team tricodes for one season, most-allowed first."""
+        """Return one season's ranked team tricodes, most-allowed first.
+
+        The list is the whole canonical league, minus any team with no rate to
+        rank by this filter, and empty when the publication cannot be trusted.
+        """
 
         return self.rank_all((team_filter,), season)[team_filter]
 
