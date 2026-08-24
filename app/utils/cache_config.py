@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 # Cache prefixes for different data types
 CACHE_PREFIXES = {
     'player_logs_daily': 'nba:player_logs',
-    'team_stats_daily': 'nba:team_stats', 
     'season_data': 'nba:season',
     'computed': 'nba:computed',
     'table_data': 'nba:table'

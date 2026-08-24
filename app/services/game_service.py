@@ -103,11 +103,6 @@ class GameService:
         """Get cache decorator for this instance"""
         return self.cache.cache_player_logs()
 
-    @property
-    def daily_cache_decorator(self):
-        """Get daily cache decorator for this instance"""
-        return self.cache.cache_daily_nba_data()
-
     def _get_game_logs(self, player_name, season=None):
         """Get game logs with daily caching - only hits the source once per day"""
         season = season or self.settings.nba.current_season
@@ -178,7 +173,7 @@ class GameService:
             if self.cache._is_current_season(season):
                 # Current season - use 1 AM CST expiry
                 if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
-                    logger.info(f"Cached NBA API result for {player_name}, {season} until 1 AM CST tomorrow")
+                    logger.info(f"Cached game logs for {player_name}, {season} until 1 AM CST tomorrow")
                 else:
                     # Fallback to regular TTL
                     ttl = self.cache._get_ttl(cache_type)

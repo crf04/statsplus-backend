@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone
 from math import isfinite
+from zoneinfo import ZoneInfo
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import (
@@ -28,7 +30,17 @@ from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     matchup_stream_key,
 )
+from app.domain.utc import assume_utc, parse_utc_iso
 from app.models.catalogs import LESS_THAN_TEN_FEET_FILTER
+from app.services.team_matchup_publications import (
+    NBA_PUBLICATION_BASES,
+    PublicationGovernanceUnavailable,
+    publication_cutoff_reason,
+    resolve_governed_team_game_ids,
+    validate_publication_rows,
+)
+
+EASTERN = ZoneInfo("America/New_York")
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +189,18 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
 class TeamFilterRankingService:
     """Rank opponents for Team Filters from their Season publications."""
 
-    def __init__(self, publication_reader) -> None:
+    def __init__(
+        self,
+        publication_reader,
+        *,
+        governance_resolver=None,
+        clock=None,
+    ) -> None:
         self.publication_reader = publication_reader
+        # Governed game-set evidence for the NBA-owned streams, resolved at the
+        # publication's own authority exactly as the matchup window read does.
+        self.governance_resolver = governance_resolver
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def ranked_teams(self, team_filter: str, season: str) -> list[str]:
         """Return one season's ranked team tricodes, most-allowed first.
@@ -253,15 +275,20 @@ class TeamFilterRankingService:
         reads = self.publication_reader.read_many(
             tuple(stream_by_base.values()), season=season
         )
+        cutoff = assume_utc(self._clock()).astimezone(EASTERN).date()
         return {
-            base: self._league_rows(reads[stream_key], stream_key)
+            base: self._league_rows(reads[stream_key], stream_key, base, cutoff)
             for base, stream_key in stream_by_base.items()
         }
 
-    @staticmethod
-    def _league_rows(read, stream_key: str):
+    def _league_rows(self, read, stream_key: str, base: str, cutoff: date):
         """Return the canonical thirty rows, or ``None`` to refuse ranking."""
 
+        cutoff_reason = publication_cutoff_reason(read, cutoff)
+        if cutoff_reason is not None:
+            # A publication whose coverage runs past today is not
+            # whole-Regular-Season evidence for this request.
+            read = replace(read, status="unavailable", unavailable_reason=cutoff_reason)
         if not read.available or read.decoded is None:
             logger.info(
                 "Team Filter rankings unavailable for %s: status=%s reason=%s",
@@ -270,7 +297,16 @@ class TeamFilterRankingService:
                 read.unavailable_reason,
             )
             return None
+        if read.retrieved_at is None:
+            logger.warning(
+                "%s publication has no provenance; refusing to rank", stream_key
+            )
+            return None
         rows = read.decoded
+        if base in NBA_PUBLICATION_BASES and not self._governed(
+            read, rows, base, stream_key
+        ):
+            return None
         # NBA-owned streams already proved the canonical league and its
         # identities at decode; the ledger-owned traditional and
         # assist-location streams did not, and a partial or mislabelled league
@@ -287,9 +323,94 @@ class TeamFilterRankingService:
             return None
         return rows
 
+    def _governed(self, read, rows, base: str, stream_key: str) -> bool:
+        """Prove an NBA-owned publication against its own governed game set.
+
+        The matchup window read applies exactly these checks; a ranking that
+        skipped them would accept a restored, hand-seeded, or corrupted
+        publication whose rows claim games the governed authority never
+        contained.
+        """
+
+        game_ids = self._publication_game_ids(read)
+        if game_ids is None:
+            logger.warning(
+                "%s publication governance is unavailable; refusing to rank",
+                stream_key,
+            )
+            return False
+        try:
+            validate_publication_rows(
+                base,
+                tuple(rows),
+                expected_team_ids=set(game_ids),
+                expected_game_ids_by_team=game_ids,
+                window=_WINDOW,
+            )
+        except ValueError as error:
+            logger.warning(
+                "%s publication failed governed validation (%s); refusing to rank",
+                stream_key,
+                getattr(error, "reason", None) or error,
+            )
+            return False
+        return True
+
+    def _publication_game_ids(self, read):
+        """Resolve governance at this immutable publication's own boundary."""
+
+        if read.cutoff is None:
+            return None
+        try:
+            cutoff = (
+                assume_utc(read.cutoff)
+                if isinstance(read.cutoff, datetime)
+                else parse_utc_iso(str(read.cutoff))
+            )
+        except (TypeError, ValueError):
+            return None
+        source = (
+            self.governance_resolver
+            if self.governance_resolver is not None
+            else self.publication_reader
+        )
+        try:
+            return resolve_governed_team_game_ids(
+                source,
+                read.season,
+                cutoff,
+                window=_WINDOW,
+                manifest_id=getattr(read, "manifest_id", None),
+                event_catalog_publication_id=getattr(
+                    read, "event_catalog_publication_id", None
+                ),
+                event_catalog_checksum=getattr(
+                    read, "event_catalog_checksum", None
+                ),
+            )
+        except PublicationGovernanceUnavailable:
+            return None
+
 
 __all__ = [
     "TEAM_FILTER_RANKINGS",
     "TeamFilterRanking",
     "TeamFilterRankingService",
 ]
+
+
+class PlayerDietReader:
+    """The one Diet capability the game-log path needs.
+
+    ``PlayerDietService`` also owns provider-backed refresh, and it holds the
+    NBA Stats adapter to do it.  Injecting the whole service would leave that
+    adapter reachable from the game-log graph; this narrows it to the read.
+    """
+
+    __slots__ = ("_diets",)
+
+    def __init__(self, diets) -> None:
+        self._diets = diets
+
+    def get_for_players(self, season: str, player_ids):
+        return self._diets.get_for_players(season, player_ids)

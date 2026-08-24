@@ -579,15 +579,37 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     )
     game_service = dependencies.game_service
 
-    # The provider adapter is still built for other callers, but nothing on
-    # the game service holds it, so a request-time NBA Stats call is
-    # unreachable rather than merely unused.
+    # A shallow attribute check would miss the adapter nested inside an
+    # injected collaborator, so walk every path and name them exactly.
+    def paths_to(root, target, label, depth=6):
+        found, seen, frontier = [], set(), [(root, label, 0)]
+        while frontier:
+            node, path, level = frontier.pop()
+            if level > depth or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if not hasattr(node, "__dict__"):
+                continue
+            for name, value in vars(node).items():
+                if value is target:
+                    found.append(f"{path}.{name}")
+                frontier.append((value, f"{path}.{name}", level + 1))
+        return found
+
     assert not hasattr(game_service, "nba_stats")
-    assert dependencies.nba_stats_provider not in vars(game_service).values()
+    # The retained live PBP game-log source resolves identity through the
+    # governed Event Catalog, which owns the schedule provider.  That one
+    # path is the documented #56 fallback and is deliberately out of #198's
+    # Team Filter slice; any other route to the adapter is a regression.
+    assert paths_to(
+        game_service, dependencies.nba_stats_provider, "game_service"
+    ) == ["game_service.game_logs_source.live_source.event_catalog.provider"]
 
     rankings = game_service.team_filter_rankings
     assert isinstance(rankings, TeamFilterRankingService)
     assert isinstance(
         rankings.publication_reader, DatabaseFirstPublicationReader
     )
-    assert set(vars(rankings)) == {"publication_reader"}
+    # Diet facts arrive through a read-only reader, not the refresh-capable
+    # service that owns the provider.
+    assert not hasattr(game_service.player_diets, "nba_stats")

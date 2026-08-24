@@ -949,6 +949,12 @@ wrong top-N.  Contradictory or unbounded evidence -- a non-numeric cell, a
 derived column that overflows, or points recorded across no possessions --
 refuses the surface the same way.
 
+The ranking read applies the same governance the matchup window read does: a
+publication whose coverage cutoff runs past today is refused, and an NBA-owned
+publication must match the exact per-team game set resolved at its own manifest
+and Event Catalog authority, so a restored, hand-seeded, or corrupted
+publication claiming games that authority never held cannot rank.
+
 One team may still be absent from one filter's ranking, and only in the single
 legitimate case of a rate with no denominator at all: a team that faced zero
 possessions of a play type has no points-per-possession to rank.  Such a team
@@ -3590,8 +3596,12 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   avoiding database, Redis, and parser initialization during route imports.
 - The game-log request path is fully synchronous and bounded: the route
   parses query parameters into one typed `GameLogQuery`, and the service runs
-  under Flask's threaded gunicorn model (`--workers 4 --threads 2`). NBA Stats
-  provider calls go through `NBAStatsAdapter`, which applies a
+  under Flask's threaded gunicorn model (`--workers 4 --threads 2`). That path
+  makes no NBA Stats call of its own: player logs come from the injected
+  game-log source and Team Filters rank from Season publications, so the only
+  NBA Stats reach left under it is the governed Event Catalog the live source
+  joins against.  Wherever an NBA Stats call is made, it goes through
+  `NBAStatsAdapter`, which applies a
   process-shared `threading.BoundedSemaphore` sized by
   `NBA_STATS_MAX_CONCURRENCY` (default 10) and shares the provider timeout from
   `NBA_STATS_TIMEOUT_SECONDS`.  All adapter instances using the same configured

@@ -112,8 +112,23 @@ class _StubReader:
         }
 
 
-def _service(reads):
-    return TeamFilterRankingService(_StubReader(reads))
+class _StubGovernance:
+    """The governed per-team game set an NBA publication must match."""
+
+    def __init__(self, game_ids=("0022500001",)):
+        self.game_ids = frozenset(game_ids)
+
+    def resolve_team_game_ids(self, season, cutoff, *, window, **kwargs):
+        return {
+            team_id: self.game_ids for team_id in NBA_TEAM_ID_TO_TRICODE
+        }
+
+
+def _service(reads, governance=None):
+    return TeamFilterRankingService(
+        _StubReader(reads),
+        governance_resolver=governance or _StubGovernance(),
+    )
 
 
 # --- catalog ---------------------------------------------------------------
@@ -203,7 +218,12 @@ def test_catch_and_shoot_points_are_derived_from_the_made_shot_counts():
 def _play_type_reads(values):
     def per48(tricode):
         points, possessions = values.get(tricode, (10.0, 20.0))
-        return {"Transition_PTS": points, "Transition_POSS": possessions}
+        metrics = {
+            key: 1.0 for key in NBA_PUBLICATION_TAXONOMY["play_types"]
+        }
+        metrics["Transition_PTS"] = points
+        metrics["Transition_POSS"] = possessions
+        return metrics
 
     return {
         "synergy_play_types_opponent_season": _read(
@@ -703,6 +723,15 @@ def _publish_nba_streams(tmp_path, values):
     return TeamFilterRankingService(reader)
 
 
+def test_a_real_nba_publication_without_governed_games_refuses_to_rank(tmp_path):
+    """Rows claiming a game the governed authority never held are not evidence."""
+
+    service = _publish_nba_streams(tmp_path, {})
+
+    assert service.ranked_teams("C&S 3s", SEASON) == []
+    assert service.ranked_teams("Transition", SEASON) == []
+
+
 def test_real_grouped_shot_and_synergy_publications_rank(tmp_path):
     service = _publish_nba_streams(tmp_path, {
         "shot_types": {
@@ -717,6 +746,7 @@ def test_real_grouped_shot_and_synergy_publications_rank(tmp_path):
         },
     })
 
+    service.governance_resolver = _StubGovernance()
     shot_ranking = service.ranked_teams("C&S 3s", SEASON)
     play_ranking = service.ranked_teams("Transition", SEASON)
 

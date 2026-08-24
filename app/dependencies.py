@@ -560,17 +560,29 @@ def build_dependencies(
         stored_game_logs_source,
         player_game_log_repository,
     )
-    from app.services.team_filter_rankings import TeamFilterRankingService
+    from app.services.team_filter_rankings import (
+        PlayerDietReader,
+        TeamFilterRankingService,
+    )
 
     game_service = GameService(
         engine,
         redis_client=redis_client,
         settings=settings,
         game_logs_source=game_logs_source,
-        player_diets=player_diet_service,
+        # Read-only Diet access: the full service owns a provider-backed
+        # refresh, so injecting it would leave NBA Stats reachable from here.
+        player_diets=(
+            PlayerDietReader(player_diet_service)
+            if player_diet_service is not None
+            else None
+        ),
         team_matchups=team_matchup_query_service,
         team_filter_rankings=(
-            TeamFilterRankingService(publication_reader)
+            TeamFilterRankingService(
+                publication_reader,
+                governance_resolver=l15_expectation_resolver,
+            )
             if publication_reader is not None
             else None
         ),
