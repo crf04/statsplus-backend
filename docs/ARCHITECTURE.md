@@ -940,11 +940,21 @@ season therefore resolves to an empty opponent set until that season is
 published.
 
 `date_filter` trims the player's own game logs and never reshapes a ranking,
-so a date-plus-Team-Filter request stays valid and season-ranked.  A ranking is
-all thirty opponents or nothing: NBA-owned streams prove the canonical league
-at their decode boundary, and the ledger-owned traditional and assist-location
-streams are proved here, so a partial publication refuses rather than ranking a
-plausible but wrong top-N.  A stale newest publication still serves its
+so a date-plus-Team-Filter request stays valid and season-ranked.  The
+publication is all thirty opponents or nothing: NBA-owned streams prove the
+canonical league and its tricodes at their decode boundary, and the
+ledger-owned traditional and assist-location streams are proved here, so a
+partial or mislabelled publication refuses rather than ranking a plausible but
+wrong top-N.  Contradictory or unbounded evidence -- a non-numeric cell, a
+derived column that overflows, or points recorded across no possessions --
+refuses the surface the same way.
+
+One team may still be absent from one filter's ranking, and only in the single
+legitimate case of a rate with no denominator at all: a team that faced zero
+possessions of a play type has no points-per-possession to rank.  Such a team
+is excluded from both ends, because it is neither a strongest nor a weakest
+opponent against a play type it never faced, so a `rank_filter` of `-30`
+returns the twenty-nine teams that have evidence.  A stale newest publication still serves its
 last-good ranking; an unavailable, partial, or unscoreable publication ranks
 nothing, which resolves to an empty opponent set rather than a new error case.
 

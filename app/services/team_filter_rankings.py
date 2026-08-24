@@ -6,10 +6,13 @@ is no governed-window parameter and no request-time provider call: the Season
 stream is the only source, and a stale newest publication still serves its
 last-good values rather than degrading the ranking.
 
-A ranking is all thirty opponents or nothing.  NBA-owned streams already prove
-the canonical league at their decode boundary; the ledger-owned traditional and
-assist-location streams do not, so this module proves it for every base rather
-than presenting a partial league as a complete ranking.
+The publication is all thirty opponents or nothing.  NBA-owned streams already
+prove the canonical league at their decode boundary; the ledger-owned
+traditional and assist-location streams do not, so this module proves it for
+every base rather than presenting a partial league as a complete ranking.  One
+team may still be absent from one filter, and only where it has no rate to
+rank at all -- a play type it faced zero possessions of -- which excludes it
+from both the strongest and the weakest end.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import (
@@ -61,29 +65,45 @@ class TeamFilterRanking:
     def value(self, per48: Mapping[str, float]) -> float | None:
         """Score one team, or ``None`` when the team has no rate to rank.
 
-        A metric this ranking needs must be present: its absence is a corrupt
-        payload that got past the decode boundary, and it raises rather than
-        quietly scoring the team.  ``None`` is the narrower, legitimate case of
-        a rate whose denominator is zero -- a team that never faced this play
-        type has no points-per-possession, which is not the same as allowing
-        none.
+        A metric this ranking needs must be present and finite: its absence or
+        corruption is invalid evidence that got past the decode boundary, and
+        it raises rather than quietly scoring the team.  ``None`` is the one
+        narrow legitimate case -- a team that never faced this play type has no
+        points-per-possession at all, which is not the same as allowing none.
+        A zero denominator carrying a non-zero numerator is not that case: it
+        is contradictory evidence (points scored across no possessions) and
+        raises like any other corrupt cell.
         """
 
-        total = sum(
+        total = _finite(sum(
             coefficient * _finite(per48[key])
             for key, coefficient in self.numerator
-        )
+        ))
         if self.denominator is None:
             return total
         divisor = _finite(per48[self.denominator])
-        return total / divisor if divisor > 0 else None
+        if divisor > 0:
+            return _finite(total / divisor)
+        if total:
+            raise ValueError(
+                "a per-48 rate cannot carry a numerator across no denominator"
+            )
+        return None
 
 
 def _finite(value) -> float:
-    """Coerce one published metric, refusing a non-numeric cell."""
+    """Coerce one published metric, refusing a non-numeric or unbounded cell.
 
+    The decode boundary already proves every published cell is a finite,
+    non-negative, non-boolean number.  This repeats the proof because the
+    decoded rows arrive through an injected reader, and because a derived sum
+    or quotient can overflow to infinity from operands that were each finite.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("a published per-48 metric must be numeric")
     number = float(value)
-    if number != number or number in (float("inf"), float("-inf")):
+    if not isfinite(number):
         raise ValueError("a published per-48 metric must be finite")
     return number
 

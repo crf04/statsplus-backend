@@ -1,10 +1,11 @@
-"""Game service: database-only game-log filtering.
+"""Game service: game-log filtering with no provider client of its own.
 
 Requests are served by threaded Flask workers, so this service is fully
-synchronous: there is no per-request event loop.  No provider client is
-reachable from here: player game logs come from the injected
-:mod:`app.services.game_logs_source` seam and Team Filters rank opponents from
-the Season publications through
+synchronous: there is no per-request event loop.  This service holds no
+provider client: player game logs come from the injected
+:mod:`app.services.game_logs_source` seam -- which decides for itself whether a
+season is served from durable facts or a cached live call -- and Team Filters
+rank opponents from the Season publications through
 :class:`~app.services.team_filter_rankings.TeamFilterRankingService` (#198).
 Filters arrive as one typed :class:`GameLogQuery` (built by the route or the NL
 executor) and the response is a validated :class:`GameLogResponse` whose

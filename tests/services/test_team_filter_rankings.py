@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy import event as sqlalchemy_event
 
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.migrations import run_migrations
@@ -14,7 +15,10 @@ from app.services.database_first_activation import (
     PublicationRead,
     PublicationTeamWindowRow,
 )
-from app.services.ledger_derivations import TEAM_METRICS
+from app.services.ledger_derivations import (
+    ASSIST_DERIVED_METRICS,
+    TEAM_METRICS,
+)
 from app.services.team_filter_rankings import (
     TEAM_FILTER_RANKINGS,
     TeamFilterRankingService,
@@ -206,10 +210,10 @@ def test_play_type_filter_ranks_points_per_possession():
 
 
 def test_a_team_that_never_faced_a_play_type_is_not_ranked_by_it():
-    """Zero possessions is real data: that team has no rate, the rest do."""
+    """No points across no possessions is real: that team has no rate."""
 
     service = _service(
-        _play_type_reads({"LAL": (22.0, 0.0), "GSW": (30.0, 30.0)})
+        _play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 30.0)})
     )
 
     ranked = service.ranked_teams("Transition", SEASON)
@@ -217,6 +221,40 @@ def test_a_team_that_never_faced_a_play_type_is_not_ranked_by_it():
     assert "LAL" not in ranked
     assert ranked[0] == "GSW"
     assert len(ranked) == len(NBA_TEAM_ID_TO_TRICODE) - 1
+
+
+def test_points_across_no_possessions_refuses_to_rank():
+    """Contradictory evidence is not an absent rate."""
+
+    service = _service(
+        _play_type_reads({"LAL": (22.0, 0.0), "GSW": (30.0, 30.0)})
+    )
+
+    assert service.ranked_teams("Transition", SEASON) == []
+
+
+def test_a_derived_column_that_overflows_refuses_to_rank():
+    """Operands can each be finite while their weighted sum is not."""
+
+    service = _service(_shot_type_reads({"LAL": (1e308, 1e308)}))
+
+    assert service.ranked_teams("C&S PTS", SEASON) == []
+
+
+def test_a_non_numeric_published_metric_refuses_to_rank():
+    reads = {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season",
+            _league(
+                lambda tricode: {
+                    metric: (True if metric == "points" else 1.0)
+                    for metric in TEAM_METRICS
+                }
+            ),
+        )
+    }
+
+    assert _service(reads).ranked_teams("OPP_PTS", SEASON) == []
 
 
 def test_a_publication_missing_a_ranked_metric_refuses_to_rank():
@@ -448,6 +486,40 @@ def test_a_real_publication_for_another_season_ranks_nothing(tmp_path):
     assert service.ranked_teams("OPP_PTS", "2024-25") == []
 
 
+def test_two_bases_rank_from_one_real_database_snapshot(tmp_path):
+    """Two filters over two streams issue exactly one publication query."""
+
+    engine, service = _publish_two_streams(tmp_path)
+    statements = []
+
+    @sqlalchemy_event.listens_for(engine, "before_cursor_execute")
+    def record(conn, cursor, statement, *args):  # noqa: ARG001
+        if "publication_streams" in statement:
+            statements.append(statement)
+
+    try:
+        rankings = service.rank_all(("OPP_PTS", "TwoPtAssists"), SEASON)
+    finally:
+        sqlalchemy_event.remove(engine, "before_cursor_execute", record)
+
+    assert len(statements) == 1
+    assert rankings["OPP_PTS"][:2] == ["GSW", "LAL"]
+    assert rankings["TwoPtAssists"][:2] == ["LAL", "GSW"]
+
+
+def test_a_team_without_a_rate_is_excluded_from_both_ends(tmp_path):
+    """An unrankable team is neither a strongest nor a weakest opponent."""
+
+    service = _service(
+        _play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 30.0)})
+    )
+
+    ranked = service.ranked_teams("Transition", SEASON)
+
+    assert "LAL" not in ranked[-5:]
+    assert "LAL" not in ranked[:5]
+
+
 def test_a_refresh_that_never_landed_serves_the_last_good_ranking(tmp_path):
     """No newer publication arrived for days; the pointer still ranks."""
 
@@ -460,3 +532,59 @@ def test_a_refresh_that_never_landed_serves_the_last_good_ranking(tmp_path):
 
     assert read.freshness == "stale"
     assert service.ranked_teams("OPP_PTS", SEASON)[:3] == ["GSW", "LAL", "BOS"]
+
+
+def _publish_two_streams(tmp_path):
+    """Compose one real traditional and one real assist-location publication."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'two-streams.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
+    points = {"GSW": 120.0, "LAL": 110.0}
+    assists = {"LAL": 30.0, "GSW": 25.0}
+
+    def rows(metrics, overrides, key):
+        return [
+            {
+                "team_id": team_id,
+                "team_tricode": tricode,
+                "game_ids": ["0022500001"],
+                "game_count": 1,
+                "per48": {
+                    **{metric: 1.0 for metric in metrics},
+                    key: overrides.get(tricode, 5.0),
+                },
+                "counts": {metric: 1.0 for metric in metrics},
+                "league_average": {metric: 1.0 for metric in metrics},
+                "population_sigma": {metric: 0.5 for metric in metrics},
+                "competition_rank": {metric: 1 for metric in metrics},
+                "team_minutes": 240.0,
+            }
+            for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+        ]
+
+    for stream_key, metrics, overrides, key in (
+        ("traditional_opponent_season", TEAM_METRICS, points, "points"),
+        (
+            "assist_locations_season",
+            ASSIST_DERIVED_METRICS,
+            assists,
+            "two_point_assists",
+        ),
+    ):
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=(),
+            publication_strategy="replace",
+            enabled=True,
+        )
+        publications.compose(
+            stream_key,
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            payload={"rows": rows(metrics, overrides, key)},
+        )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
+    return engine, TeamFilterRankingService(reader)
