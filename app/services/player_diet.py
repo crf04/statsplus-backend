@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import delete, insert, select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 from app.domain.team_matchup_taxonomy import SHOT_ZONE_SLICES
 from app.domain.utc import assume_utc
@@ -25,6 +25,7 @@ from app.services.database_first_activation import (
     PublicationPayloadError,
     decode_player_diet,
 )
+from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
 from app.utils.telemetry import ProviderResponseError
 
@@ -355,17 +356,21 @@ class PlayerDietRepository:
         player_ids: Sequence[int],
         *,
         publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
     ) -> PlayerDietResult:
         season = validate_canonical_season(season)
         requested = self._canonical_player_ids(player_ids)
         publication_result = self._publication_result(
-            season, requested, publication_snapshot=publication_snapshot
+            season,
+            requested,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         if publication_result is not None:
             return publication_result
         fact_table = PlayerDietFactRow.__table__
         observation_table = PlayerDietSurfaceObservationRow.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             fact_rows = []
             if requested:
                 fact_rows = (
@@ -428,6 +433,7 @@ class PlayerDietRepository:
         requested: tuple[int, ...],
         *,
         publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
     ) -> PlayerDietResult | None:
         """Serve activated Diet bases independently from immutable payloads."""
 
@@ -520,10 +526,13 @@ class PlayerDietRepository:
                             retrieved_at=retrieved_at,
                         )
                     )
-        if used_publication:
+        # With every Base activated there is no fallback row to look for, so
+        # the two legacy statements are skipped rather than run against an
+        # empty base filter.
+        if used_publication and fallback_bases:
             fact_table = PlayerDietFactRow.__table__
             observation_table = PlayerDietSurfaceObservationRow.__table__
-            with self.engine.connect() as connection:
+            with read_connection(self.engine, connection) as connection:
                 legacy_facts = connection.execute(
                     select(fact_table).where(
                         fact_table.c.season == season,
@@ -667,9 +676,13 @@ class PlayerDietService:
         player_ids: Sequence[int],
         *,
         publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
     ) -> PlayerDietResult:
         return self.repository.get_for_players(
-            season, player_ids, publication_snapshot=publication_snapshot
+            season,
+            player_ids,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
         )
 
     @staticmethod

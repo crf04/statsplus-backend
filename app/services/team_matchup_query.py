@@ -10,6 +10,8 @@ from math import isfinite
 from statistics import fmean, pstdev
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.engine import Connection
+
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.services.team_matchup_repository import (
     StoredTeamMatchupFact,
@@ -96,6 +98,7 @@ class TeamMatchupQueryService:
         window_games: int | None = None,
         as_of: date | None = None,
         publication_snapshot=None,
+        connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date."""
 
@@ -104,7 +107,10 @@ class TeamMatchupQueryService:
             raise ValueError("future as_of dates cannot be queried")
         cutoff = as_of or current_date
         observation_scope = self.repository.get_latest_scope(
-            season, window_games=window_games, as_of=cutoff
+            season,
+            window_games=window_games,
+            as_of=cutoff,
+            connection=connection,
         )
         if observation_scope is None:
             return self._database_first_window(
@@ -114,12 +120,15 @@ class TeamMatchupQueryService:
                 legacy=None,
                 publication_snapshot=publication_snapshot,
             )
-        observation_snapshot = self.repository.get_snapshot(observation_scope)
+        observation_snapshot = self.repository.get_snapshot(
+            observation_scope, connection=connection
+        )
         observations = observation_snapshot.observations
         fact_scopes = self.repository.get_latest_fact_scopes(
             season,
             window_games=window_games,
             as_of=cutoff,
+            connection=connection,
         )
         surfaces_by_scope = defaultdict(set)
         for surface, fact_scope in fact_scopes.items():
@@ -129,7 +138,7 @@ class TeamMatchupQueryService:
         for fact_scope, surfaces in surfaces_by_scope.items():
             if fact_scope not in snapshots_by_scope:
                 snapshots_by_scope[fact_scope] = self.repository.get_snapshot(
-                    fact_scope
+                    fact_scope, connection=connection
                 )
             facts.extend(
                 fact

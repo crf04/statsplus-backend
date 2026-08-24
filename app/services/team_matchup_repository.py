@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from math import isfinite
@@ -34,6 +34,7 @@ from app.services.team_matchup_publications import (
     PublicationLineage,
     publication_stream,
 )
+from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
 
 
@@ -1195,9 +1196,7 @@ class TeamMatchupRepository:
     ) -> StoredTeamMatchupSnapshot:
         fact_table = TeamMatchupFactRow.__table__
         observation_table = TeamMatchupSurfaceObservationRow.__table__
-        owned = connection is None
-        scope_context = self.engine.connect() if owned else nullcontext(connection)
-        with scope_context as connection:
+        with read_connection(self.engine, connection) as connection:
             fact_query = select(fact_table).where(*self._scope(fact_table, scope))
             observation_query = select(observation_table).where(
                 *self._scope(observation_table, scope)
@@ -1287,6 +1286,7 @@ class TeamMatchupRepository:
         *,
         window_games: int | None = None,
         as_of: date | None = None,
+        connection: Connection | None = None,
     ) -> TeamMatchupSnapshotScope | None:
         requested = TeamMatchupSnapshotScope(season, as_of or date.max, window_games)
         table = TeamMatchupSurfaceObservationRow.__table__
@@ -1298,8 +1298,8 @@ class TeamMatchupRepository:
         statement = select(func.max(table.c.as_of_date)).where(*conditions)
         if as_of is not None:
             statement = statement.where(table.c.as_of_date <= as_of)
-        with self.engine.connect() as connection:
-            latest_as_of = connection.execute(statement).scalar_one()
+        with read_connection(self.engine, connection) as scoped:
+            latest_as_of = scoped.execute(statement).scalar_one()
         if latest_as_of is None:
             return None
         return TeamMatchupSnapshotScope(season, latest_as_of, window_games)
@@ -1310,6 +1310,7 @@ class TeamMatchupRepository:
         *,
         window_games: int | None = None,
         as_of: date,
+        connection: Connection | None = None,
     ) -> dict[str, TeamMatchupSnapshotScope]:
         """Return each surface's newest fact-bearing scope through ``as_of``."""
 
@@ -1325,8 +1326,8 @@ class TeamMatchupRepository:
             )
             .group_by(table.c.base)
         )
-        with self.engine.connect() as connection:
-            rows = connection.execute(statement).mappings().all()
+        with read_connection(self.engine, connection) as scoped:
+            rows = scoped.execute(statement).mappings().all()
         return {
             row["base"]: TeamMatchupSnapshotScope(
                 season, row["as_of_date"], window_games

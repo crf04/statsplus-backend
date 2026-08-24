@@ -6,6 +6,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
+
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.nba_events import resolve_stored_event_classification
@@ -21,8 +24,9 @@ from app.services.player_game_log_values import (
 from app.services.player_pool import PoolPlayer, SingleGamePlayerPoolReader
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
-    call_with_snapshot,
+    call_with_read_scope,
 )
+from app.services.request_reads import request_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -63,6 +67,7 @@ class MatchupSelectionService:
         publication_reader: Any | None = None,
         h2h_thin_min_games: int | None = None,
         archetype_thin_min_games: int | None = None,
+        engine: Engine | None = None,
     ) -> None:
         h2h_thin_min_games = (
             settings.catalog.matchup_selection_h2h_min_games
@@ -82,6 +87,9 @@ class MatchupSelectionService:
         self.archetypes = archetypes
         self.settings = settings
         self.publication_reader = publication_reader
+        # One request checks out one connection for every read it composes;
+        # without an engine each seam keeps opening its own.
+        self._engine = engine
         self.h2h_thin_min_games = h2h_thin_min_games
         self.archetype_thin_min_games = archetype_thin_min_games
         self._statistics = {
@@ -99,13 +107,34 @@ class MatchupSelectionService:
         )
 
     def get_selection(self, *, game_id: str, player_id: int) -> dict[str, Any]:
+        with request_read_scope(self._engine) as (connection, session):
+            return self._compose_selection(
+                game_id=game_id,
+                player_id=player_id,
+                connection=connection,
+                session=session,
+            )
+
+    def _compose_selection(
+        self,
+        *,
+        game_id: str,
+        player_id: int,
+        connection: Connection | None,
+        session: Session | None,
+    ) -> dict[str, Any]:
         season = self.settings.nba.current_season
-        publication_snapshot = self._publication_snapshot(season)
-        event = self._event(season, game_id)
+        publication_snapshot = self._publication_snapshot(season, session=session)
+        event = self._event(season, game_id, connection=connection)
         pool = (
             None
             if self.player_pool is None
-            else self.player_pool.get_pool_for_game(season=season, game_id=game_id)
+            else call_with_read_scope(
+                self.player_pool.get_pool_for_game,
+                season=season,
+                game_id=game_id,
+                connection=connection,
+            )
         )
         if pool is None:
             raise ProviderUnavailableError(
@@ -129,39 +158,46 @@ class MatchupSelectionService:
                 "The stored Player Pool categories are incompatible with the current "
                 "Statistic Catalog."
             )
-        log_freshness = call_with_snapshot(
+        log_freshness = call_with_read_scope(
             self.player_logs.get_read_freshness,
             season,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
-        rate = call_with_snapshot(
+        rate = call_with_read_scope(
             self.player_logs.get_season_rate,
             season,
             player_id,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
-        h2h_records = call_with_snapshot(
+        h2h_records = call_with_read_scope(
             self.player_logs.list_h2h_rows,
             season,
             player_id,
             opponent_team_id,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         h2h_rated = self._rate_rows(h2h_records, markets, {player_id: rate})
 
-        peer_ids = self.archetypes.list_peer_ids(player_id)
-        archetype_records = call_with_snapshot(
+        peer_ids = call_with_read_scope(
+            self.archetypes.list_peer_ids, player_id, connection=connection
+        )
+        archetype_records = call_with_read_scope(
             self.player_logs.list_archetype_rows,
             season,
             peer_ids,
             opponent_team_id,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
-        summaries = call_with_snapshot(
+        summaries = call_with_read_scope(
             self.player_logs.get_player_summaries,
             season,
             peer_ids,
             publication_snapshot=publication_snapshot,
+            connection=connection,
         )
         peer_rates = {
             peer_id: summary.season_rate for peer_id, summary in summaries.items()
@@ -184,7 +220,7 @@ class MatchupSelectionService:
             "archetype": self._table(archetype_rated, self.archetype_thin_min_games),
         }
 
-    def _publication_snapshot(self, season: str):
+    def _publication_snapshot(self, season: str, *, session: Session | None = None):
         if self.publication_reader is None:
             return None
         snapshot = getattr(self.publication_reader, "snapshot", None)
@@ -197,18 +233,30 @@ class MatchupSelectionService:
             # One card resolves its own rows from the projection, so the
             # season-wide game-log payload is never worth shipping.
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if session is not None and accepts_keyword(snapshot, "session"):
+            keyword["session"] = session
         return snapshot(("player_game_logs",), season=season, **keyword)
 
-    def _event(self, season: str, game_id: str) -> Mapping[str, Any]:
+    def _event(
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> Mapping[str, Any]:
         if self.event_catalog is None:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
-        if self.event_catalog.count_events(season) == 0:
+        if call_with_read_scope(
+            self.event_catalog.count_events, season, connection=connection
+        ) == 0:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
-        for event in self.event_catalog.get_events(season):
+        for event in call_with_read_scope(
+            self.event_catalog.get_events, season, connection=connection
+        ):
             if str(event.get("nba_game_id")) == game_id:
                 classification = resolve_stored_event_classification(
                     game_id,

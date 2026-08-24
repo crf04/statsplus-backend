@@ -366,7 +366,7 @@ def test_projection_and_payload_reads_render_the_same_card(tmp_path):
 
     hydrated = reader._reader.snapshot(("player_game_logs",), season=SEASON)
     assert hydrated.read("player_game_logs").payload is not None
-    service._publication_snapshot = lambda season: hydrated
+    service._publication_snapshot = lambda season, **_scope: hydrated
     via_payload = service.get_selection(game_id=GAME_ID, player_id=2544)
 
     assert via_projection == via_payload

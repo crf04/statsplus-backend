@@ -10,6 +10,8 @@ import time
 from typing import Any, Callable, Iterable, Mapping, Protocol
 from uuid import uuid4
 
+from sqlalchemy.engine import Connection
+
 from app.domain.freshness import (
     exact_age_seconds,
     exact_seconds,
@@ -36,6 +38,7 @@ from app.services.player_pool_snapshot_repository import (
     StoredPlayerPoolSnapshot,
     StoredPlayerPoolSnapshotCandidate,
 )
+from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 from app.utils.telemetry import (
     BoundedPlayerPoolTelemetryRecorder,
@@ -167,14 +170,29 @@ class PlayerPoolReader(Protocol):
 class SingleGamePlayerPoolReader(Protocol):
     """Read one game's governed Player Pool without prescribing storage."""
 
-    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None: ...
+    def get_pool_for_game(
+        self,
+        *,
+        season: str,
+        game_id: str,
+        connection: Connection | None = None,
+    ) -> PlayerPool | None: ...
 
 
 class StoredPlayerPoolSnapshotReader(Protocol):
-    def get(self, scope: PlayerPoolSnapshotScope) -> StoredPlayerPoolSnapshot | None: ...
+    def get(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        connection: Connection | None = None,
+    ) -> StoredPlayerPoolSnapshot | None: ...
 
     def list_containing_game(
-        self, season: str, game_id: str
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
     ) -> tuple[StoredPlayerPoolSnapshotCandidate, ...]: ...
 
 
@@ -190,9 +208,20 @@ class StoredPlayerPoolReader:
         self.snapshot_repository = snapshot_repository
         self._clock = clock
 
-    def get_pool_for_game(self, *, season: str, game_id: str) -> PlayerPool | None:
+    def get_pool_for_game(
+        self,
+        *,
+        season: str,
+        game_id: str,
+        connection: Connection | None = None,
+    ) -> PlayerPool | None:
         try:
-            candidates = self.snapshot_repository.list_containing_game(season, game_id)
+            candidates = call_with_read_scope(
+                self.snapshot_repository.list_containing_game,
+                season,
+                game_id,
+                connection=connection,
+            )
         except (KeyError, TypeError, ValueError):
             return None
         now = self._clock()
@@ -209,7 +238,11 @@ class StoredPlayerPoolReader:
                         candidate, now, maximum_age
                     ):
                         continue
-                    stored = self.snapshot_repository.get(candidate.scope)
+                    stored = call_with_read_scope(
+                        self.snapshot_repository.get,
+                        candidate.scope,
+                        connection=connection,
+                    )
                     if stored is None or not PlayerPoolService._within_age(
                         stored, now, maximum_age
                     ):

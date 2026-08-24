@@ -8,12 +8,13 @@ import json
 from typing import Any, Iterable, Mapping
 
 from sqlalchemy import and_, insert, or_, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from app.domain.utc import assume_utc
 from app.domain.freshness import exact_timedelta, time_window_seconds
 from app.models.player_pool_snapshot import PlayerPoolSnapshot
+from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
 
 
@@ -88,9 +89,14 @@ class PlayerPoolSnapshotRepository:
             table.c.game_ids == scope.storage_game_ids,
         )
 
-    def get(self, scope: PlayerPoolSnapshotScope) -> StoredPlayerPoolSnapshot | None:
+    def get(
+        self,
+        scope: PlayerPoolSnapshotScope,
+        *,
+        connection: Connection | None = None,
+    ) -> StoredPlayerPoolSnapshot | None:
         table = PlayerPoolSnapshot.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             row = connection.execute(
                 select(table.c.payload, table.c.retrieved_at).where(
                     self._identity(table, scope)
@@ -104,12 +110,16 @@ class PlayerPoolSnapshotRepository:
         return StoredPlayerPoolSnapshot(payload, assume_utc(row["retrieved_at"]))
 
     def list_containing_game(
-        self, season: str, game_id: str
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
     ) -> tuple[StoredPlayerPoolSnapshotCandidate, ...]:
         """Read candidate metadata without loading season-wide snapshot payloads."""
 
         table = PlayerPoolSnapshot.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             rows = connection.execute(
                 select(
                     table.c.game_ids,

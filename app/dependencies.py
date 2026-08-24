@@ -583,6 +583,7 @@ def build_dependencies(
         statistic_catalog=statistic_catalog,
         settings=settings,
         publication_reader=publication_reader,
+        engine=engine,
     )
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,
@@ -595,6 +596,7 @@ def build_dependencies(
         injuries=matchup_injury_service,
         database_only=not demo_database,
         publication_reader=publication_reader,
+        engine=engine,
     )
 
     return ApplicationDependencies(

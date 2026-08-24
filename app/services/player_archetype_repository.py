@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
+
+from app.services.request_reads import read_connection
 
 
 class PlayerArchetypeRepository:
@@ -12,9 +14,9 @@ class PlayerArchetypeRepository:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def list_peer_ids(self, player_id: int) -> tuple[int, ...]:
-        if not inspect(self.engine).has_table("player_clusters"):
-            return ()
+    def list_peer_ids(
+        self, player_id: int, *, connection: Connection | None = None
+    ) -> tuple[int, ...]:
         statement = text(
             'SELECT DISTINCT peers."PlayerID" '
             "FROM player_clusters AS selected "
@@ -24,10 +26,14 @@ class PlayerArchetypeRepository:
             'AND peers."PlayerID" <> :player_id '
             'ORDER BY peers."PlayerID"'
         )
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as scoped:
+            # Reflection is done on the request's own connection so the legacy
+            # table probe does not cost a second checkout.
+            if not inspect(scoped).has_table("player_clusters"):
+                return ()
             return tuple(
                 int(value)
-                for value in connection.execute(
+                for value in scoped.execute(
                     statement, {"player_id": player_id}
                 ).scalars()
             )
