@@ -762,9 +762,9 @@ class PlayerGameLogRepository:
     def read_publication_snapshot(self, season: str) -> Any | None:
         """Read the player-log publication once for one request.
 
-        The database-first game-log router uses this snapshot for both its
-        source decision and the stored row projection.  Readers without the
-        snapshot seam retain the legacy completeness path.
+        The stored game-log source uses this snapshot for both its completeness
+        decision and row projection. Readers without the snapshot seam retain
+        the legacy completeness path.
         """
 
         canonical_season = validate_canonical_season(season)

@@ -1,12 +1,10 @@
 """PBP Stats game-log provider boundary.
 
-The application depends on :class:`PBPGameLogProvider`.  The concrete adapter
-keeps the PBP game-log endpoints, request parameters, shared HTTP session,
+The concrete adapter keeps the PBP ingestion endpoints, request parameters, shared HTTP session,
 timeouts, telemetry, response validation, and provider error translation in
 one place.  Callers receive PBP-shaped observation rows through the production
 parse seams; canonical game-log normalization lives beside the service
-consumers so the same mapping serves both the live request path and durable
-ingestion.
+consumers so durable ingestion and stored reads share one mapping.
 
 The wire contract was verified against live responses and the PBP Stats
 OpenAPI:
@@ -35,18 +33,16 @@ import pandas as pd
 import requests
 
 from app.config.settings import RuntimeSettings
-from app.services.pbp_stats_adapter import PBPTotalsAdapter as _InstrumentedPBPTotalsAdapter
-from app.services.pbp_stats_adapter import PBP_REGULAR_SEASON
+from app.services.pbp_stats_adapter import (
+    PBPTotalsAdapter as _InstrumentedPBPTotalsAdapter,
+)
 from app.utils.telemetry import (
     CACHE_DISABLED,
-    PBP_STATS_OPERATIONS,
     PROVIDER_PBP_STATS,
     ProviderResponseError,
     provider_call,
-    record_cached_provider_event,
 )
 
-PBP_GAME_LOGS_URL = "https://api.pbpstats.com/get-game-logs/nba"
 PBP_GAME_STATS_URL = "https://api.pbpstats.com/get-game-stats"
 
 #: The strict per-row identity/minute columns a game-log row carries on the
@@ -108,16 +104,6 @@ class PBPGameLogProvider(Protocol):
     way the totals adapter does.
     """
 
-    def fetch_player_game_logs(
-        self,
-        player_id: int,
-        season: str,
-        *,
-        season_type: str = "Regular Season",
-        cache_status: str = CACHE_DISABLED,
-    ) -> pd.DataFrame:
-        """Fetch one player's season game-log observations."""
-
     def fetch_game_player_logs(
         self,
         game_id: str,
@@ -136,15 +122,11 @@ class PBPGameLogProvider(Protocol):
     ) -> dict[str, Any]:
         """Fetch one game's complete raw ``/get-game-stats`` evidence."""
 
-    def record_cache_hit(self, operation: str) -> None:
-        """Record an event for a response served without a provider call."""
-
 
 class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
     """Concrete PBP game-log adapter backed by the shared retrying session."""
 
     PROVIDER_NAME = "PBP Stats"
-    game_logs_url = PBP_GAME_LOGS_URL
     game_stats_url = PBP_GAME_STATS_URL
 
     def __init__(
@@ -178,36 +160,6 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
             tracker.status_code = response.status_code
             response.raise_for_status()
             yield response
-
-    def fetch_player_game_logs(
-        self,
-        player_id: int,
-        season: str,
-        *,
-        season_type: str = "Regular Season",
-        cache_status: str = CACHE_DISABLED,
-    ) -> pd.DataFrame:
-        """Fetch and validate one player's season game-log observations."""
-        params = {
-            "Season": season,
-            "SeasonType": _provider_season_type(season_type),
-            "EntityType": "Player",
-            "EntityId": str(player_id),
-        }
-        with self._request_game_logs(
-            "player_game_logs",
-            self.game_logs_url,
-            params,
-            cache_status=cache_status,
-        ) as response:
-            payload = _json_payload(response)
-            totals = payload.get("single_row_table_data") if isinstance(payload, dict) else None
-            player_name = totals.get("Name") if isinstance(totals, dict) else None
-            return type(self).parse_game_logs(
-                payload,
-                entity_id=str(player_id),
-                player_name=player_name,
-            )
 
     def fetch_game_player_logs(
         self,
@@ -261,15 +213,6 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
             params,
         ) as response:
             return _json_payload(response)
-
-    def record_cache_hit(self, operation: str) -> None:
-        """Record a cache-hit event for a PBP game-log operation."""
-        if operation not in PBP_STATS_OPERATIONS:
-            raise ValueError(
-                f"Unsupported PBP Stats operation {operation!r}; "
-                f"expected one of {sorted(PBP_STATS_OPERATIONS)}."
-            )
-        record_cached_provider_event(PROVIDER_PBP_STATS, operation)
 
     @staticmethod
     def parse_game_logs(
@@ -328,7 +271,9 @@ class PBPGameLogAdapter(_InstrumentedPBPTotalsAdapter):
         }
         rows: list[dict[str, Any]] = []
         for side, (team, opponent) in sides.items():
-            period = stats[side].get("FullGame") if isinstance(stats[side], dict) else None
+            period = (
+                stats[side].get("FullGame") if isinstance(stats[side], dict) else None
+            )
             if not isinstance(period, list):
                 raise ProviderResponseError(
                     "PBP Stats game-stats payload has an invalid FullGame list."
@@ -353,14 +298,6 @@ def _is_team_summary_row(row: dict[str, Any]) -> bool:
     """Whether a boxscore row is the provider's team aggregate, not a player."""
     entity_id = str(row.get("EntityId") or "")
     return entity_id == "0" or row.get("Name") == "Team"
-
-
-def _provider_season_type(season_type: str) -> str:
-    return (
-        PBP_REGULAR_SEASON
-        if season_type in {"Regular Season", PBP_REGULAR_SEASON}
-        else season_type
-    )
 
 
 def _json_payload(response: requests.Response) -> Any:
@@ -404,13 +341,7 @@ def _project_game_log_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=PBP_GAME_LOG_COLUMNS)
     return pd.DataFrame(
-        [
-            {
-                column: row.get(column)
-                for column in PBP_GAME_LOG_COLUMNS
-            }
-            for row in rows
-        ],
+        [{column: row.get(column) for column in PBP_GAME_LOG_COLUMNS} for row in rows],
         columns=PBP_GAME_LOG_COLUMNS,
     )
 
@@ -420,7 +351,6 @@ __all__ = [
     "PBP_GAME_LOG_COUNTING_COLUMNS",
     "PBP_GAME_LOG_ASSIST_LOCATION_COLUMNS",
     "PBP_GAME_LOG_REQUIRED_COLUMNS",
-    "PBP_GAME_LOGS_URL",
     "PBP_GAME_STATS_URL",
     "PBPGameLogAdapter",
     "PBPGameLogProvider",

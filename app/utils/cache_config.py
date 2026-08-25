@@ -10,26 +10,15 @@ scheme, or when `REDIS_TLS=true`.
 
 import redis
 import logging
-import pytz
-from datetime import datetime, timezone, timedelta, time
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
-# Cache prefixes for different data types
-CACHE_PREFIXES = {
-    'player_logs_daily': 'nba:player_logs',
-    'season_data': 'nba:season',
-    'computed': 'nba:computed',
-    'table_data': 'nba:table'
-}
-
 # Cache TTL configurations (in seconds)
 CACHE_TTLS = {
-    'daily_nba_data': 6 * 60 * 60,      # 6 hours - current season data
-    'season_historical': 30 * 24 * 60 * 60,  # 30 days - historical data
     'intraday_computed': 2 * 60 * 60,    # 2 hours - computed/derived data  
     'player_info': 24 * 60 * 60,        # 24 hours - player information
 }
@@ -130,54 +119,3 @@ def get_ttl_for_cache_type(cache_type: str) -> int:
         int: TTL in seconds
     """
     return CACHE_TTLS.get(cache_type, CACHE_TTLS['intraday_computed'])
-
-def get_next_1am_cst_timestamp() -> int:
-    """
-    Get the Unix timestamp for 1 AM CST the following day.
-    
-    This is used for setting cache expiration to occur at a specific time
-    rather than using a fixed TTL duration.
-    
-    Returns:
-        int: Unix timestamp for next 1 AM CST
-    """
-    cst = pytz.timezone('US/Central')
-    now = datetime.now(cst)
-    
-    # Get tomorrow's date
-    tomorrow = now.date() + timedelta(days=1)
-    
-    # Create 1 AM CST tomorrow
-    next_1am = cst.localize(datetime.combine(tomorrow, time(1, 0)))
-    
-    return int(next_1am.timestamp())
-
-def set_cache_with_1am_expiry(redis_client: redis.Redis, key: str, value: str) -> bool:
-    """
-    Set a cache value that expires at 1 AM CST the following day.
-    
-    Args:
-        redis_client: Redis client instance
-        key: Cache key
-        value: Cache value
-        
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    if not redis_client:
-        return False
-        
-    try:
-        # Set the value
-        redis_client.set(key, value)
-        
-        # Set expiration to 1 AM CST tomorrow
-        expire_timestamp = get_next_1am_cst_timestamp()
-        redis_client.expireat(key, expire_timestamp)
-        
-        logger.debug(f"Cache key '{key}' set to expire at 1 AM CST tomorrow (timestamp: {expire_timestamp})")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to set cache with 1 AM expiry: {e}")
-        return False

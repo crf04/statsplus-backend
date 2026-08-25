@@ -1,18 +1,13 @@
-"""PBP game-log provider, canonical normalization, and request-time source."""
+"""PBP game-log provider and canonical ingestion normalization."""
 
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError
 from app.providers.pbp_game_logs import PBPGameLogAdapter, PBP_GAME_LOG_COLUMNS
 from app.services.game_log_frame import derive_game_log_frame
-from app.services.game_logs_source import (
-    DatabaseFirstGameLogsSource,
-    LivePBPGameLogsSource,
-)
 from app.services.pbp_game_log_normalization import (
     normalize_pbp_game_logs,
     parse_pbp_minutes,
@@ -191,63 +186,6 @@ def test_adapter_empty_payload_carries_the_declared_schema():
     assert frame.empty
 
 
-def test_adapter_fetch_player_game_logs_uses_entity_params_and_telemetry():
-    from app.config.settings import ProviderSettings, RuntimeSettings
-
-    class FakeResponse:
-        status_code = 200
-        payload = {
-            "single_row_table_data": {"Name": "Player One"},
-            "multi_row_table_data": [_pbp_row()],
-        }
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self.payload
-
-    class FakeSession:
-        def __init__(self):
-            self.calls = []
-
-        def get(self, url, params, timeout):
-            self.calls.append((url, params, timeout))
-            return FakeResponse()
-
-    telemetry.clear_recorded_provider_events()
-    session = FakeSession()
-    adapter = PBPGameLogAdapter(
-        RuntimeSettings(
-            environment="testing",
-            providers=ProviderSettings(
-                pbp_connect_timeout_seconds=1.0,
-                pbp_read_timeout_seconds=2.0,
-            ),
-        ),
-        session=session,
-    )
-    frame = adapter.fetch_player_game_logs(101, "2025-26")
-
-    url, params, timeout = session.calls[0]
-    assert url == adapter.game_logs_url
-    assert params == {
-        "Season": "2025-26",
-        "SeasonType": "Regular+Season",
-        "EntityType": "Player",
-        "EntityId": "101",
-    }
-    assert timeout == (1.0, 2.0)
-    assert frame.loc[0, "EntityId"] == "101"
-    assert frame.loc[0, "Name"] == "Player One"
-
-    event = telemetry.get_recorded_provider_events()[-1]
-    assert event["provider"] == telemetry.PROVIDER_PBP_STATS
-    assert event["operation"] == "player_game_logs"
-    assert event["outcome"] == telemetry.OUTCOME_SUCCESS
-    assert event["cache_status"] == telemetry.CACHE_DISABLED
-
-
 def test_adapter_fetch_game_player_logs_uses_game_params():
     from app.config.settings import ProviderSettings, RuntimeSettings
 
@@ -365,28 +303,6 @@ def test_adapter_fetch_game_stats_returns_complete_raw_evidence():
     assert payload["ProviderAddedField"] == "future-proof"
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["operation"] == "game_player_stats"
-
-
-def test_adapter_record_cache_hit_requires_closed_pbp_operation():
-    from app.config.settings import ProviderSettings, RuntimeSettings
-
-    adapter = PBPGameLogAdapter(
-        RuntimeSettings(
-            environment="testing",
-            providers=ProviderSettings(),
-        ),
-        session=object(),
-    )
-    telemetry.clear_recorded_provider_events()
-    adapter.record_cache_hit("player_game_logs")
-
-    event = telemetry.get_recorded_provider_events()[-1]
-    assert event["provider"] == telemetry.PROVIDER_PBP_STATS
-    assert event["operation"] == "player_game_logs"
-    assert event["cache_status"] == telemetry.CACHE_HIT
-
-    with pytest.raises(ValueError, match="Unsupported PBP Stats operation"):
-        adapter.record_cache_hit("nba_thing")
 
 
 # ------------------------------------------------------------- normalization
@@ -542,193 +458,6 @@ def test_normalize_pbp_game_logs_empty_input_carries_full_schema():
     assert "FG_PCT" in frame.columns
     assert "PRA" in frame.columns
     assert "FD_PTS" in frame.columns
-
-
-# ------------------------------------------------------------- live source
-
-
-class _FakeRedis:
-    def __init__(self):
-        self._data = {}
-
-    def set(self, key, value, *args, **kwargs):
-        self._data[key] = value
-        return True
-
-    def setex(self, key, ttl, value):
-        self._data[key] = value
-        return True
-
-    def expireat(self, key, timestamp):
-        return True
-
-    def get(self, key):
-        return self._data.get(key)
-
-    def delete(self, key):
-        self._data.pop(key, None)
-        return 1
-
-
-def test_game_service_cache_attributes_live_pbp_hits_and_misses(
-    monkeypatch, mock_db_engine
-):
-    from app.services.game_service import GameService
-
-    provider = FakePBPGameLogs([_pbp_row()])
-    source = LivePBPGameLogsSource(provider, FakeEventCatalog(_events()))
-    service = GameService(
-        mock_db_engine,
-        _FakeRedis(),
-        settings=RuntimeSettings(
-            environment="testing",
-            nba=NBASeasonSettings(current_season="2025-26"),
-        ),
-        game_logs_source=source,
-    )
-    monkeypatch.setattr(service, "get_player_id", lambda name: 101)
-
-    first = service._get_game_logs("Player One", "2025-26")
-    assert len(provider.calls) == 1
-    assert len(first[0]) == 1
-
-    second = service._get_game_logs("Player One", "2025-26")
-    assert len(provider.calls) == 1
-    assert len(second[0]) == 1
-    # A cache hit is attributed to the PBP provider, not NBA Stats.
-    assert provider.hits == ["player_game_logs"]
-
-
-def test_game_service_cache_keeps_historical_expiration_for_pbp(monkeypatch, mock_db_engine):
-    from app.services.game_service import GameService
-
-    provider = FakePBPGameLogs([_pbp_row()])
-    source = LivePBPGameLogsSource(provider, FakeEventCatalog(_events()))
-    service = GameService(
-        mock_db_engine,
-        _FakeRedis(),
-        settings=RuntimeSettings(
-            environment="testing",
-            nba=NBASeasonSettings(current_season="2025-26"),
-        ),
-        game_logs_source=source,
-    )
-    monkeypatch.setattr(service, "get_player_id", lambda name: 101)
-
-    service._get_game_logs("Player One", "2024-25")
-    service._get_game_logs("Player One", "2024-25")
-
-    assert len(provider.calls) == 1
-    assert provider.hits == ["player_game_logs"]
-
-
-class FakePBPGameLogs:
-    def __init__(self, rows):
-        self.rows = rows
-        self.calls = []
-        self.hits = []
-
-    def fetch_player_game_logs(self, player_id, season, *, season_type, cache_status):
-        self.calls.append((player_id, season, season_type, cache_status))
-        return _pbp_frame(*self.rows)
-
-    def fetch_game_player_logs(self, game_id, season, *, season_type):
-        self.calls.append((game_id, season, season_type))
-        return _pbp_frame(*self.rows)
-
-    def record_cache_hit(self, operation):
-        self.hits.append(operation)
-
-
-class FakeEventCatalog:
-    def __init__(self, events=None):
-        self.events = events
-
-    def get_events(self, season):
-        return self.events
-
-
-def test_live_source_fetches_and_joins_events():
-    provider = FakePBPGameLogs([_pbp_row()])
-    source = LivePBPGameLogsSource(provider, FakeEventCatalog(_events()))
-
-    frame = source.get_player_logs(101, "2025-26")
-
-    assert provider.calls == [
-        (101, "2025-26", "Regular Season", telemetry.CACHE_MISS)
-    ]
-    assert len(frame) == 1
-    assert frame.iloc[0]["MATCHUP"] == "AAA vs. BBB"
-
-
-def test_live_source_fails_closed_on_any_unjoinable_row():
-    provider = FakePBPGameLogs([_pbp_row(), _pbp_row(EntityId=202, GameId="0022999999", Minutes="10:00")])
-    source = LivePBPGameLogsSource(provider, FakeEventCatalog(_events()))
-
-    with pytest.raises(ProviderUnavailableError):
-        source.get_player_logs(101, "2025-26")
-
-
-def test_live_source_fails_closed_without_a_governed_event_catalog():
-    source = LivePBPGameLogsSource(FakePBPGameLogs([_pbp_row()]), None)
-    with pytest.raises(ProviderUnavailableError):
-        source.get_player_logs(101, "2025-26")
-
-    source = LivePBPGameLogsSource(FakePBPGameLogs([_pbp_row()]), FakeEventCatalog([]))
-    with pytest.raises(ProviderUnavailableError):
-        source.get_player_logs(101, "2025-26")
-
-
-def test_live_source_is_cacheable_and_attributes_hits_to_pbp():
-    provider = FakePBPGameLogs([_pbp_row()])
-    source = LivePBPGameLogsSource(provider, FakeEventCatalog(_events()))
-
-    assert source.cached("2025-26") is True
-    source.record_cache_hit("player_game_logs")
-    assert provider.hits == ["player_game_logs"]
-
-
-# --------------------------------------------------------- database router
-
-
-class FakeRepository:
-    def __init__(self, complete):
-        self.complete = complete
-        self.reads = []
-
-    def has_complete_publication(self, season):
-        self.reads.append(season)
-        return self.complete
-
-
-def test_database_first_router_serves_complete_seasons_from_storage():
-    class StoredSource:
-        def get_player_logs(self, player_id, season, *, cache_status):
-            return "stored-frame"
-
-    router = DatabaseFirstGameLogsSource(
-        live_source=object(),
-        stored_source=StoredSource(),
-        repository=FakeRepository(complete=True),
-    )
-
-    assert router.get_player_logs(101, "2025-26") == "stored-frame"
-    assert router.cached("2025-26") is False
-
-
-def test_database_first_router_falls_back_to_live_when_not_complete():
-    class LiveSource:
-        def get_player_logs(self, player_id, season, *, cache_status):
-            return "live-frame"
-
-    router = DatabaseFirstGameLogsSource(
-        live_source=LiveSource(),
-        stored_source=object(),
-        repository=FakeRepository(complete=False),
-    )
-
-    assert router.get_player_logs(101, "2025-26") == "live-frame"
-    assert router.cached("2025-26") is True
 
 
 # ------------------------------------------------------------------ derive

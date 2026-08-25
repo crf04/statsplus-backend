@@ -863,50 +863,37 @@ Game logs:
 GET /api/games/game_logs
   → Firebase auth (or explicit local-only bypass)
   → GameService.get_filtered_logs
-  → game-log source (cached PBP Stats per-player call, or stored facts for a
-    durably complete season)
+  → durable player-game-log publication
   → local/database and request filters
   → serialized logs and averages
 ```
 
-The request-time player-game-log source is one injected seam
-(`app.services.game_logs_source`).  Production assembles a
-`DatabaseFirstGameLogsSource` that serves a season from the durable
-`player_game_logs` facts only when the season has a complete, valid
-publication; every other valid season falls through to the cached
-`LivePBPGameLogsSource`.  The live source replaces the request-time NBA Stats
-call: it requests one PBP per-player season game-log observation
-(`GET /get-game-logs/nba` with `EntityType=Player` and `EntityId`) through
-`PBPGameLogAdapter`, normalizes it through the shared canonical contract, and
-joins every row to the governed Event Catalog by game ID to recover team and
-opponent identity, home/away, and the existing Matchup notation.  The live
-per-player rows do not carry `EntityId`/`Name`/`TeamId`: player identity comes
-from the request plus the `single_row_table_data.Name` envelope, and team
-identity is derived exactly from each row's `Team`/`Opponent` tricodes against
-the Event Catalog.  An unavailable or empty Event Catalog fails closed as
-`provider_unavailable`.  The Redis cache policy
-is unchanged (current-season daily, historical 30-day); cache hits and misses
-are attributed to the PBP provider.  A database-served season bypasses Redis
-entirely so cached provider results never shadow fresher stored facts.
+The request-time player-game-log source is one injected database-only seam
+(`app.services.game_logs_source.StoredGameLogsSource`). It captures the active
+immutable `player_game_logs` publication generation and reads that generation's
+indexed player projection only when the publication is complete and valid. An
+unavailable, invalid, or legacy-fallback-eligible publication produces an empty
+canonical frame. No request-time provider or Redis player-log cache sits behind
+the seam; historical seasons are outside the supported Log Workspace outcome
+and may return empty.
 
 `app.services.pbp_game_log_normalization.normalize_pbp_game_logs` is the one
-canonical PBP game-log mapping shared by the live path and durable ingestion.
+canonical PBP game-log mapping used by durable ingestion.
 Provider omissions become zero only for a closed list of additive/counting
 box-score fields; identity, game, date, team, opponent, and `MM:SS` minutes
 evidence is malformed rather than zero-filled.  The join is fail-closed: any
 row that cannot join the governed Event Catalog, contradicts its team tricode,
 disagrees with the requested phase, or is missing identity/minutes evidence
-aborts the whole pass with `provider_unavailable`, so neither the live response
-nor a durable game publication ever tolerates a dropped row.  Canonical
+aborts the whole ingestion pass, so a durable game publication never tolerates
+a dropped row. Canonical
 shooting facts derive
 `FGM = FG2M + FG3M` and `FGA = FG2A + FG3A`; PBP reports free-throw points
 rather than made free throws, and a made free throw is exactly one point, so
 the endpoint's canonical `FTM` reads `FtPoints` after that semantic
 equivalence; composite and fantasy values are
-computed centrally by `app.services.game_log_frame.derive_game_log_frame` so
-the live PBP and stored read paths can never disagree.  The stored source
-rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
-makes the Stage 3 parity seam a real equivalence check.
+computed centrally by `app.services.game_log_frame.derive_game_log_frame`.
+The stored source rebuilds the request frame from `PlayerGameLogRecord` facts
+through that same derivation.
 
 ### Team Filter Season Rankings
 
@@ -970,8 +957,8 @@ season rows. `players_on[]` intersects `(game_id, team)` pairs across the
 primary player and every named teammate; `players_off[]` removes the union of
 same-team pairs where any named teammate has a row. A player appearing for the
 opponent in the same game is therefore never treated as the primary player's
-teammate. The algorithm is provider-independent: before durable activation it
-uses cached PBP season rows and after activation it uses stored game-log facts.
+teammate. Every named player's rows come from an active durable publication;
+unavailable coverage produces no matching games.
 
 Explicit contract amendment (#66): plus/minus is removed from the game-log
 contract.  `PLUS_MINUS` is not a supported `self_filters[STAT]`, the averages
@@ -1683,16 +1670,16 @@ while recording a false retrieval time.
 
 ### Database-first game-log reads
 
-Stage 3 makes Postgres the preferred read path.  `PlayerGameLogRepository`
+Postgres is the only request-time read path. `PlayerGameLogRepository`
 reports a complete publication only when the season sidecar is present with
 `publication_status == complete` and the read remains valid (a historical
 season's own sidecar, or a fresh stats-surface observation for the configured
-current season).  The request-time router serves that season from the durable
+current season). The request-time source serves that season from the durable
 facts through `StoredGameLogsSource`, which rebuilds the canonical frame from
-`PlayerGameLogRecord` primitives with the same central derivations as the live
-path. Active immutable player-log publications also own a normalized
+`PlayerGameLogRecord` primitives with the central game-log derivations. Active
+immutable player-log publications also own a normalized
 `publication_player_game_logs` projection keyed by `publication_id`, player,
-and game. The request planner reads pointer/version metadata without selecting
+and game. The source reads pointer/version metadata without selecting
 `publication_versions.payload`, then the repository executes one indexed
 player query and decodes only those rows. The matchup read takes the same
 projection path: its one snapshot names `player_game_logs` as projection-only,
@@ -1706,15 +1693,11 @@ projection's `(publication_id, opponent_team_id, player_id, game_date)` index.
 Composition and rollback write the
 projection in the publication transaction, while migration 036 backfills
 existing valid versions; the projection therefore preserves exact active and
-rollback generation semantics without a season-wide cold decode. A valid
-season that has not yet received a complete durable publication
-continues through the cached live PBP path; it is never mistaken for an empty
-stored season.  Because the #66 contract amendment removed plus/minus from the
-game-log contract, the durable path covers every public primitive and needs no
-separate cutover gate.  The parity seam is the authenticated game-log endpoint:
-tests compare the complete live-PBP and stored response documents — game
-identity, statistics, averages, and filter results — and cutover depends on
-strict equivalence.
+rollback generation semantics without a season-wide cold decode. A season
+without a complete, valid publication returns the endpoint's normal empty
+result rather than reaching a provider or legacy repository fallback. Because
+the #66 contract amendment removed plus/minus from the game-log contract, the
+durable path covers every public primitive.
 
 Authenticated matchup-selection reads compose only stored seams:
 
@@ -3597,12 +3580,9 @@ The authoritative local and CI gate is `./scripts/check.sh`.
 - The game-log request path is fully synchronous and bounded: the route
   parses query parameters into one typed `GameLogQuery`, and the service runs
   under Flask's threaded gunicorn model (`--workers 4 --threads 2`). That path
-  makes no provider call of its own: player logs come from the injected
-  game-log source and Team Filters rank from Season publications.  The only
-  provider clients still reachable from `GameService` sit under the retained
-  live PBP game-log source -- the PBP adapter itself and the NBA Stats adapter
-  owned by the governed Event Catalog it joins against -- and a structural test
-  asserts that every reach lies there and nowhere else.  Diet facts arrive
+  reaches no provider client: player logs and Team Filters come from durable
+  publications, and a structural test walks the dependency graph and asserts
+  an empty provider path list. Diet facts arrive
   through a read-only reader bound to the Diet repository, not the
   refresh-capable service that owns the adapters.  Wherever an NBA Stats call
   is made, it goes through
