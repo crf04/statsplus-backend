@@ -219,7 +219,9 @@ class ResidentialScopeExecutor:
                     self.provider, "fetch_opponent_shooting_zone",
                     parameters.get("date_from"), date_to=parameters.get("date_to"),
                     season=work.season, season_type="Regular Season",
-                    team_id=int(team_id), last_n_games=15 if window == "l15" else None,
+                    # The endpoint refuses an empty LastNGames; the season
+                    # window is its explicit zero, not an omitted parameter.
+                    team_id=int(team_id), last_n_games=15 if window == "l15" else 0,
                     per_mode_detailed=str(parameters.get("per_mode", "Per48")),
                 )
                 yield normalize_opponent_zone_response(
@@ -428,11 +430,38 @@ class _StandaloneNBAProvider:
             league_id="00",
             timeout=self.timeout,
         ))
+        frame = self._collapse_opponent_breakdown(frame, team_id=team_id)
         evidence = self._team_window_evidence(
             season=season, season_type=season_type, team_id=team_id,
             last_n_games=last_n_games, date_from=date_from, date_to=date_to,
         )
         return self._bind_window_gp(frame, evidence, team_id=team_id)
+
+    @staticmethod
+    def _collapse_opponent_breakdown(frame: Any, *, team_id: int) -> Any:
+        """Sum an exact-window per-opponent breakdown into one team row.
+
+        With a date window the opponent shot chart reports one row per
+        opponent faced -- every row carries the requested TEAM_ID, and ``G``
+        counts the games against that opponent -- where the season shape is a
+        single aggregate row.  The count columns are additive, so the window
+        row is their sum; anything else in the response is a different
+        contract and stays for the normalizer to refuse.
+        """
+
+        try:
+            frame = _flatten_frame_columns(frame)
+            if len(frame.index) <= 1 or "G" not in frame.columns:
+                return frame
+            if "TEAM_ID" not in frame or not (frame["TEAM_ID"] == team_id).all():
+                return frame
+            collapsed = frame.iloc[[0]].copy()
+            for column in ("FGM", "FGA", "FG2M", "FG2A", "FG3M", "FG3A", "MIN", "G"):
+                if column in frame.columns:
+                    collapsed[column] = frame[column].sum()
+            return collapsed.drop(columns=["G"])
+        except (KeyError, TypeError, AttributeError, ValueError):
+            return frame
 
     def fetch_opponent_shooting_zone(
         self, date_from: str | None, *, date_to: str | None = None,
