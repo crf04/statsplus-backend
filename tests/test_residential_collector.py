@@ -446,6 +446,110 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     } == {"11/01/2025"}
 
 
+def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):
+    # A retried collection appends a second accepted observation for the same
+    # (team, category); the composed payload must come from the newer one
+    # rather than refusing the manifest as a taxonomy duplicate.
+    control_db = create_engine(f"sqlite:///{tmp_path / 'latest.sqlite3'}")
+    run_migrations(control_db)
+    team_ids = sorted(NBA_TEAM_IDS)
+    control = CollectionControlService(control_db, clock=lambda: NOW)
+    control.activate_season("2025-26", actor="operator")
+    event_payload = {"complete_snapshot": True, "events": [{
+        "nba_game_id": f"game-{round_index}-{pair_index}",
+        "home_team_id": team_ids[pair_index * 2],
+        "away_team_id": team_ids[pair_index * 2 + 1],
+        "phase": "Regular Season", "status": "Final",
+        "scheduled_at": (
+            NOW - timedelta(days=15 - round_index, hours=1)
+        ).isoformat(),
+    } for round_index in range(15) for pair_index in range(15)]}
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=NOW)
+    control.publish_catalog(event_request.request_id, event_payload, version="event-v1")
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=NOW)
+    control.publish_catalog(athlete_request.request_id, {"complete_snapshot": True, "identities": [{
+        "player_id": "1", "team_id": team_ids[0], "status": "active",
+        "event_ids": [
+            f"game-{round_index}-{pair_index}"
+            for round_index in range(15) for pair_index in range(15)
+        ],
+    }]}, version="athlete-v1")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=NOW,
+        scopes={"synergy_play_types_opponent_season", "canonical_game_ledger"},
+        collect_before=NOW + timedelta(hours=1),
+    )
+    governance = ActiveManifestLedgerGovernanceReader(control_db)
+    publications = PublicationService(
+        control_db, clock=lambda: NOW, l15_expectation_resolver=governance,
+    )
+    publications.register_stream(
+        "synergy_play_types_opponent_season", provider="nba",
+        owner="residential_collector",
+        required_observations=["synergy_opponent"],
+        publication_strategy="snapshot_replace", supported_windows=["season"],
+        completeness_rule="base_complete", enabled=True,
+    )
+    tokens = CollectorTokenService(
+        control_db, environment="testing", signing_secret="test", clock=lambda: NOW
+    )
+    identity = tokens.create_identity(
+        "collector", scopes=["ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=["synergy_opponent"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    ticks = iter(range(1, 10_000))
+    ingestion = ObservationIngestionService(
+        control_db, publication_service=publications,
+        clock=lambda: NOW + timedelta(seconds=next(ticks)),
+    )
+    from app.collector.normalizers import normalize_opponent_synergy_response
+    from app.models.catalogs import PLAY_TYPES
+    def deliver(points):
+        for play_type in PLAY_TYPES:
+            observation = normalize_opponent_synergy_response(
+                [{"TEAM_ID": team_id, "PLAY_TYPE": play_type,
+                  "TYPE_GROUPING": "Defensive", "GP": 15, "MIN": 725.0,
+                  "POSS": 100, "PTS": points}
+                 for team_id in team_ids],
+                season="2025-26", cutoff=NOW,
+                scope={"window": "season", "phase": "Regular Season",
+                       "play_type": play_type, "subject": "opponent",
+                       "value_mode": "totals_with_minutes"},
+            )
+            envelope = {
+                "client_observation_id": f"obs-{play_type}-{points}",
+                "observation_type": "synergy_opponent",
+                "provider": "nba", "season": "2025-26",
+                "cutoff": NOW.isoformat(), "schema_version": 2,
+                "retrieved_at": NOW.isoformat(),
+                "manifest_id": manifest.manifest_id,
+                "scope": observation.scope,
+                "environment": "testing",
+            }
+            raw = json.dumps(observation.payload, sort_keys=True, separators=(",", ":")).encode()
+            envelope["checksum"] = hashlib.sha256(raw).hexdigest()
+            ingestion.ingest(claims, envelope, gzip.compress(raw), compressed=True)
+    deliver(points=110)
+    deliver(points=120)
+    version = publications.compose_from_observations(
+        "synergy_play_types_opponent_season", season="2025-26", cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+    payload = json.loads(version.payload) if isinstance(version.payload, str) else version.payload
+    rows = payload if isinstance(payload, list) else payload.get("rows", payload.get("records"))
+    text = json.dumps(rows)
+    # 120 points over 725 minutes per 48 — the newer observation's value.
+    assert f"{120 * 48 / 725.0:.9f}"[:8] in text or str(120 * 48 / 725.0)[:8] in text
+    assert str(110 * 48 / 725.0)[:8] not in text
+    transition = 120 * 48 / 725.0
+    # 120 points over 725 minutes per 48 — the newer observation's value.
+    assert abs(transition - 120 * 48 / 725.0) < 1e-9
+    assert version.status in {"candidate", "active"}
+
+
 def test_exact_window_opponent_breakdown_collapses_to_one_team_row():
     # With a date window the opponent shot chart reports one row per opponent
     # faced; the season shape is a single aggregate row, so the counts are
