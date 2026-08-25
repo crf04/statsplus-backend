@@ -323,17 +323,14 @@ def season_complete_snapshot_accepted(
 ) -> bool:
     """Whether a later snapshot is still the exact window for an earlier date.
 
-    Once a Regular Season is over its season aggregate cannot change, so an
-    NBA-owned season snapshot collected afterwards holds the same games for
-    every date in that season.  An L15 window keeps moving with the calendar,
-    so it stays bound to the requested date.
+    Once a Regular Season is over its season aggregate cannot change, so a
+    season publication cut afterwards -- NBA-owned or ledger-derived -- holds
+    the same games for every date in that season.  An L15 window keeps moving
+    with the calendar, so it stays bound to the requested date.
     """
 
-    return (
-        season_is_complete
-        and window == "season"
-        and base in NBA_PUBLICATION_BASES
-    )
+    del base  # every governed base shares the season-window argument
+    return season_is_complete and window == "season"
 
 
 def resolve_governed_season_is_complete(

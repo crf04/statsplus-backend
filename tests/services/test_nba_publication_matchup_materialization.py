@@ -2640,8 +2640,10 @@ def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
 SEASON_COMPLETE_CUTOFF = "2025-10-16T04:00:00+00:00"
 
 
-def _season_complete_query(tmp_path, *, window_games=None, unplayed_games=0):
-    """Query one NBA surface whose snapshot was cut after the requested date."""
+def _season_complete_query(
+    tmp_path, *, window_games=None, unplayed_games=0, surface="shot_zones"
+):
+    """Query one surface whose snapshot was cut after the requested date."""
 
     engine = _engine(tmp_path)
     with engine.begin() as connection:
@@ -2652,11 +2654,18 @@ def _season_complete_query(tmp_path, *, window_games=None, unplayed_games=0):
             catalog_id="season-complete-catalog",
             unplayed_games=unplayed_games,
         )
-    stream_key = (
-        "exact_shot_zones_opponent_l15"
-        if window_games is not None
-        else "exact_shot_zones_opponent_season"
-    )
+    stream_key = {
+        "shot_zones": (
+            "exact_shot_zones_opponent_l15"
+            if window_games is not None
+            else "exact_shot_zones_opponent_season"
+        ),
+        "traditional": (
+            "traditional_opponent_l15"
+            if window_games is not None
+            else "traditional_opponent_season"
+        ),
+    }[surface]
     window = TeamMatchupQueryService(
         TeamMatchupRepository(engine),
         publication_reader=_reader(
@@ -2668,8 +2677,28 @@ def _season_complete_query(tmp_path, *, window_games=None, unplayed_games=0):
         TeamMatchupSnapshotScope("2025-26", AS_OF, window_games=window_games)
     )
     return stream_key, next(
-        item for item in window.observations if item.surface == "shot_zones"
+        item for item in window.observations if item.surface == surface
     ), window
+
+
+def test_completed_season_exemption_covers_every_governed_base():
+    # A ledger-derived season aggregate is one sum over the same finished set
+    # of games, so it is as date-independent as the NBA-owned snapshots; the
+    # window, not the owner, decides.
+    from app.services.team_matchup_publications import (
+        season_complete_snapshot_accepted,
+    )
+
+    for base in ("traditional", "assist_locations", "play_types", "shot_zones"):
+        assert season_complete_snapshot_accepted(
+            None, base=base, window="season", season_is_complete=True
+        )
+        assert not season_complete_snapshot_accepted(
+            None, base=base, window="l15", season_is_complete=True
+        )
+        assert not season_complete_snapshot_accepted(
+            None, base=base, window="season", season_is_complete=False
+        )
 
 
 def test_completed_season_serves_a_later_season_snapshot_with_its_reason(

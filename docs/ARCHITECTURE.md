@@ -2179,8 +2179,11 @@ case is exempt. When the Event Catalog bound to the read's own manifest is
 complete and every Regular Season event it governs is already final, the
 season is over and its season aggregate can no longer move, so the season
 snapshot holds exactly the same games for every date in that season: the
-refusal would be about timestamps rather than content. The Matchups read then
-serves the NBA-owned `season` window and names `season_complete_snapshot` in
+refusal would be about timestamps rather than content. This holds for every
+governed base — the ledger-derived traditional and assist-location seasons as
+much as the NBA-owned play-type and shot seasons — because all of them are one
+aggregate over the same finished set of games. The Matchups read then
+serves the `season` window and names `season_complete_snapshot` in
 the team-window provenance alongside the publication ID and cutoff, so a
 reader can see the window came from a post-season snapshot. The exemption is
 window-specific: an L15 aggregate keeps moving with the calendar even after the
