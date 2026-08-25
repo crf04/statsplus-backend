@@ -29,12 +29,15 @@ from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAMS,
     PublicationGovernanceUnavailable,
     PublicationLineage,
+    SEASON_COMPLETE_SNAPSHOT_REASON,
     publication_cutoff_reason,
     publication_lineage,
     publication_metric_identity,
     publication_metric_keys,
     validate_publication_rows,
+    resolve_governed_season_is_complete,
     resolve_governed_team_game_ids,
+    season_complete_snapshot_accepted,
 )
 
 
@@ -246,8 +249,21 @@ class TeamMatchupQueryService:
             return legacy
         base_windows: dict[str, TeamMatchupWindow | None] = {}
         validation_failures: dict[str, str] = {}
+        snapshot_reasons: dict[str, str] = {}
         for base, read in active.items():
             cutoff_reason = publication_cutoff_reason(read, cutoff)
+            if cutoff_reason == "publication_cutoff_after_as_of" and (
+                season_complete_snapshot_accepted(
+                    read,
+                    base=base,
+                    window=window,
+                    season_is_complete=self._publication_season_is_complete(
+                        read, requested_season=season
+                    ),
+                )
+            ):
+                cutoff_reason = None
+                snapshot_reasons[base] = SEASON_COMPLETE_SNAPSHOT_REASON
             if cutoff_reason is not None:
                 read = replace(
                     read,
@@ -313,7 +329,9 @@ class TeamMatchupQueryService:
                 base=base,
                 rows=rows,
                 retrieved_at=read.retrieved_at,
-                publication=publication_lineage(read),
+                publication=publication_lineage(
+                    read, reason=snapshot_reasons.get(base)
+                ),
             )
         scope = legacy.scope if legacy is not None else TeamMatchupSnapshotScope(
             season=season, as_of=cutoff, window_games=window_games
@@ -534,18 +552,9 @@ class TeamMatchupQueryService:
             )
         except (TypeError, ValueError):
             return None
-        source = (
-            self._l15_expectation_resolver
-            if self._l15_expectation_resolver is not None
-            else (
-                self._expected_l15_game_ids_source
-                if self._expected_l15_game_ids_source is not None
-                else self._publication_reader
-            )
-        )
         try:
             return resolve_governed_team_game_ids(
-                source,
+                self._governance_source,
                 read.season,
                 cutoff,
                 window=window,
@@ -559,6 +568,42 @@ class TeamMatchupQueryService:
             )
         except PublicationGovernanceUnavailable:
             return None
+
+    @property
+    def _governance_source(self):
+        if self._l15_expectation_resolver is not None:
+            return self._l15_expectation_resolver
+        if self._expected_l15_game_ids_source is not None:
+            return self._expected_l15_game_ids_source
+        return self._publication_reader
+
+    def _publication_season_is_complete(
+        self, read, *, requested_season: str
+    ) -> bool:
+        """Ask this publication's own governance whether its season is over."""
+
+        if read.season != requested_season or read.cutoff is None:
+            return False
+        try:
+            cutoff = (
+                assume_utc(read.cutoff)
+                if isinstance(read.cutoff, datetime)
+                else parse_utc_iso(str(read.cutoff))
+            )
+        except (TypeError, ValueError):
+            return False
+        return resolve_governed_season_is_complete(
+            self._governance_source,
+            read.season,
+            cutoff,
+            manifest_id=getattr(read, "manifest_id", None),
+            event_catalog_publication_id=getattr(
+                read, "event_catalog_publication_id", None
+            ),
+            event_catalog_checksum=getattr(
+                read, "event_catalog_checksum", None
+            ),
+        )
 
     def _build_window(
         self,

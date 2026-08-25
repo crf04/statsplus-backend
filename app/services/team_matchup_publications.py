@@ -264,9 +264,13 @@ class PublicationLineage:
     cutoff: str | None
     freshness: str | None
     version: int | None
+    #: Why this read accepted a publication its date ordering would normally
+    #: refuse.  The answer depends on the requested ``as_of``, not on the
+    #: immutable publication row, so it is reported rather than stored.
+    reason: str | None = None
 
 
-def publication_lineage(read) -> PublicationLineage | None:
+def publication_lineage(read, *, reason: str | None = None) -> PublicationLineage | None:
     publication_id = getattr(read, "publication_id", None)
     if not publication_id:
         return None
@@ -275,6 +279,7 @@ def publication_lineage(read) -> PublicationLineage | None:
         cutoff=publication_cutoff(read),
         freshness=getattr(read, "freshness", None),
         version=getattr(read, "version", None),
+        reason=reason,
     )
 
 
@@ -306,6 +311,61 @@ def publication_cutoff_reason(read, cutoff: date) -> str | None:
     )
 
 
+SEASON_COMPLETE_SNAPSHOT_REASON = "season_complete_snapshot"
+
+
+def season_complete_snapshot_accepted(
+    read,
+    *,
+    base: str,
+    window: str,
+    season_is_complete: bool,
+) -> bool:
+    """Whether a later snapshot is still the exact window for an earlier date.
+
+    Once a Regular Season is over its season aggregate cannot change, so an
+    NBA-owned season snapshot collected afterwards holds the same games for
+    every date in that season.  An L15 window keeps moving with the calendar,
+    so it stays bound to the requested date.
+    """
+
+    return (
+        season_is_complete
+        and window == "season"
+        and base in NBA_PUBLICATION_BASES
+    )
+
+
+def resolve_governed_season_is_complete(
+    resolver,
+    season: str,
+    cutoff,
+    *,
+    manifest_id: str | None = None,
+    event_catalog_publication_id: str | None = None,
+    event_catalog_checksum: str | None = None,
+) -> bool:
+    """Ask the bound governance whether every governed game is final.
+
+    Fail closed: a resolver that cannot prove completeness leaves the date
+    ordering refusal in place rather than widening what a read may serve.
+    """
+
+    operation = getattr(resolver, "resolve_season_is_complete", None)
+    if not callable(operation):
+        return False
+    try:
+        return operation(
+            season,
+            cutoff,
+            manifest_id=manifest_id,
+            event_catalog_publication_id=event_catalog_publication_id,
+            event_catalog_checksum=event_catalog_checksum,
+        ) is True
+    except PublicationGovernanceUnavailable:
+        return False
+
+
 def publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
     """Split one publication key into the existing matchup taxonomy."""
 
@@ -335,6 +395,7 @@ __all__ = [
     "PublicationLineage",
     "PublicationGovernanceUnavailable",
     "PublicationValidationError",
+    "SEASON_COMPLETE_SNAPSHOT_REASON",
     "SHOT_TYPE_SLICES",
     "SHOT_TYPE_STATS",
     "SHOT_TYPE_STORED_TO_DISPLAY",
@@ -347,7 +408,9 @@ __all__ = [
     "publication_metric_identity",
     "publication_metric_keys",
     "publication_stream",
+    "season_complete_snapshot_accepted",
     "resolve_governed_l15_game_ids",
+    "resolve_governed_season_is_complete",
     "resolve_governed_team_game_ids",
     "resolve_governed_l15_date_from_by_team",
     "validate_publication_rows",
