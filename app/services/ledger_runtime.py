@@ -56,6 +56,9 @@ class LedgerGovernance:
     accepted_versions: frozenset[int] = frozenset({1})
     event_catalog_publication_id: str | None = None
     event_catalog_checksum: str | None = None
+    #: Whether every Regular Season event the bound Event Catalog governs is
+    #: final.  A finished season's aggregates can no longer move.
+    season_complete: bool = False
 
     @property
     def expected_season_game_ids(self) -> dict[int, frozenset[str]]:
@@ -199,6 +202,31 @@ class ActiveManifestLedgerGovernanceReader:
     def resolve_season_game_ids(self, season: str, cutoff: date | datetime):
         return self.resolve_team_game_ids(season, cutoff, window="season")
 
+    def resolve_season_is_complete(
+        self,
+        season: str,
+        cutoff: date | datetime,
+        *,
+        manifest_id: str | None = None,
+        event_catalog_publication_id: str | None = None,
+        event_catalog_checksum: str | None = None,
+    ) -> bool:
+        """Whether the governance bound at this cutoff finished its season."""
+
+        governance = self._governance_at_cutoff(
+            season, cutoff, manifest_id=manifest_id,
+        )
+        if (
+            event_catalog_publication_id is not None
+            and governance.event_catalog_publication_id
+            != event_catalog_publication_id
+        ) or (
+            event_catalog_checksum is not None
+            and governance.event_catalog_checksum != event_catalog_checksum
+        ):
+            raise PublicationGovernanceUnavailable()
+        return governance.season_complete
+
     def _governance_at_cutoff(
         self,
         season: str,
@@ -284,7 +312,7 @@ class ActiveManifestLedgerGovernanceReader:
             manifest["event_catalog_publication_id"]
             and manifest["event_catalog_checksum"]
         ):
-            events = self._immutable_catalog_events(manifest)
+            events, season_complete = self._immutable_catalog_events(manifest)
         else:
             raise PublicationGovernanceUnavailable(
                 "active manifest and immutable Event Catalog governance are required"
@@ -330,10 +358,18 @@ class ActiveManifestLedgerGovernanceReader:
                 "event_catalog_publication_id"
             ],
             event_catalog_checksum=manifest["event_catalog_checksum"],
+            season_complete=season_complete,
         )
 
-    def _immutable_catalog_events(self, manifest) -> tuple[Mapping[str, object], ...]:
-        """Read the exact Event Catalog snapshot bound to this manifest."""
+    def _immutable_catalog_events(
+        self, manifest
+    ) -> tuple[tuple[Mapping[str, object], ...], bool]:
+        """Read the exact Event Catalog snapshot bound to this manifest.
+
+        Also report whether the catalog governs a finished Regular Season:
+        every event it lists is already final, so no later game can change a
+        season aggregate derived from it.
+        """
 
         with self.engine.connect() as connection:
             publication_id = manifest.get("event_catalog_publication_id")
@@ -442,7 +478,7 @@ class ActiveManifestLedgerGovernanceReader:
         return tuple(sorted(
             eligible,
             key=lambda event: (event["scheduled_at"], event["nba_game_id"]),
-        ))
+        )), len(eligible) == len(rows)
 
     def read_for_collection(self, season: str) -> LedgerGovernance:
         """Resolve the newest executable manifest before any provider I/O."""

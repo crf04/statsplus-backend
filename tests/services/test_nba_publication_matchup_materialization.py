@@ -326,18 +326,23 @@ def _insert_publication_authority(
     cutoff,
     manifest_id,
     catalog_id,
+    unplayed_games: int = 0,
 ):
+    games = _canonical_league_games()
+    unplayed = {
+        game.game_id for game in games[len(games) - unplayed_games:]
+    } if unplayed_games else frozenset()
     events = [{
         "nba_game_id": game.game_id,
         "home_team_id": game.home_team_id,
         "away_team_id": game.away_team_id,
         "phase": "Regular Season",
-        "status": "Final",
-        "status_code": 3,
+        "status": "Scheduled" if game.game_id in unplayed else "Final",
+        "status_code": 1 if game.game_id in unplayed else 3,
         "scheduled_at": datetime.combine(
             game.game_date, datetime.min.time(), timezone.utc
         ).isoformat(),
-    } for game in _canonical_league_games()]
+    } for game in games]
     payload = json.dumps(
         {"events": events}, separators=(",", ":"), sort_keys=True
     )
@@ -2629,6 +2634,143 @@ def test_direct_publication_query_derives_statistics_from_per48_rows(tmp_path):
     assert team_metric.rank == 1
     assert team_metric.sigma_deviation == (
         (CANONICAL_TEAM_IDS[0] - expected_average) / expected_sigma
+    )
+
+
+SEASON_COMPLETE_CUTOFF = "2025-10-16T04:00:00+00:00"
+
+
+def _season_complete_query(
+    tmp_path, *, window_games=None, unplayed_games=0, surface="shot_zones"
+):
+    """Query one surface whose snapshot was cut after the requested date."""
+
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _insert_publication_authority(
+            connection,
+            cutoff=datetime.fromisoformat(SEASON_COMPLETE_CUTOFF),
+            manifest_id="season-complete-manifest",
+            catalog_id="season-complete-catalog",
+            unplayed_games=unplayed_games,
+        )
+    stream_key = {
+        "shot_zones": (
+            "exact_shot_zones_opponent_l15"
+            if window_games is not None
+            else "exact_shot_zones_opponent_season"
+        ),
+        "traditional": (
+            "traditional_opponent_l15"
+            if window_games is not None
+            else "traditional_opponent_season"
+        ),
+    }[surface]
+    window = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        publication_reader=_reader(
+            cutoff_by_stream={stream_key: SEASON_COMPLETE_CUTOFF},
+            freshness_by_stream={stream_key: "fresh"},
+        ),
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
+    ).get_window(
+        TeamMatchupSnapshotScope("2025-26", AS_OF, window_games=window_games)
+    )
+    return stream_key, next(
+        item for item in window.observations if item.surface == surface
+    ), window
+
+
+def test_completed_season_exemption_covers_every_governed_base():
+    # A ledger-derived season aggregate is one sum over the same finished set
+    # of games, so it is as date-independent as the NBA-owned snapshots; the
+    # window, not the owner, decides.
+    from app.services.team_matchup_publications import (
+        season_complete_snapshot_accepted,
+    )
+
+    for base in ("traditional", "assist_locations", "play_types", "shot_zones"):
+        assert season_complete_snapshot_accepted(
+            None, base=base, window="season", season_is_complete=True
+        )
+        assert not season_complete_snapshot_accepted(
+            None, base=base, window="l15", season_is_complete=True
+        )
+        assert not season_complete_snapshot_accepted(
+            None, base=base, window="season", season_is_complete=False
+        )
+
+
+def test_completed_season_serves_a_later_season_snapshot_with_its_reason(
+    tmp_path,
+):
+    stream_key, observation, window = _season_complete_query(tmp_path)
+
+    assert observation.status == "available"
+    assert observation.unavailable_reason is None
+    assert observation.publication == PublicationLineage(
+        publication_id=f"publication-{stream_key}",
+        cutoff=SEASON_COMPLETE_CUTOFF,
+        freshness="fresh",
+        version=2,
+        reason="season_complete_snapshot",
+    )
+    assert any(metric.base == "shot_zones" for metric in window.league_metrics)
+    # Surfaces read at a cutoff on or before the requested date are ordinary
+    # reads and must not claim the completed-season exemption.
+    shot_types = next(
+        item for item in window.observations if item.surface == "shot_types"
+    )
+    assert shot_types.status == "available"
+    assert shot_types.publication.reason is None
+
+
+def test_a_later_season_snapshot_without_bound_governance_stays_withheld(
+    tmp_path,
+):
+    """No governance at the snapshot's own cutoff proves nothing about it."""
+
+    engine = _engine(tmp_path)
+    stream_key = "exact_shot_zones_opponent_season"
+    window = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        publication_reader=_reader(
+            cutoff_by_stream={stream_key: SEASON_COMPLETE_CUTOFF},
+            freshness_by_stream={stream_key: "fresh"},
+        ),
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
+    ).get_window(TeamMatchupSnapshotScope("2025-26", AS_OF))
+
+    observation = next(
+        item for item in window.observations if item.surface == "shot_zones"
+    )
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_cutoff_after_as_of"
+
+
+def test_completed_season_still_withholds_a_later_last_15_snapshot(tmp_path):
+    _stream_key, observation, window = _season_complete_query(
+        tmp_path, window_games=15
+    )
+
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_cutoff_after_as_of"
+    assert observation.publication.reason is None
+    assert not any(
+        metric.base == "shot_zones" for metric in window.league_metrics
+    )
+
+
+def test_incomplete_season_still_withholds_a_later_season_snapshot(tmp_path):
+    _stream_key, observation, window = _season_complete_query(
+        tmp_path, unplayed_games=1
+    )
+
+    assert observation.status == "unavailable"
+    assert observation.unavailable_reason == "publication_cutoff_after_as_of"
+    assert observation.publication.reason is None
+    assert not any(
+        metric.base == "shot_zones" for metric in window.league_metrics
     )
 
 

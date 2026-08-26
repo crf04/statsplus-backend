@@ -1235,10 +1235,16 @@ class MatchupService:
         )
         if observation is None:
             return {"status": "missing", "unavailable_reason": "not_stored"}
-        return {
+        state = {
             "status": observation.status,
             "unavailable_reason": observation.unavailable_reason,
         }
+        publication = observation.publication
+        # Only a read that departed from its ordinary date ordering owes the
+        # reader an explanation, so the key stays absent otherwise.
+        if publication is not None and publication.reason:
+            state["reason"] = publication.reason
+        return state
 
     @classmethod
     def _surface_availability(
