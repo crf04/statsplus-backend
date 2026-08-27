@@ -483,6 +483,34 @@ def _compose_nba_observation_payload(
         session.get(CollectionObservation, observation_id)
         for observation_id in sorted(provenance_ids)
     ]
+    # A retried collection accepts a fresh observation for an identity it has
+    # already covered — acceptance is append-only evidence, not a replacement —
+    # so the same (team, slice) can arrive more than once under one manifest.
+    # One payload cell has one source: the latest accepted observation per
+    # scope identity wins, and the taxonomy check below still refuses a real
+    # duplicate inside a single observation.
+    latest: dict[tuple, CollectionObservation] = {}
+    for observation in observations:
+        if observation is None:
+            continue
+        try:
+            scope_value = json.loads(observation.scope)
+        except (TypeError, json.JSONDecodeError):
+            scope_value = {}
+        identity = (
+            observation.observation_type,
+            str(scope_value.get("team_id", "")),
+            str(scope_value.get("category", scope_value.get("play_type", ""))),
+            str(scope_value.get("window", "")),
+        )
+        held = latest.get(identity)
+        if held is None or (
+            _aware(observation.accepted_at), observation.observation_id
+        ) > (_aware(held.accepted_at), held.observation_id):
+            latest[identity] = observation
+    observations = sorted(
+        latest.values(), key=lambda row: row.observation_id
+    )
     values: dict[int, dict[str, float]] = {
         team_id: {} for team_id in expected_teams
     }

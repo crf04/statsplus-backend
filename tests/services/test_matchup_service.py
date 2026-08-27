@@ -39,6 +39,7 @@ from app.services.team_matchup_query import (
     TeamMatchupMetric,
     TeamMatchupWindow,
 )
+from app.services.team_matchup_publications import PublicationLineage
 from app.services.team_matchup_repository import (
     StoredTeamMatchupObservation,
     TeamMatchupSnapshotScope,
@@ -439,6 +440,35 @@ def test_matchup_composes_only_stored_facts_with_nullable_unavailable_window():
         league_keys = {row["key"] for row in payload["league"]["defense_sheet"][base]}
         for team in payload["teams"]:
             assert {row["key"] for row in team["defense_sheet"][base]} <= league_keys
+
+
+def test_season_complete_snapshot_names_its_reason_in_surface_availability():
+    season = _window()
+    season = replace(season, observations=tuple(
+        replace(item, publication=PublicationLineage(
+            publication_id="publication-exact_shot_zones_opponent_season",
+            cutoff="2026-08-01T00:00:00+00:00",
+            freshness="stale",
+            version=3,
+            reason="season_complete_snapshot",
+        ))
+        if item.surface == "shot_zones"
+        else item
+        for item in season.observations
+    ))
+
+    payload = _service(season_window=season).get_matchup(game_id=GAME_ID)
+
+    availability = payload["league"]["surface_availability"]
+    assert availability["shot_zones"]["season"] == {
+        "status": "available",
+        "unavailable_reason": None,
+        "reason": "season_complete_snapshot",
+    }
+    assert availability["shot_types"]["season"] == {
+        "status": "available",
+        "unavailable_reason": None,
+    }
 
 
 def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence_is_partial():

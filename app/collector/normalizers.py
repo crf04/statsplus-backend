@@ -639,16 +639,18 @@ def _zone_response(
                 side_values = (
                     left_makes, left_attempts, right_makes, right_attempts
                 )
-                if makes is not None or attempts is not None:
-                    if makes is None or attempts is None or any(
-                        value is not None for value in side_values
-                    ):
+                # The endpoint's combined corner is authoritative when it is
+                # present.  The side columns are not additive components of
+                # it under every per-mode (live Per48 reports a combined value
+                # near the sides' mean, not their sum), so they are consulted
+                # only when the combined columns are absent, and a lone
+                # partial split stays drift.
+                if makes is None and attempts is None:
+                    if all(value is not None for value in side_values):
+                        makes = _number(left_makes) + _number(right_makes)
+                        attempts = _number(left_attempts) + _number(right_attempts)
+                    else:
                         raise ProviderContractError("provider_schema_changed")
-                elif all(value is not None for value in side_values):
-                    makes = _number(left_makes) + _number(right_makes)
-                    attempts = _number(left_attempts) + _number(right_attempts)
-                else:
-                    raise ProviderContractError("provider_schema_changed")
             if makes is None or attempts is None:
                 raise ProviderContractError("provider_schema_changed")
             values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}
