@@ -373,10 +373,10 @@ generated. Every call to `stats.nba.com` (via `nba_api`) and
 duration, retry count, cache status, and HTTP status — operator counters and
 recent events are available on the admin-only `GET /api/data/telemetry`.
 
-Live requests to `stats.nba.com` use a 10-second timeout by default. If that
-provider times out, game-log requests return `503 Service Unavailable` instead
-of exposing a generic internal-server error. Override the timeout with
-`NBA_STATS_TIMEOUT_SECONDS` when needed.
+Live requests to `stats.nba.com` use a 10-second timeout by default; override it
+with `NBA_STATS_TIMEOUT_SECONDS` when needed. Log Workspace game-log requests
+do not make those live calls: they read the active durable publication and
+return the normal empty result when complete, valid coverage is unavailable.
 
 `NBA_STATS_MAX_CONCURRENCY` bounds in-flight NBA Stats provider calls per
 worker process: all adapters in one worker share the configured gate, while

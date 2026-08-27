@@ -615,6 +615,19 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
         id(dependencies.pbp_stats_provider),
         id(dependencies.pbp_game_logs_provider),
     }
+
+    class ProviderHolder:
+        def __init__(self, provider):
+            self.provider = provider
+
+    # Positive control: the walker must find an intentionally reachable
+    # provider, or the empty production result below would be vacuous.
+    assert provider_paths(
+        ProviderHolder(dependencies.pbp_game_logs_provider),
+        providers,
+        "positive_control",
+    ) == ["positive_control.provider"]
+
     paths = provider_paths(game_service, providers, "game_service")
 
     assert not hasattr(game_service, "nba_stats")
