@@ -272,22 +272,22 @@ def test_game_service_reads_a_normalized_table_on_postgres(pg_engine, monkeypatc
 
     pd.DataFrame(
         [
-            {"team": "LAL", "Transition": 1.10},
-            {"team": "GSW", "Transition": 1.30},
+            {"id": 101, "full_name": "Player One"},
+            {"id": 202, "full_name": "Player Two"},
         ]
-    ).to_sql("team_play_types", pg_engine, index=False, if_exists="replace")
+    ).to_sql("player_information", pg_engine, index=False, if_exists="replace")
 
     monkeypatch.setattr(
         game_service_module, "get_redis_client", lambda *args, **kwargs: None
     )
     service = game_service_module.GameService(pg_engine)
 
-    df = service._fetch_data_from_table("team_play_types")
+    df = service._fetch_data_from_table("player_information")
 
-    assert sorted(df["team"].tolist()) == ["GSW", "LAL"]
+    assert sorted(df["full_name"].tolist()) == ["Player One", "Player Two"]
 
     with pg_engine.connect() as connection:
-        connection.execute(text("DROP TABLE IF EXISTS team_play_types"))
+        connection.execute(text("DROP TABLE IF EXISTS player_information"))
         connection.commit()
 
 

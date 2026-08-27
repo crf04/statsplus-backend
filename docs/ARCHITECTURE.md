@@ -908,6 +908,62 @@ the live PBP and stored read paths can never disagree.  The stored source
 rebuilds the identical frame from `PlayerGameLogRecord` facts, which is what
 makes the Stage 3 parity seam a real equivalence check.
 
+### Team Filter Season Rankings
+
+`teams_against[]` filters rank the 30 opponents from the durable window-aware
+team matchup publications, always at the Season window
+(`app.services.team_filter_rankings`).  One map names, per Team Filter, the
+publication base and the per-48 metric keys it ranks:
+`traditional_opponent_season` covers the opponent box set (`OPP_STOCKS` sums
+the published blocks and steals), `grouped_shot_types_opponent_season` covers
+the catch-and-shoot, pull-up, and under-10-feet filters (their points columns
+are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
+`synergy_play_types_opponent_season` ranks points per possession, and
+`assist_locations_season` ranks the published location counters.
+
+There is no governed-window parameter and no request-time provider call: the
+game service holds no NBA Stats adapter, so the previous dated
+`fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branch and its daily
+Redis key are gone along with the legacy `general_opponent_stats`,
+`catch_and_shoot`, `pullups`, `less_than_10_ft`, `team_play_types`, and
+`processed_team_assists` reads.  Every Team Filter in one request is answered
+from a single publication snapshot, so two filters can never intersect two
+generations that never coexisted, and two filters sharing a base cost one read.
+The read is not cached in Redis: an activation, a rollback, or a season
+rollover must never be shadowed by a previous generation.
+
+The rankings are read for the request's own `season_filter`.  A publication
+stream carries one pointer, so only the published season can rank: a request
+for any other season ranks nothing rather than borrowing the published season's
+rankings and attributing them to the wrong year.  A Team Filter on a historical
+season therefore resolves to an empty opponent set until that season is
+published.
+
+`date_filter` trims the player's own game logs and never reshapes a ranking,
+so a date-plus-Team-Filter request stays valid and season-ranked.  The
+publication is all thirty opponents or nothing: NBA-owned streams prove the
+canonical league and its tricodes at their decode boundary, and the
+ledger-owned traditional and assist-location streams are proved here, so a
+partial or mislabelled publication refuses rather than ranking a plausible but
+wrong top-N.  Contradictory or unbounded evidence -- a non-numeric cell, a
+derived column that overflows, or points recorded across no possessions --
+refuses the surface the same way.
+
+The ranking read applies the same governance the matchup window read does: a
+publication whose coverage cutoff runs past today is refused, and an NBA-owned
+publication must match the exact per-team game set resolved at its own manifest
+and Event Catalog authority, so a restored, hand-seeded, or corrupted
+publication claiming games that authority never held cannot rank.
+
+One team may still be absent from one filter's ranking, and only in the single
+legitimate case of a rate with no denominator at all: a team that faced zero
+possessions of a play type has no points-per-possession to rank.  Such a team
+is excluded from both ends, because it is neither a strongest nor a weakest
+opponent against a play type it never faced, so a `rank_filter` of `-30`
+returns the twenty-nine teams that have evidence.  A stale newest publication still serves its
+last-good ranking; an unavailable, partial, or unscoreable publication ranks
+nothing, which resolves to an empty opponent set rather than a new error case.
+
 `players_on[]` and `players_off[]` are game-level appearance filters, not PBP
 lineup-stint filters. For every named player, the same game-log source supplies
 season rows. `players_on[]` intersects `(game_id, team)` pairs across the
@@ -952,8 +1008,10 @@ class NBAStatsProvider(Protocol):
 
 The production adapter owns endpoint construction, timeout, concurrency,
 telemetry, response normalization, and provider error translation. Tests inject
-the protocol into `GameService` or `PlayerService` rather than patching
-`nba_api`.
+the protocol into `PlayerService` rather than patching `nba_api`. `GameService`
+no longer takes the adapter at all: after the #198 cutover its player logs come
+from the injected game-log source and its Team Filters from Season
+publications, so no request-time NBA Stats call is reachable from it.
 
 `get_season_player_game_logs` is the legacy season-wide NBA durable-log seam.
 Each call fetches one explicit phase for the whole season, retains canonical
@@ -3559,8 +3617,17 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   avoiding database, Redis, and parser initialization during route imports.
 - The game-log request path is fully synchronous and bounded: the route
   parses query parameters into one typed `GameLogQuery`, and the service runs
-  under Flask's threaded gunicorn model (`--workers 4 --threads 2`). NBA Stats
-  provider calls go through `NBAStatsAdapter`, which applies a
+  under Flask's threaded gunicorn model (`--workers 4 --threads 2`). That path
+  makes no provider call of its own: player logs come from the injected
+  game-log source and Team Filters rank from Season publications.  The only
+  provider clients still reachable from `GameService` sit under the retained
+  live PBP game-log source -- the PBP adapter itself and the NBA Stats adapter
+  owned by the governed Event Catalog it joins against -- and a structural test
+  asserts that every reach lies there and nowhere else.  Diet facts arrive
+  through a read-only reader bound to the Diet repository, not the
+  refresh-capable service that owns the adapters.  Wherever an NBA Stats call
+  is made, it goes through
+  `NBAStatsAdapter`, which applies a
   process-shared `threading.BoundedSemaphore` sized by
   `NBA_STATS_MAX_CONCURRENCY` (default 10) and shares the provider timeout from
   `NBA_STATS_TIMEOUT_SECONDS`.  All adapter instances using the same configured

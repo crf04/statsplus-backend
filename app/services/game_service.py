@@ -1,17 +1,20 @@
-"""Game service: game logs filtering with a synchronous provider adapter.
+"""Game service: game-log filtering with no provider client of its own.
 
 Requests are served by threaded Flask workers, so this service is fully
-synchronous: there is no per-request event loop.  Provider calls go through
-:class:`NBAStatsAdapter`, which keeps ``stats.nba.com`` concurrency bounded by
-``Settings.providers.nba_stats_max_concurrency`` (#10).  Filters arrive as one
-typed :class:`GameLogQuery` (built by the route or the NL executor) and the
-response is a validated :class:`GameLogResponse` whose ``game_logs`` and
-``averages`` are ordinary JSON arrays, not pandas JSON strings (#9).
+synchronous: there is no per-request event loop.  This service holds no
+provider client: player game logs come from the injected
+:mod:`app.services.game_logs_source` seam -- which decides for itself whether a
+season is served from durable facts or a cached live call -- and Team Filters
+rank opponents from the Season publications through
+:class:`~app.services.team_filter_rankings.TeamFilterRankingService` (#198).
+Filters arrive as one typed :class:`GameLogQuery` (built by the route or the NL
+executor) and the response is a validated :class:`GameLogResponse` whose
+``game_logs`` and ``averages`` are ordinary JSON arrays, not pandas JSON
+strings (#9).
 """
 
 import json
 import logging
-from dataclasses import dataclass
 from difflib import get_close_matches
 
 import pandas as pd
@@ -19,22 +22,12 @@ from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.play_type_matchup import play_type_matchup
-from app.models.catalogs import (
-    ASSIST_LOCATION_FILTERS,
-    CATCH_SHOOT_FILTERS,
-    LESS_THAN_TEN_FEET_FILTER,
-    OPPONENT_FILTERS,
-    PLAY_TYPES,
-    PULLUP_FILTERS,
-)
 from app.models.game_logs import GameLogQuery, GameLogResponse
-from app.providers.nba_stats import NBAStatsProvider
 from app.utils.cache_config import get_redis_client, set_cache_with_1am_expiry
-from app.utils.database_utils import nba_team_to_abbreviation
 from app.utils.tables import normalize_table_name
 from app.utils.telemetry import CACHE_DISABLED, CACHE_MISS
 from .nba_cache import NBAGameCache
-from .nba_stats_adapter import NBAStatsAdapter
+from .team_filter_rankings import TEAM_FILTER_RANKINGS
 
 logger = logging.getLogger(__name__)
 
@@ -55,126 +48,32 @@ def _records(frame: pd.DataFrame):
     return json.loads(frame.to_json(orient="records", date_format="iso"))
 
 
-@dataclass(frozen=True, slots=True)
-class TeamFilterStrategy:
-    """Provider/cache policy and handler for one team filter category."""
-
-    category: str
-    handler: str
-    provider_operation: str | None
-    cache_policy: str
-    provider_category: str | None = None
-    table_name: str | None = None
-    sort_column: str | None = None
-
-
-def _team_filter_strategies() -> dict[str, TeamFilterStrategy]:
-    """Build the one canonical classification map used by the filter path."""
-
-    return {
-        **{
-            team_filter: TeamFilterStrategy(
-                category="catch_shoot",
-                handler="_shooting_filtering",
-                provider_operation="league_opponent_shot_chart",
-                cache_policy="daily_nba_data",
-                provider_category="Catch and Shoot",
-                table_name="catch_and_shoot",
-                sort_column={
-                    "C&S 3s": "FG3M",
-                    "C&S PTS": "PTS",
-                    "C&S 3A": "FG3A",
-                }[team_filter],
-            )
-            for team_filter in CATCH_SHOOT_FILTERS
-        },
-        **{
-            team_filter: TeamFilterStrategy(
-                category="pullup",
-                handler="_shooting_filtering",
-                provider_operation="league_opponent_shot_chart",
-                cache_policy="daily_nba_data",
-                provider_category="Pullups",
-                table_name="pullups",
-                sort_column={
-                    "PU 2s": "FG2M",
-                    "PU 3s": "FG3M",
-                    "PU PTS": "PTS",
-                }[team_filter],
-            )
-            for team_filter in PULLUP_FILTERS
-        },
-        **{
-            team_filter: TeamFilterStrategy(
-                category="opponent",
-                handler="general_opp_filtering",
-                provider_operation="league_opponent_team_stats",
-                cache_policy="daily_nba_data",
-            )
-            for team_filter in OPPONENT_FILTERS
-        },
-        **{
-            team_filter: TeamFilterStrategy(
-                category="play_type",
-                handler="playtype_filtering",
-                provider_operation=None,
-                cache_policy="intraday_computed",
-            )
-            for team_filter in PLAY_TYPES
-        },
-        LESS_THAN_TEN_FEET_FILTER: TeamFilterStrategy(
-            category="shooting_zone",
-            handler="less_than_ten_feet_filtering",
-            provider_operation=None,
-            cache_policy="intraday_computed",
-        ),
-        **{
-            team_filter: TeamFilterStrategy(
-                category="assist_location",
-                handler="assist_location_filtering",
-                provider_operation=None,
-                cache_policy="intraday_computed",
-            )
-            for team_filter in ASSIST_LOCATION_FILTERS
-        },
-    }
-
-
-# A single descriptor map prevents the cache and dispatch paths from growing
-# separate, subtly different classifications of the same team filter.
-TEAM_FILTER_STRATEGIES = _team_filter_strategies()
-
-
 class GameService:
     # Whitelist of allowed database tables to prevent SQL injection
-    ALLOWED_TABLES = {
-        'player_information', 'team_play_types', 'processed_team_assists',
-        'processed_player_assists', 'general_opponent_stats', 'catch_and_shoot',
-        'pullups', 'less_than_10_ft'
-    }
+    ALLOWED_TABLES = {'player_information'}
 
     def __init__(
         self,
         db_engine,
         redis_client=None,
         settings: RuntimeSettings | None = None,
-        nba_stats_adapter: NBAStatsProvider | None = None,
         game_logs_source=None,
         player_diets=None,
         team_matchups=None,
+        team_filter_rankings=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.all_teams = teams.get_teams()
 
-        # Synchronous provider adapter that bounds concurrent stats.nba.com
-        # calls with the configured NBA_STATS_MAX_CONCURRENCY limit (#10).
-        self.nba_stats = nba_stats_adapter or NBAStatsAdapter(settings=self.settings)
-
-        # Request-time game-log source.  Production injects the PBP-backed or
-        # database-first source; tests may leave it unset to exercise the
-        # legacy NBA fallback path.
+        # Request-time game-log source.  Production injects the database-first
+        # source; there is no provider fallback to reach from here.
         self.game_logs_source = game_logs_source
+
+        # Season Rankings for every ``teams_against`` filter.  Absent against
+        # the read-only demo database, which ranks nothing rather than calling
+        # a provider.
+        self.team_filter_rankings = team_filter_rankings
 
         # Governed rating inputs.  Both are absent against the read-only demo
         # database, which leaves PLAYTYPE_RTG null rather than failing.
@@ -203,11 +102,6 @@ class GameService:
     def cache_decorator(self):
         """Get cache decorator for this instance"""
         return self.cache.cache_player_logs()
-
-    @property
-    def daily_cache_decorator(self):
-        """Get daily cache decorator for this instance"""
-        return self.cache.cache_daily_nba_data()
 
     def _get_game_logs(self, player_name, season=None):
         """Get game logs with daily caching - only hits the source once per day"""
@@ -263,10 +157,7 @@ class GameService:
             cached_result = self.cache.get(cache_key)
             if cached_result is not None:
                 logger.debug(f"Cache hit for player logs: {player_name}, {season} (avoiding provider call)")
-                if self.game_logs_source is not None:
-                    self.game_logs_source.record_cache_hit("player_game_logs")
-                else:
-                    self.nba_stats.record_cache_hit("player_game_logs")
+                self.game_logs_source.record_cache_hit("player_game_logs")
                 return cached_result
 
             # Cache miss - make provider call
@@ -282,7 +173,7 @@ class GameService:
             if self.cache._is_current_season(season):
                 # Current season - use 1 AM CST expiry
                 if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
-                    logger.info(f"Cached NBA API result for {player_name}, {season} until 1 AM CST tomorrow")
+                    logger.info(f"Cached game logs for {player_name}, {season} until 1 AM CST tomorrow")
                 else:
                     # Fallback to regular TTL
                     ttl = self.cache._get_ttl(cache_type)
@@ -311,60 +202,22 @@ class GameService:
         game_logs_plan=None,
     ):
         season = season or self.settings.nba.current_season
+        if self.game_logs_source is None:
+            raise RuntimeError(
+                "GameService needs an injected game-log source; there is no "
+                "request-time provider fallback"
+            )
         player_id = int(self.get_player_id(player_name))
-
-        if self.game_logs_source is not None:
-            if game_logs_plan is not None:
-                return game_logs_plan.get_player_logs(
-                    player_id, season, cache_status=cache_status
-                ), None
-            return self.game_logs_source.get_player_logs(
-                player_id, season, cache_status=cache_status
-            ), None
-
-        if hasattr(self.nba_stats, "fetch_player_game_logs"):
-            gamelogs = self.nba_stats.fetch_player_game_logs(
-                player_id, season, cache_status=cache_status
-            )
-        else:
-            gamelogs = self.nba_stats.get_player_game_logs(
-                player_id=player_id,
-                season=season,
-            )
-
-        # Clean up columns
-        drop_columns = [
-            'SEASON_YEAR', 'PLAYER_ID', 'GP_RANK', 'W_RANK', 'L_RANK',
-            'W_PCT_RANK', 'MIN_RANK', 'FGM_RANK', 'FGA_RANK', 'FG_PCT_RANK',
-            'FG3M_RANK', 'FG3A_RANK', 'FG3_PCT_RANK', 'FTM_RANK', 'FTA_RANK',
-            'FT_PCT_RANK', 'OREB_RANK', 'DREB_RANK', 'REB_RANK', 'AST_RANK',
-            'TOV_RANK', 'STL_RANK', 'BLK_RANK', 'BLKA_RANK', 'PF_RANK',
-            'PFD_RANK', 'PTS_RANK', 'PLUS_MINUS_RANK', 'NBA_FANTASY_PTS_RANK',
-            'DD2_RANK', 'TD3_RANK', 'WNBA_FANTASY_PTS_RANK', 'AVAILABLE_FLAG',
-            'NICKNAME', 'TEAM_NAME', 'DD2', 'TD3', 'WNBA_FANTASY_PTS',
-            'BLKA', 'PFD'
-        ]
-        gamelogs = gamelogs.drop(drop_columns, axis=1, errors='ignore')
 
         # The pre-issues-9 contract deliberately leaves next_game unset.  Keep
         # that behavior until a separately specified provider seam exists.
-        next_team = None
-
-        # Calculate additional stats
-        gamelogs['PRA'] = gamelogs['PTS'] + gamelogs['REB'] + gamelogs['AST']
-        gamelogs['PA'] = gamelogs['PTS'] + gamelogs['AST']
-        gamelogs['PR'] = gamelogs['PTS'] + gamelogs['REB']
-        gamelogs['RA'] = gamelogs['REB'] + gamelogs['AST']
-        gamelogs['STKS'] = gamelogs['STL'] + gamelogs['BLK']
-        gamelogs['FD_PTS'] = gamelogs['NBA_FANTASY_PTS']
-        gamelogs['+/-'] = gamelogs['PLUS_MINUS']
-        gamelogs['MIN'] = gamelogs['MIN'].round().astype(int)
-        gamelogs['FG2M'] = gamelogs['FGM'] - gamelogs['FG3M']
-        gamelogs['FG2A'] = gamelogs['FGA'] - gamelogs['FG3A']
-
-        gamelogs['GAME_DATE'] = gamelogs['GAME_DATE'].astype(str)
-
-        return gamelogs, next_team
+        if game_logs_plan is not None:
+            return game_logs_plan.get_player_logs(
+                player_id, season, cache_status=cache_status
+            ), None
+        return self.game_logs_source.get_player_logs(
+            player_id, season, cache_status=cache_status
+        ), None
 
     def get_common_games(self, primary_player_logs, other_players_names, season=None):
         """Find common games between players"""
@@ -551,12 +404,19 @@ class GameService:
             full_game_logs, player_name, query.season_filter
         )
 
-        # Resolve opponent filters into one intersecting team set.
+        # Resolve opponent filters into one intersecting team set, read from
+        # one publication generation so two filters cannot disagree about which
+        # season and which activation they ranked.
         resolved_teams = None
         if query.teams_against:
+            rankings = self._season_rankings(
+                query.teams_against, query.season_filter
+            )
             for index, team_filter in enumerate(query.teams_against):
                 matching = set(
-                    self.filter_teams(team_filter, query.rank_filter[index], str(query.date_filter) if query.date_filter else None)
+                    self._select_rank(
+                        rankings[team_filter], query.rank_filter[index]
+                    )
                 )
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
             resolved_teams = resolved_teams or set()
@@ -588,130 +448,38 @@ class GameService:
         )
         return result.model_dump()
 
-    def filter_teams(self, team_filter, rank_filter, date_filter=None):
-        """Filter teams using the central strategy and its cache policy."""
-        strategy = TEAM_FILTER_STRATEGIES.get(team_filter)
-        if strategy is None:
-            raise ValueError(f"Unsupported team filter: {team_filter!r}")
+    def filter_teams(self, team_filter, rank_filter, season):
+        """Select the top-N or bottom-N opponents by Season Rankings.
 
-        if strategy.provider_operation and date_filter is not None:
-            return self._filter_teams_with_api_calls(
-                team_filter, strategy, rank_filter, date_filter
+        The rankings are whole-Regular-Season aggregates for the requested
+        season, so ``date_filter`` deliberately takes no part here: a date
+        trims the player's own logs without reshaping which opponents rank
+        where.  The read is not cached: an activation, a rollback, or a season
+        rollover must never be shadowed by a previous generation's ranking.
+        """
+
+        ranked = self._season_rankings((team_filter,), season)[team_filter]
+        return self._select_rank(ranked, rank_filter)
+
+    def _season_rankings(self, team_filters, season):
+        """Rank every requested Team Filter from one publication generation."""
+
+        for team_filter in team_filters:
+            if team_filter not in TEAM_FILTER_RANKINGS:
+                raise ValueError(f"Unsupported team filter: {team_filter!r}")
+        if self.team_filter_rankings is None:
+            logger.warning(
+                "Team Filters %s cannot rank without Season publications",
+                list(team_filters),
             )
-        return self._filter_teams_computed(
-            team_filter, strategy, rank_filter, date_filter
-        )
+            return {team_filter: [] for team_filter in team_filters}
+        return self.team_filter_rankings.rank_all(tuple(team_filters), season)
 
-    def _filter_teams_with_api_calls(
-        self,
-        team_filter,
-        strategy: TeamFilterStrategy,
-        rank_filter,
-        date_filter=None,
-    ):
-        """Filter provider-backed teams with the descriptor's daily cache."""
-        if self.cache.enabled:
-            from ..utils.cache_config import CACHE_PREFIXES
-
-            # Cache with date component since NBA API data changes daily
-            cache_key = self.cache._generate_key(
-                CACHE_PREFIXES['team_stats_daily'],
-                True,  # include_date
-                'filter_teams_api',
-                team_filter, rank_filter, str(date_filter)
-            )
-
-            cached_result = self.cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug(
-                    "Cache hit for team filter: %s (avoiding NBA API call)",
-                    team_filter,
-                )
-                if strategy.provider_operation is not None:
-                    self.nba_stats.record_cache_hit(strategy.provider_operation)
-                return cached_result
-
-            logger.info(
-                "Cache miss for team filter: %s - making NBA API call", team_filter
-            )
-            result = self._filter_teams_uncached(
-                team_filter, rank_filter, date_filter, cache_status=CACHE_MISS
-            )
-
-            # Use 1 AM CST expiry for daily NBA data
-            if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
-                logger.info(
-                    "Cached team filter result for %s until 1 AM CST tomorrow",
-                    team_filter,
-                )
-            else:
-                # Fallback to regular TTL
-                ttl = self.cache._get_ttl(strategy.cache_policy)
-                self.cache.set(cache_key, result, ttl)
-
-            return result
-        else:
-            return self._filter_teams_uncached(
-                team_filter, rank_filter, date_filter, cache_status=CACHE_DISABLED
-            )
-
-    def _filter_teams_computed(
-        self,
-        team_filter,
-        strategy: TeamFilterStrategy,
-        rank_filter,
-        date_filter=None,
-    ):
-        """Filter teams using computed/database data and its cache policy."""
-        if self.cache.enabled:
-            from ..utils.cache_config import CACHE_PREFIXES
-
-            cache_key = self.cache._generate_key(
-                CACHE_PREFIXES['computed'],
-                False,  # include_date
-                'filter_teams_computed',
-                team_filter, rank_filter, str(date_filter)
-            )
-
-            cached_result = self.cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug("Cache hit for computed team filter: %s", team_filter)
-                return cached_result
-
-            result = self._filter_teams_uncached(
-                team_filter, rank_filter, date_filter, cache_status=CACHE_MISS
-            )
-
-            ttl = self.cache._get_ttl(strategy.cache_policy)
-            self.cache.set(cache_key, result, ttl)
-
-            return result
-        else:
-            return self._filter_teams_uncached(
-                team_filter, rank_filter, date_filter, cache_status=CACHE_DISABLED
-            )
-
-    def _filter_teams_uncached(
-        self,
-        team_filter,
-        rank_filter,
-        date_filter=None,
-        *,
-        cache_status=CACHE_DISABLED,
-    ):
-        strategy = TEAM_FILTER_STRATEGIES.get(team_filter)
-        if strategy is None:
-            raise ValueError(f"Unsupported team filter: {team_filter!r}")
-        handler = getattr(self, strategy.handler)
-        if strategy.category in {"catch_shoot", "pullup", "opponent"}:
-            df = handler(team_filter, date_filter, cache_status=cache_status)
-        else:
-            df = handler(team_filter)
-
+    @staticmethod
+    def _select_rank(ranked, rank_filter):
         if rank_filter >= 0:
-            return df.head(rank_filter)['team'].tolist()
-        else:
-            return df.tail(-rank_filter)['team'].tolist()
+            return ranked[:rank_filter]
+        return ranked[rank_filter:]
 
     def _fetch_data_from_table(self, table_name):
         """Helper method to fetch data from database table with caching"""
@@ -722,7 +490,7 @@ class GameService:
         cache_key = None
 
         # Check cache first for static tables
-        if self.cache and self.cache.enabled and table_name in ['player_information', 'team_play_types', 'processed_team_assists', 'processed_player_assists']:
+        if self.cache and self.cache.enabled:
             cache_key = self.cache._generate_key('table_data', False, table_name)
             cached_result = self.cache.get(cache_key)
             if cached_result is not None:
@@ -736,67 +504,12 @@ class GameService:
             result = pd.read_sql(query, conn)
 
         # Cache static tables for longer periods
-        if self.cache and self.cache.enabled and table_name in ['player_information', 'team_play_types', 'processed_team_assists', 'processed_player_assists'] and cache_key:
+        if cache_key:
             ttl = self.cache._get_ttl('player_info')  # Use longer TTL for static data
             self.cache.set(cache_key, result, ttl)
             logger.debug(f"Cached table data for {table_name}")
 
         return result
-
-    # Function that returns general opponent stats sorted by the filter
-    def general_opp_filtering(
-        self, team_filter, date_filter, *, cache_status=CACHE_DISABLED
-    ):
-        if date_filter is not None:
-            date_filter = pd.to_datetime(date_filter)
-            df = self.nba_stats.fetch_opponent_team_stats(
-                date_filter, cache_status=cache_status
-            )
-        else:
-            df = self._fetch_data_from_table('general_opponent_stats')
-        df['OPP_STOCKS'] = df['OPP_BLK'] + df['OPP_STL']
-        df['team'] = df['TEAM_NAME'].apply(nba_team_to_abbreviation)
-        return df.sort_values(by=team_filter, ascending=False)
-
-    # Function that returns opponent playtype data sorted
-    def playtype_filtering(self, team_filter):
-        df = self._fetch_data_from_table('team_play_types')
-        return df.sort_values(by=team_filter, ascending=False)
-
-    def _shooting_filtering(
-        self,
-        team_filter,
-        date_filter,
-        *,
-        cache_status=CACHE_DISABLED,
-    ):
-        """Apply one parameterized opponent shooting-type pipeline."""
-        strategy = TEAM_FILTER_STRATEGIES[team_filter]
-        if date_filter is not None:
-            date_filter = pd.to_datetime(date_filter)
-            df = self.nba_stats.fetch_opponent_shot_chart(
-                strategy.provider_category,
-                date_filter,
-                cache_status=cache_status,
-            )
-        else:
-            df = self._fetch_data_from_table(strategy.table_name)
-        df['PTS'] = df['FG3M'] * 3 + df['FG2M'] * 2
-        df['team'] = df['TEAM_ABBREVIATION']
-        return df.sort_values(by=strategy.sort_column, ascending=False)
-
-    def less_than_ten_feet_filtering(self, team_filter):
-        del team_filter
-        df = self._fetch_data_from_table('less_than_10_ft')
-        df.sort_values(by='FG2M', ascending=False, inplace=True)
-        df['team'] = df['TEAM_ABBREVIATION']
-        return df
-
-    def assist_location_filtering(self, team_filter):
-        df = self._fetch_data_from_table('processed_team_assists')
-        df.sort_values(by=team_filter, ascending=False, inplace=True)
-        df['team'] = df['Name']
-        return df
 
     # Function to find team name by ID
     def _get_team_name_by_id(self, team_id):

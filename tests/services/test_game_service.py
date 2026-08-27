@@ -61,31 +61,19 @@ def game_engine(tmp_path):
         ]
     ).to_sql("player_information", engine, index=False)
 
-    pd.DataFrame(
-        [
-            {"team": "LAL", "Transition": 1.10, "Isolation": 0.80},
-            {"team": "GSW", "Transition": 1.30, "Isolation": 0.95},
-            {"team": "BOS", "Transition": 0.90, "Isolation": 1.05},
-        ]
-    ).to_sql("team_play_types", engine, index=False)
-
-    pd.DataFrame(
-        [
-            {"Name": "LAL", "TwoPtAssists": 12, "ThreePtAssists": 9},
-            {"Name": "GSW", "TwoPtAssists": 18, "ThreePtAssists": 14},
-            {"Name": "BOS", "TwoPtAssists": 15, "ThreePtAssists": 11},
-        ]
-    ).to_sql("processed_team_assists", engine, index=False)
-
-    pd.DataFrame(
-        [
-            {"TEAM_ABBREVIATION": "LAL", "FG2M": 10},
-            {"TEAM_ABBREVIATION": "GSW", "FG2M": 20},
-            {"TEAM_ABBREVIATION": "BOS", "FG2M": 15},
-        ]
-    ).to_sql("less_than_10_ft", engine, index=False)
-
     return engine
+
+
+class _StubRankings:
+    """Stand in for the Season Rankings read with one fixed ranking."""
+
+    def __init__(self, ranked):
+        self.ranked = list(ranked)
+        self.calls = []
+
+    def rank_all(self, team_filters, season):
+        self.calls.append((tuple(team_filters), season))
+        return {team_filter: list(self.ranked) for team_filter in team_filters}
 
 
 @pytest.fixture
@@ -94,7 +82,10 @@ def service(game_engine, monkeypatch):
     from app.services import game_service as game_service_module
 
     monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
-    built = game_service_module.GameService(game_engine)
+    built = game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+    )
     assert built.cache.enabled is False
     return built
 
@@ -108,9 +99,16 @@ def test_fetch_data_rejects_a_table_outside_the_whitelist(service):
 
 
 def test_fetch_data_returns_rows_for_an_allowed_table(service):
-    df = service._fetch_data_from_table("team_play_types")
+    df = service._fetch_data_from_table("player_information")
 
-    assert sorted(df["team"].tolist()) == ["BOS", "GSW", "LAL"]
+    assert sorted(df["full_name"].tolist()) == ["LeBron James", "Stephen Curry"]
+
+
+def test_fetch_data_rejects_a_retired_legacy_team_filter_table(service):
+    """The team-filter tables are no longer reachable from this service."""
+
+    with pytest.raises(ValueError, match="Invalid table name"):
+        service._fetch_data_from_table("general_opponent_stats")
 
 
 # --- player identity -------------------------------------------------------
@@ -329,17 +327,43 @@ def test_games_to_exclude_unions_every_named_player(service, game_logs, monkeypa
 # --- team ranking ----------------------------------------------------------
 
 
-def test_playtype_ranking_returns_the_best_teams_first(service):
-    assert run(service._filter_teams_uncached("Transition", 2)) == ["GSW", "LAL"]
+def test_ranking_returns_the_top_teams_first(service):
+    assert run(service.filter_teams("Transition", 2, "2025-26")) == ["GSW", "LAL"]
 
 
 def test_negative_rank_filter_returns_the_worst_teams(service):
-    assert run(service._filter_teams_uncached("Transition", -2)) == ["LAL", "BOS"]
+    assert run(service.filter_teams("Transition", -2, "2025-26")) == ["LAL", "BOS"]
 
 
-def test_assist_ranking_uses_the_team_name_column(service):
-    assert run(service._filter_teams_uncached("TwoPtAssists", 2)) == ["GSW", "BOS"]
+def test_a_rank_filter_wider_than_the_league_returns_every_ranked_team(service):
+    assert run(service.filter_teams("TwoPtAssists", 30, "2025-26")) == ["GSW", "LAL", "BOS"]
+    assert run(service.filter_teams("TwoPtAssists", -30, "2025-26")) == ["GSW", "LAL", "BOS"]
 
 
-def test_short_range_ranking_uses_the_team_abbreviation(service):
-    assert run(service._filter_teams_uncached("Less Than 10 ft", 1)) == ["GSW"]
+def test_every_team_filter_category_ranks_from_the_same_seam(service):
+    for team_filter in ("OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft",
+                        "TwoPtAssists"):
+        assert run(service.filter_teams(team_filter, 1, "2025-26")) == ["GSW"]
+
+    assert service.team_filter_rankings.calls == [
+        ((team_filter,), "2025-26")
+        for team_filter in (
+            "OPP_PTS", "C&S PTS", "Transition", "Less Than 10 ft", "TwoPtAssists"
+        )
+    ]
+
+
+def test_an_unsupported_team_filter_is_rejected(service):
+    with pytest.raises(ValueError, match="Unsupported team filter"):
+        run(service.filter_teams("NOT_A_FILTER", 1, "2025-26"))
+
+
+def test_rankings_are_unavailable_without_season_publications(game_engine, monkeypatch):
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(
+        game_service_module, "get_redis_client", lambda *args, **kwargs: None
+    )
+    service = game_service_module.GameService(game_engine)
+
+    assert run(service.filter_teams("OPP_PTS", 5, "2025-26")) == []

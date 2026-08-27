@@ -549,3 +549,91 @@ def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, t
         build_dependencies(settings, statistic_catalog_path=definition_path)
 
     constructor.assert_not_called()
+
+
+def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
+    """The Team Filter read path can only reach Season publications (#198)."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+    )
+    from app.services.team_filter_rankings import TeamFilterRankingService
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///:memory:"},
+        )
+    )
+    game_service = dependencies.game_service
+
+    # A shallow attribute check misses an adapter nested inside an injected
+    # collaborator, and a `__dict__`-only walk misses one behind `__slots__`.
+    # Walk both, defensively: some collaborators expose lazy attributes that
+    # raise on access.
+    def members(node):
+        found = {}
+        try:
+            found.update(vars(node))
+        except TypeError:
+            pass
+        for klass in type(node).__mro__:
+            for name in getattr(klass, "__slots__", ()) or ():
+                try:
+                    found[name] = getattr(node, name)
+                except Exception:  # noqa: BLE001 - lazy attributes may raise
+                    pass
+        return found
+
+    def provider_paths(root, targets, label, depth=8):
+        paths, seen, frontier = [], set(), [(root, label, 0)]
+        while frontier:
+            node, path, level = frontier.pop()
+            if level > depth or id(node) in seen:
+                continue
+            seen.add(id(node))
+            for name, value in members(node).items():
+                if id(value) in targets:
+                    paths.append(f"{path}.{name}")
+                frontier.append((value, f"{path}.{name}", level + 1))
+        return sorted(paths)
+
+    providers = {
+        id(dependencies.nba_stats_provider),
+        id(dependencies.pbp_stats_provider),
+        id(dependencies.pbp_game_logs_provider),
+    }
+    paths = provider_paths(game_service, providers, "game_service")
+
+    assert not hasattr(game_service, "nba_stats")
+    # Every remaining reach lives under the retained live PBP game-log source,
+    # which resolves identity through the governed Event Catalog.  That is the
+    # documented fallback tracked by crf04/statsplus-backend#203 and is outside
+    # #198's Team Filter slice; a provider reachable by any other route is a
+    # regression.
+    assert paths, "the walker must actually find the documented live-source reach"
+    assert all(
+        path.startswith("game_service.game_logs_source.live_source.")
+        for path in paths
+    ), paths
+
+    rankings = game_service.team_filter_rankings
+    assert isinstance(rankings, TeamFilterRankingService)
+    assert isinstance(
+        rankings.publication_reader, DatabaseFirstPublicationReader
+    )
+    # Diet facts arrive through a read-only reader bound to the repository,
+    # not the refresh-capable service that owns the adapters.
+    assert not any("player_diets" in path for path in paths)
