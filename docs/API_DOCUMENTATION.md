@@ -920,23 +920,20 @@ array contains one object per game, and `averages` / `season_averages` are
 arrays holding a single averages object; all three fields are ordinary JSON
 arrays, never JSON strings.
 
-Provider migration (#66): the request-time game-log source is PBP Stats, not
-`stats.nba.com`. Each row joins the governed Event Catalog by game ID to
-recover team/opponent identity, home/away, and the `TEAM vs. OPP` / `TEAM @ OPP`
-Matchup notation; any unjoinable or contradictory row fails the request rather
-than being guessed or dropped. The HTTP
-parameters, success payload, filter vocabulary, authentication, error schema,
-and Redis caching behavior are unchanged, and cache telemetry is attributed to
-PBP Stats. A season with a complete, valid durable publication is served
-database-first from the stored `player_game_logs` facts with strictly identical
-values; every other valid season continues through the cached live PBP path.
-The database-first implementation resolves the active immutable publication
+The request-time game-log source is database-only. A complete, valid durable
+`player_game_logs` publication supplies the response; a season without one
+returns the normal successful empty result and never calls NBA Stats or PBP
+Stats. Historical seasons are not a supported Log Workspace outcome and may
+therefore return empty. The HTTP parameters, success payload, filter
+vocabulary, authentication, and error schema are unchanged. Player game logs
+do not pass through Redis.
+
+The durable implementation resolves the active immutable publication
 and queries its publication-keyed player projection; a cold request does not
 load or decode the season-wide publication payload. This is an internal read
 optimization and does not change the endpoint parameters or response schema.
-Both paths
-return the same whole-minute presentation and the same composite/fantasy
-averages, and any season cut over to the database must satisfy strict parity.
+The stored rows retain the whole-minute presentation and composite/fantasy
+averages established by durable ingestion.
 
 Play-type matchup rating (#37): every `game_logs` row carries `PLAYTYPE_RTG`,
 the play-type matchup between the player's Season Synergy Diet Share and that

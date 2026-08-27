@@ -503,10 +503,6 @@ def main() -> int:
     ):
         if target is not None and hasattr(target, attribute):
             setattr(target, attribute, pbp_guard)
-    if dependencies.game_logs_source is not None:
-        live_source = getattr(dependencies.game_logs_source, "live_source", None)
-        if live_source is not None and hasattr(live_source, "pbp_provider"):
-            live_source.pbp_provider = pbp_guard
     # Injury Reports retain their existing service contract, but the benchmark
     # measures the statistical Matchups path and must not let a live injury
     # provider dominate its route timing.

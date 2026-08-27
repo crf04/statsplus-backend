@@ -543,21 +543,10 @@ def build_dependencies(
         publication_reader=publication_reader,
     )
     from app.services.game_logs_source import (
-        DatabaseFirstGameLogsSource,
-        LivePBPGameLogsSource,
         StoredGameLogsSource,
     )
 
-    live_game_logs_source = LivePBPGameLogsSource(
-        pbp_game_logs_provider,
-        event_catalog_service,
-    )
-    stored_game_logs_source = StoredGameLogsSource(
-        player_game_log_repository,
-    )
-    game_logs_source = DatabaseFirstGameLogsSource(
-        live_game_logs_source,
-        stored_game_logs_source,
+    game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
     )
     from app.services.team_filter_rankings import (

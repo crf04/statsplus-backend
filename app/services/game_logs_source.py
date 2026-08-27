@@ -1,33 +1,12 @@
-"""Request-time game-log sources behind one injectable seam.
-
-``GameService`` reads one :class:`GameLogsSource` for the player/season frame it
-filters and serializes.  Stage 1 introduces the live PBP source that replaces
-the request-time NBA Stats call; Stage 3 adds the stored source and a
-database-first router that serves a season from Postgres only when its complete
-publication is present and valid, preserving the cached live PBP path for
-seasons that have not yet been durably covered.
-"""
+"""Database-only request-time player game logs behind one injectable seam."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 import pandas as pd
 
-from app.errors import ProviderUnavailableError
 from app.services.game_log_frame import GAME_LOG_FRAME_COLUMNS, derive_game_log_frame
-from app.services.pbp_game_log_normalization import (
-    PBPJoinCounts,
-    normalize_pbp_game_logs,
-)
-from app.utils.telemetry import CACHE_MISS
-
-
-class EventCatalogReader(Protocol):
-    """Owner read seam for governed season games."""
-
-    def get_events(self, season: str) -> list[dict[str, Any]]: ...
 
 
 class PlayerGameLogReader(Protocol):
@@ -55,96 +34,11 @@ class GameLogsSource(Protocol):
         self,
         player_id: int,
         season: str,
-        *,
-        cache_status: str = CACHE_MISS,
     ) -> pd.DataFrame: ...
-
-    def cached(self, season: str) -> bool:
-        """Whether Redis caching applies to this season's source result."""
-
-    def record_cache_hit(self, operation: str) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class GameLogsReadPlan:
-    """One request's stable source choice and immutable publication read."""
-
-    source: GameLogsSource
-    cacheable: bool
-    publication_snapshot: Any | None = None
-
-    def get_player_logs(
-        self,
-        player_id: int,
-        season: str,
-        *,
-        cache_status: str = CACHE_MISS,
-    ) -> pd.DataFrame:
-        if self.publication_snapshot is None:
-            return self.source.get_player_logs(
-                player_id,
-                season,
-                cache_status=cache_status,
-            )
-        return self.source.get_player_logs(
-            player_id,
-            season,
-            cache_status=cache_status,
-            publication_snapshot=self.publication_snapshot,
-        )
-
-
-class LivePBPGameLogsSource:
-    """Request-time PBP source with the governed Event Catalog join."""
-
-    def __init__(
-        self,
-        pbp_provider: Any,
-        event_catalog: EventCatalogReader | None,
-    ) -> None:
-        self.pbp_provider = pbp_provider
-        self.event_catalog = event_catalog
-
-    def get_player_logs(
-        self,
-        player_id: int,
-        season: str,
-        *,
-        cache_status: str = CACHE_MISS,
-    ) -> pd.DataFrame:
-        if self.event_catalog is None:
-            raise ProviderUnavailableError(
-                "The Event Catalog is required to resolve game-log identity."
-            )
-        events = self.event_catalog.get_events(season)
-        if not events:
-            raise ProviderUnavailableError(
-                "The Event Catalog is unavailable for the requested season."
-            )
-        observations = self.pbp_provider.fetch_player_game_logs(
-            player_id,
-            season,
-            season_type="Regular Season",
-            cache_status=cache_status,
-        )
-        frame, _counts = normalize_pbp_game_logs(
-            observations,
-            events,
-            season_type="Regular Season",
-            round_minutes=True,
-        )
-        return _recency_frame(frame)
-
-    def cached(self, season: str) -> bool:
-        del season
-        return True
-
-    def record_cache_hit(self, operation: str) -> None:
-        self.pbp_provider.record_cache_hit(operation)
 
 
 class StoredGameLogsSource:
-    """Build the canonical request-time frame from durable player-game facts."""
+    """Build a frame from one complete durable publication, else return empty."""
 
     def __init__(self, repository: PlayerGameLogReader) -> None:
         self.repository = repository
@@ -153,23 +47,28 @@ class StoredGameLogsSource:
         self,
         player_id: int,
         season: str,
-        *,
-        cache_status: str = CACHE_MISS,
-        publication_snapshot: Any | None = None,
     ) -> pd.DataFrame:
-        del cache_status
-        records = self.repository.list_player_rows(
-            season,
-            player_id,
-            publication_snapshot=publication_snapshot,
+        read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
+        publication_snapshot = (
+            read_snapshot(season) if callable(read_snapshot) else None
         )
-        # The legacy request-time contract serves Regular Season games only;
-        # the live PBP path requests that phase explicitly, so the stored path
-        # must project the same phase for parity.
+        if publication_snapshot is not None:
+            publication = publication_snapshot.read("player_game_logs")
+            complete = not publication.legacy_fallback_allowed and publication.available
+        else:
+            complete = self.repository.has_complete_publication(season)
+        records = (
+            self.repository.list_player_rows(
+                season,
+                player_id,
+                publication_snapshot=publication_snapshot,
+            )
+            if complete
+            else ()
+        )
+        # The request-time contract serves Regular Season games only.
         records = tuple(
-            record
-            for record in records
-            if record.season_type == "Regular Season"
+            record for record in records if record.season_type == "Regular Season"
         )
         return _recency_frame(
             derive_game_log_frame(
@@ -178,74 +77,12 @@ class StoredGameLogsSource:
             )
         )
 
-    def cached(self, season: str) -> bool:
-        del season
-        return False
-
-    def record_cache_hit(self, operation: str) -> None:
-        del operation
-
-
-class DatabaseFirstGameLogsSource:
-    """Serve an ingestion-complete, valid season from Postgres, else live PBP."""
-
-    def __init__(
-        self,
-        live_source: GameLogsSource,
-        stored_source: GameLogsSource,
-        repository: PlayerGameLogReader,
-    ) -> None:
-        self.live_source = live_source
-        self.stored_source = stored_source
-        self.repository = repository
-
-    def get_player_logs(
-        self,
-        player_id: int,
-        season: str,
-        *,
-        cache_status: str = CACHE_MISS,
-    ) -> pd.DataFrame:
-        return self.prepare(season).get_player_logs(
-            player_id,
-            season,
-            cache_status=cache_status,
-        )
-
-    def cached(self, season: str) -> bool:
-        return self.prepare(season).cacheable
-
-    def prepare(self, season: str) -> GameLogsReadPlan:
-        """Choose one source and retain its publication snapshot for the request."""
-
-        read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
-        publication_snapshot = (
-            read_snapshot(season) if callable(read_snapshot) else None
-        )
-        if publication_snapshot is not None:
-            publication = publication_snapshot.read("player_game_logs")
-            complete = (
-                not publication.legacy_fallback_allowed
-                and publication.available
-            )
-        else:
-            complete = self.repository.has_complete_publication(season)
-        return GameLogsReadPlan(
-            source=self.stored_source if complete else self.live_source,
-            cacheable=not complete,
-            publication_snapshot=publication_snapshot if complete else None,
-        )
-
-    def record_cache_hit(self, operation: str) -> None:
-        self.live_source.record_cache_hit(operation)
-
 
 def _recency_frame(frame: pd.DataFrame) -> pd.DataFrame:
     """Order a canonical frame deterministically, most recent game first.
 
-    The legacy NBA provider returned games newest first and the last-N
-    ``game_filter`` keeps the leading rows, so the live PBP and stored paths
-    must agree on the same newest-first order for identical response documents.
+    The legacy endpoint returned games newest first and the last-N
+    ``game_filter`` keeps the leading rows, so durable reads retain that order.
     """
     if frame.empty:
         return frame
@@ -300,11 +137,7 @@ _RECORD_PRIMITIVE_COLUMNS = GAME_LOG_FRAME_COLUMNS
 
 
 __all__ = [
-    "DatabaseFirstGameLogsSource",
-    "EventCatalogReader",
     "GameLogsSource",
-    "LivePBPGameLogsSource",
     "PlayerGameLogReader",
     "StoredGameLogsSource",
-    "PBPJoinCounts",
 ]

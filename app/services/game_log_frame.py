@@ -1,10 +1,8 @@
 """One canonical derivation for game-log frames.
 
-Both the live PBP path and the durable stored path build their response
-frames from the same canonical primitives, so composite and fantasy values are
-calculated exactly once here rather than drifting between providers.  The
-legacy NBA path keeps its own provider-valued derivation; this module is the
-single derivation used by every PBP-based request-time and durable source.
+Durable ingestion and stored request-time reads build frames from the same
+canonical primitives, so composite and fantasy values are calculated exactly
+once here rather than drifting between publication and presentation.
 """
 
 from __future__ import annotations
@@ -28,9 +26,8 @@ CANONICAL_GAME_LOG_PRIMITIVE_COLUMNS = (
     "MIN",
 )
 
-#: The one canonical frame vocabulary every PBP-based source produces before
-#: derivation.  The live normalization and the stored-source rebuild share this
-#: single definition so the two paths cannot drift.
+#: The one canonical frame vocabulary durable ingestion and stored reads share
+#: before derivation.
 GAME_LOG_FRAME_COLUMNS = (
     "PLAYER_ID",
     "PLAYER_NAME",
@@ -88,8 +85,7 @@ def derive_game_log_frame(
     ``MIN`` is rounded to a whole minute for the request-time presentation,
     exactly as the legacy NBA path did; durable ingestion passes
     ``round_minutes=False`` so exact minutes are retained before persistence.
-    The fantasy total is one reviewed formula over the canonical primitives, so
-    a live PBP response and a stored response can never disagree.
+    The fantasy total is one reviewed formula over the canonical primitives.
     """
 
     if not isinstance(frame, pd.DataFrame):

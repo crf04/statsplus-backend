@@ -2,9 +2,8 @@
 
 Requests are served by threaded Flask workers, so this service is fully
 synchronous: there is no per-request event loop.  This service holds no
-provider client: player game logs come from the injected
-:mod:`app.services.game_logs_source` seam -- which decides for itself whether a
-season is served from durable facts or a cached live call -- and Team Filters
+provider client: player game logs come only from the injected durable
+:mod:`app.services.game_logs_source` seam, and Team Filters
 rank opponents from the Season publications through
 :class:`~app.services.team_filter_rankings.TeamFilterRankingService` (#198).
 Filters arrive as one typed :class:`GameLogQuery` (built by the route or the NL
@@ -23,9 +22,8 @@ from nba_api.stats.static import teams
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.play_type_matchup import play_type_matchup
 from app.models.game_logs import GameLogQuery, GameLogResponse
-from app.utils.cache_config import get_redis_client, set_cache_with_1am_expiry
+from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
-from app.utils.telemetry import CACHE_DISABLED, CACHE_MISS
 from .nba_cache import NBAGameCache
 from .team_filter_rankings import TEAM_FILTER_RANKINGS
 
@@ -66,8 +64,8 @@ class GameService:
         self.settings = settings or get_runtime_settings()
         self.all_teams = teams.get_teams()
 
-        # Request-time game-log source.  Production injects the database-first
-        # source; there is no provider fallback to reach from here.
+        # Request-time game-log source. Production injects the durable source;
+        # there is no provider fallback to reach from here.
         self.game_logs_source = game_logs_source
 
         # Season Rankings for every ``teams_against`` filter.  Absent against
@@ -98,109 +96,8 @@ class GameService:
         else:
             raise ValueError(f"No matching player found for {player_name}.")
 
-    @property
-    def cache_decorator(self):
-        """Get cache decorator for this instance"""
-        return self.cache.cache_player_logs()
-
     def _get_game_logs(self, player_name, season=None):
-        """Get game logs with daily caching - only hits the source once per day"""
-        season = season or self.settings.nba.current_season
-        game_logs_plan = None
-        source_is_cacheable = True
-        if self.game_logs_source is not None:
-            prepare = getattr(type(self.game_logs_source), "prepare", None)
-            if callable(prepare):
-                game_logs_plan = prepare(self.game_logs_source, season)
-                source_is_cacheable = game_logs_plan.cacheable
-            else:
-                source_is_cacheable = self.game_logs_source.cached(season)
-        if self.game_logs_source is not None and not source_is_cacheable:
-            # A durably complete season is served straight from the database;
-            # Redis caching would only shadow the fresher stored facts.
-            return self._fetch_game_logs_from_api(
-                player_name,
-                season,
-                cache_status=CACHE_DISABLED,
-                game_logs_plan=game_logs_plan,
-            )
-        cache_status = (
-            CACHE_DISABLED
-            if not self.cache or not self.cache.enabled
-            else CACHE_MISS
-        )
-        # Apply caching manually since we can't use decorators on dynamic methods
-        if self.cache and hasattr(self.cache, 'enabled') and self.cache.enabled:
-            from ..utils.cache_config import CACHE_PREFIXES
-
-            # Determine cache strategy based on season
-            if self.cache._is_current_season(season):
-                # Current season - cache until 4 AM ET next day with date key
-                cache_key = self.cache._generate_key(
-                    CACHE_PREFIXES['player_logs_daily'],
-                    True,  # include_date
-                    '_fetch_game_logs_from_api',
-                    player_name, season
-                )
-                cache_type = 'daily_nba_data'
-            else:
-                # Historical season - cache for 30 days without date key
-                cache_key = self.cache._generate_key(
-                    CACHE_PREFIXES['season_data'],
-                    False,  # include_date
-                    '_fetch_game_logs_from_api',
-                    player_name, season
-                )
-                cache_type = 'season_historical'
-
-            # Check cache first
-            cached_result = self.cache.get(cache_key)
-            if cached_result is not None:
-                logger.debug(f"Cache hit for player logs: {player_name}, {season} (avoiding provider call)")
-                self.game_logs_source.record_cache_hit("player_game_logs")
-                return cached_result
-
-            # Cache miss - make provider call
-            logger.info(f"Cache miss for player logs: {player_name}, {season} - making provider call")
-            result = self._fetch_game_logs_from_api(
-                player_name,
-                season,
-                cache_status=CACHE_MISS,
-                game_logs_plan=game_logs_plan,
-            )
-
-            # Cache the result with 1 AM CST expiry for current season data
-            if self.cache._is_current_season(season):
-                # Current season - use 1 AM CST expiry
-                if set_cache_with_1am_expiry(self.cache.redis_client, cache_key, self.cache._serialize_data(result)):
-                    logger.info(f"Cached game logs for {player_name}, {season} until 1 AM CST tomorrow")
-                else:
-                    # Fallback to regular TTL
-                    ttl = self.cache._get_ttl(cache_type)
-                    self.cache.set(cache_key, result, ttl)
-            else:
-                # Historical season - use regular TTL
-                ttl = self.cache._get_ttl(cache_type)
-                self.cache.set(cache_key, result, ttl)
-
-            return result
-        else:
-            # No cache - direct API call
-            return self._fetch_game_logs_from_api(
-                player_name,
-                season,
-                cache_status=cache_status,
-                game_logs_plan=game_logs_plan,
-            )
-
-    def _fetch_game_logs_from_api(
-        self,
-        player_name,
-        season=None,
-        *,
-        cache_status=CACHE_DISABLED,
-        game_logs_plan=None,
-    ):
+        """Read player game logs directly from durable facts."""
         season = season or self.settings.nba.current_season
         if self.game_logs_source is None:
             raise RuntimeError(
@@ -211,13 +108,7 @@ class GameService:
 
         # The pre-issues-9 contract deliberately leaves next_game unset.  Keep
         # that behavior until a separately specified provider seam exists.
-        if game_logs_plan is not None:
-            return game_logs_plan.get_player_logs(
-                player_id, season, cache_status=cache_status
-            ), None
-        return self.game_logs_source.get_player_logs(
-            player_id, season, cache_status=cache_status
-        ), None
+        return self.game_logs_source.get_player_logs(player_id, season), None
 
     def get_common_games(self, primary_player_logs, other_players_names, season=None):
         """Find common games between players"""

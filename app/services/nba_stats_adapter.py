@@ -58,7 +58,7 @@ from app.utils.telemetry import (
 )
 
 
-# These are the columns consumed by ``GameService._fetch_game_logs_from_api``.
+# These are the canonical columns returned by the adapter's game-log seam.
 # The recorded fixture uses the smaller parser contract below because it is a
 # raw provider fixture rather than the fully enriched live service frame.
 GAME_LOG_REQUIRED_COLUMNS: tuple[str, ...] = (

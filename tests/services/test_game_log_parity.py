@@ -1,8 +1,8 @@
-"""Stage 3 parity between the live PBP path and the durable stored path.
+"""Durable player-game-log ingestion and request-time read parity.
 
 The #66 contract amendment removes plus/minus from the game-log contract
-entirely, so an ingestion-complete, valid durable publication is again
-database-first, and live and stored documents compare strictly.
+entirely. An ingestion-complete, valid publication serves the Log Workspace
+from the same canonical facts produced by durable PBP ingestion.
 """
 
 from __future__ import annotations
@@ -35,11 +35,7 @@ from app.services.database_first_activation import (
 )
 from app.services import database_first_activation
 from app.services.event_catalog_service import EventCatalogService
-from app.services.game_logs_source import (
-    DatabaseFirstGameLogsSource,
-    LivePBPGameLogsSource,
-    StoredGameLogsSource,
-)
+from app.services.game_logs_source import StoredGameLogsSource
 from app.services.game_service import GameService
 from app.services.player_game_log_ingest import PlayerGameLogIngestService
 from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -106,39 +102,8 @@ class PlayerLogProvider:
             else frozenset(games)
         )
 
-    def fetch_player_game_logs(self, player_id, season, *, season_type, cache_status):
-        rows = [
-            row
-            for game_rows in self.games.values()
-            for row in game_rows
-            if row["EntityId"] == player_id
-            and row["GameId"] in self.regular_season_game_ids
-        ]
-        return _frame(rows)
-
     def fetch_game_player_logs(self, game_id, season, *, season_type):
         return _frame(self.games[game_id])
-
-    def record_cache_hit(self, operation):
-        return None
-
-
-class _EventsFromDb:
-    """Read the seeded governed events through the owner's read shape."""
-
-    def __init__(self, engine):
-        self.engine = engine
-
-    def get_events(self, season):
-        from sqlalchemy import select
-
-        from app.models.event_catalog import EventCatalogEntry
-
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(EventCatalogEntry.__table__)
-            ).mappings().all()
-        return [dict(row) for row in rows]
 
 
 @pytest.fixture
@@ -196,13 +161,6 @@ def _service(engine, source):
     )
 
 
-def _live_service(engine, provider):
-    return _service(
-        engine,
-        LivePBPGameLogsSource(provider, _EventsFromDb(engine)),
-    )
-
-
 def _stored_service(engine, repository):
     return _service(
         engine,
@@ -210,37 +168,22 @@ def _stored_service(engine, repository):
     )
 
 
-def test_complete_publication_is_database_first_with_strict_parity(durable_world):
-    engine, repository, provider, _games = durable_world
+def test_complete_publication_serves_the_log_workspace(durable_world):
+    engine, repository, _provider, _games = durable_world
 
     assert repository.get_freshness(SEASON).publication_status == "complete"
     assert repository.has_complete_publication(SEASON) is True
 
-    router = DatabaseFirstGameLogsSource(
-        LivePBPGameLogsSource(provider, _EventsFromDb(engine)),
-        StoredGameLogsSource(repository),
-        repository,
-    )
-    route_service = _service(engine, router)
+    route_service = _stored_service(engine, repository)
     query = GameLogQuery(season_filter=SEASON)
     route_doc = route_service.get_filtered_logs("Player One", query)
-    stored_doc = _stored_service(engine, repository).get_filtered_logs(
-        "Player One", query
-    )
-    live_doc = _live_service(engine, provider).get_filtered_logs(
-        "Player One", query
-    )
 
-    # An ingestion-complete valid publication serves database-first, and the
-    # stored document strictly equals the live document (no plus/minus at all).
-    assert router.cached(SEASON) is False
-    assert route_doc == stored_doc == live_doc
-    assert len(stored_doc["game_logs"]) == 2
-    assert stored_doc["game_logs"][0]["MATCHUP"] == "AAA vs. BBB"
+    assert len(route_doc["game_logs"]) == 2
+    assert route_doc["game_logs"][0]["MATCHUP"] == "AAA vs. BBB"
 
 
-def test_stored_and_live_paths_agree_under_filters(durable_world):
-    engine, repository, provider, _games = durable_world
+def test_stored_path_applies_filters(durable_world):
+    engine, repository, _provider, _games = durable_world
     query = GameLogQuery(
         season_filter=SEASON,
         minutes_filter="15,48",
@@ -251,28 +194,22 @@ def test_stored_and_live_paths_agree_under_filters(durable_world):
     stored = _stored_service(engine, repository).get_filtered_logs(
         "Player One", query
     )
-    live = _live_service(engine, provider).get_filtered_logs("Player One", query)
-
-    assert stored == live
     assert stored["game_logs"]
 
 
-def test_stored_and_live_paths_agree_on_recent_game_filter(durable_world):
-    engine, repository, provider, _games = durable_world
+def test_stored_path_applies_recent_game_filter(durable_world):
+    engine, repository, _provider, _games = durable_world
     query = GameLogQuery(season_filter=SEASON, game_filter=1)
 
     stored = _stored_service(engine, repository).get_filtered_logs(
         "Player One", query
     )
-    live = _live_service(engine, provider).get_filtered_logs("Player One", query)
-
-    assert stored == live
     # game_filter keeps the leading newest-first rows, matching the legacy
     # NBA ordering the head() filter depends on.
     assert stored["game_logs"][0]["GAME_DATE"] == "2026-01-11"
 
 
-def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
+def test_stored_path_serves_regular_season_only(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'parity-playoffs.sqlite3'}")
     run_migrations(engine)
     repository = PlayerGameLogRepository(
@@ -315,26 +252,13 @@ def test_stored_path_serves_regular_season_only_like_the_live_path(tmp_path):
     stored = _stored_service(engine, repository).get_filtered_logs(
         "Player One", GameLogQuery(season_filter=SEASON)
     )
-    live = _live_service(engine, provider).get_filtered_logs(
-        "Player One", GameLogQuery(season_filter=SEASON)
-    )
-
-    assert stored == live
-    # The playoff game is excluded from both paths, matching the legacy
-    # Regular-Season-only request-time contract.
+    # The playoff game remains outside the Regular-Season-only wire contract.
     assert len(stored["game_logs"]) == 2
 
 
-def test_database_first_router_serves_complete_season_from_storage(durable_world):
-    engine, repository, provider, _games = durable_world
-    router = DatabaseFirstGameLogsSource(
-        LivePBPGameLogsSource(provider, _EventsFromDb(engine)),
-        StoredGameLogsSource(repository),
-        repository,
-    )
-
-    assert router.cached(SEASON) is False
-    frame = router.get_player_logs(101, SEASON)
+def test_stored_source_serves_complete_season(durable_world):
+    _engine, repository, _provider, _games = durable_world
+    frame = StoredGameLogsSource(repository).get_player_logs(101, SEASON)
     assert len(frame) == 2
     assert frame.iloc[0]["GAME_ID"] == "0022500004"  # newest first
 
@@ -392,16 +316,7 @@ def test_game_service_reads_an_active_player_log_publication_once(
         publication_reader=reader,
     )
 
-    class NeverLiveSource:
-        def get_player_logs(self, player_id, season, *, cache_status):
-            raise AssertionError("an active publication must not call the provider")
-
-        def record_cache_hit(self, operation):
-            raise AssertionError("an active publication must not use Redis")
-
-    source = DatabaseFirstGameLogsSource(
-        NeverLiveSource(), StoredGameLogsSource(repository), repository
-    )
+    source = StoredGameLogsSource(repository)
     service = _service(engine, source)
     monkeypatch.setattr(service, "get_player_id", lambda _name: 101)
 
@@ -556,36 +471,22 @@ def test_active_player_log_read_uses_indexed_publication_projection(
     )
 
 
-def test_database_first_router_falls_back_to_live_before_complete_publication(
-    tmp_path,
-):
-    engine = create_engine(f"sqlite:///{tmp_path / 'parity-live.sqlite3'}")
-    run_migrations(engine)
-    repository = PlayerGameLogRepository(
-        engine,
-        statistic_catalog=StatisticCatalog.load_default(),
-        stats_surface_season=SEASON,
-        clock=lambda: RETRIEVED_AT,
-        stats_surface_max_age=timedelta(hours=30),
-    )
-    _seed_identities(repository)
-    provider = PlayerLogProvider(
-        {
-            "0022500001": _game_rows("0022500001", "2026-01-02", 1, 2),
-            "0022500004": _game_rows("0022500004", "2026-01-11", 1, 2),
-        }
-    )
-    live = LivePBPGameLogsSource(provider, _EventsFromDb(engine))
-    router = DatabaseFirstGameLogsSource(
-        live,
-        StoredGameLogsSource(repository),
-        repository,
-    )
+def test_stored_source_returns_empty_before_complete_publication():
+    class IncompleteRepository:
+        def has_complete_publication(self, season):
+            assert season == SEASON
+            return False
 
-    assert router.cached(SEASON) is True
-    frame = router.get_player_logs(101, SEASON)
-    assert len(frame) == 2
-    assert frame.iloc[0]["GAME_ID"] == "0022500004"
+        def list_player_rows(self, season, player_id, *, publication_snapshot=None):
+            assert season == SEASON
+            assert player_id == 101
+            assert publication_snapshot is None
+            return (_record(),)
+
+    repository = IncompleteRepository()
+    frame = StoredGameLogsSource(repository).get_player_logs(101, SEASON)
+
+    assert frame.empty
 
 
 def _seed_player_log_projection(engine, records):

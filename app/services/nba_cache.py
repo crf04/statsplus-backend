@@ -9,14 +9,12 @@ import json
 import pickle
 import logging
 import hashlib
-from typing import Any, Optional, Union, Callable
-from functools import wraps
+from typing import Any, Optional, Union
 
 import redis
 import pandas as pd
 
 from ..utils.cache_config import (
-    CACHE_PREFIXES, 
     CACHE_TTLS,
     get_cache_date_key,
     is_cache_enabled
@@ -59,7 +57,7 @@ class NBAGameCache:
         Generate a cache key with consistent format.
         
         Args:
-            prefix: Cache prefix from CACHE_PREFIXES
+            prefix: Cache-key namespace
             include_date: Whether to include date in key for daily expiration
             function_name: Name of the function being cached
             *args, **kwargs: Function arguments to include in key
@@ -253,63 +251,6 @@ class NBAGameCache:
             int: TTL in seconds
         """
         return CACHE_TTLS.get(cache_type, CACHE_TTLS['intraday_computed'])
-    
-    def _is_current_season(self, season: str) -> bool:
-        """
-        Check if season is the current NBA season.
-        
-        Args:
-            season: Season string like '2024-25'
-            
-        Returns:
-            bool: True if current season, False otherwise
-        """
-        # Compare against the one startup-derived season rather than repeating
-        # calendar arithmetic in each cache/request path.
-        try:
-            return season == self.settings.nba.current_season
-        except (AttributeError, TypeError):
-            logger.warning(f"Could not parse season string: {season}")
-            return False
-    
-    def cache_player_logs(self):
-        """
-        Decorator factory for caching player log data.
-        
-        Returns:
-            Callable: Decorator function
-        """
-        def decorator(func: Callable) -> Callable:
-            @wraps(func)
-            def wrapper(*args, **kwargs):
-                if not self.enabled:
-                    return func(*args, **kwargs)
-                
-                # Generate cache key
-                cache_key = self._generate_key(
-                    CACHE_PREFIXES['player_logs_daily'],
-                    True,  # include_date for daily expiration
-                    func.__name__,
-                    *args, **kwargs
-                )
-                
-                # Check cache first
-                cached_result = self.get(cache_key)
-                if cached_result is not None:
-                    logger.debug(f"Cache hit for player logs: {func.__name__}")
-                    return cached_result
-                
-                # Cache miss - call function
-                logger.info(f"Cache miss for player logs: {func.__name__} - making NBA API call")
-                result = func(*args, **kwargs)
-                
-                # Cache the result
-                ttl = self._get_ttl('daily_nba_data')
-                self.set(cache_key, result, ttl)
-                
-                return result
-            return wrapper
-        return decorator
     
     def clear_cache_pattern(self, pattern: str) -> int:
         """

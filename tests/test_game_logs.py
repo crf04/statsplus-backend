@@ -12,6 +12,7 @@ import pytest
 import requests
 
 from app.config.settings import (
+    CacheSettings,
     NBASeasonSettings,
     RuntimeSettings,
 )
@@ -480,23 +481,30 @@ def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(
     GameLogResponse.model_validate(body)
 
 
-def test_route_accepts_schema_valid_empty_source_frame(
+def test_route_returns_empty_when_player_log_publication_is_unavailable(
     client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
 ):
-    """A real source-shaped empty frame is a successful no-result query."""
+    """An unavailable durable publication is a successful no-result query."""
 
     from app.routes import game_routes
-    from app.services.nba_stats_adapter import GAME_LOG_REQUIRED_COLUMNS
+    from app.services.game_logs_source import StoredGameLogsSource
 
-    class EmptyGameLogsSource:
-        def cached(self, season):
-            return False
+    class UnavailablePublication:
+        legacy_fallback_allowed = False
+        available = False
 
-        def get_player_logs(self, player_id, season, **kwargs):
-            return pd.DataFrame(columns=GAME_LOG_REQUIRED_COLUMNS)
+    class UnavailableSnapshot:
+        def read(self, stream_key):
+            assert stream_key == "player_game_logs"
+            return UnavailablePublication()
 
-        def record_cache_hit(self, operation):
-            return None
+    class UnavailableRepository:
+        def read_publication_snapshot(self, season):
+            assert season == "2024-25"
+            return UnavailableSnapshot()
+
+        def list_player_rows(self, *args, **kwargs):
+            raise AssertionError("an unavailable publication must not be read")
 
     service = GameService(
         mock_db_engine,
@@ -505,7 +513,7 @@ def test_route_accepts_schema_valid_empty_source_frame(
             environment="testing",
             nba=NBASeasonSettings(current_season="2024-25"),
         ),
-        game_logs_source=EmptyGameLogsSource(),
+        game_logs_source=StoredGameLogsSource(UnavailableRepository()),
     )
     dependencies.game_service = service
     _stub_route_settings(monkeypatch)
@@ -529,6 +537,46 @@ def test_route_accepts_schema_valid_empty_source_frame(
     assert body["game_logs"] == []
     assert body["averages"] == []
     assert body["season_averages"] == []
+
+
+def test_game_service_never_caches_player_logs_in_redis(
+    monkeypatch, mock_db_engine
+):
+    class RedisGuard:
+        def __getattr__(self, name):
+            raise AssertionError(f"player game logs reached Redis through {name}")
+
+    class ChangingDurableSource:
+        def __init__(self):
+            self.calls = 0
+
+        def get_player_logs(self, player_id, season):
+            assert player_id == 1
+            assert season == "2024-25"
+            self.calls += 1
+            frame = _game_logs_frame().head(1).copy()
+            frame.loc[:, "PTS"] = self.calls
+            return frame
+
+    source = ChangingDurableSource()
+    service = GameService(
+        mock_db_engine,
+        RedisGuard(),
+        settings=RuntimeSettings(
+            environment="testing",
+            cache=CacheSettings(enabled=True),
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        game_logs_source=source,
+    )
+    monkeypatch.setattr(service, "get_player_id", lambda _name: 1)
+
+    first, _ = service._get_game_logs("LeBron James", "2024-25")
+    second, _ = service._get_game_logs("LeBron James", "2024-25")
+
+    assert source.calls == 2
+    assert first.iloc[0]["PTS"] == 1
+    assert second.iloc[0]["PTS"] == 2
 
 
 def test_malformed_provider_response_is_safe_503_without_app_failure(
