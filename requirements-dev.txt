@@ -2,8 +2,8 @@
 -r analysis/nba-archetypes/requirements.txt
 
 pytest==9.1.1
-pytest-cov==6.0.0
-pytest-mock==3.14.0
-pytest-xdist==3.6.1
-ruff==0.8.4
+pytest-cov==7.1.0
+pytest-mock==3.15.1
+pytest-xdist==3.8.0
+ruff==0.16.4
 pip-audit==2.10.1
