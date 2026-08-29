@@ -90,6 +90,7 @@ from app.services.player_diet import (
 )
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
+    PlayerGameLogRefreshChange,
     PlayerGameLogRepository,
 )
 from app.services.player_pool import StoredPlayerPoolReader
@@ -1453,7 +1454,10 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
     assert scores["REB"][missing_rebound_window] == {
         "components": {},
         "blend": None,
+        # The legacy scope has no stored OPP_REB identity to consume.
+        "missing_inputs": ["team_defense:traditional"],
     }
+    assert scores["REB"][present_rebound_window]["missing_inputs"] == []
     assert scores["REB"][present_rebound_window]["components"][
         "traditional"
     ] is not None
@@ -2386,6 +2390,7 @@ def projection_route_context(tmp_path, monkeypatch):
                 team_matchups=team_matchups,
                 stats_freshness=stats_freshness,
                 settings=route_settings,
+                statistic_catalog=catalog,
                 injuries=None,
                 clock=lambda: route_now[0],
             ),
@@ -2421,6 +2426,7 @@ def projection_route_context(tmp_path, monkeypatch):
         route_client=route_client,
         client=client,
         pool=pool,
+        player_logs=player_logs,
         projection_provider_calls=projection_provider_calls,
     )
 
@@ -3334,3 +3340,295 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
                 LatestPlayerProjection.provider == "prizepicks"
             )
         ).scalar_one() == 1
+
+
+AWAY_PARTICIPANT = 1629661
+HOME_PARTICIPANT = 203507
+FOCAL_GAME_DATE = date(2026, 1, 15)
+
+
+def _mark_event_final(engine, *, status_text="Final", status_code=3):
+    with engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(status_text=status_text, status_code=status_code)
+        )
+
+
+def _participant_record(
+    *, player_id, name, team_id, tricode, opponent_team_id, opponent, points
+):
+    return PlayerGameLogRecord(
+        season=SEASON,
+        season_type="Regular Season",
+        player_id=player_id,
+        game_id=GAME_ID,
+        player_name=name,
+        game_date=FOCAL_GAME_DATE,
+        team_id=team_id,
+        team_tricode=tricode,
+        opponent_team_id=opponent_team_id,
+        opponent_team_tricode=opponent,
+        is_home=team_id == BOS,
+        minutes=34.0,
+        points=points,
+        rebounds=6,
+        assists=5,
+        field_goals_made=10,
+        field_goals_attempted=19,
+        three_pointers_made=2,
+        three_pointers_attempted=6,
+        turnovers=3,
+        steals=1,
+        blocks=1,
+    )
+
+
+def _publish_focal_participants(player_logs, records=None):
+    """Publish the focal game's canonical rows with complete sync evidence."""
+
+    if records is None:
+        records = (
+            _participant_record(
+                player_id=AWAY_PARTICIPANT,
+                name="Away Participant",
+                team_id=LAL,
+                tricode="LAL",
+                opponent_team_id=BOS,
+                opponent="BOS",
+                points=24,
+            ),
+            _participant_record(
+                player_id=HOME_PARTICIPANT,
+                name="Home Participant",
+                team_id=BOS,
+                tricode="BOS",
+                opponent_team_id=LAL,
+                opponent="LAL",
+                points=31,
+            ),
+        )
+    player_logs.publish_refresh(
+        SEASON,
+        (
+            PlayerGameLogRefreshChange(
+                game_id=GAME_ID,
+                season_type="Regular Season",
+                records=records,
+                checksum=PlayerGameLogRepository.game_checksum(records),
+            ),
+        ),
+        retrieved_at=NOW,
+        source_provider="recorded",
+        expected_complete_game_ids=frozenset({GAME_ID}),
+    )
+
+
+def test_authenticated_final_matchup_without_archived_projections_is_historical(
+    projection_route_context,
+):
+    context = projection_route_context
+    _mark_event_final(context.engine)
+    _publish_focal_participants(context.player_logs)
+
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["experience"]["player_source"] == "game_logs"
+    sections = payload["experience"]["sections"]
+    assert sections["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "completed_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": NOW.isoformat(),
+    }
+    assert sections["participants"] == {
+        "status": "available",
+        "source": "player_game_logs",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert sections["season_defense"]["status"] == "available"
+    assert sections["season_defense"]["context"] == "completed_season"
+    assert sections["injuries"]["unavailable_reason"] == "no_pregame_snapshot"
+    # The Player Pool is genuinely absent, and the existing surface says so.
+    assert payload["freshness"]["pool"]["state"] == "missing"
+    assert payload["freshness"]["schedule"] == {
+        "status": "fresh",
+        "retrieved_at": NOW.isoformat(),
+    }
+    players = {row["canonical_id"]: row for row in payload["players"]}
+    assert set(players) == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    assert players[AWAY_PARTICIPANT]["tricode"] == "LAL"
+    assert players[HOME_PARTICIPANT]["tricode"] == "BOS"
+    for player in players.values():
+        assert player["player_source"] == "game_logs"
+        assert player["posted_markets"] == []
+        assert player["provenance"] == {}
+        assert player["focal_game_line"]["game_id"] == GAME_ID
+        assert set(player["scores"]) == set(player["stat_categories"])
+        for windows in player["scores"].values():
+            for window in windows.values():
+                assert isinstance(window["missing_inputs"], list)
+    assert payload["game"]["away_team"]["targetable_player_count"] == 0
+    assert payload["game"]["home_team"]["targetable_player_count"] == 0
+    assert context.projection_provider_calls == {
+        "dabble": 0,
+        "prizepicks": 0,
+        "underdog": 0,
+    }
+
+
+def test_authenticated_historical_selection_uses_stored_game_log_evidence(
+    projection_route_context,
+):
+    context = projection_route_context
+    _mark_event_final(context.engine)
+    _publish_focal_participants(context.player_logs)
+
+    response = context.client.get(
+        f"/api/games/matchup/selection?game_id={GAME_ID}"
+        f"&player_id={AWAY_PARTICIPANT}"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["player_id"] == AWAY_PARTICIPANT
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["experience"]["player_source"] == "game_logs"
+    assert payload["experience"]["focal_game"]["game_id"] == GAME_ID
+    assert payload["experience"]["focal_game"]["matchup"] == "LAL @ BOS"
+    assert payload["experience"]["samples"] == {
+        "context": "pregame",
+        "excludes_focal_game": True,
+    }
+    assert payload["experience"]["baseline"] == {
+        "context": "completed_season",
+        "hindsight": True,
+    }
+    # The focal game is separated out, never sampled as pregame evidence.
+    assert all(
+        row["game_date"] != FOCAL_GAME_DATE.isoformat()
+        for row in payload["h2h"]["rows"]
+        if row["row_type"] == "game"
+    )
+
+
+def test_authenticated_historical_matchup_keeps_defense_without_participants(
+    projection_route_context,
+):
+    context = projection_route_context
+    _mark_event_final(context.engine)
+
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["participants"][
+        "unavailable_reason"
+    ] == "game_logs_incomplete"
+    # Missing participants never suppress the available team Defense Sheet.
+    assert payload["experience"]["sections"]["season_defense"]["status"] == (
+        "available"
+    )
+    assert payload["league"]["surface_availability"]["shot_zones"]["season"][
+        "status"
+    ] == "available"
+    assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
+
+
+def test_authenticated_final_matchup_with_archived_projections_stays_current(
+    projection_route_context,
+):
+    context = projection_route_context
+    assembled = context.assembled
+    query = NBAMarketQuery(season=SEASON)
+    assembled.projection_recorder.record_complete_snapshot(
+        _recorded_projection_snapshot(context.catalog),
+        query=query,
+        accepted_at=NOW,
+    )
+    start_seen_at = NOW + timedelta(minutes=1)
+    _mark_event_final(context.engine, status_text="Q1", status_code=2)
+    with context.engine.begin() as connection:
+        connection.execute(
+            EventCatalogEntry.__table__
+            .update()
+            .where(EventCatalogEntry.__table__.c.nba_game_id == GAME_ID)
+            .values(first_observed_started_at=start_seen_at)
+        )
+    assembled.projection_recorder.freeze_closing_projection_sets(
+        events=assembled.event_catalog_service.get_events_by_ids(SEASON, (GAME_ID,)),
+        query=query,
+        created_at=start_seen_at,
+    )
+    _mark_event_final(context.engine)
+    _publish_focal_participants(context.player_logs)
+    context.route_now[0] = start_seen_at + timedelta(hours=8)
+
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["experience"]["mode"] == "current"
+    assert payload["experience"]["player_source"] == "player_pool"
+    assert payload["experience"]["sections"]["schedule"]["context"] == (
+        "current_season_catalog"
+    )
+    assert payload["freshness"]["pool"]["state"] == "closing"
+    # Governed archived projection evidence keeps the existing experience even
+    # though canonical game-log rows exist for the same game.
+    assert [player["canonical_id"] for player in payload["players"]] == [2544]
+    assert payload["players"][0]["player_source"] == "player_pool"
+    assert payload["players"][0]["focal_game_line"] is None
+
+
+def test_authenticated_live_matchup_declares_the_current_experience(
+    projection_route_context,
+):
+    context = projection_route_context
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _recorded_projection_snapshot(context.catalog),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=NOW,
+    )
+
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["freshness"]["pool"]["state"] == "live"
+    assert payload["experience"]["mode"] == "current"
+    assert payload["experience"]["player_source"] == "player_pool"
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "current_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": NOW.isoformat(),
+    }
+    assert set(payload["experience"]["sections"]) == {
+        "schedule",
+        "participants",
+        "season_defense",
+        "last_15_defense",
+        "injuries",
+    }
+    assert set(payload) == {
+        "game",
+        "experience",
+        "league",
+        "teams",
+        "players",
+        "injuries",
+        "freshness",
+        "provenance",
+        "coverage",
+    }

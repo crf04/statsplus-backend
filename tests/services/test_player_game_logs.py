@@ -875,6 +875,89 @@ def test_queries_derive_rates_last_ten_h2h_and_archetype_rows(tmp_path):
     ]
 
 
+def _focal_game_repository(tmp_path):
+    """Twelve stored games for one player, the seventh being the focal game."""
+
+    repository = _repository(tmp_path)
+    start = date(2026, 1, 1)
+    rows = [
+        replace(
+            _record(),
+            game_id=f"002250{i:04d}",
+            game_date=start + timedelta(days=i - 1),
+            minutes=10.0,
+            points=10,
+        )
+        for i in range(1, 13)
+    ]
+    focal = replace(rows[6], minutes=10.0, points=100)
+    rows[6] = focal
+    other_team = replace(
+        _record(player_id=202),
+        game_id="0022500202",
+        game_date=date(2026, 1, 7),
+    )
+    repository.publish(
+        SEASON,
+        [*rows, other_team],
+        retrieved_at=RETRIEVED_AT,
+        source_provider="nba_stats",
+        source_row_count=13,
+    )
+    return repository, focal
+
+
+def test_list_game_rows_returns_one_games_canonical_participants(tmp_path):
+    repository, focal = _focal_game_repository(tmp_path)
+
+    rows = repository.list_game_rows(SEASON, "0022500202")
+
+    assert [(row.player_id, row.game_id) for row in rows] == [
+        (202, "0022500202")
+    ]
+    assert rows[0].team_id == 1
+    assert rows[0].team_tricode == "AAA"
+    assert repository.list_game_rows(SEASON, focal.game_id)[0].points == 100
+    assert repository.list_game_rows(SEASON, "no-such-game") == ()
+
+
+def test_summaries_can_exclude_one_focal_game_from_the_baseline(tmp_path):
+    repository, focal = _focal_game_repository(tmp_path)
+
+    included = repository.get_season_rate(SEASON, 101)
+    excluded = repository.get_season_rate(
+        SEASON, 101, exclude_game_id=focal.game_id
+    )
+
+    # Eleven 10-point games plus the 100-point focal game.
+    assert included.game_count == 12
+    assert included.per_game["PTS"] == 17.5
+    assert excluded.game_count == 11
+    assert excluded.per_game["PTS"] == 10.0
+    assert focal.game_id not in {
+        row.game_id
+        for row in repository.list_game_rows(SEASON, "0022500202")
+    }
+
+
+def test_sample_rows_can_be_restricted_to_games_before_the_focal_date(tmp_path):
+    repository, focal = _focal_game_repository(tmp_path)
+
+    before = repository.list_h2h_rows(
+        SEASON, 101, 2, before_date=focal.game_date
+    )
+
+    assert [row.game_id for row in before] == [
+        f"002250{i:04d}" for i in range(6, 0, -1)
+    ]
+    assert all(row.game_date < focal.game_date for row in before)
+    assert focal.game_id not in {row.game_id for row in before}
+    peers = repository.list_archetype_rows(
+        SEASON, [101, 202], 2, before_date=focal.game_date
+    )
+    assert all(row.game_date < focal.game_date for row in peers)
+
+
 def test_batch_summaries_use_one_rows_query_and_keep_phase_semantics(tmp_path):
     repository = _repository(tmp_path)
     start = date(2026, 1, 1)

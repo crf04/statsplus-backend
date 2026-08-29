@@ -1754,7 +1754,54 @@ GET /api/games/matchup?game_id
   → TeamMatchupQueryService newest Season + exact team Last-15 windows
   → gated MatchupInjuryService lazy pre-tip observation or retained final snapshot
   → backend-shaped league/team metrics, availability, and freshness
+  → additive Historical Matchup declaration and section-owned evidence
 ```
+
+### Historical Matchup composition (#208, #209)
+
+`MatchupService._experience` is the sole authority for the additive
+`experience` block. A game is historical when the resolved Event Catalog event
+is completed and not postponed and the composed Player Pool contributes no
+player for either team; the Regular Season restriction is already enforced by
+the event read, which refuses every other kind with `404`. A closing projection
+set with memberships always contributes players, so that single condition is
+exactly "no archived closing projections", and it also keeps a legacy
+deployment's still-servable stored pool on the current experience instead of
+silently discarding real pool players.
+
+In historical mode the rail is composed from stored evidence rather than a
+Player Pool. `PlayerGameLogRepository.get_sync_status` is the completeness
+authority, and `list_game_rows` returns the exact game's canonical rows; both
+follow the same publication-projection, publication-payload, then legacy read
+order as every other player-log seam. Each row becomes one `_Participant`
+carrying the identity recorded for that game, so a later trade cannot rewrite
+which side a player was on. `get_player_summaries(exclude_game_id=…)` drops the
+focal row, so the participant's own result never feeds its own baseline or
+Matchup Score inputs. Score formulas, thresholds, and blend rules are
+unchanged; each window gains a `missing_inputs` list naming the score-contract
+inputs it could not consume, so an unavailable cell explains itself instead of
+becoming a silent partial blend.
+
+Every section reports from its own evidence. A Defense Sheet section is
+available whenever any governed Base is available for that window, so a missing
+Player Pool, a missing legacy `stats_tables` marker, an unavailable Last-15
+window, missing participants, and unavailable injuries can none of them
+suppress an available Season Defense Sheet.
+`league.surface_availability` stays the per-Base authority. Completed-season
+Schedule evidence is immutable, so the Schedule section reports the Event
+Catalog collection time as `collected_at` provenance rather than an age-only
+stale warning; the separate `freshness.schedule` surface keeps its existing
+age-based status. The two surfaces answer different questions and neither is
+derived from the other.
+
+`MatchupSelectionService` mirrors the declaration. When the pool names nobody
+for a completed game it resolves the participant from the focal game's
+canonical rows, scores the governed Statistic Catalog categories, restricts
+`h2h` and `archetype` samples to games strictly before the focal date, and
+excludes the focal game from the delta baseline. The declaration adds no
+provider call and no schema change: the Event Catalog, completed-season
+publications, canonical player game logs, and game-time identities already
+exist.
 
 Both assemblies serve the reads they compose on one pooled connection.
 `MatchupService` and `MatchupSelectionService` take the application engine,

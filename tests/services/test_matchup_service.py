@@ -27,7 +27,9 @@ from app.services.player_diet import (
 )
 from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
+    PlayerGameLogRecord,
     PlayerGameLogRepository,
+    PlayerGameLogSyncStatus,
     PlayerSeasonLogSummary,
     PlayerSeasonRate,
 )
@@ -479,6 +481,9 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         "name": "LeBron James",
         "team_id": LAL,
         "tricode": "LAL",
+        "player_source": "player_pool",
+        "stat_categories": ["PTS", "FGA"],
+        "focal_game_line": None,
         "posted_markets": ["PTS", "FGA"],
         "provenance": {
             "prizepicks": ["PTS", "FGA"],
@@ -521,12 +526,38 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                         "play_types": {"value": -0.011875, "thin": True}
                     },
                     "blend": {"value": -0.011875, "thin": True},
+                    "missing_inputs": [
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
                 },
-                "last_15": {"components": {}, "blend": None},
+                "last_15": {
+                    "components": {},
+                    "blend": None,
+                    "missing_inputs": [
+                        "team_defense:play_types",
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
+                },
             },
             "FGA": {
-                "season": {"components": {}, "blend": None},
-                "last_15": {"components": {}, "blend": None},
+                "season": {
+                    "components": {},
+                    "blend": None,
+                    "missing_inputs": [
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
+                },
+                "last_15": {
+                    "components": {},
+                    "blend": None,
+                    "missing_inputs": [
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
+                },
             },
         },
         "injury_badge_ref": None,
@@ -852,17 +883,21 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
             assert scores[market][window_name] == {
                 "components": {
                     "traditional": {"value": value, "thin": False}
-                }
+                },
+                "missing_inputs": [],
             }
     assert scores["REB"][missing_rebound_window] == {
         "components": {},
         "blend": None,
+        # The legacy scope has no stored OPP_REB identity to consume.
+        "missing_inputs": ["team_defense:traditional"],
     }
     assert scores["REB"][present_rebound_window] == {
         "components": {
             "traditional": {"value": -0.1, "thin": False}
         },
         "blend": {"value": -0.1, "thin": False},
+        "missing_inputs": [],
     }
 
 
@@ -1349,3 +1384,607 @@ def test_matchup_without_the_projection_degrades_without_a_legacy_fallback(
     }
     assert payload["players"][0]["season_scoring"] is None
     assert payload["players"][0]["last_10_minutes"] == []
+
+
+HISTORICAL_GAME_DATE = date(2026, 1, 10)
+AWAY_PARTICIPANT = 1629661
+HOME_PARTICIPANT = 203507
+
+
+def _final_event(**overrides):
+    """A completed Regular Season event whose tip is already in the past."""
+
+    return {
+        **_event(),
+        "scheduled_at": "2026-01-11T00:30:00+00:00",
+        "status_text": "Final",
+        "status_code": 3,
+        **overrides,
+    }
+
+
+def _pool_with_freshness(freshness):
+    return PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                ("PTS", "FGA"),
+                {"prizepicks": ("PTS", "FGA")},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness=freshness,
+    )
+
+
+def _empty_projection_pool():
+    """The production pattern: a final game whose closing sets are empty."""
+
+    return PlayerPool(
+        players=(),
+        team_counts={},
+        freshness=PlayerPool.missing_projection_freshness(),
+    )
+
+
+def _closing_projection_freshness():
+    freshness = PlayerPool.unavailable_freshness()
+    freshness.update(
+        {
+            "state": "closing",
+            "observed_at": RETRIEVED_AT.isoformat(),
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+        }
+    )
+    return freshness
+
+
+def _game_log_record(
+    *,
+    player_id,
+    player_name,
+    team_id,
+    team_tricode,
+    opponent_team_id,
+    opponent_team_tricode,
+    game_id=GAME_ID,
+    game_date=HISTORICAL_GAME_DATE,
+    minutes=34.0,
+    points=24,
+):
+    return PlayerGameLogRecord(
+        season=SEASON,
+        season_type="Regular Season",
+        player_id=player_id,
+        game_id=game_id,
+        player_name=player_name,
+        game_date=game_date,
+        team_id=team_id,
+        team_tricode=team_tricode,
+        opponent_team_id=opponent_team_id,
+        opponent_team_tricode=opponent_team_tricode,
+        is_home=False,
+        minutes=minutes,
+        points=points,
+        rebounds=5,
+        assists=7,
+        field_goals_made=9,
+        field_goals_attempted=18,
+        three_pointers_made=3,
+        three_pointers_attempted=7,
+        free_throws_made=3,
+        free_throws_attempted=4,
+        offensive_rebounds=1,
+        defensive_rebounds=4,
+        turnovers=2,
+        steals=1,
+        blocks=1,
+        personal_fouls=2,
+    )
+
+
+def _historical_rows():
+    return (
+        _game_log_record(
+            player_id=AWAY_PARTICIPANT,
+            player_name="Away Participant",
+            # The identity recorded for this game. A later trade must not
+            # rewrite which side the participant played for.
+            team_id=LAL,
+            team_tricode="LAL",
+            opponent_team_id=BOS,
+            opponent_team_tricode="BOS",
+        ),
+        _game_log_record(
+            player_id=HOME_PARTICIPANT,
+            player_name="Home Participant",
+            team_id=BOS,
+            team_tricode="BOS",
+            opponent_team_id=LAL,
+            opponent_team_tricode="LAL",
+            points=31,
+        ),
+    )
+
+
+class RecordedGameLogs:
+    """A player-log seam that also serves one game's canonical rows."""
+
+    def __init__(self, rows=None, *, sync_status="complete", season_rate=True):
+        self.rows = _historical_rows() if rows is None else rows
+        self.sync_status = sync_status
+        self.season_rate = season_rate
+        self.summary_calls = []
+        self.game_row_calls = []
+
+    def list_game_rows(self, season, game_id):
+        assert season == SEASON
+        self.game_row_calls.append(game_id)
+        return tuple(row for row in self.rows if row.game_id == game_id)
+
+    def get_sync_status(self, season, game_id):
+        assert season == SEASON
+        if self.sync_status is None:
+            return None
+        return PlayerGameLogSyncStatus(
+            season=SEASON,
+            game_id=game_id,
+            season_type="Regular Season",
+            status=self.sync_status,
+            checksum="abc",
+            row_count=len(self.rows),
+            source_provider="pbp_stats",
+            retrieved_at=RETRIEVED_AT,
+        )
+
+    def get_player_summaries(self, season, player_ids, *, exclude_game_id=None):
+        assert season == SEASON
+        self.summary_calls.append((tuple(player_ids), exclude_game_id))
+        return {
+            player_id: PlayerSeasonLogSummary(
+                season=SEASON,
+                player_id=player_id,
+                season_rate=(
+                    PlayerSeasonRate(
+                        season=SEASON,
+                        player_id=player_id,
+                        game_count=20,
+                        total_minutes=700,
+                        per_game={"PTS": 21.0, "REB": 5.0, "AST": 4.0},
+                        per_minute={"PTS": 0.03, "REB": 0.007, "AST": 0.006},
+                    )
+                    if self.season_rate
+                    else None
+                ),
+                last_ten_minutes=(31.0, 32.0),
+            )
+            for player_id in player_ids
+        }
+
+    def get_read_freshness(self, season):
+        assert season == SEASON
+        return PlayerGameLogReadFreshness("fresh", RETRIEVED_AT)
+
+
+class RecordedEmptyDiets:
+    def get_for_players(self, season, player_ids):
+        assert season == SEASON
+        return PlayerDietResult(season=SEASON, players={}, observations=())
+
+
+def _historical_service(
+    *,
+    player_logs=None,
+    pool=None,
+    season_window=None,
+    last_15_window=None,
+    injuries=None,
+    events=None,
+    diets=None,
+    stats_at=None,
+):
+    return MatchupService(
+        event_catalog=(
+            events if events is not None else RecordedEvents(events=[_final_event()])
+        ),
+        player_pool=RecordedPool(
+            _empty_projection_pool() if pool is None else pool
+        ),
+        player_logs=player_logs if player_logs is not None else RecordedGameLogs(),
+        player_diets=diets if diets is not None else RecordedEmptyDiets(),
+        team_matchups=RecordedTeamWindows(
+            season_window if season_window is not None else _window(),
+            last_15_window,
+        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(stats_at)),
+        statistic_catalog=StatisticCatalog.load_default(),
+        injuries=injuries,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+        ),
+        clock=lambda: NOW,
+    )
+
+
+def test_final_regular_season_game_without_archived_projections_is_historical():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["experience"]["player_source"] == "game_logs"
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "completed_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": RETRIEVED_AT.isoformat(),
+    }
+    # The declaration is explicit: a client never has to read an empty array
+    # or a freshness marker to learn the mode.
+    assert payload["freshness"]["pool"]["state"] == "missing"
+
+
+def test_completed_season_schedule_keeps_provenance_without_a_stale_warning():
+    aged = NOW - timedelta(days=30)
+
+    payload = _historical_service(
+        events=RecordedEvents(events=[_final_event()], retrieved_at=aged)
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["freshness"]["schedule"] == {
+        "status": "stale",
+        "retrieved_at": aged.isoformat(),
+    }
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "completed_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": aged.isoformat(),
+    }
+
+
+def test_final_game_with_archived_closing_projections_stays_current():
+    logs = RecordedGameLogs()
+
+    payload = _historical_service(
+        pool=_pool_with_freshness(_closing_projection_freshness()),
+        player_logs=logs,
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert payload["experience"]["player_source"] == "player_pool"
+    assert payload["experience"]["sections"]["schedule"]["context"] == (
+        "current_season_catalog"
+    )
+    assert [row["canonical_id"] for row in payload["players"]] == [2544]
+    assert payload["players"][0]["player_source"] == "player_pool"
+    assert payload["players"][0]["posted_markets"] == ["PTS", "FGA"]
+    assert payload["players"][0]["focal_game_line"] is None
+    assert payload["game"]["away_team"]["targetable_player_count"] == 1
+    # Governed archived projection evidence keeps the existing experience, so
+    # the canonical game-log rail is never read.
+    assert logs.game_row_calls == []
+
+
+def test_a_final_game_with_a_servable_stored_pool_stays_current():
+    """A landed stored pool is still governed evidence for a past game."""
+
+    logs = RecordedGameLogs()
+
+    payload = _historical_service(
+        pool=_pool_with_freshness(
+            {
+                "status": "stale-served",
+                "retrieved_at": RETRIEVED_AT.isoformat(),
+                "providers": {},
+            }
+        ),
+        player_logs=logs,
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert [row["canonical_id"] for row in payload["players"]] == [2544]
+    assert logs.game_row_calls == []
+
+
+def test_a_past_tip_that_is_not_final_is_not_a_historical_matchup():
+    past = {**_event(), "scheduled_at": "2026-01-11T00:30:00+00:00"}
+
+    payload = _historical_service(
+        events=RecordedEvents(events=[past])
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert payload["players"] == []
+
+
+def test_a_postponed_event_is_not_a_historical_matchup():
+    payload = _historical_service(
+        events=RecordedEvents(events=[_final_event(postponed_status="postponed")])
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+
+
+def test_historical_matchup_reports_section_owned_evidence():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    sections = payload["experience"]["sections"]
+    assert sections["participants"] == {
+        "status": "available",
+        "source": "player_game_logs",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert sections["season_defense"] == {
+        "status": "available",
+        "source": "team_matchup_publication",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert sections["last_15_defense"] == {
+        "status": "unavailable",
+        "source": None,
+        "context": None,
+        "unavailable_reason": "no_point_in_time_snapshot",
+    }
+    assert sections["injuries"] == {
+        "status": "unavailable",
+        "source": None,
+        "context": None,
+        "unavailable_reason": "no_pregame_snapshot",
+    }
+    # Section provenance never replaces the per-Base authority.
+    assert payload["league"]["surface_availability"]["shot_zones"]["season"] == {
+        "status": "available",
+        "unavailable_reason": None,
+    }
+
+
+def test_a_retained_pregame_snapshot_is_labeled_pregame_and_removes_nobody():
+    # A stopped game serves only its retained pre-tip snapshot, so available
+    # historical injury evidence is pregame rather than current.
+    injury_block = {
+        "status": "fresh",
+        "unavailable_reason": None,
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+        "source": "rotowire",
+        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "teams": [],
+    }
+    injuries = RecordedInjuries(
+        MatchupInjuryResult(
+            injury_block,
+            frozenset({AWAY_PARTICIPANT}),
+            {AWAY_PARTICIPANT: "rotowire:6504"},
+        )
+    )
+
+    payload = _historical_service(injuries=injuries).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["sections"]["injuries"] == {
+        "status": "available",
+        "source": "rotowire",
+        "context": "pregame",
+        "unavailable_reason": None,
+    }
+    # A canonical row means the player appeared: injury evidence never removes
+    # or badges a participant.
+    players = {row["canonical_id"]: row for row in payload["players"]}
+    assert set(players) == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    assert players[AWAY_PARTICIPANT]["injury_badge_ref"] is None
+
+
+def test_historical_participants_come_from_game_logs_on_both_sides():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    players = {row["canonical_id"]: row for row in payload["players"]}
+    assert set(players) == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    assert players[AWAY_PARTICIPANT]["team_id"] == LAL
+    assert players[AWAY_PARTICIPANT]["tricode"] == "LAL"
+    assert players[HOME_PARTICIPANT]["team_id"] == BOS
+    assert players[HOME_PARTICIPANT]["tricode"] == "BOS"
+    for player in players.values():
+        assert player["player_source"] == "game_logs"
+        # Box-score participants carry no posted-market claim.
+        assert player["posted_markets"] == []
+        assert player["provenance"] == {}
+        assert player["injury_badge_ref"] is None
+        assert set(player["scores"]) == set(player["stat_categories"])
+        assert "PTS" in player["stat_categories"]
+    assert payload["game"]["away_team"]["targetable_player_count"] == 0
+    assert payload["game"]["home_team"]["targetable_player_count"] == 0
+
+
+def test_historical_participants_use_the_game_time_team_not_a_current_roster():
+    traded = _game_log_record(
+        player_id=AWAY_PARTICIPANT,
+        player_name="Away Participant",
+        team_id=LAL,
+        team_tricode="LAL",
+        opponent_team_id=BOS,
+        opponent_team_tricode="BOS",
+    )
+
+    # The catalog now carries a newer tricode for the same franchise; the
+    # identity recorded for that game still governs the rail.
+    renamed = _final_event(
+        away_team_tricode="LAK",
+        away_team={"id": LAL, "name": "Los Angeles Lakers", "tricode": "LAK"},
+    )
+
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(rows=(traded,)),
+        events=RecordedEvents(events=[renamed]),
+    ).get_matchup(game_id=GAME_ID)
+
+    (player,) = payload["players"]
+    assert (player["team_id"], player["tricode"]) == (LAL, "LAL")
+    # The opposing rail is rendered from this identity alone.
+    assert [
+        row["canonical_id"]
+        for row in payload["players"]
+        if row["team_id"] != BOS
+    ] == [AWAY_PARTICIPANT]
+
+
+def test_historical_participants_carry_the_focal_line_excluded_from_inputs():
+    logs = RecordedGameLogs()
+
+    payload = _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
+
+    player = next(
+        row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT
+    )
+    assert player["focal_game_line"]["game_id"] == GAME_ID
+    assert player["focal_game_line"]["game_date"] == "2026-01-10"
+    assert player["focal_game_line"]["matchup"] == "LAL @ BOS"
+    assert player["focal_game_line"]["minutes"] == 34.0
+    assert player["focal_game_line"]["stats"]["PTS"] == 24.0
+    # 24 points in the focal game against 21.0 completed-season context: the
+    # focal result is display-only and never feeds its own baseline.
+    assert player["season_scoring"] == 21.0
+    assert logs.summary_calls == [
+        ((AWAY_PARTICIPANT, HOME_PARTICIPANT), GAME_ID)
+    ]
+
+
+def test_historical_scores_name_missing_inputs_without_a_partial_blend():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    scores = payload["players"][0]["scores"]
+    # No stored Diet evidence, so every Diet-backed window is unavailable
+    # rather than silently partial.
+    assert scores["PTS"]["season"] == {
+        "components": {},
+        "blend": None,
+        "missing_inputs": [
+            "player_diet:play_types",
+            "player_diet:shot_zones",
+            "player_diet:shot_types",
+        ],
+    }
+    assert scores["PTS"]["last_15"]["missing_inputs"][0] == (
+        "team_defense:play_types"
+    )
+    # The traditional Base consumes no Diet, so it still scores.
+    assert scores["TOV"]["season"]["components"]["traditional"]["value"] is not None
+    assert scores["TOV"]["season"]["missing_inputs"] == []
+
+
+def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(season_rate=False)
+    ).get_matchup(game_id=GAME_ID)
+
+    assert len(payload["players"]) == 2
+    for player in payload["players"]:
+        assert player["season_scoring"] is None
+        assert player["scores"]["PRA"]["season"] == {
+            "components": {},
+            "blend": None,
+            "missing_inputs": ["player_season_rate"],
+        }
+    # Participants without a score sort last but are never dropped.
+    assert {row["canonical_id"] for row in payload["players"]} == {
+        AWAY_PARTICIPANT,
+        HOME_PARTICIPANT,
+    }
+
+
+def test_incomplete_game_logs_remove_only_participants():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(sync_status="in_progress")
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["participants"] == {
+        "status": "unavailable",
+        "source": "player_game_logs",
+        "context": None,
+        "unavailable_reason": "game_logs_incomplete",
+    }
+    # The available completed-season Defense Sheet still renders.
+    assert payload["experience"]["sections"]["season_defense"]["status"] == (
+        "available"
+    )
+    assert payload["league"]["defense_sheet"]["shot_zones"]
+    assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
+
+
+def test_a_game_without_canonical_rows_names_its_own_reason():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(rows=())
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["participants"][
+        "unavailable_reason"
+    ] == "no_game_log_rows"
+
+
+def test_available_season_defense_survives_every_other_missing_surface():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(sync_status=None)
+    ).get_matchup(game_id=GAME_ID)
+
+    # No pool, no legacy stats_tables marker, no Last 15, no injuries, no
+    # participants: none of them governs the Season Defense Sheet.
+    assert payload["freshness"]["pool"]["state"] == "missing"
+    assert payload["freshness"]["stats"] == {
+        "status": "missing",
+        "retrieved_at": None,
+    }
+    assert payload["freshness"]["injuries"]["status"] == "unavailable"
+    assert payload["freshness"]["team_matchups"]["last_15"]["status"] == (
+        "unavailable"
+    )
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["season_defense"]["status"] == (
+        "available"
+    )
+    assert payload["league"]["surface_availability"]["traditional"]["season"][
+        "status"
+    ] == "available"
+    assert payload["teams"][1]["defense_sheet"]["traditional"][0]["season"]
+
+
+def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
+    payload = _service().get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert payload["experience"]["player_source"] == "player_pool"
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "current_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": RETRIEVED_AT.isoformat(),
+    }
+    assert payload["experience"]["sections"]["participants"] == {
+        "status": "available",
+        "source": "player_pool",
+        "context": "posted_markets",
+        "unavailable_reason": None,
+    }
+    assert payload["experience"]["sections"]["injuries"] == {
+        "status": "unavailable",
+        "source": "rotowire",
+        "context": "current",
+        "unavailable_reason": "disabled",
+    }
+    assert payload["players"][0]["posted_markets"] == ["PTS", "FGA"]
+    assert set(payload) == {
+        "game",
+        "league",
+        "teams",
+        "players",
+        "injuries",
+        "freshness",
+        "provenance",
+        "coverage",
+        "experience",
+    }

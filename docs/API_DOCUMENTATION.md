@@ -448,8 +448,100 @@ servable under its landed stored-pool rules may populate `players`.
 Top-level fields are required:
 
 ```text
-game, league, teams, players, injuries, freshness
+game, experience, league, teams, players, injuries, freshness
 ```
+
+`experience` is the additive Historical Matchup declaration (#208, #209). It is
+always present, so a client never infers the mode from tip dates, empty arrays,
+or freshness markers:
+
+```json
+{
+  "mode": "historical",
+  "player_source": "game_logs",
+  "sections": {
+    "schedule": {
+      "status": "available",
+      "source": "event_catalog",
+      "context": "completed_season_catalog",
+      "unavailable_reason": null,
+      "collected_at": "2026-03-30T04:10:00+00:00"
+    },
+    "participants": {
+      "status": "available",
+      "source": "player_game_logs",
+      "context": "completed_season",
+      "unavailable_reason": null
+    },
+    "season_defense": {
+      "status": "available",
+      "source": "team_matchup_publication",
+      "context": "completed_season",
+      "unavailable_reason": null
+    },
+    "last_15_defense": {
+      "status": "unavailable",
+      "source": null,
+      "context": null,
+      "unavailable_reason": "no_point_in_time_snapshot"
+    },
+    "injuries": {
+      "status": "unavailable",
+      "source": null,
+      "context": null,
+      "unavailable_reason": "no_pregame_snapshot"
+    }
+  }
+}
+```
+
+`mode` is `historical` for a completed, non-postponed Regular Season game whose
+governed Player Pool contributes no player for either team; it is `current`
+otherwise. A closing projection set with memberships always contributes
+players, so this is exactly "a final Regular Season game with no archived
+closing projections". A final game with governed archived projection evidence,
+or with any still-servable stored Player Pool, therefore keeps the
+evidence-appropriate existing experience, as does every scheduled or live game.
+`player_source` is `game_logs` in historical mode and `player_pool` otherwise.
+
+`sections` always contains exactly `schedule`, `participants`,
+`season_defense`, `last_15_defense`, and `injuries`. Every section carries its
+own `status` (`available | unavailable | missing`), `source`, `context`, and
+`unavailable_reason`; no section's evidence governs another's. `source` is one
+of `event_catalog`, `player_game_logs`, `player_pool`,
+`team_matchup_publication`, `rotowire`, or `null`. `context` is one of
+`completed_season_catalog`, `current_season_catalog`, `completed_season`,
+`pregame`, `posted_markets`, `current`, or `null`; `completed_season` is the
+hindsight label a client renders beside a completed-season window.
+
+The Schedule section is always `available` and additionally carries
+`collected_at`, the same Event Catalog collection time reported by
+`freshness.schedule`. Completed-season Schedule evidence is immutable, so that
+age never makes the section stale; the unchanged `freshness.schedule` surface
+keeps its existing age-based `fresh`/`stale`/`missing` status.
+
+A Defense Sheet section is `available` whenever any of its five governed Bases
+is available for that window, so an unavailable Last-15 window, a missing
+Player Pool, missing participants, unavailable injuries, and a missing legacy
+`stats_tables` freshness marker can none of them suppress an available Season
+Defense Sheet. `league.surface_availability` remains the sole per-Base
+authority, and a section that is not available repeats the first governed Base
+reason. In historical mode a Last-15 window with no available Base reports
+`no_point_in_time_snapshot`, because no point-in-time snapshot was captured for
+a completed game.
+
+The Participants section reports `game_logs_incomplete` when the game's
+canonical player-log synchronization is not complete and `no_game_log_rows`
+when it is complete but names nobody on either team; in current mode it reports
+`player_pool_unavailable` when no stored pool player belongs to the game. In
+historical mode the Injuries section never presents current injury data. A
+stopped game serves only its retained pre-tip snapshot, so a retained snapshot
+is `available` with context `pregame` and anything else is
+`unavailable/no_pregame_snapshot`.
+
+This block is purely additive. Every other field, value, and error contract on
+this route is unchanged in both modes, so a frontend that ignores `experience`
+behaves exactly as it did before backend-first rollout.
 
 `game` is the same header as a Slate card. `teams` is ordered away then home,
 and its targetable counts reflect the returned stored pool players. Canonical
@@ -531,6 +623,9 @@ Each stored pool player has this shape:
   "name": "LeBron James",
   "team_id": 1610612747,
   "tricode": "LAL",
+  "player_source": "player_pool",
+  "stat_categories": ["FGA", "PTS"],
+  "focal_game_line": null,
   "posted_markets": ["FGA", "PTS"],
   "provenance": {
     "prizepicks": ["FGA", "PTS"],
@@ -561,13 +656,15 @@ Each stored pool player has this shape:
           "play_types": { "value": 0.08, "thin": false },
           "shot_zones": { "value": 0.12, "thin": false }
         },
-        "blend": { "value": 0.10, "thin": false }
+        "blend": { "value": 0.10, "thin": false },
+        "missing_inputs": ["player_diet:shot_types"]
       },
       "last_15": {
         "components": {
           "shot_zones": { "value": -0.03, "thin": true }
         },
-        "blend": { "value": -0.03, "thin": true }
+        "blend": { "value": -0.03, "thin": true },
+        "missing_inputs": ["team_defense:play_types", "player_diet:shot_types"]
       }
     },
     "FGA": {
@@ -575,19 +672,29 @@ Each stored pool player has this shape:
         "components": {
           "shot_zones": { "value": 0.04, "thin": false }
         },
-        "blend": { "value": 0.04, "thin": false }
+        "blend": { "value": 0.04, "thin": false },
+        "missing_inputs": ["player_diet:shot_types"]
       },
       "last_15": {
         "components": {
           "shot_zones": { "value": -0.02, "thin": false }
         },
-        "blend": { "value": -0.02, "thin": false }
+        "blend": { "value": -0.02, "thin": false },
+        "missing_inputs": ["player_diet:shot_types"]
       }
     }
   },
   "injury_badge_ref": null
 }
 ```
+
+`player_source`, `stat_categories`, and `focal_game_line` are additive and
+always present. `player_source` is `player_pool` for a stored pool player and
+`game_logs` for a Historical Matchup participant. `stat_categories` is always
+exactly the key set of `scores`; in current mode it equals `posted_markets`,
+and in historical mode it is the governed Statistic Catalog crossed with the
+score-input contract rather than any DFS archive. `focal_game_line` is `null`
+in current mode.
 
 Player Diet facts are unthresholded raw Season shares and volumes. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
@@ -660,6 +767,16 @@ STKS Season-volume-weights the stored OPP_STL and OPP_BLK comparisons into one
 `traditional` component. These defensive windows omit `blend` (a JSON `null`
 is also contract-equivalent) so the response never pretends a one-Base result
 is a Blend.
+
+Every score window additionally carries `missing_inputs`, an always-present
+list naming the score-contract inputs that window could not consume. Its values
+are `team_defense:<base>` when that Base/window is not available,
+`player_diet:<base>` when an available Base had no complete stored player Diet,
+and `player_season_rate` when a combo or STKS window lacked the player's stored
+Season rate. `<base>` is one of the five governed Bases. An empty list means
+every required input was present. This document only names the gaps; it changes
+no score formula, threshold, or blend rule, and a complete window's cells are
+identical to what they were before.
 
 Every numeric cell carries `thin`. The backend marks a Diet component thin when
 the player's Season sample is below `MATCHUP_SCORE_MIN_GAMES` (default `5`) or
@@ -786,6 +903,41 @@ between equivalent legacy and ledger sources preserves the established public
 matchup freshness timestamp byte-for-byte where the compatibility contract
 requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
+### Historical Matchup participants
+
+In historical mode `players` is not a Player Pool. It is populated from the
+complete canonical player-log rows for that exact game, one row per player who
+appeared, and carries no inferred DNP or inactive roster. Each participant has
+the same shape as a stored pool player, with these differences:
+
+- `player_source` is `game_logs`, `posted_markets` is `[]`, and `provenance` is
+  `{}`. There is no posted-market claim, and both
+  `game.away_team.targetable_player_count` and
+  `game.home_team.targetable_player_count` are `0`.
+- `team_id` and `tricode` are the identity recorded for that game. A later
+  trade or a newer Athlete Catalog team cannot override it, so
+  `players[]` filtered by `team_id` deterministically renders the offense
+  opposing a selected Defense Sheet.
+- `focal_game_line` is that participant's actual line in the focal game:
+  `{ game_id, game_date, matchup, minutes, stats }`, where `stats` covers the
+  governed Stat Categories. It is display-only.
+- `season_scoring`, `last_10_minutes`, and every Matchup Score input are
+  computed with the focal game's own row excluded, so a participant's result
+  never grades itself. Team Defense Sheet windows keep the completed-season
+  cutoff behavior established by #41; they are labeled `completed_season`
+  hindsight rather than recomputed.
+- Player Diet evidence remains the stored completed-season Season Diet, which
+  is why the Season window is labeled hindsight.
+- Injury evidence never removes or badges a participant: a canonical row means
+  the player appeared.
+- Participants with unavailable scores stay in the response, sort after
+  complete scores under the unchanged ordering, and name their gaps through
+  `missing_inputs`.
+
+If the game's canonical log synchronization is not complete, `players` is `[]`
+and only the Participants section is unavailable; every other section,
+including an available Season Defense Sheet, still returns.
+
 Pool freshness and per-provider status are passed through from the selected
 stored snapshot. Under the projection archive gate, `freshness.player_pool`
 also carries `state: live | closing | missing` and `observed_at`. For a started
@@ -818,6 +970,13 @@ are refused rather than ignored.
 ```json
 {
   "player_id": 2544,
+  "experience": {
+    "mode": "current",
+    "player_source": "player_pool",
+    "focal_game": null,
+    "samples": {"context": "season_to_date", "excludes_focal_game": false},
+    "baseline": {"context": "season_to_date", "hindsight": false}
+  },
   "freshness": {
     "player_pool": {
       "status": "fresh",
@@ -859,6 +1018,41 @@ are refused rather than ignored.
   "archetype": {"thin": true, "rows": []}
 }
 ```
+
+`experience` is the additive selection-side declaration and is always present.
+In current mode it is exactly the block above. In historical mode — a
+completed, non-postponed Regular Season game whose governed Player Pool names
+nobody — it becomes:
+
+```json
+{
+  "mode": "historical",
+  "player_source": "game_logs",
+  "focal_game": {
+    "game_id": "0022501082",
+    "game_date": "2026-03-29",
+    "matchup": "LAC @ MIL",
+    "minutes": 34.5,
+    "stats": {"PTS": 24.0, "REB": 5.0, "AST": 7.0}
+  },
+  "samples": {"context": "pregame", "excludes_focal_game": true},
+  "baseline": {"context": "completed_season", "hindsight": true}
+}
+```
+
+In historical mode a canonical participant of the focal game is selectable with
+no Player Pool membership at all, and `404 resource_not_found` means only that
+the player has no canonical row in that game. The requested Market Categories
+come from the governed Statistic Catalog rather than a stored pool. `h2h` and
+`archetype` rows are restricted to games strictly before the focal game's date,
+so the focal game never appears in either table and its result cannot leak into
+a pregame sample; `focal_game` presents that line separately. Each row's delta
+baseline is the sampled player's stored Regular Season rate with the focal game
+excluded, and `baseline.hindsight` marks it completed-season evidence rather
+than pregame evidence. When no stored Player Pool exists at all,
+`freshness.player_pool` is the truthful
+`{"status": "unavailable", "state": "missing", "observed_at": null,
+"retrieved_at": null, "providers": {}}` document instead of a `503`.
 
 Both tables carry backend-owned `thin` booleans. A nonempty table contains
 newest-first `game` rows followed by exactly one `average` row; an empty table
@@ -902,6 +1096,7 @@ acquires a refresh lease or invokes a DFS provider.
 | --- | --- |
 | Known selection with no usable H2H or archetype rows | `200` with the affected `rows: []`, `thin: true` |
 | Unknown game in a nonempty Event Catalog, or player absent from a usable stored Player Pool | `404 resource_not_found` |
+| Historical Matchup selection for a player with no canonical row in that game | `404 resource_not_found` |
 | Missing, empty, repeated, noncanonical, or extra query parameter | `400 invalid_input` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 | Event Catalog is unavailable or empty | `503 provider_unavailable` |

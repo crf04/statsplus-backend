@@ -601,6 +601,7 @@ def build_dependencies(
         team_matchups=team_matchup_query_service,
         stats_freshness=stats_freshness_repository,
         settings=settings,
+        statistic_catalog=statistic_catalog,
         injuries=matchup_injury_service,
         database_only=not demo_database,
         publication_reader=publication_reader,

@@ -66,8 +66,34 @@ def selected_player_game_log_market_values(
     }
 
 
+def player_game_log_focal_line(
+    record: Any,
+    markets: Iterable[str],
+    statistics: Mapping[str, CanonicalStatistic],
+    *,
+    precision: int = 6,
+) -> dict[str, Any]:
+    """Return one game's display-only stat line for a historical participant."""
+
+    separator = "vs." if record.is_home else "@"
+    values = selected_player_game_log_market_values(record, markets, statistics)
+    return {
+        "game_id": str(record.game_id),
+        "game_date": record.game_date.isoformat(),
+        "matchup": (
+            f"{record.team_tricode} {separator} {record.opponent_team_tricode}"
+        ),
+        "minutes": round(float(record.minutes), precision),
+        "stats": {
+            market: round(float(value), precision)
+            for market, value in values.items()
+        },
+    }
+
+
 __all__ = [
     "player_game_log_component_value",
+    "player_game_log_focal_line",
     "player_game_log_market_values",
     "selected_player_game_log_market_values",
     "validate_player_game_log_components",
