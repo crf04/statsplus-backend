@@ -7,7 +7,44 @@ here rather than inside whichever service happened to need it first.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from math import isfinite
+
+from app.domain.team_matchup_taxonomy import PLAY_TYPES
+
+
+_PLAY_TYPE_SHARE_BOUNDS = (0.0, 1.005)
+
+
+def complete_play_type_shares(
+    facts: Iterable[tuple[str, float]],
+) -> dict[str, float] | None:
+    """Return one valid observed Synergy Diet partition, else ``None``.
+
+    Synergy omits unobserved slices, so a partial partition is valid. Duplicate
+    or unknown slices and a share total outside the provider's accepted rounded
+    range are invalid evidence for both Matchup Scores and the Log Workspace.
+    """
+
+    shares: dict[str, float] = {}
+    for slice_key, share in facts:
+        if (
+            slice_key in shares
+            or slice_key not in PLAY_TYPES
+            or isinstance(share, bool)
+            or not isinstance(share, (int, float))
+            or not isfinite(share)
+            or not 0 <= share <= 1
+        ):
+            return None
+        shares[slice_key] = share
+    if not shares:
+        return None
+    lower, upper = _PLAY_TYPE_SHARE_BOUNDS
+    share_sum = sum(shares.values())
+    if not lower - 1e-12 <= share_sum <= upper + 1e-12:
+        return None
+    return shares
 
 
 def play_type_matchup(
@@ -45,4 +82,4 @@ def play_type_matchup(
     return total - weight_total
 
 
-__all__ = ["play_type_matchup"]
+__all__ = ["complete_play_type_shares", "play_type_matchup"]

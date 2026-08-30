@@ -638,6 +638,18 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     rankings = game_service.team_filter_rankings
     assert isinstance(rankings, TeamFilterRankingService)
     assert isinstance(
+        game_service.publication_reader, DatabaseFirstPublicationReader
+    )
+    assert game_service.publication_reader is rankings.publication_reader
+    assert (
+        game_service.publication_reader
+        is game_service.team_matchups._publication_reader
+    )
+    assert (
+        game_service.publication_reader
+        is game_service.player_diets._diets._publication_reader
+    )
+    assert isinstance(
         rankings.publication_reader, DatabaseFirstPublicationReader
     )
     # Diet facts arrive through a read-only reader bound to the repository,
