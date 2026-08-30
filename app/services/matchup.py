@@ -511,6 +511,33 @@ class MatchupService:
         availability = self._surface_availability(
             windows, metric_indexes, team_ids
         )
+        # A Historical Matchup scores from evidence stored strictly before the
+        # focal game. A snapshot scope carries a date, so nothing dated on the
+        # game's own date can be proven pre-tip; only an earlier scope can.
+        # The display windows above are unchanged, so the completed-season
+        # Defense Sheet still renders as the hindsight context #41 defines.
+        if historical:
+            score_windows = {
+                name: self._team_window(
+                    season,
+                    window_games=None if name == "season" else 15,
+                    as_of=slate_date - timedelta(days=1),
+                    publication_snapshot=publication_snapshot,
+                    connection=connection,
+                )
+                for name in windows
+            }
+            score_metric_indexes = {
+                name: None if not window else _WindowMetricIndex.build(window)
+                for name, window in score_windows.items()
+            }
+            score_availability = self._surface_availability(
+                score_windows, score_metric_indexes, team_ids
+            )
+        else:
+            score_windows = windows
+            score_metric_indexes = metric_indexes
+            score_availability = availability
         league = self._league(windows, metric_indexes, availability)
         teams = [
             self._team(
@@ -556,10 +583,11 @@ class MatchupService:
                 summaries,
                 diets,
                 event,
-                windows,
-                metric_indexes,
-                availability,
+                score_windows,
+                score_metric_indexes,
+                score_availability,
                 {} if historical else injury_result.badge_refs,
+                score_diets=not historical,
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -1068,6 +1096,8 @@ class MatchupService:
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
+        *,
+        score_diets: bool = True,
     ) -> list[dict[str, Any]]:
         rows = []
         for player in players:
@@ -1093,7 +1123,13 @@ class MatchupService:
             scores = self._scores(
                 player,
                 summary,
-                diets.players.get(player.canonical_player_id, ()),
+                # A completed-season Diet aggregate carries no game dimension,
+                # so its focal contribution cannot be subtracted and it is not
+                # a usable historical score input. The raw shares above stay
+                # displayed as their own independent evidence.
+                diets.players.get(player.canonical_player_id, ())
+                if score_diets
+                else (),
                 event,
                 windows,
                 metric_indexes,

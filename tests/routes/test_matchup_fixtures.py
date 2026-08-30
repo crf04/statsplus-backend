@@ -3597,6 +3597,17 @@ def test_authenticated_production_pattern_game_serves_its_participants(
                 assert isinstance(window["missing_inputs"], list)
                 if window["missing_inputs"]:
                     assert window.get("blend") is None
+    # The production limitation, stated at the boundary: this deployment
+    # stored only completed-season team-defense snapshots, so no score input
+    # can be proven free of the focal game. Every window names its unusable
+    # inputs instead of silently consuming a contaminated aggregate, while the
+    # Defense Sheet above still renders as completed-season hindsight.
+    assert all(
+        window["missing_inputs"] and window.get("blend") is None
+        for player in players
+        for windows in player["scores"].values()
+        for window in windows.values()
+    )
     assert payload["game"]["away_team"]["targetable_player_count"] == 0
     assert payload["game"]["home_team"]["targetable_player_count"] == 0
     # No archived closing projection memberships, and no provider was called.

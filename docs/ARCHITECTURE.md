@@ -1779,9 +1779,29 @@ order as every other player-log seam. Each row becomes one `_Participant`
 carrying the identity recorded for that game, so a later trade cannot rewrite
 which side a player was on. `get_player_summaries(exclude_game_id=…)` drops the
 focal row, so the participant's own result never feeds its own baseline or
-Matchup Score inputs. Score formulas and thresholds are unchanged; each window
-gains a `missing_inputs` list naming the score-contract inputs it could not
-consume. In historical mode `MatchupService._presented_window` then withholds
+Matchup Score inputs.
+
+A historical score input must be provably free of the focal game, and the two
+team-side surfaces answer that differently. Team defense can: scores read
+`_team_window(as_of=slate_date - 1 day)`, because a `TeamMatchupSnapshotScope`
+carries a date and a scope dated strictly before the game cannot contain it,
+while a scope dated on the game's own date cannot be shown to predate tip-off.
+Those pre-focal windows drive scoring only; the display windows are unchanged,
+so the Defense Sheet still renders the completed-season Publication under the
+#41 cutoff. Player Diet cannot: `player_diet_facts` is unique on
+`(season, player_id, base, slice_key)` with `share`, `volume`, and
+`games_played` and no game dimension, and no stored surface carries per-game
+play-type, shot-zone, or shot-type slices — `player_game_logs` and
+`canonical_game_ledger_player_facts` are traditional box-score primitives
+(the ledger's nullable assist-location columns are the only per-game slice
+evidence of any kind). Subtracting the focal contribution or rebuilding a
+pre-focal Diet would require new persistence, so `MatchupService` passes no
+Diet facts into historical scoring and each Diet-backed Base names itself in
+`missing_inputs` instead. The raw `diet_shares` display is untouched, being
+independent evidence rather than a score input.
+
+Score formulas and thresholds are unchanged; each window gains a
+`missing_inputs` list naming the score-contract inputs it could not consume. In historical mode `MatchupService._presented_window` then withholds
 the Blend of any window with a nonempty `missing_inputs`, so an unavailable
 cell explains itself instead of presenting a mean of the surviving Bases as a
 complete blended score. Withholding happens on the presented copy, not the
