@@ -1574,6 +1574,48 @@ class RecordedEmptyDiets:
         return PlayerDietResult(season=SEASON, players={}, observations=())
 
 
+class RecordedPartialDiets:
+    """Stored Diet for two of PTS's three Bases, so a Blend would be partial."""
+
+    def get_for_players(self, season, player_ids):
+        assert season == SEASON
+        return PlayerDietResult(
+            season=SEASON,
+            players={
+                player_id: (
+                    StoredPlayerDietFact(
+                        player_id,
+                        "play_types",
+                        "Transition",
+                        0.19,
+                        95.0,
+                        20,
+                        "possessions",
+                        "nba_synergy",
+                        RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id,
+                        "shot_zones",
+                        "Restricted Area",
+                        0.27,
+                        108.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
+                    ),
+                )
+                for player_id in player_ids
+            },
+            observations=tuple(
+                StoredPlayerDietObservation(base, "available", None, RETRIEVED_AT)
+                for base in BASES
+                if base != "traditional"
+            ),
+        )
+
+
 def _historical_service(
     *,
     player_logs=None,
@@ -1873,6 +1915,56 @@ def test_historical_scores_name_missing_inputs_without_a_partial_blend():
     # The traditional Base consumes no Diet, so it still scores.
     assert scores["TOV"]["season"]["components"]["traditional"]["value"] is not None
     assert scores["TOV"]["season"]["missing_inputs"] == []
+
+
+def test_a_historical_blend_is_withheld_while_its_components_still_show():
+    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
+        game_id=GAME_ID
+    )
+
+    scores = payload["players"][0]["scores"]
+    # One of PTS's three required Bases produced evidence. That component is
+    # still shown, but a mean of the survivors is not a Blend of the contract's
+    # required inputs, so no blended score is returned.
+    assert scores["PTS"]["season"] == {
+        "components": {"play_types": {"value": 0.011875, "thin": True}},
+        "blend": None,
+        "missing_inputs": ["player_diet:shot_zones", "player_diet:shot_types"],
+    }
+    # A combo withholds its own Blend on the same rule rather than inheriting
+    # a partial one through its parts.
+    assert scores["PRA"]["season"]["components"]["play_types"]["value"] is not None
+    assert scores["PRA"]["season"]["blend"] is None
+    assert scores["PRA"]["season"]["missing_inputs"] == [
+        "player_diet:shot_zones",
+        "player_diet:shot_types",
+        "player_diet:assist_locations",
+        "team_defense:traditional",
+    ]
+
+
+def test_a_historical_window_with_every_required_input_keeps_its_cells():
+    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
+        game_id=GAME_ID
+    )
+
+    # The traditional Base consumes no Diet, so TOV needs nothing it lacks and
+    # its cells are exactly what they were. Defensive windows omit `blend`.
+    season = payload["players"][0]["scores"]["TOV"]["season"]
+    assert season["missing_inputs"] == []
+    assert season["components"]["traditional"]["value"] is not None
+
+
+def test_a_current_matchup_keeps_its_partial_blend_unchanged():
+    payload = _service().get_matchup(game_id=GAME_ID)
+
+    # Current-slate scoring is untouched: a mean of the present Bases is still
+    # returned beside the named gaps.
+    assert payload["players"][0]["scores"]["PTS"]["season"] == {
+        "components": {"play_types": {"value": -0.011875, "thin": True}},
+        "blend": {"value": -0.011875, "thin": True},
+        "missing_inputs": ["player_diet:shot_zones", "player_diet:shot_types"],
+    }
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():

@@ -18,8 +18,16 @@ from app.domain.freshness import (
     time_window_timedelta,
     within_max_age,
 )
+from app.domain.matchup_experience import (
+    CURRENT_MODE,
+    GAME_LOG_SOURCE,
+    HISTORICAL_MODE,
+    PLAYER_POOL_SOURCE,
+    experience_mode,
+    is_historical_matchup,
+    player_source,
+)
 from app.domain.nba_events import (
-    is_completed_non_postponed_event,
     is_final_event,
     is_postponed_event,
     resolve_stored_event_classification,
@@ -206,16 +214,6 @@ _SCORE_INPUT_BASES.update(
 _SEASON_RATE_MARKETS = frozenset({*_COMBO_PARTS, "STKS"})
 #: Every Stat Category the backend can score from stored evidence.
 _SCOREABLE_MARKETS = frozenset(_SCORE_INPUT_BASES)
-
-HISTORICAL_MODE = "historical"
-CURRENT_MODE = "current"
-_EXPERIENCE_SECTIONS = (
-    "schedule",
-    "participants",
-    "season_defense",
-    "last_15_defense",
-    "injuries",
-)
 
 _PUBLICATION_STREAM_KEYS = (
     "player_game_logs",
@@ -437,14 +435,9 @@ class MatchupService:
             player for player in pool.players if player.team_id in team_ids
         )
         injury_result = self._injuries(event, season, pool_players)
-        # A completed Regular Season game whose governed Player Pool evidence
-        # names nobody has no archived closing projections: a closing set with
-        # memberships always contributes players. The backend declares the
-        # mode so no client infers it from dates or empty arrays. The event
-        # read already refused every non-Regular-Season kind.
-        historical = (
-            is_completed_non_postponed_event(event) and not pool_players
-        )
+        # The backend declares the mode so no client ever infers it from tip
+        # dates, empty arrays, or freshness markers.
+        historical = is_historical_matchup(event, pool_players)
         if historical:
             players, participants_section = self._historical_participants(
                 season,
@@ -464,7 +457,7 @@ class MatchupService:
                     tricode=str(self._event_team(event, player.team_id)["tricode"]),
                     market_categories=player.market_categories,
                     provenance=player.provenance,
-                    source="player_pool",
+                    source=PLAYER_POOL_SOURCE,
                 )
                 for player in pool_players
                 if player.canonical_player_id not in injury_result.out_player_ids
@@ -533,7 +526,7 @@ class MatchupService:
             team_id: sum(
                 player.team_id == team_id
                 for player in players
-                if player.source == "player_pool"
+                if player.source == PLAYER_POOL_SOURCE
             )
             for team_id in team_ids
         }
@@ -636,7 +629,7 @@ class MatchupService:
                 tricode=str(record.team_tricode),
                 market_categories=self._historical_categories,
                 provenance={},
-                source="game_logs",
+                source=GAME_LOG_SOURCE,
                 focal_game_line=player_game_log_focal_line(
                     record, self._historical_categories, self._statistics
                 ),
@@ -689,8 +682,8 @@ class MatchupService:
         """Declare the experience mode and each section's own evidence."""
 
         return {
-            "mode": HISTORICAL_MODE if historical else CURRENT_MODE,
-            "player_source": "game_logs" if historical else "player_pool",
+            "mode": experience_mode(historical),
+            "player_source": player_source(historical),
             "sections": {
                 "schedule": cls._schedule_section(historical, schedule_freshness),
                 "participants": dict(participants),
@@ -1116,7 +1109,7 @@ class MatchupService:
                     "stat_categories": list(player.market_categories),
                     "focal_game_line": player.focal_game_line,
                     "posted_markets": (
-                        [] if player.source == "game_logs"
+                        [] if player.source == GAME_LOG_SOURCE
                         else list(player.market_categories)
                     ),
                     "provenance": {
@@ -1163,22 +1156,45 @@ class MatchupService:
             if team_id != player.team_id
         )
         memo: dict[tuple[str, str], dict[str, Any]] = {}
+        withhold = player.source == GAME_LOG_SOURCE
         return {
             market: {
-                window_name: self._score_window(
-                    market,
-                    window_name,
-                    metric_indexes[window_name],
-                    opponent_id,
-                    summary,
-                    diet_facts,
-                    availability,
-                    memo,
+                window_name: self._presented_window(
+                    self._score_window(
+                        market,
+                        window_name,
+                        metric_indexes[window_name],
+                        opponent_id,
+                        summary,
+                        diet_facts,
+                        availability,
+                        memo,
+                    ),
+                    withhold,
                 )
                 for window_name, window in windows.items()
             }
             for market in player.market_categories
         }
+
+    @staticmethod
+    def _presented_window(
+        window: dict[str, Any], withhold_partial_blend: bool
+    ) -> dict[str, Any]:
+        """Return one score window as the response carries it.
+
+        A Historical Matchup withholds the Blend unless every input the score
+        contract requires was present, so a mean of the surviving Bases is
+        never presented as a complete blended score. Component evidence and the
+        named gaps still ship. The memoized window keeps its computed Blend, so
+        a combo still composes from its parts exactly as it did.
+        """
+
+        if not withhold_partial_blend or not window["missing_inputs"]:
+            return window
+        if window.get("blend") is None:
+            return window
+        return {**window, "blend": None}
 
     def _score_window(
         self,

@@ -1759,11 +1759,13 @@ GET /api/games/matchup?game_id
 
 ### Historical Matchup composition (#208, #209)
 
-`MatchupService._experience` is the sole authority for the additive
-`experience` block. A game is historical when the resolved Event Catalog event
-is completed and not postponed and the composed Player Pool contributes no
-player for either team; the Regular Season restriction is already enforced by
-the event read, which refuses every other kind with `404`. A closing projection
+`MatchupService._experience` shapes the additive `experience` block, and
+`app/domain/matchup_experience.py` owns the one eligibility rule and the wire
+vocabulary both Matchup responses declare. A game is historical when the
+resolved Event Catalog event is completed and not postponed and the composed
+Player Pool contributes no player for either team; the Regular Season
+restriction is already enforced by the event read, which refuses every other
+kind with `404`. A closing projection
 set with memberships always contributes players, so that single condition is
 exactly "no archived closing projections", and it also keeps a legacy
 deployment's still-servable stored pool on the current experience instead of
@@ -1777,10 +1779,15 @@ order as every other player-log seam. Each row becomes one `_Participant`
 carrying the identity recorded for that game, so a later trade cannot rewrite
 which side a player was on. `get_player_summaries(exclude_game_id=…)` drops the
 focal row, so the participant's own result never feeds its own baseline or
-Matchup Score inputs. Score formulas, thresholds, and blend rules are
-unchanged; each window gains a `missing_inputs` list naming the score-contract
-inputs it could not consume, so an unavailable cell explains itself instead of
-becoming a silent partial blend.
+Matchup Score inputs. Score formulas and thresholds are unchanged; each window
+gains a `missing_inputs` list naming the score-contract inputs it could not
+consume. In historical mode `MatchupService._presented_window` then withholds
+the Blend of any window with a nonempty `missing_inputs`, so an unavailable
+cell explains itself instead of presenting a mean of the surviving Bases as a
+complete blended score. Withholding happens on the presented copy, not the
+memoized one, so a combo still composes from its parts exactly as it did and
+then withholds its own Blend under the same rule. Current-mode windows are
+byte-identical to what they were.
 
 Every section reports from its own evidence. A Defense Sheet section is
 available whenever any governed Base is available for that window, so a missing
@@ -1794,11 +1801,17 @@ stale warning; the separate `freshness.schedule` surface keeps its existing
 age-based status. The two surfaces answer different questions and neither is
 derived from the other.
 
-`MatchupSelectionService` mirrors the declaration. When the pool names nobody
-for a completed game it resolves the participant from the focal game's
-canonical rows, scores the governed Statistic Catalog categories, restricts
-`h2h` and `archetype` samples to games strictly before the focal date, and
-excludes the focal game from the delta baseline. The declaration adds no
+`MatchupSelectionService` mirrors the declaration. Both services ask
+`app/domain/matchup_experience.py` the same eligibility question and use its
+wire vocabulary, so the two responses cannot drift apart on what a Historical
+Matchup is. When the pool names nobody for a completed game, selection first
+requires the focal game's `get_sync_status` to be complete — the same
+completeness gate the Matchup route applies to Participants — and fails closed
+with `provider_unavailable` otherwise, rather than resolving a participant from
+rows that may still be partial. It then resolves the participant from the focal
+game's canonical rows, scores the governed Statistic Catalog categories,
+restricts `h2h` and `archetype` samples to games strictly before the focal
+date, and excludes the focal game from the delta baseline. The declaration adds no
 provider call and no schema change: the Event Catalog, completed-season
 publications, canonical player game logs, and game-time identities already
 exist.

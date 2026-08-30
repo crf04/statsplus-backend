@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
-from app.domain.nba_events import (
-    is_completed_non_postponed_event,
-    resolve_stored_event_classification,
+from app.domain.matchup_experience import (
+    experience_mode,
+    is_historical_matchup,
+    player_source,
 )
+from app.domain.nba_events import resolve_stored_event_classification
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -162,14 +164,10 @@ class MatchupSelectionService:
             ),
             None,
         )
-        # A completed Regular Season game whose governed Player Pool names
-        # nobody is a Historical Matchup, so a canonical game-log participant
-        # stays selectable without any Player Pool membership.
-        historical = (
-            player is None
-            and not pool_players
-            and is_completed_non_postponed_event(event)
-        )
+        # A Historical Matchup keeps a canonical game-log participant
+        # selectable without any Player Pool membership. The eligibility rule
+        # is the one the Matchup response declares.
+        historical = is_historical_matchup(event, pool_players)
         focal_record = None
         if historical:
             focal_record = self._focal_record(
@@ -285,6 +283,19 @@ class MatchupSelectionService:
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> PlayerGameLogRecord:
+        # The Matchup route withholds Participants entirely until this game's
+        # canonical synchronization is complete, so selection reads the same
+        # evidence rather than resolving a participant from partial rows.
+        sync = call_with_read_scope(
+            self.player_logs.get_sync_status,
+            season,
+            game_id,
+            connection=connection,
+        )
+        if sync is None or sync.status != "complete":
+            raise ProviderUnavailableError(
+                "The stored canonical game logs for this matchup are incomplete."
+            )
         rows = call_with_read_scope(
             self.player_logs.list_game_rows,
             season,
@@ -309,8 +320,8 @@ class MatchupSelectionService:
 
         if not historical or focal_record is None:
             return {
-                "mode": "current",
-                "player_source": "player_pool",
+                "mode": experience_mode(False),
+                "player_source": player_source(False),
                 "focal_game": None,
                 "samples": {
                     "context": "season_to_date",
@@ -322,8 +333,8 @@ class MatchupSelectionService:
                 },
             }
         return {
-            "mode": "historical",
-            "player_source": "game_logs",
+            "mode": experience_mode(True),
+            "player_source": player_source(True),
             "focal_game": player_game_log_focal_line(
                 focal_record, markets, self._statistics
             ),

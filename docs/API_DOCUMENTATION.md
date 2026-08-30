@@ -774,9 +774,19 @@ are `team_defense:<base>` when that Base/window is not available,
 `player_diet:<base>` when an available Base had no complete stored player Diet,
 and `player_season_rate` when a combo or STKS window lacked the player's stored
 Season rate. `<base>` is one of the five governed Bases. An empty list means
-every required input was present. This document only names the gaps; it changes
-no score formula, threshold, or blend rule, and a complete window's cells are
-identical to what they were before.
+every required input was present.
+
+In current mode `missing_inputs` only names the gaps: every score formula,
+threshold, and blend rule above is unchanged, and a current window's cells are
+identical to what they were before. In historical mode the Blend is
+additionally **withheld** whenever `missing_inputs` is nonempty, so `blend` is
+`null` and a mean of the surviving Bases is never presented as a complete
+blended score. Component evidence still ships, and the named gaps explain the
+withheld Blend. Defensive windows omit `blend` in both modes. Combos withhold
+their own Blend under the same rule rather than inheriting a partial one
+through their parts. The score formulas themselves are unchanged: a historical
+window whose `missing_inputs` is empty carries exactly the cells it always
+did.
 
 Every numeric cell carries `thin`. The backend marks a Diet component thin when
 the player's Season sample is below `MATCHUP_SCORE_MIN_GAMES` (default `5`) or
@@ -932,7 +942,9 @@ the same shape as a stored pool player, with these differences:
   the player appeared.
 - Participants with unavailable scores stay in the response, sort after
   complete scores under the unchanged ordering, and name their gaps through
-  `missing_inputs`.
+  `missing_inputs`. A historical Blend is withheld whenever `missing_inputs`
+  is nonempty, so no historical participant is ever shown a partial blended
+  score.
 
 If the game's canonical log synchronization is not complete, `players` is `[]`
 and only the Participants section is unavailable; every other section,
@@ -1042,7 +1054,12 @@ nobody — it becomes:
 
 In historical mode a canonical participant of the focal game is selectable with
 no Player Pool membership at all, and `404 resource_not_found` means only that
-the player has no canonical row in that game. The requested Market Categories
+the player has no canonical row in a game whose logs are complete. Selection
+reads the same completeness evidence the Matchup route does: while the focal
+game's canonical log synchronization is absent or not complete, it fails closed
+with `503 provider_unavailable` rather than resolving a participant from rows
+that may still be partial, and rather than claiming a player did not appear in
+a game nobody has finished collecting. The requested Market Categories
 come from the governed Statistic Catalog rather than a stored pool. `h2h` and
 `archetype` rows are restricted to games strictly before the focal game's date,
 so the focal game never appears in either table and its result cannot leak into
@@ -1096,7 +1113,8 @@ acquires a refresh lease or invokes a DFS provider.
 | --- | --- |
 | Known selection with no usable H2H or archetype rows | `200` with the affected `rows: []`, `thin: true` |
 | Unknown game in a nonempty Event Catalog, or player absent from a usable stored Player Pool | `404 resource_not_found` |
-| Historical Matchup selection for a player with no canonical row in that game | `404 resource_not_found` |
+| Historical Matchup selection for a player with no canonical row in a game whose logs are complete | `404 resource_not_found` |
+| Historical Matchup selection while the focal game's canonical log synchronization is absent or not complete | `503 provider_unavailable` |
 | Missing, empty, repeated, noncanonical, or extra query parameter | `400 invalid_input` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 | Event Catalog is unavailable or empty | `503 provider_unavailable` |

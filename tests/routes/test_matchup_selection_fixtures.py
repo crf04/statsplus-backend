@@ -15,6 +15,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.migrations import run_migrations
+from app.models.player_game_log import PlayerGameLogSync
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -51,6 +52,24 @@ class RecordedArchetypePeers:
         return self.peer_ids
 
 
+def _record_focal_sync(engine, *, season, game_id, status):
+    """Record the focal game's canonical synchronization evidence."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            PlayerGameLogSync.__table__.insert().values(
+                season=season,
+                game_id=game_id,
+                season_type="Regular Season",
+                status=status,
+                checksum="fixture",
+                row_count=1,
+                source_provider="recorded",
+                retrieved_at=RETRIEVED_AT,
+            )
+        )
+
+
 def _client(
     tmp_path,
     *,
@@ -62,6 +81,7 @@ def _client(
     statistic_catalog=None,
     publish_logs=True,
     extra_logs=(),
+    focal_sync="complete",
 ):
     fixture = json.loads(FIXTURE.read_text())
     fixture["logs"] = [*fixture["logs"], *extra_logs]
@@ -93,6 +113,13 @@ def _client(
             retrieved_at=RETRIEVED_AT,
             source_provider="recorded",
             source_row_count=len(records),
+        )
+    if focal_sync is not None:
+        _record_focal_sync(
+            engine,
+            season=fixture["season"],
+            game_id=fixture["game"]["nba_game_id"],
+            status=focal_sync,
         )
     snapshot_repository = PlayerPoolSnapshotRepository(engine)
     if seed_pool:
@@ -537,6 +564,33 @@ def test_historical_selection_accepts_a_participant_without_a_player_pool(
         "retrieved_at": None,
         "providers": {},
     }
+
+
+def test_historical_selection_fails_closed_on_incomplete_canonical_logs(tmp_path):
+    # The Matchup route withholds Participants entirely until the focal game's
+    # canonical synchronization is complete. Selection reads the same evidence,
+    # so it must not resolve a participant from rows that may still be partial.
+    client, fixture = _historical_selection_client(tmp_path, focal_sync="failed")
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+
+def test_historical_selection_fails_closed_without_sync_evidence(tmp_path):
+    client, fixture = _historical_selection_client(tmp_path, focal_sync=None)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
 def test_historical_selection_separates_the_focal_line_from_the_samples(
