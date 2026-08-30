@@ -8,11 +8,16 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from math import isfinite
 from statistics import fmean, pstdev
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Connection
 
 from app.domain.utc import assume_utc, parse_utc_iso
+from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_WINDOWS,
+    matchup_stream_key,
+)
 from app.services.team_matchup_repository import (
     StoredTeamMatchupFact,
     StoredTeamMatchupObservation,
@@ -42,6 +47,23 @@ from app.services.team_matchup_publications import (
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+TEAM_MATCHUP_PUBLICATION_STREAMS = MappingProxyType({
+    window: MappingProxyType({
+        "traditional": matchup_stream_key("traditional", window),
+        "assist_locations": matchup_stream_key("assist_locations", window),
+        **{
+            base: template.format(window=window)
+            for base, template in NBA_PUBLICATION_STREAMS.items()
+        },
+    })
+    for window in NBA_PUBLICATION_WINDOWS
+})
+TEAM_MATCHUP_PUBLICATION_STREAM_KEYS = MappingProxyType({
+    window: frozenset(stream_by_base.values())
+    for window, stream_by_base in TEAM_MATCHUP_PUBLICATION_STREAMS.items()
+})
+
 
 @dataclass(frozen=True, slots=True)
 class LeagueMatchupMetric:
@@ -194,14 +216,7 @@ class TeamMatchupQueryService:
         if self._publication_reader is None:
             return legacy
         window = "l15" if window_games is not None else "season"
-        stream_by_base = {
-            "traditional": f"traditional_opponent_{window}",
-            "assist_locations": f"assist_locations_{window}",
-        }
-        stream_by_base.update({
-            base: NBA_PUBLICATION_STREAMS[base].format(window=window)
-            for base in NBA_PUBLICATION_STREAMS
-        })
+        stream_by_base = TEAM_MATCHUP_PUBLICATION_STREAMS[window]
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key)
@@ -769,6 +784,8 @@ class TeamMatchupQueryService:
 
 __all__ = [
     "LeagueMatchupMetric",
+    "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
+    "TEAM_MATCHUP_PUBLICATION_STREAMS",
     "TeamMatchupMetric",
     "TeamMatchupQueryService",
     "TeamMatchupWindow",

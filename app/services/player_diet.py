@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -35,6 +36,15 @@ PLAYER_DIET_BASES = (
     "play_types",
     "shot_types",
     "shot_zones",
+)
+PLAYER_DIET_PUBLICATION_STREAMS = MappingProxyType({
+    "assist_locations": "player_assist_locations",
+    "play_types": "synergy_play_types",
+    "shot_types": "grouped_shot_types",
+    "shot_zones": "exact_shot_zones",
+})
+PLAYER_DIET_PUBLICATION_STREAM_KEYS = frozenset(
+    PLAYER_DIET_PUBLICATION_STREAMS.values()
 )
 _SHOT_ZONE_SLICES = SHOT_ZONE_SLICES
 _ASSIST_SLICES = (
@@ -190,12 +200,7 @@ class PlayerDietRepository:
                 )
             }
             checker = getattr(self._write_fence, "assert_writable", None)
-            stream_by_base = {
-                "assist_locations": "player_assist_locations",
-                    "play_types": "synergy_play_types",
-                    "shot_types": "grouped_shot_types",
-                    "shot_zones": "exact_shot_zones",
-            }
+            stream_by_base = PLAYER_DIET_PUBLICATION_STREAMS
             if callable(checker):
                 # Lock only the Bases represented by this atomic update, in a
                 # stable order so concurrent independent refreshes cannot
@@ -439,12 +444,7 @@ class PlayerDietRepository:
 
         if self._publication_reader is None:
             return None
-        stream_by_base = {
-            "assist_locations": "player_assist_locations",
-            "play_types": "synergy_play_types",
-            "shot_types": "grouped_shot_types",
-            "shot_zones": "exact_shot_zones",
-        }
+        stream_by_base = PLAYER_DIET_PUBLICATION_STREAMS
         facts_by_player: dict[int, list[StoredPlayerDietFact]] = defaultdict(list)
         observations: list[StoredPlayerDietObservation] = []
         fallback_bases: list[str] = []
@@ -997,6 +997,8 @@ class PlayerDietService:
 
 __all__ = [
     "PLAYER_DIET_BASES",
+    "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
+    "PLAYER_DIET_PUBLICATION_STREAMS",
     "PlayerDietFact",
     "PlayerDietObservation",
     "PlayerDietResult",

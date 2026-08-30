@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from app.domain.play_type_matchup import play_type_matchup
+from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        (("Isolation", -0.1), ("Spotup", 0.5)),
+        (("Isolation", 1.01),),
+        (("Isolation", float("nan")),),
+    ],
+)
+def test_invalid_individual_play_type_shares_fail_closed(facts):
+    assert complete_play_type_shares(facts) is None
 
 
 @pytest.mark.parametrize(

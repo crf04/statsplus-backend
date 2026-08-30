@@ -34,6 +34,8 @@ class GameLogsSource(Protocol):
         self,
         player_id: int,
         season: str,
+        *,
+        publication_snapshot: Any | None = None,
     ) -> pd.DataFrame: ...
 
 
@@ -47,11 +49,16 @@ class StoredGameLogsSource:
         self,
         player_id: int,
         season: str,
+        *,
+        publication_snapshot: Any | None = None,
     ) -> pd.DataFrame:
-        read_snapshot = getattr(self.repository, "read_publication_snapshot", None)
-        publication_snapshot = (
-            read_snapshot(season) if callable(read_snapshot) else None
-        )
+        if publication_snapshot is None:
+            read_snapshot = getattr(
+                self.repository, "read_publication_snapshot", None
+            )
+            publication_snapshot = (
+                read_snapshot(season) if callable(read_snapshot) else None
+            )
         if publication_snapshot is not None:
             publication = publication_snapshot.read("player_game_logs")
             complete = not publication.legacy_fallback_allowed and publication.available
