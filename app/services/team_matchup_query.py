@@ -100,10 +100,17 @@ class TeamMatchupQueryService:
         *,
         window_games: int | None = None,
         as_of: date | None = None,
+        strict_as_of: bool = False,
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
-        """Read the newest stored window on or before an optional slate date."""
+        """Read the newest stored window on or before an optional slate date.
+
+        ``strict_as_of`` refuses the completed-season exemption. That exemption
+        serves a finished season's aggregate for any date inside it, which is
+        sound for hindsight display and unsound for an analytical input about
+        one of those dates, because the aggregate contains that date's games.
+        """
 
         current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
         if as_of is not None and as_of > current_date:
@@ -121,6 +128,7 @@ class TeamMatchupQueryService:
                 cutoff=cutoff,
                 window_games=window_games,
                 legacy=None,
+                strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
             )
         observation_snapshot = self.repository.get_snapshot(
@@ -159,6 +167,7 @@ class TeamMatchupQueryService:
             cutoff=cutoff,
             window_games=window_games,
             legacy=legacy_window,
+            strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
         )
 
@@ -187,6 +196,7 @@ class TeamMatchupQueryService:
         cutoff: date,
         window_games: int | None,
         legacy: TeamMatchupWindow | None,
+        strict_as_of: bool = False,
         publication_snapshot=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
@@ -252,7 +262,9 @@ class TeamMatchupQueryService:
         snapshot_reasons: dict[str, str] = {}
         for base, read in active.items():
             cutoff_reason = publication_cutoff_reason(read, cutoff)
-            if cutoff_reason == "publication_cutoff_after_as_of" and (
+            if not strict_as_of and cutoff_reason == (
+                "publication_cutoff_after_as_of"
+            ) and (
                 season_complete_snapshot_accepted(
                     read,
                     base=base,

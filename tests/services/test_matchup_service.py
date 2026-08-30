@@ -187,8 +187,10 @@ class RecordedTeamWindows:
         self.pre_focal_cutoff = pre_focal_cutoff
         self.calls = []
 
-    def get_latest_window(self, season, *, window_games=None, as_of=None):
-        self.calls.append((season, window_games, as_of))
+    def get_latest_window(
+        self, season, *, window_games=None, as_of=None, strict_as_of=False
+    ):
+        self.calls.append((season, window_games, as_of, strict_as_of))
         if window_games is not None:
             return self.last_15_window
         if (
@@ -196,7 +198,13 @@ class RecordedTeamWindows:
             and as_of is not None
             and as_of <= self.pre_focal_cutoff
         ):
-            return self.pre_focal_season_window
+            # Issue 41 serves the completed-season snapshot for any earlier
+            # date in that season. Only a strict read refuses it.
+            return (
+                self.pre_focal_season_window
+                if strict_as_of
+                else self.season_window
+            )
         return self.season_window
 
 
@@ -989,9 +997,11 @@ def test_past_matchup_queries_both_team_windows_at_the_slate_date():
     payload = service.get_matchup(game_id=GAME_ID)
 
     assert payload["game"]["game_id"] == GAME_ID
+    # A current-slate read is never strict: it asks the same question it
+    # always asked.
     assert service.team_matchups.calls == [
-        (SEASON, None, date(2026, 1, 13)),
-        (SEASON, 15, date(2026, 1, 13)),
+        (SEASON, None, date(2026, 1, 13), False),
+        (SEASON, 15, date(2026, 1, 13), False),
     ]
 
 
@@ -1002,8 +1012,8 @@ def test_future_matchup_queries_both_team_windows_without_a_future_cutoff():
 
     assert payload["game"]["game_id"] == GAME_ID
     assert service.team_matchups.calls == [
-        (SEASON, None, None),
-        (SEASON, 15, None),
+        (SEASON, None, None, False),
+        (SEASON, 15, None, False),
     ]
 
 
@@ -1532,10 +1542,20 @@ def _historical_rows():
 class RecordedGameLogs:
     """A player-log seam that also serves one game's canonical rows."""
 
-    def __init__(self, rows=None, *, sync_status="complete", season_rate=True):
+    def __init__(
+        self,
+        rows=None,
+        *,
+        sync_status="complete",
+        season_rate=True,
+        focal_points=0.0,
+    ):
         self.rows = _historical_rows() if rows is None else rows
         self.sync_status = sync_status
         self.season_rate = season_rate
+        # What the focal game itself contributes to the completed-season rate.
+        # A read that excludes the focal game must not see it.
+        self.focal_points = focal_points
         self.summary_calls = []
         self.game_row_calls = []
 
@@ -1562,6 +1582,7 @@ class RecordedGameLogs:
     def get_player_summaries(self, season, player_ids, *, exclude_game_id=None):
         assert season == SEASON
         self.summary_calls.append((tuple(player_ids), exclude_game_id))
+        focal = 0.0 if exclude_game_id is not None else self.focal_points
         return {
             player_id: PlayerSeasonLogSummary(
                 season=SEASON,
@@ -1572,13 +1593,17 @@ class RecordedGameLogs:
                         player_id=player_id,
                         game_count=20,
                         total_minutes=700,
-                        per_game={"PTS": 21.0, "REB": 5.0, "AST": 4.0},
+                        per_game={
+                            "PTS": 21.0 + focal,
+                            "REB": 5.0,
+                            "AST": 4.0,
+                        },
                         per_minute={"PTS": 0.03, "REB": 0.007, "AST": 0.006},
                     )
                     if self.season_rate
                     else None
                 ),
-                last_ten_minutes=(31.0, 32.0),
+                last_ten_minutes=(31.0 + focal, 32.0),
             )
             for player_id in player_ids
         }
@@ -1907,12 +1932,14 @@ def test_historical_participants_carry_the_focal_line_excluded_from_inputs():
     assert player["focal_game_line"]["matchup"] == "LAL @ BOS"
     assert player["focal_game_line"]["minutes"] == 34.0
     assert player["focal_game_line"]["stats"]["PTS"] == 24.0
-    # 24 points in the focal game against 21.0 completed-season context: the
-    # focal result is display-only and never feeds its own baseline.
+    # 24 points in the focal game against 21.0 completed-season context. The
+    # displayed context is the completed season under its hindsight label; the
+    # analytical read that feeds scores and samples drops the focal row.
     assert player["season_scoring"] == 21.0
-    assert logs.summary_calls == [
-        ((AWAY_PARTICIPANT, HOME_PARTICIPANT), GAME_ID)
-    ]
+    assert (
+        (AWAY_PARTICIPANT, HOME_PARTICIPANT),
+        GAME_ID,
+    ) in logs.summary_calls
 
 
 def test_historical_scores_name_missing_inputs_without_a_partial_blend():
@@ -1971,6 +1998,38 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
         "player_diet:shot_types",
         "player_diet:assist_locations",
     ]
+
+
+def test_the_focal_row_moves_historical_display_but_never_the_score():
+    # Display carries completed-season hindsight under its declared label;
+    # analytical score and sample inputs exclude the focal row. Changing only
+    # what the focal game contributes must move the first and not the second.
+    small = _historical_service(
+        player_logs=RecordedGameLogs(focal_points=3.0)
+    ).get_matchup(game_id=GAME_ID)
+    large = _historical_service(
+        player_logs=RecordedGameLogs(focal_points=9.0)
+    ).get_matchup(game_id=GAME_ID)
+
+    assert small["players"][0]["season_scoring"] == 24.0
+    assert large["players"][0]["season_scoring"] == 30.0
+    assert small["players"][0]["last_10_minutes"] == [34.0, 32.0]
+    assert large["players"][0]["last_10_minutes"] == [40.0, 32.0]
+    assert [row["scores"] for row in small["players"]] == [
+        row["scores"] for row in large["players"]
+    ]
+
+
+def test_historical_display_and_analysis_read_the_summary_separately():
+    logs = RecordedGameLogs(focal_points=3.0)
+
+    _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
+
+    # One read keeps the focal game for the labeled hindsight display, one
+    # drops it for the analysis. Neither borrows the other's summary.
+    assert {
+        exclude_game_id for _ids, exclude_game_id in logs.summary_calls
+    } == {GAME_ID, None}
 
 
 def test_changing_the_focal_contribution_to_diet_cannot_move_a_historical_score():
@@ -2033,9 +2092,48 @@ def test_a_historical_score_reads_team_defense_from_before_the_focal_game():
     ]
     assert payload["league"]["defense_sheet"]["traditional"]
     assert any(
-        as_of == HISTORICAL_GAME_DATE - timedelta(days=1)
-        for _season, _games, as_of in windows.calls
+        as_of == HISTORICAL_GAME_DATE - timedelta(days=1) and strict
+        for _season, _games, as_of, strict in windows.calls
     )
+
+
+def test_only_a_later_completed_season_snapshot_scores_nothing_but_still_shows():
+    # The issue 41 exemption hands a non-strict read the completed-season
+    # snapshot for any earlier date in that season. That snapshot contains the
+    # focal game, so scoring must refuse it while the sheet still renders.
+    windows = RecordedTeamWindows(
+        _window(),
+        None,
+        pre_focal_season_window=None,
+        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
+    )
+
+    payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
+
+    # Display: the completed-season Defense Sheet is available and labeled.
+    assert payload["experience"]["sections"]["season_defense"] == {
+        "status": "available",
+        "source": "team_matchup_publication",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert payload["league"]["defense_sheet"]["shot_zones"]
+    assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
+    # Scoring: the same evidence is refused and named, not silently consumed.
+    for player in payload["players"]:
+        for windows_by_name in player["scores"].values():
+            season = windows_by_name["season"]
+            assert season["components"] == {}
+            assert season.get("blend") is None
+            assert season["missing_inputs"]
+    assert payload["players"][0]["scores"]["TOV"]["season"]["missing_inputs"] == [
+        "team_defense:traditional"
+    ]
+    # The scoring read asked strictly; the display read did not.
+    assert (SEASON, None, HISTORICAL_GAME_DATE - timedelta(days=1), True) in (
+        windows.calls
+    )
+    assert (SEASON, None, HISTORICAL_GAME_DATE, False) in windows.calls
 
 
 def test_a_historical_score_is_withheld_without_a_pre_focal_defense_window():

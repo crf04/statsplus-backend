@@ -931,19 +931,30 @@ the same shape as a stored pool player, with these differences:
 - `focal_game_line` is that participant's actual line in the focal game:
   `{ game_id, game_date, matchup, minutes, stats }`, where `stats` covers the
   governed Stat Categories. It is display-only.
-- `season_scoring` and `last_10_minutes` are computed with the focal game's own
-  row excluded, so a participant's result never grades itself.
+- Display and analysis read the participant's season summary separately.
+  `season_scoring` and `last_10_minutes` are the completed-season context the
+  rail displays under the declared `completed_season` hindsight label, so they
+  include the focal game. Everything analytical — Matchup Score inputs and the
+  selection route's comparison samples and delta baseline — reads its own
+  summary with the focal row dropped, so a participant's result never grades
+  itself.
 - Every Matchup Score input must be provably free of the focal game, and an
   input that cannot be proven focal-free is not used. Two consequences follow
   from what this deployment stores:
   - **Team defense.** Scores read the newest team-defense snapshot stored
-    strictly *before* the focal game's date. A snapshot scope carries a date
-    and no time, so a snapshot dated on the game's own date cannot be shown to
-    predate tip-off and is not a score input. When no earlier snapshot exists,
-    the window reports `team_defense:<base>` in `missing_inputs` and computes
-    no component. This is a scoring rule only: the Defense Sheet in `league`
-    and `teams` still renders from the completed-season Publication under the
-    #41 cutoff, labeled `completed_season` hindsight.
+    strictly *before* the focal game's date, through a strict-as-of read. A
+    snapshot scope carries a date and no time, so a snapshot dated on the
+    game's own date cannot be shown to predate tip-off and is not a score
+    input. The strict read also refuses the #41 completed-season exemption:
+    that exemption serves a finished season's aggregate for any date inside
+    the season, which is correct for hindsight display and wrong as a score
+    input, because that aggregate contains the focal game. When no qualifying
+    earlier snapshot exists, the window reports `team_defense:<base>` in
+    `missing_inputs` and computes no component. This is a scoring rule only:
+    the Defense Sheet in `league` and `teams` still renders from the
+    completed-season Publication under the #41 cutoff, labeled
+    `completed_season` hindsight, and `league.surface_availability` is
+    unchanged.
   - **Player Diet.** `player_diet_facts` stores one completed-season aggregate
     per `(season, player, base, slice)` with no game dimension, and no stored
     surface decomposes play-type, shot-zone, or shot-type slices per game. The
