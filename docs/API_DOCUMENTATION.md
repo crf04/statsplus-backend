@@ -700,8 +700,12 @@ Player Diet facts are unthresholded raw Season shares and volumes. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
 logs yield `season_scoring: null` and an empty minutes series rather than zero.
 
-`scores` has exactly one row for every `posted_markets` value and no unposted
-row. Each row always carries independent `season` and `last_15` windows. A
+`scores` has exactly one row for every `stat_categories` value and no other
+row. In current mode `stat_categories` equals `posted_markets`, so a stored
+pool player still has exactly one row per posted market and no unposted row; a
+Historical Matchup participant carries `posted_markets: []` and is keyed by the
+governed categories instead. Each row always carries independent `season` and
+`last_15` windows. A
 component cell's `value` is the fractional difference from a league-average
 matchup (`0.08` renders as `+8%`), calculated as the sum across that Base's
 slices of:

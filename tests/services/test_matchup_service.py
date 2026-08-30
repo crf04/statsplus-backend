@@ -187,10 +187,14 @@ class RecordedTeamWindows:
         self.pre_focal_cutoff = pre_focal_cutoff
         self.calls = []
 
-    def get_latest_window(
-        self, season, *, window_games=None, as_of=None, strict_as_of=False
-    ):
-        self.calls.append((season, window_games, as_of, strict_as_of))
+    def get_latest_window(self, season, *, window_games=None, as_of=None):
+        return self._window(season, window_games, as_of, focal_safe=False)
+
+    def get_focal_safe_window(self, season, *, as_of, window_games=None):
+        return self._window(season, window_games, as_of, focal_safe=True)
+
+    def _window(self, season, window_games, as_of, *, focal_safe):
+        self.calls.append((season, window_games, as_of, focal_safe))
         if window_games is not None:
             return self.last_15_window
         if (
@@ -199,10 +203,10 @@ class RecordedTeamWindows:
             and as_of <= self.pre_focal_cutoff
         ):
             # Issue 41 serves the completed-season snapshot for any earlier
-            # date in that season. Only a strict read refuses it.
+            # date in that season. Only the focal-safe read refuses it.
             return (
                 self.pre_focal_season_window
-                if strict_as_of
+                if focal_safe
                 else self.season_window
             )
         return self.season_window
@@ -2004,12 +2008,29 @@ def test_the_focal_row_moves_historical_display_but_never_the_score():
     # Display carries completed-season hindsight under its declared label;
     # analytical score and sample inputs exclude the focal row. Changing only
     # what the focal game contributes must move the first and not the second.
-    small = _historical_service(
-        player_logs=RecordedGameLogs(focal_points=3.0)
-    ).get_matchup(game_id=GAME_ID)
-    large = _historical_service(
-        player_logs=RecordedGameLogs(focal_points=9.0)
-    ).get_matchup(game_id=GAME_ID)
+    # The window carries OPP_REB so the REB part scores, which makes the PRA
+    # combo weight its component by the player's Season per-game volumes. The
+    # focal contribution therefore reaches a real number if it leaks.
+    def payload(focal_points):
+        return _historical_service(
+            player_logs=RecordedGameLogs(focal_points=focal_points),
+            season_window=_window(
+                traditional_metrics=(
+                    ("traditional", "OPP_REB", "OPP_REB", 44.0),
+                    ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+                    ("traditional", "OPP_STL", "OPP_STL", 7.0),
+                    ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+                )
+            ),
+        ).get_matchup(game_id=GAME_ID)
+
+    small = payload(3.0)
+    large = payload(9.0)
+
+    # A combo component really is computed from the Season rate, so the
+    # comparison below is not vacuous.
+    combo = small["players"][0]["scores"]["PRA"]["season"]
+    assert combo["components"]["traditional"]["value"] is not None
 
     assert small["players"][0]["season_scoring"] == 24.0
     assert large["players"][0]["season_scoring"] == 30.0

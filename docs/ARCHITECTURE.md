@@ -1789,18 +1789,20 @@ is the only one that reaches Matchup Score inputs. Current mode asks the one
 question once and reuses the answer for both, so its payload is unchanged.
 
 A historical score input must be provably free of the focal game, and the two
-team-side surfaces answer that differently. Team defense can: scores read
-`_team_window(as_of=slate_date - 1 day, strict_as_of=True)`, because a
+team-side surfaces answer that differently. Team defense can:
+`TeamMatchupQueryService` exposes the distinction as two named reads rather
+than a flag on one. `get_latest_window` is the hindsight-display read and
+honors the #41 completed-season exemption; `get_focal_safe_window` refuses it.
+That exemption deliberately serves a finished season's aggregate for any date
+inside the season — sound for display, unsound as an analytical input about a
+game the aggregate contains — so an analytical caller names the focal-safe read
+and cannot reach the display rule by forgetting an argument. `MatchupService`
+scores from `_focal_safe_team_window(as_of=slate_date - 1 day)`, because a
 `TeamMatchupSnapshotScope` carries a date and a scope dated strictly before the
 game cannot contain it, while a scope dated on the game's own date cannot be
-shown to predate tip-off. `strict_as_of` is also what refuses the #41
-completed-season exemption in `TeamMatchupQueryService._database_first_window`:
-that exemption deliberately serves a finished season's aggregate for any date
-inside the season — sound for hindsight display, unsound as an analytical input
-about a game the aggregate contains. Those pre-focal windows drive scoring
-only; the display windows and `league.surface_availability` are unchanged, so
-the Defense Sheet still renders the completed-season Publication under the #41
-cutoff. Player Diet cannot: `player_diet_facts` is unique on
+shown to predate tip-off. Those pre-focal windows drive scoring only; the
+display windows and `league.surface_availability` are unchanged, so the Defense
+Sheet still renders the completed-season Publication under the #41 cutoff. Player Diet cannot: `player_diet_facts` is unique on
 `(season, player_id, base, slice_key)` with `share`, `volume`, and
 `games_played` and no game dimension, and no stored surface carries per-game
 play-type, shot-zone, or shot-type slices — `player_game_logs` and

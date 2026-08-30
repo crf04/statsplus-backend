@@ -31,6 +31,10 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
+from app.models.team_matchup import (
+    TeamMatchupFactRow,
+    TeamMatchupSurfaceObservationRow,
+)
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
     LedgerObservationEvidence,
@@ -3458,6 +3462,91 @@ def _production_pattern_records():
     )
 
 
+#: An earlier LAC @ MIL meeting, so the focal game is not the only row a
+#: pregame sample could draw on. Without it a selection journey passes whether
+#: or not the focal game is excluded.
+PRIOR_GAME_ID = "0022501001"
+PRIOR_GAME_DATE = date(2026, 1, 5)
+
+
+def _prior_meeting_records():
+    """One earlier LAC @ MIL row for each side's first participant."""
+
+    return tuple(
+        PlayerGameLogRecord(
+            season=SEASON,
+            season_type="Regular Season",
+            player_id=player_id,
+            game_id=PRIOR_GAME_ID,
+            player_name=f"{tricode} Participant 0",
+            game_date=PRIOR_GAME_DATE,
+            team_id=team_id,
+            team_tricode=tricode,
+            opponent_team_id=opponent_id,
+            opponent_team_tricode=opponent,
+            is_home=is_home,
+            minutes=30.0,
+            points=12,
+            rebounds=4,
+            assists=3,
+            field_goals_made=5,
+            field_goals_attempted=12,
+            three_pointers_made=1,
+            three_pointers_attempted=4,
+            turnovers=2,
+            steals=1,
+            blocks=0,
+        )
+        for player_id, team_id, tricode, opponent_id, opponent, is_home in (
+            (AWAY_PARTICIPANT, LAC, "LAC", MIL, "MIL", False),
+            (HOME_PARTICIPANT, MIL, "MIL", LAC, "LAC", True),
+        )
+    )
+
+
+def _publish_production_pattern_games(player_logs):
+    """Publish the earlier meeting and the focal game as complete."""
+
+    changes = tuple(
+        PlayerGameLogRefreshChange(
+            game_id=game_id,
+            season_type="Regular Season",
+            records=records,
+            checksum=PlayerGameLogRepository.game_checksum(records),
+        )
+        for game_id, records in (
+            (PRIOR_GAME_ID, _prior_meeting_records()),
+            (PRODUCTION_GAME_ID, _production_pattern_records()),
+        )
+    )
+    player_logs.publish_refresh(
+        SEASON,
+        changes,
+        retrieved_at=NOW,
+        source_provider="recorded",
+        expected_complete_game_ids=frozenset(
+            {PRIOR_GAME_ID, PRODUCTION_GAME_ID}
+        ),
+    )
+
+
+def _drop_last_15_snapshots(engine):
+    """Match production: no point-in-time Last-15 snapshot was ever captured.
+
+    The shared fixture stores one so the ordinary route tests can exercise both
+    windows. The authoritative production pattern for `0022501082` has Season
+    surfaces only, so this test removes it rather than asserting against a
+    shape production never had.
+    """
+
+    for table in (
+        TeamMatchupFactRow.__table__,
+        TeamMatchupSurfaceObservationRow.__table__,
+    ):
+        with engine.begin() as connection:
+            connection.execute(table.delete().where(table.c.window_games == 15))
+
+
 def _mark_event_final(engine, *, status_text="Final", status_code=3):
     with engine.begin() as connection:
         connection.execute(
@@ -3544,6 +3633,7 @@ def test_authenticated_production_pattern_game_serves_its_participants(
 
     context = projection_route_context
     _publish_production_pattern_event(context.engine, context.settings)
+    _drop_last_15_snapshots(context.engine)
     records = _production_pattern_records()
     assert len(records) == 18
     _publish_focal_participants(
@@ -3569,8 +3659,50 @@ def test_authenticated_production_pattern_game_serves_its_participants(
     # `stats_tables` marker hid usable Season defense evidence.
     assert sections["season_defense"]["status"] == "available"
     assert sections["season_defense"]["context"] == "completed_season"
-    assert payload["league"]["defense_sheet"]["shot_zones"]
     assert payload["freshness"]["pool"]["state"] == "missing"
+    # Production has all five Season Defense Sheet surfaces and no
+    # point-in-time Last-15 snapshot at all.
+    availability = payload["league"]["surface_availability"]
+    assert {
+        base: availability[base]["season"]["status"] for base in availability
+    } == {
+        "assist_locations": "available",
+        "play_types": "available",
+        "shot_types": "available",
+        "shot_zones": "available",
+        "traditional": "available",
+    }
+    assert all(payload["league"]["defense_sheet"][base] for base in availability)
+    assert sections["last_15_defense"] == {
+        "status": "unavailable",
+        "source": None,
+        "context": None,
+        "unavailable_reason": "no_point_in_time_snapshot",
+    }
+    assert all(
+        state["last_15"]["status"] != "available"
+        for state in availability.values()
+    )
+    # Production reported the same governed metric set for every team. The
+    # count is deployment-specific; the invariant is that no team is short a
+    # metric the others have.
+    metric_identities = {
+        (base, metric["key"])
+        for base in availability
+        for metric in payload["league"]["defense_sheet"][base]
+    }
+    assert metric_identities
+    for team in payload["teams"]:
+        assert {
+            (base, row["key"])
+            for base in availability
+            for row in team["defense_sheet"][base]
+        } == metric_identities
+        assert all(
+            row["season"] is not None
+            for base in availability
+            for row in team["defense_sheet"][base]
+        )
 
     players = payload["players"]
     assert len(players) == 18
@@ -3623,11 +3755,8 @@ def test_authenticated_production_pattern_selection_uses_canonical_rows(
 ):
     context = projection_route_context
     _publish_production_pattern_event(context.engine, context.settings)
-    records = _production_pattern_records()
-    _publish_focal_participants(
-        context.player_logs, records=records, game_id=PRODUCTION_GAME_ID
-    )
-    participant = records[0]
+    _publish_production_pattern_games(context.player_logs)
+    participant = _production_pattern_records()[0]
 
     response = context.client.get(
         f"/api/games/matchup/selection?game_id={PRODUCTION_GAME_ID}"
@@ -3644,6 +3773,20 @@ def test_authenticated_production_pattern_selection_uses_canonical_rows(
         "excludes_focal_game": True,
     }
     assert payload["freshness"]["player_pool"]["state"] == "missing"
+
+    # The participant met MIL twice. Only the earlier meeting is a pregame
+    # sample; the focal game appears in `focal_game` and nowhere else, so
+    # dropping the cutoff would surface a second row here.
+    game_rows = [row for row in payload["h2h"]["rows"] if row["row_type"] == "game"]
+    assert [row["game_date"] for row in game_rows] == [
+        PRIOR_GAME_DATE.isoformat()
+    ]
+    assert all(
+        row["game_date"] < FOCAL_GAME_DATE.isoformat() for row in game_rows
+    )
+    assert PRODUCTION_GAME_ID not in {
+        row.get("game_id") for row in payload["h2h"]["rows"]
+    }
 
 
 def test_authenticated_final_matchup_without_archived_projections_is_historical(

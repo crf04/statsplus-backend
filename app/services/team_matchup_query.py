@@ -100,18 +100,64 @@ class TeamMatchupQueryService:
         *,
         window_games: int | None = None,
         as_of: date | None = None,
-        strict_as_of: bool = False,
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date.
 
-        ``strict_as_of`` refuses the completed-season exemption. That exemption
-        serves a finished season's aggregate for any date inside it, which is
-        sound for hindsight display and unsound for an analytical input about
-        one of those dates, because the aggregate contains that date's games.
+        This is the hindsight-display read. It honors the #41 completed-season
+        exemption, so a finished season's aggregate answers for any date inside
+        that season. Analytical callers must use ``get_focal_safe_window``.
         """
 
+        return self._window_on_or_before(
+            season,
+            window_games=window_games,
+            as_of=as_of,
+            strict_as_of=False,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+
+    def get_focal_safe_window(
+        self,
+        season: str,
+        *,
+        as_of: date,
+        window_games: int | None = None,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> TeamMatchupWindow | None:
+        """Read a window that provably contains no game after ``as_of``.
+
+        The completed-season exemption serves a finished season's aggregate for
+        any date inside it. That is sound for hindsight display and unsound as
+        an analytical input about one of those dates, because the aggregate
+        contains that date's games. This read refuses it, so an evidence gap
+        surfaces as an unavailable surface rather than a contaminated number.
+        Analytical callers name this method instead of setting a flag, so a
+        read cannot silently fall back to the display rule.
+        """
+
+        return self._window_on_or_before(
+            season,
+            window_games=window_games,
+            as_of=as_of,
+            strict_as_of=True,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+
+    def _window_on_or_before(
+        self,
+        season: str,
+        *,
+        window_games: int | None,
+        as_of: date | None,
+        strict_as_of: bool,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> TeamMatchupWindow | None:
         current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
         if as_of is not None and as_of > current_date:
             raise ValueError("future as_of dates cannot be queried")

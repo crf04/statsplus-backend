@@ -2725,7 +2725,7 @@ def test_completed_season_serves_a_later_season_snapshot_with_its_reason(
     assert shot_types.publication.reason is None
 
 
-def test_a_strict_as_of_read_refuses_the_completed_season_exemption(tmp_path):
+def test_the_focal_safe_read_refuses_the_completed_season_exemption(tmp_path):
     """Scoring cannot borrow a snapshot cut after the date it asked about.
 
     The completed-season exemption is sound for hindsight display: the finished
@@ -2755,7 +2755,7 @@ def test_a_strict_as_of_read_refuses_the_completed_season_exemption(tmp_path):
     )
 
     display = service.get_latest_window("2025-26", as_of=AS_OF)
-    scoring = service.get_latest_window("2025-26", as_of=AS_OF, strict_as_of=True)
+    scoring = service.get_focal_safe_window("2025-26", as_of=AS_OF)
 
     display_observation = next(
         item for item in display.observations if item.surface == "shot_zones"
