@@ -2725,6 +2725,54 @@ def test_completed_season_serves_a_later_season_snapshot_with_its_reason(
     assert shot_types.publication.reason is None
 
 
+def test_the_focal_safe_read_refuses_the_completed_season_exemption(tmp_path):
+    """Scoring cannot borrow a snapshot cut after the date it asked about.
+
+    The completed-season exemption is sound for hindsight display: the finished
+    season's aggregate is the same for every date in it. That is exactly why it
+    is unsound as a Matchup Score input for a game inside that season, because
+    the aggregate contains the focal game.
+    """
+
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _insert_publication_authority(
+            connection,
+            cutoff=datetime.fromisoformat(SEASON_COMPLETE_CUTOFF),
+            manifest_id="season-complete-manifest",
+            catalog_id="season-complete-catalog",
+            unplayed_games=0,
+        )
+    stream_key = "exact_shot_zones_opponent_season"
+    service = TeamMatchupQueryService(
+        TeamMatchupRepository(engine),
+        publication_reader=_reader(
+            cutoff_by_stream={stream_key: SEASON_COMPLETE_CUTOFF},
+            freshness_by_stream={stream_key: "fresh"},
+        ),
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
+        clock=lambda: datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+
+    display = service.get_latest_window("2025-26", as_of=AS_OF)
+    scoring = service.get_focal_safe_window("2025-26", as_of=AS_OF)
+
+    display_observation = next(
+        item for item in display.observations if item.surface == "shot_zones"
+    )
+    assert display_observation.status == "available"
+    assert display_observation.publication.reason == "season_complete_snapshot"
+
+    scoring_observation = next(
+        item for item in scoring.observations if item.surface == "shot_zones"
+    )
+    assert scoring_observation.status == "unavailable"
+    assert scoring_observation.unavailable_reason == "publication_cutoff_after_as_of"
+    assert not any(
+        metric.base == "shot_zones" for metric in scoring.league_metrics
+    )
+
+
 def test_a_later_season_snapshot_without_bound_governance_stays_withheld(
     tmp_path,
 ):

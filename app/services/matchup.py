@@ -18,6 +18,15 @@ from app.domain.freshness import (
     time_window_timedelta,
     within_max_age,
 )
+from app.domain.matchup_experience import (
+    CURRENT_MODE,
+    GAME_LOG_SOURCE,
+    HISTORICAL_MODE,
+    PLAYER_POOL_SOURCE,
+    experience_mode,
+    is_historical_matchup,
+    player_source,
+)
 from app.domain.nba_events import (
     is_final_event,
     is_postponed_event,
@@ -42,8 +51,12 @@ from app.services.player_diet import (
 )
 from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
+    PlayerGameLogRecord,
+    PlayerGameLogSyncStatus,
     PlayerSeasonLogSummary,
 )
+from app.services.player_game_log_values import player_game_log_focal_line
+from app.services.statistic_catalog import StatisticCatalog
 from app.services.player_pool import PlayerPool, PoolPlayer, SingleGamePlayerPoolReader
 from app.services.matchup_injuries import (
     MatchupInjuryResult,
@@ -167,6 +180,37 @@ _DIET_SHARE_BOUNDS = {
     "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
 }
 
+# The score contract's required Bases per governed Stat Category. A Base named
+# here and absent from a window's computed components is a named missing input
+# rather than a silent partial blend.
+_SCORE_INPUT_BASES = {
+    market: tuple(base for base, _weights, _slices in inputs)
+    for market, inputs in _PRIMITIVE_SCORE_INPUTS.items()
+}
+_SCORE_INPUT_BASES.update(
+    {
+        "REB": ("traditional",),
+        "TOV": ("traditional",),
+        "STL": ("traditional",),
+        "BLK": ("traditional",),
+        "STKS": ("traditional",),
+    }
+)
+_SCORE_INPUT_BASES.update(
+    {
+        market: tuple(
+            base
+            for base in DEFENSE_BASES
+            if any(base in _SCORE_INPUT_BASES[part] for part in parts)
+        )
+        for market, parts in _COMBO_PARTS.items()
+    }
+)
+#: Categories whose score consumes the player's own stored Season rate.
+_SEASON_RATE_MARKETS = frozenset({*_COMBO_PARTS, "STKS"})
+#: Every Stat Category the backend can score from stored evidence.
+_SCOREABLE_MARKETS = frozenset(_SCORE_INPUT_BASES)
+
 _PUBLICATION_STREAM_KEYS = (
     "player_game_logs",
     "player_per36",
@@ -198,6 +242,18 @@ class PlayerLogReader(Protocol):
         self, season: str, *, publication_snapshot: Any | None = None
     ) -> PlayerGameLogReadFreshness: ...
 
+    def list_game_rows(
+        self,
+        season: str,
+        game_id: str,
+        *,
+        publication_snapshot: Any | None = None,
+    ) -> Sequence[PlayerGameLogRecord]: ...
+
+    def get_sync_status(
+        self, season: str, game_id: str
+    ) -> PlayerGameLogSyncStatus | None: ...
+
 
 class PlayerDietReader(Protocol):
     def get_for_players(
@@ -219,6 +275,15 @@ class TeamMatchupReader(Protocol):
         publication_snapshot: Any | None = None,
     ) -> TeamMatchupWindow | None: ...
 
+    def get_focal_safe_window(
+        self,
+        season: str,
+        *,
+        as_of: date,
+        window_games: int | None = None,
+        publication_snapshot: Any | None = None,
+    ) -> TeamMatchupWindow | None: ...
+
 
 class StatsFreshnessReader(Protocol):
     def get(self) -> StatsFreshness: ...
@@ -235,6 +300,25 @@ class MatchupInjuryReader(Protocol):
 
 
 _MetricIdentity = tuple[str, str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _Participant:
+    """One rail row and the evidence that named it.
+
+    A current-slate participant is a Player Pool entry; a Historical Matchup
+    participant is one canonical game-log row, so its team identity is the
+    identity recorded for that game rather than a current roster.
+    """
+
+    canonical_player_id: int
+    name: str
+    team_id: int
+    tricode: str
+    market_categories: tuple[str, ...]
+    provenance: Mapping[str, tuple[str, ...]]
+    source: str
+    focal_game_line: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +356,7 @@ class MatchupService:
         team_matchups: TeamMatchupReader | None,
         stats_freshness: StatsFreshnessReader,
         settings: RuntimeSettings,
+        statistic_catalog: StatisticCatalog | None = None,
         injuries: MatchupInjuryReader | None = None,
         clock: Callable[[], datetime] | None = None,
         database_only: bool = False,
@@ -286,6 +371,18 @@ class MatchupService:
         self.stats_freshness = stats_freshness
         self.settings = settings
         self.injuries = injuries
+        # Historical Stat Categories come from the governed Statistic Catalog
+        # crossed with the score-input contract, never from a DFS archive.
+        self._statistics = (
+            {}
+            if statistic_catalog is None
+            else {
+                statistic.market_category: statistic
+                for statistic in statistic_catalog.statistics
+                if statistic.market_category in _SCOREABLE_MARKETS
+            }
+        )
+        self._historical_categories = tuple(sorted(self._statistics))
         self.database_only = bool(database_only)
         self.publication_reader = publication_reader
         # One request checks out one connection for every read it composes;
@@ -336,17 +433,58 @@ class MatchupService:
             player for player in pool.players if player.team_id in team_ids
         )
         injury_result = self._injuries(event, season, pool_players)
-        players = tuple(
-            player
-            for player in pool_players
-            if player.canonical_player_id not in injury_result.out_player_ids
-        )
-        summaries = call_with_read_scope(
+        # The backend declares the mode so no client ever infers it from tip
+        # dates, empty arrays, or freshness markers.
+        historical = is_historical_matchup(event, pool_players)
+        if historical:
+            players, participants_section = self._historical_participants(
+                season,
+                game_id,
+                team_ids,
+                publication_snapshot=publication_snapshot,
+                connection=connection,
+            )
+        else:
+            # A matched Out entry removes a targetable player; a game-log
+            # participant already played, so injuries never remove one.
+            players = tuple(
+                _Participant(
+                    canonical_player_id=player.canonical_player_id,
+                    name=player.name,
+                    team_id=player.team_id,
+                    tricode=str(self._event_team(event, player.team_id)["tricode"]),
+                    market_categories=player.market_categories,
+                    provenance=player.provenance,
+                    source=PLAYER_POOL_SOURCE,
+                )
+                for player in pool_players
+                if player.canonical_player_id not in injury_result.out_player_ids
+            )
+            participants_section = self._pool_participants_section(pool_players)
+        player_ids = tuple(player.canonical_player_id for player in players)
+        # The completed-season summary is what the rail displays under its
+        # declared hindsight label.
+        display_summaries = call_with_read_scope(
             self.player_logs.get_player_summaries,
             season,
-            tuple(player.canonical_player_id for player in players),
+            player_ids,
             publication_snapshot=publication_snapshot,
             connection=connection,
+        )
+        # Analysis reads its own summary with the focal row dropped, so the
+        # focal result never feeds a participant's own baseline or Matchup
+        # Score inputs. In current mode the two reads are the same question.
+        analysis_summaries = (
+            call_with_read_scope(
+                self.player_logs.get_player_summaries,
+                season,
+                player_ids,
+                publication_snapshot=publication_snapshot,
+                connection=connection,
+                exclude_game_id=game_id,
+            )
+            if historical
+            else display_summaries
         )
         log_freshness = call_with_read_scope(
             self.player_logs.get_read_freshness,
@@ -386,6 +524,33 @@ class MatchupService:
         availability = self._surface_availability(
             windows, metric_indexes, team_ids
         )
+        # A Historical Matchup scores from evidence stored strictly before the
+        # focal game. A snapshot scope carries a date, so nothing dated on the
+        # game's own date can be proven pre-tip; only an earlier scope can.
+        # The display windows above are unchanged, so the completed-season
+        # Defense Sheet still renders as the hindsight context #41 defines.
+        if historical:
+            score_windows = {
+                name: self._focal_safe_team_window(
+                    season,
+                    window_games=None if name == "season" else 15,
+                    as_of=slate_date - timedelta(days=1),
+                    publication_snapshot=publication_snapshot,
+                    connection=connection,
+                )
+                for name in windows
+            }
+            score_metric_indexes = {
+                name: None if not window else _WindowMetricIndex.build(window)
+                for name, window in score_windows.items()
+            }
+            score_availability = self._surface_availability(
+                score_windows, score_metric_indexes, team_ids
+            )
+        else:
+            score_windows = windows
+            score_metric_indexes = metric_indexes
+            score_availability = availability
         league = self._league(windows, metric_indexes, availability)
         teams = [
             self._team(
@@ -398,7 +563,11 @@ class MatchupService:
             for team_id in team_ids
         ]
         returned_counts = {
-            team_id: sum(player.team_id == team_id for player in players)
+            team_id: sum(
+                player.team_id == team_id
+                for player in players
+                if player.source == PLAYER_POOL_SOURCE
+            )
             for team_id in team_ids
         }
         game = self._game(event)
@@ -413,17 +582,26 @@ class MatchupService:
         }
         return {
             "game": game,
+            "experience": self._experience(
+                historical=historical,
+                schedule_freshness=schedule_freshness,
+                participants=participants_section,
+                availability=availability,
+                injury_block=injury_result.block,
+            ),
             "league": league,
             "teams": teams,
             "players": self._players(
                 players,
-                summaries,
+                analysis_summaries,
+                display_summaries,
                 diets,
                 event,
-                windows,
-                metric_indexes,
-                availability,
-                injury_result.badge_refs,
+                score_windows,
+                score_metric_indexes,
+                score_availability,
+                {} if historical else injury_result.badge_refs,
+                score_diets=not historical,
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -448,6 +626,219 @@ class MatchupService:
                 season,
                 publication_snapshot,
             ),
+        }
+
+    def _historical_participants(
+        self,
+        season: str,
+        game_id: str,
+        team_ids: Sequence[int],
+        *,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> tuple[tuple[_Participant, ...], dict[str, Any]]:
+        """Name the players with a complete canonical row for this game."""
+
+        sync = call_with_read_scope(
+            self.player_logs.get_sync_status,
+            season,
+            game_id,
+            connection=connection,
+        )
+        if sync is None or sync.status != "complete":
+            # Incomplete canonical logs remove only Participants; every other
+            # section keeps reporting its own evidence.
+            return (), {
+                "status": "unavailable",
+                "source": "player_game_logs",
+                "context": None,
+                "unavailable_reason": "game_logs_incomplete",
+            }
+        rows = call_with_read_scope(
+            self.player_logs.list_game_rows,
+            season,
+            game_id,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+        participants = tuple(
+            _Participant(
+                canonical_player_id=int(record.player_id),
+                name=record.player_name,
+                # The game-time identity is authoritative: a later trade
+                # cannot rewrite who a player suited up for that night.
+                team_id=int(record.team_id),
+                tricode=str(record.team_tricode),
+                market_categories=self._historical_categories,
+                provenance={},
+                source=GAME_LOG_SOURCE,
+                focal_game_line=player_game_log_focal_line(
+                    record, self._historical_categories, self._statistics
+                ),
+            )
+            for record in rows
+            if int(record.team_id) in tuple(team_ids)
+        )
+        if not participants:
+            return (), {
+                "status": "unavailable",
+                "source": "player_game_logs",
+                "context": None,
+                "unavailable_reason": "no_game_log_rows",
+            }
+        return participants, {
+            "status": "available",
+            "source": "player_game_logs",
+            "context": "completed_season",
+            "unavailable_reason": None,
+        }
+
+    @staticmethod
+    def _pool_participants_section(
+        pool_players: Sequence[PoolPlayer],
+    ) -> dict[str, Any]:
+        if not pool_players:
+            return {
+                "status": "unavailable",
+                "source": "player_pool",
+                "context": None,
+                "unavailable_reason": "player_pool_unavailable",
+            }
+        return {
+            "status": "available",
+            "source": "player_pool",
+            "context": "posted_markets",
+            "unavailable_reason": None,
+        }
+
+    @classmethod
+    def _experience(
+        cls,
+        *,
+        historical: bool,
+        schedule_freshness: Mapping[str, Any],
+        participants: Mapping[str, Any],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        injury_block: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Declare the experience mode and each section's own evidence."""
+
+        return {
+            "mode": experience_mode(historical),
+            "player_source": player_source(historical),
+            "sections": {
+                "schedule": cls._schedule_section(historical, schedule_freshness),
+                "participants": dict(participants),
+                "season_defense": cls._defense_section(
+                    availability,
+                    "season",
+                    context="completed_season" if historical else "pregame",
+                    historical_reason=None,
+                ),
+                "last_15_defense": cls._defense_section(
+                    availability,
+                    "last_15",
+                    context="pregame",
+                    historical_reason=(
+                        "no_point_in_time_snapshot" if historical else None
+                    ),
+                ),
+                "injuries": cls._injury_section(historical, injury_block),
+            },
+        }
+
+    @staticmethod
+    def _schedule_section(
+        historical: bool, schedule_freshness: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Report the catalog that named this game, plus its collection time.
+
+        A completed season's catalog is immutable evidence, so its collection
+        age stays provenance rather than an operational warning; the separate
+        ``freshness.schedule`` surface keeps its age-based status.
+        """
+
+        return {
+            "status": "available",
+            "source": "event_catalog",
+            "context": (
+                "completed_season_catalog"
+                if historical
+                else "current_season_catalog"
+            ),
+            "unavailable_reason": None,
+            "collected_at": schedule_freshness["retrieved_at"],
+        }
+
+    @staticmethod
+    def _defense_section(
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+        window_name: str,
+        *,
+        context: str | None,
+        historical_reason: str | None,
+    ) -> dict[str, Any]:
+        """Report a Defense Sheet window from its own Surface evidence.
+
+        The window renders whenever any governed Base is available; the
+        per-Base authority stays ``league.surface_availability``.
+        """
+
+        states = [availability[base][window_name] for base in DEFENSE_BASES]
+        if any(state["status"] == "available" for state in states):
+            return {
+                "status": "available",
+                "source": "team_matchup_publication",
+                "context": context,
+                "unavailable_reason": None,
+            }
+        status = (
+            "unavailable"
+            if any(state["status"] == "unavailable" for state in states)
+            else "missing"
+        )
+        reason = historical_reason or next(
+            (
+                state["unavailable_reason"]
+                for state in states
+                if state["unavailable_reason"]
+            ),
+            "not_stored",
+        )
+        return {
+            "status": status,
+            "source": None,
+            "context": None,
+            "unavailable_reason": reason,
+        }
+
+    @staticmethod
+    def _injury_section(
+        historical: bool, injury_block: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if injury_block["status"] in {"fresh", "stale"}:
+            # A stopped game only ever serves its retained pre-tip snapshot, so
+            # available historical injury evidence is pregame by construction.
+            return {
+                "status": "available",
+                "source": "rotowire",
+                "context": "pregame" if historical else "current",
+                "unavailable_reason": None,
+            }
+        if historical:
+            # Current injury evidence is never projected backward onto a
+            # completed game.
+            return {
+                "status": "unavailable",
+                "source": None,
+                "context": None,
+                "unavailable_reason": "no_pregame_snapshot",
+            }
+        return {
+            "status": "unavailable",
+            "source": "rotowire",
+            "context": "current",
+            "unavailable_reason": injury_block["unavailable_reason"],
         }
 
     def _publication_snapshot(self, season: str, *, session: Session | None = None):
@@ -586,6 +977,8 @@ class MatchupService:
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
+        """Read one Defense Sheet window for display."""
+
         if self.team_matchups is None:
             return None
         return call_with_read_scope(
@@ -597,10 +990,43 @@ class MatchupService:
             connection=connection,
         )
 
+    def _focal_safe_team_window(
+        self,
+        season: str,
+        *,
+        window_games: int | None,
+        as_of: date,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> TeamMatchupWindow | None:
+        """Read one window that provably predates the focal game."""
+
+        if self.team_matchups is None:
+            return None
+        reader = getattr(self.team_matchups, "get_focal_safe_window", None)
+        if reader is None:
+            # An injected legacy seam predates the completed-season exemption,
+            # so its ordinary read is already free of anything after `as_of`.
+            return self._team_window(
+                season,
+                window_games=window_games,
+                as_of=as_of,
+                publication_snapshot=publication_snapshot,
+                connection=connection,
+            )
+        return call_with_read_scope(
+            reader,
+            season,
+            window_games=window_games,
+            as_of=as_of,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+
     def _diets(
         self,
         season: str,
-        players: Sequence[PoolPlayer],
+        players: Sequence[_Participant],
         *,
         publication_snapshot=None,
         connection: Connection | None = None,
@@ -711,22 +1137,29 @@ class MatchupService:
 
     def _players(
         self,
-        players: Sequence[PoolPlayer],
-        summaries: Mapping[int, PlayerSeasonLogSummary],
+        players: Sequence[_Participant],
+        analysis_summaries: Mapping[int, PlayerSeasonLogSummary],
+        display_summaries: Mapping[int, PlayerSeasonLogSummary],
         diets: PlayerDietResult,
         event: Mapping[str, Any],
         windows: Mapping[str, TeamMatchupWindow | None],
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
+        *,
+        score_diets: bool = True,
     ) -> list[dict[str, Any]]:
         rows = []
         for player in players:
-            summary = summaries.get(player.canonical_player_id)
+            summary = analysis_summaries.get(player.canonical_player_id)
+            # The rail's scoring context and minutes series are display, so
+            # they carry the completed-season summary; only the analytical
+            # summary above drops the focal row.
+            display = display_summaries.get(player.canonical_player_id)
             scoring = (
                 None
-                if summary is None or summary.season_rate is None
-                else summary.season_rate.per_game.get("PTS")
+                if display is None or display.season_rate is None
+                else display.season_rate.per_game.get("PTS")
             )
             diet_by_base = {base: [] for base in PLAYER_DIET_BASES}
             for fact in diets.players.get(player.canonical_player_id, ()):
@@ -741,14 +1174,34 @@ class MatchupService:
                         },
                     }
                 )
-            team = self._event_team(event, player.team_id)
+            scores = self._scores(
+                player,
+                summary,
+                # A completed-season Diet aggregate carries no game dimension,
+                # so its focal contribution cannot be subtracted and it is not
+                # a usable historical score input. The raw shares above stay
+                # displayed as their own independent evidence.
+                diets.players.get(player.canonical_player_id, ())
+                if score_diets
+                else (),
+                event,
+                windows,
+                metric_indexes,
+                availability,
+            )
             rows.append(
                 {
                     "canonical_id": int(player.canonical_player_id),
                     "name": player.name,
                     "team_id": int(player.team_id),
-                    "tricode": str(team["tricode"]),
-                    "posted_markets": list(player.market_categories),
+                    "tricode": player.tricode,
+                    "player_source": player.source,
+                    "stat_categories": list(player.market_categories),
+                    "focal_game_line": player.focal_game_line,
+                    "posted_markets": (
+                        [] if player.source == GAME_LOG_SOURCE
+                        else list(player.market_categories)
+                    ),
                     "provenance": {
                         provider: list(categories)
                         for provider, categories in sorted(player.provenance.items())
@@ -758,19 +1211,11 @@ class MatchupService:
                     ),
                     "last_10_minutes": (
                         []
-                        if summary is None
-                        else [self._number(value) for value in summary.last_ten_minutes]
+                        if display is None
+                        else [self._number(value) for value in display.last_ten_minutes]
                     ),
                     "diet_shares": diet_by_base,
-                    "scores": self._scores(
-                        player,
-                        summary,
-                        diets.players.get(player.canonical_player_id, ()),
-                        event,
-                        windows,
-                        metric_indexes,
-                        availability,
-                    ),
+                    "scores": scores,
                     "injury_badge_ref": injury_badges.get(
                         player.canonical_player_id
                     ),
@@ -787,7 +1232,7 @@ class MatchupService:
 
     def _scores(
         self,
-        player: PoolPlayer,
+        player: _Participant,
         summary: PlayerSeasonLogSummary | None,
         diet_facts: Sequence[StoredPlayerDietFact],
         event: Mapping[str, Any],
@@ -801,22 +1246,45 @@ class MatchupService:
             if team_id != player.team_id
         )
         memo: dict[tuple[str, str], dict[str, Any]] = {}
+        withhold = player.source == GAME_LOG_SOURCE
         return {
             market: {
-                window_name: self._score_window(
-                    market,
-                    window_name,
-                    metric_indexes[window_name],
-                    opponent_id,
-                    summary,
-                    diet_facts,
-                    availability,
-                    memo,
+                window_name: self._presented_window(
+                    self._score_window(
+                        market,
+                        window_name,
+                        metric_indexes[window_name],
+                        opponent_id,
+                        summary,
+                        diet_facts,
+                        availability,
+                        memo,
+                    ),
+                    withhold,
                 )
                 for window_name, window in windows.items()
             }
             for market in player.market_categories
         }
+
+    @staticmethod
+    def _presented_window(
+        window: dict[str, Any], withhold_partial_blend: bool
+    ) -> dict[str, Any]:
+        """Return one score window as the response carries it.
+
+        A Historical Matchup withholds the Blend unless every input the score
+        contract requires was present, so a mean of the surviving Bases is
+        never presented as a complete blended score. Component evidence and the
+        named gaps still ship. The memoized window keeps its computed Blend, so
+        a combo still composes from its parts exactly as it did.
+        """
+
+        if not withhold_partial_blend or not window["missing_inputs"]:
+            return window
+        if window.get("blend") is None:
+            return window
+        return {**window, "blend": None}
 
     def _score_window(
         self,
@@ -831,7 +1299,7 @@ class MatchupService:
     ) -> dict[str, Any]:
         key = (market, window_name)
         if key not in memo:
-            memo[key] = self._compute_score_window(
+            window = self._compute_score_window(
                 market,
                 window_name,
                 metric_index,
@@ -841,7 +1309,39 @@ class MatchupService:
                 availability,
                 memo,
             )
+            # An unavailable cell names what it lacked instead of leaving the
+            # reader to guess why no blend arrived.
+            window["missing_inputs"] = self._missing_score_inputs(
+                market, window_name, window["components"], summary, availability
+            )
+            memo[key] = window
         return memo[key]
+
+    @staticmethod
+    def _missing_score_inputs(
+        market: str,
+        window_name: str,
+        components: Mapping[str, Any],
+        summary: PlayerSeasonLogSummary | None,
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> list[str]:
+        """Name every score-contract input this window could not consume."""
+
+        needs_rate = market in _SEASON_RATE_MARKETS
+        rate_missing = summary is None or summary.season_rate is None
+        missing = ["player_season_rate"] if needs_rate and rate_missing else []
+        for base in _SCORE_INPUT_BASES.get(market, ()):
+            if availability[base][window_name]["status"] != "available":
+                missing.append(f"team_defense:{base}")
+            elif base in components or (needs_rate and rate_missing):
+                # A named missing Season rate already explains the gap; the
+                # Diet evidence behind it was never consulted.
+                continue
+            elif base == "traditional":
+                missing.append("team_defense:traditional")
+            else:
+                missing.append(f"player_diet:{base}")
+        return missing
 
     def _compute_score_window(
         self,
@@ -1639,7 +2139,9 @@ class MatchupService:
 
 
 __all__ = [
+    "CURRENT_MODE",
     "DEFENSE_BASES",
     "DEFENSIVE_COLUMNS",
+    "HISTORICAL_MODE",
     "MatchupService",
 ]

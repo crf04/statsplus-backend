@@ -15,6 +15,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.migrations import run_migrations
+from app.models.player_game_log import PlayerGameLogSync
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerGameLogRepository,
@@ -51,6 +52,24 @@ class RecordedArchetypePeers:
         return self.peer_ids
 
 
+def _record_focal_sync(engine, *, season, game_id, status):
+    """Record the focal game's canonical synchronization evidence."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            PlayerGameLogSync.__table__.insert().values(
+                season=season,
+                game_id=game_id,
+                season_type="Regular Season",
+                status=status,
+                checksum="fixture",
+                row_count=1,
+                source_provider="recorded",
+                retrieved_at=RETRIEVED_AT,
+            )
+        )
+
+
 def _client(
     tmp_path,
     *,
@@ -61,8 +80,11 @@ def _client(
     clock=lambda: RETRIEVED_AT,
     statistic_catalog=None,
     publish_logs=True,
+    extra_logs=(),
+    focal_sync="complete",
 ):
     fixture = json.loads(FIXTURE.read_text())
+    fixture["logs"] = [*fixture["logs"], *extra_logs]
     tmp_path.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{tmp_path / 'selection.sqlite3'}")
     run_migrations(engine)
@@ -91,6 +113,13 @@ def _client(
             retrieved_at=RETRIEVED_AT,
             source_provider="recorded",
             source_row_count=len(records),
+        )
+    if focal_sync is not None:
+        _record_focal_sync(
+            engine,
+            season=fixture["season"],
+            game_id=fixture["game"]["nba_game_id"],
+            status=focal_sync,
         )
     snapshot_repository = PlayerPoolSnapshotRepository(engine)
     if seed_pool:
@@ -291,6 +320,16 @@ def test_known_pool_player_without_stored_logs_gets_honest_empty_tables(tmp_path
     assert response.status_code == 200
     assert response.get_json() == {
         "player_id": 404,
+        "experience": {
+            "mode": "current",
+            "player_source": "player_pool",
+            "focal_game": None,
+            "samples": {
+                "context": "season_to_date",
+                "excludes_focal_game": False,
+            },
+            "baseline": {"context": "season_to_date", "hindsight": False},
+        },
         "freshness": {
             "player_pool": {
                 "status": "fresh",
@@ -433,3 +472,194 @@ def test_sanctioned_derived_component_catalog_extension_is_computed(tmp_path):
     regular = response.get_json()["h2h"]["rows"][1]
     assert regular["stats"]["X2A"] == 12.0
     assert regular["deltas"]["X2A"] == 0.0
+
+
+FOCAL_GAME_DATE = "2026-01-20"
+
+
+def _focal_log_row(*, player_id, name, team_id, tricode, opponent_id, opponent):
+    """One canonical row for the focal game itself."""
+
+    return {
+        "season_type": "Regular Season",
+        "player_id": player_id,
+        "game_id": "0022500200",
+        "player_name": name,
+        "game_date": FOCAL_GAME_DATE,
+        "team_id": team_id,
+        "team_tricode": tricode,
+        "opponent_team_id": opponent_id,
+        "opponent_team_tricode": opponent,
+        "is_home": False,
+        "minutes": 36.0,
+        "points": 40,
+        "rebounds": 9,
+        "assists": 6,
+        "field_goals_made": 15,
+        "field_goals_attempted": 25,
+        "three_pointers_made": 4,
+        "three_pointers_attempted": 9,
+        "free_throws_made": 6,
+        "free_throws_attempted": 7,
+        "offensive_rebounds": 2,
+        "defensive_rebounds": 7,
+        "turnovers": 3,
+        "steals": 2,
+        "blocks": 1,
+        "personal_fouls": 3,
+    }
+
+
+def _historical_selection_client(tmp_path, **kwargs):
+    """A completed focal game with canonical rows and no Player Pool at all."""
+
+    fixture = json.loads(FIXTURE.read_text())
+    final_game = {**fixture["game"], "status_text": "Final", "status_code": 3}
+    return _client(
+        tmp_path,
+        event_catalog=RecordedEventCatalog(final_game),
+        seed_pool=False,
+        extra_logs=(
+            _focal_log_row(
+                player_id=101,
+                name="Selected Player",
+                team_id=1,
+                tricode="AAA",
+                opponent_id=2,
+                opponent="BBB",
+            ),
+        ),
+        **kwargs,
+    )
+
+
+def test_historical_selection_accepts_a_participant_without_a_player_pool(
+    tmp_path,
+):
+    client, fixture = _historical_selection_client(tmp_path)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["player_id"] == 101
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["experience"]["player_source"] == "game_logs"
+    assert payload["experience"]["samples"] == {
+        "context": "pregame",
+        "excludes_focal_game": True,
+    }
+    assert payload["experience"]["baseline"] == {
+        "context": "completed_season",
+        "hindsight": True,
+    }
+    # No Player Pool exists at all, and the response says so truthfully.
+    assert payload["freshness"]["player_pool"] == {
+        "status": "unavailable",
+        "state": "missing",
+        "observed_at": None,
+        "retrieved_at": None,
+        "providers": {},
+    }
+
+
+def test_historical_selection_fails_closed_on_incomplete_canonical_logs(tmp_path):
+    # The Matchup route withholds Participants entirely until the focal game's
+    # canonical synchronization is complete. Selection reads the same evidence,
+    # so it must not resolve a participant from rows that may still be partial.
+    client, fixture = _historical_selection_client(tmp_path, focal_sync="failed")
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+
+def test_historical_selection_fails_closed_without_sync_evidence(tmp_path):
+    client, fixture = _historical_selection_client(tmp_path, focal_sync=None)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+
+def test_historical_selection_separates_the_focal_line_from_the_samples(
+    tmp_path,
+):
+    client, fixture = _historical_selection_client(tmp_path)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    payload = response.get_json()
+    focal = payload["experience"]["focal_game"]
+    assert focal["game_id"] == "0022500200"
+    assert focal["game_date"] == FOCAL_GAME_DATE
+    assert focal["matchup"] == "AAA @ BBB"
+    assert focal["minutes"] == 36.0
+    assert focal["stats"]["PTS"] == 40.0
+    # Only the one stored game against BBB strictly before the focal date:
+    # the focal row itself and the later playoff row are both excluded.
+    game_rows = [row for row in payload["h2h"]["rows"] if row["row_type"] == "game"]
+    assert [row["game_date"] for row in game_rows] == ["2026-01-05"]
+    assert all(row["game_date"] < FOCAL_GAME_DATE for row in game_rows)
+
+
+def test_historical_selection_baseline_excludes_the_focal_result(tmp_path):
+    client, fixture = _historical_selection_client(tmp_path)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    (game_row, _average) = response.get_json()["h2h"]["rows"]
+    # Regular Season rows excluding the focal game are 15 points in 30 minutes
+    # and 25 in 40, so the baseline rate is 40/70 PTS per minute. Including the
+    # 40-point focal game would drag the delta down instead.
+    assert game_row["stats"]["PTS"] == 25.0
+    assert game_row["deltas"]["PTS"] == round(25.0 / 40 - 40 / 70, 6)
+
+
+def test_a_player_without_a_canonical_row_in_the_focal_game_is_404(tmp_path):
+    client, fixture = _historical_selection_client(tmp_path)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=202"
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "resource_not_found"
+
+
+def test_historical_selection_scores_the_governed_statistic_catalog(tmp_path):
+    client, fixture = _historical_selection_client(tmp_path)
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    payload = response.get_json()
+    catalog_markets = {
+        statistic.market_category
+        for statistic in StatisticCatalog.load_default().statistics
+        if statistic.market_category is not None
+    }
+    # The category universe comes from the Statistic Catalog, never from a
+    # DFS projection archive.
+    assert set(payload["experience"]["focal_game"]["stats"]) == catalog_markets
+    assert set(payload["h2h"]["rows"][0]["stats"]) == catalog_markets

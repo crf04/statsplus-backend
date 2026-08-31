@@ -384,6 +384,76 @@ class PlayerGameLogRepository:
             season=season,
         )
 
+    def list_game_rows(
+        self,
+        season: str,
+        game_id: str,
+        *,
+        publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Return every canonical row stored for one exact game."""
+
+        canonical_season = validate_canonical_season(season)
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                return self._projected_game_rows(
+                    read.publication_id,
+                    canonical_season,
+                    game_id,
+                    connection=connection,
+                )
+        publication_rows = self._publication_rows(
+            canonical_season, publication_snapshot=publication_snapshot
+        )
+        if publication_rows is not None:
+            return tuple(
+                sorted(
+                    (
+                        record
+                        for record in publication_rows
+                        if record.game_id == game_id
+                    ),
+                    key=lambda record: record.player_id,
+                )
+            )
+        if not self._season_is_readable(canonical_season, connection=connection):
+            return ()
+        log_table = PlayerGameLog.__table__
+        with read_connection(self.engine, connection) as connection:
+            rows = connection.execute(
+                self._published_rows_statement()
+                .where(
+                    log_table.c.season == canonical_season,
+                    log_table.c.game_id == game_id,
+                )
+                .order_by(log_table.c.player_id.asc())
+            ).mappings()
+            return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
+    def _projected_game_rows(
+        self,
+        publication_id: str | None,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        if publication_id is None:
+            return ()
+        projection = PublicationPlayerGameLog.__table__
+        return self._decode_projection(
+            select(projection.c.row_payload)
+            .where(
+                projection.c.publication_id == publication_id,
+                projection.c.game_id == game_id,
+            )
+            .order_by(projection.c.player_id.asc()),
+            season=season,
+            connection=connection,
+        )
+
     def _projected_opponent_rows(
         self,
         publication_id: str | None,
@@ -803,12 +873,16 @@ class PlayerGameLogRepository:
         return frozenset(str(row) for row in rows)
 
     def get_sync_status(
-        self, season: str, game_id: str
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
     ) -> PlayerGameLogSyncStatus | None:
         """Return the bounded synchronization evidence for one game."""
         canonical_season = validate_canonical_season(season)
         sync_table = PlayerGameLogSync.__table__
-        with self.engine.connect() as connection:
+        with read_connection(self.engine, connection) as connection:
             row = connection.execute(
                 select(sync_table).where(
                     sync_table.c.season == canonical_season,
@@ -870,6 +944,7 @@ class PlayerGameLogRepository:
         player_id: int,
         *,
         season_type: str | None = REGULAR_SEASON_TYPE,
+        exclude_game_id: str | None = None,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
     ) -> PlayerSeasonRate | None:
@@ -877,6 +952,7 @@ class PlayerGameLogRepository:
             season,
             (player_id,),
             rate_season_type=season_type,
+            exclude_game_id=exclude_game_id,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )[player_id].season_rate
@@ -887,10 +963,15 @@ class PlayerGameLogRepository:
         player_ids: Iterable[int],
         *,
         rate_season_type: str | None = REGULAR_SEASON_TYPE,
+        exclude_game_id: str | None = None,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
     ) -> dict[int, PlayerSeasonLogSummary]:
-        """Return per-player rates and chronological combined-phase last tens."""
+        """Return per-player rates and chronological combined-phase last tens.
+
+        ``exclude_game_id`` drops one focal game from every summary so a
+        historical participant's own result never feeds its own baseline.
+        """
 
         canonical_season = validate_canonical_season(season)
         canonical_ids = tuple(sorted(set(player_ids)))
@@ -941,6 +1022,13 @@ class PlayerGameLogRepository:
                 for row in rows:
                     record = PlayerGameLogRecord(**dict(row))
                     rows_by_player[record.player_id].append(record)
+        if exclude_game_id is not None:
+            rows_by_player = {
+                player_id: [
+                    row for row in rows if row.game_id != exclude_game_id
+                ]
+                for player_id, rows in rows_by_player.items()
+            }
         return {
             player_id: PlayerSeasonLogSummary(
                 season=canonical_season,
@@ -1009,6 +1097,7 @@ class PlayerGameLogRepository:
         player_id: int,
         opponent_team_id: int,
         *,
+        before_date: date | None = None,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
@@ -1016,6 +1105,7 @@ class PlayerGameLogRepository:
             season,
             player_ids=(player_id,),
             opponent_team_id=opponent_team_id,
+            before_date=before_date,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
@@ -1026,6 +1116,7 @@ class PlayerGameLogRepository:
         player_ids: Iterable[int],
         opponent_team_id: int,
         *,
+        before_date: date | None = None,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
@@ -1036,6 +1127,7 @@ class PlayerGameLogRepository:
             season,
             player_ids=canonical_ids,
             opponent_team_id=opponent_team_id,
+            before_date=before_date,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
@@ -1046,6 +1138,7 @@ class PlayerGameLogRepository:
         *,
         player_ids: tuple[int, ...],
         opponent_team_id: int,
+        before_date: date | None = None,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
@@ -1053,12 +1146,15 @@ class PlayerGameLogRepository:
         if publication_snapshot is not None:
             read = publication_snapshot.read("player_game_logs")
             if getattr(read, "projection_ready", False):
-                return self._projected_opponent_rows(
-                    read.publication_id,
-                    canonical_season,
-                    player_ids=player_ids,
-                    opponent_team_id=opponent_team_id,
-                    connection=connection,
+                return self._before(
+                    self._projected_opponent_rows(
+                        read.publication_id,
+                        canonical_season,
+                        player_ids=player_ids,
+                        opponent_team_id=opponent_team_id,
+                        connection=connection,
+                    ),
+                    before_date,
                 )
         publication_rows = self._publication_rows(
             canonical_season, publication_snapshot=publication_snapshot
@@ -1067,40 +1163,56 @@ class PlayerGameLogRepository:
             # A rendered payload carries its rows in composition order, so the
             # card's newest-first contract is imposed here exactly as the
             # indexed and legacy statements impose it.
-            return tuple(
-                sorted(
-                    (
-                        record
-                        for record in publication_rows
-                        if record.player_id in player_ids
-                        and record.opponent_team_id == opponent_team_id
-                    ),
-                    key=lambda record: (
-                        record.game_date,
-                        -record.player_id,
-                        record.game_id,
-                    ),
-                    reverse=True,
-                )
+            return self._before(
+                tuple(
+                    sorted(
+                        (
+                            record
+                            for record in publication_rows
+                            if record.player_id in player_ids
+                            and record.opponent_team_id == opponent_team_id
+                        ),
+                        key=lambda record: (
+                            record.game_date,
+                            -record.player_id,
+                            record.game_id,
+                        ),
+                        reverse=True,
+                    )
+                ),
+                before_date,
             )
         if not self._season_is_readable(canonical_season, connection=connection):
             return ()
         log_table = PlayerGameLog.__table__
+        statement = self._published_rows_statement().where(
+            log_table.c.season == canonical_season,
+            log_table.c.player_id.in_(player_ids),
+            log_table.c.opponent_team_id == opponent_team_id,
+        )
+        if before_date is not None:
+            statement = statement.where(log_table.c.game_date < before_date)
         with read_connection(self.engine, connection) as connection:
             rows = connection.execute(
-                self._published_rows_statement()
-                .where(
-                    log_table.c.season == canonical_season,
-                    log_table.c.player_id.in_(player_ids),
-                    log_table.c.opponent_team_id == opponent_team_id,
-                )
-                .order_by(
+                statement.order_by(
                     log_table.c.game_date.desc(),
                     log_table.c.player_id.asc(),
                     log_table.c.game_id.desc(),
                 )
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
+    @staticmethod
+    def _before(
+        records: tuple[PlayerGameLogRecord, ...], before_date: date | None
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Keep only rows strictly before a focal game's date."""
+
+        if before_date is None:
+            return records
+        return tuple(
+            record for record in records if record.game_date < before_date
+        )
 
     def _season_is_readable(
         self, season: str, *, connection: Connection | None = None

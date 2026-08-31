@@ -1754,7 +1754,101 @@ GET /api/games/matchup?game_id
   → TeamMatchupQueryService newest Season + exact team Last-15 windows
   → gated MatchupInjuryService lazy pre-tip observation or retained final snapshot
   → backend-shaped league/team metrics, availability, and freshness
+  → additive Historical Matchup declaration and section-owned evidence
 ```
+
+### Historical Matchup composition (#208, #209)
+
+`MatchupService._experience` shapes the additive `experience` block, and
+`app/domain/matchup_experience.py` owns the one eligibility rule and the wire
+vocabulary both Matchup responses declare. A game is historical when the
+resolved Event Catalog event is completed and not postponed and the composed
+Player Pool contributes no player for either team; the Regular Season
+restriction is already enforced by the event read, which refuses every other
+kind with `404`. A closing projection
+set with memberships always contributes players, so that single condition is
+exactly "no archived closing projections", and it also keeps a legacy
+deployment's still-servable stored pool on the current experience instead of
+silently discarding real pool players.
+
+In historical mode the rail is composed from stored evidence rather than a
+Player Pool. `PlayerGameLogRepository.get_sync_status` is the completeness
+authority, and `list_game_rows` returns the exact game's canonical rows; both
+follow the same publication-projection, publication-payload, then legacy read
+order as every other player-log seam. Each row becomes one `_Participant`
+carrying the identity recorded for that game, so a later trade cannot rewrite
+which side a player was on. `get_player_summaries(exclude_game_id=…)` drops the
+focal row, so the participant's own result never feeds its own baseline or
+Matchup Score inputs.
+
+`MatchupService` reads the participant summary twice in historical mode. The
+display read keeps the focal game, because `season_scoring` and
+`last_10_minutes` are the completed-season context the rail shows under its
+declared hindsight label. The analytical read passes `exclude_game_id`, and it
+is the only one that reaches Matchup Score inputs. Current mode asks the one
+question once and reuses the answer for both, so its payload is unchanged.
+
+A historical score input must be provably free of the focal game, and the two
+team-side surfaces answer that differently. Team defense can:
+`TeamMatchupQueryService` exposes the distinction as two named reads rather
+than a flag on one. `get_latest_window` is the hindsight-display read and
+honors the #41 completed-season exemption; `get_focal_safe_window` refuses it.
+That exemption deliberately serves a finished season's aggregate for any date
+inside the season — sound for display, unsound as an analytical input about a
+game the aggregate contains — so an analytical caller names the focal-safe read
+and cannot reach the display rule by forgetting an argument. `MatchupService`
+scores from `_focal_safe_team_window(as_of=slate_date - 1 day)`, because a
+`TeamMatchupSnapshotScope` carries a date and a scope dated strictly before the
+game cannot contain it, while a scope dated on the game's own date cannot be
+shown to predate tip-off. Those pre-focal windows drive scoring only; the
+display windows and `league.surface_availability` are unchanged, so the Defense
+Sheet still renders the completed-season Publication under the #41 cutoff. Player Diet cannot: `player_diet_facts` is unique on
+`(season, player_id, base, slice_key)` with `share`, `volume`, and
+`games_played` and no game dimension, and no stored surface carries per-game
+play-type, shot-zone, or shot-type slices — `player_game_logs` and
+`canonical_game_ledger_player_facts` are traditional box-score primitives
+(the ledger's nullable assist-location columns are the only per-game slice
+evidence of any kind). Subtracting the focal contribution or rebuilding a
+pre-focal Diet would require new persistence, so `MatchupService` passes no
+Diet facts into historical scoring and each Diet-backed Base names itself in
+`missing_inputs` instead. The raw `diet_shares` display is untouched, being
+independent evidence rather than a score input.
+
+Score formulas and thresholds are unchanged; each window gains a
+`missing_inputs` list naming the score-contract inputs it could not consume. In historical mode `MatchupService._presented_window` then withholds
+the Blend of any window with a nonempty `missing_inputs`, so an unavailable
+cell explains itself instead of presenting a mean of the surviving Bases as a
+complete blended score. Withholding happens on the presented copy, not the
+memoized one, so a combo still composes from its parts exactly as it did and
+then withholds its own Blend under the same rule. Current-mode windows are
+byte-identical to what they were.
+
+Every section reports from its own evidence. A Defense Sheet section is
+available whenever any governed Base is available for that window, so a missing
+Player Pool, a missing legacy `stats_tables` marker, an unavailable Last-15
+window, missing participants, and unavailable injuries can none of them
+suppress an available Season Defense Sheet.
+`league.surface_availability` stays the per-Base authority. Completed-season
+Schedule evidence is immutable, so the Schedule section reports the Event
+Catalog collection time as `collected_at` provenance rather than an age-only
+stale warning; the separate `freshness.schedule` surface keeps its existing
+age-based status. The two surfaces answer different questions and neither is
+derived from the other.
+
+`MatchupSelectionService` mirrors the declaration. Both services ask
+`app/domain/matchup_experience.py` the same eligibility question and use its
+wire vocabulary, so the two responses cannot drift apart on what a Historical
+Matchup is. When the pool names nobody for a completed game, selection first
+requires the focal game's `get_sync_status` to be complete — the same
+completeness gate the Matchup route applies to Participants — and fails closed
+with `provider_unavailable` otherwise, rather than resolving a participant from
+rows that may still be partial. It then resolves the participant from the focal
+game's canonical rows, scores the governed Statistic Catalog categories,
+restricts `h2h` and `archetype` samples to games strictly before the focal
+date, and excludes the focal game from the delta baseline. The declaration adds no
+provider call and no schema change: the Event Catalog, completed-season
+publications, canonical player game logs, and game-time identities already
+exist.
 
 Both assemblies serve the reads they compose on one pooled connection.
 `MatchupService` and `MatchupSelectionService` take the application engine,
