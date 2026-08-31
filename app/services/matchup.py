@@ -32,11 +32,10 @@ from app.domain.nba_events import (
     is_postponed_event,
     resolve_stored_event_classification,
 )
-from app.domain.play_type_matchup import play_type_matchup
+from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.team_matchup_taxonomy import (
-    PLAY_TYPES,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
     SHOT_TYPE_STORED_TO_DISPLAY,
@@ -44,11 +43,9 @@ from app.domain.team_matchup_taxonomy import (
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
 )
-from app.services.team_matchup_publications import (
-    NBA_PUBLICATION_STREAM_KEYS,
-)
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
+    PLAYER_DIET_PUBLICATION_STREAM_KEYS,
     PlayerDietResult,
     StoredPlayerDietFact,
 )
@@ -69,6 +66,7 @@ from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.team_matchup_query import (
     LeagueMatchupMetric,
+    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
     TeamMatchupMetric,
     TeamMatchupWindow,
 )
@@ -164,7 +162,6 @@ _ASSIST_LOCATION_SLICES = frozenset(
     }
 )
 _DIET_SLICE_KEYS = {
-    "play_types": frozenset(PLAY_TYPES),
     "shot_zones": _GOVERNED_SHOT_ZONES,
     "shot_types": frozenset(_SHOT_TYPE_STORED_SLICES),
     "assist_locations": _ASSIST_LOCATION_SLICES,
@@ -178,7 +175,6 @@ _DIET_SLICE_KEYS = {
 # component still computes, but the cell is marked thin.
 _PLAY_TYPE_THIN_COVERAGE = 0.85
 _DIET_SHARE_BOUNDS = {
-    "play_types": (0.0, 1.005),
     "shot_zones": (1.0 - 1e-6, 1.0 + 1e-6),
     "shot_types": (0.9, 1.01),
     "assist_locations": (1.0 - 1e-6, 1.0 + 1e-6),
@@ -217,17 +213,10 @@ _SCOREABLE_MARKETS = frozenset(_SCORE_INPUT_BASES)
 
 _PUBLICATION_STREAM_KEYS = (
     "player_game_logs",
-    "traditional_opponent_season",
-    "traditional_opponent_l15",
-    "assist_locations_season",
-    "assist_locations_l15",
     "player_per36",
-    "synergy_play_types",
-    "grouped_shot_types",
-    "exact_shot_zones",
-    "player_assist_locations",
     "synergy:l15",
-    *sorted(NBA_PUBLICATION_STREAM_KEYS),
+    *sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS),
+    *sorted(frozenset().union(*TEAM_MATCHUP_PUBLICATION_STREAM_KEYS.values())),
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 
@@ -1709,16 +1698,15 @@ class MatchupService:
 
         if not facts:
             return None
+        if base == "play_types":
+            shares = complete_play_type_shares(
+                (fact.slice_key, fact.share) for fact in facts
+            )
+            return None if shares is None else sum(shares.values())
         keys = [fact.slice_key for fact in facts]
         if len(keys) != len(set(keys)):
             return None
-        # play_types is the one Base whose provider omits unobserved slices,
-        # so it is complete when every observed slice is governed; the other
-        # Bases are full partitions and must arrive whole.
-        if base == "play_types":
-            if not set(keys) <= _DIET_SLICE_KEYS[base]:
-                return None
-        elif set(keys) != _DIET_SLICE_KEYS[base]:
+        if set(keys) != _DIET_SLICE_KEYS[base]:
             return None
         lower, upper = _DIET_SHARE_BOUNDS[base]
         share_sum = sum(fact.share for fact in facts)

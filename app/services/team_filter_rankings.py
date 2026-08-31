@@ -60,6 +60,7 @@ _STREAM_KEY_BY_BASE: dict[str, str] = {
         for base, template in NBA_PUBLICATION_STREAMS.items()
     },
 }
+TEAM_FILTER_PUBLICATION_STREAM_KEYS = frozenset(_STREAM_KEY_BY_BASE.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +212,9 @@ class TeamFilterRankingService:
 
         return self.rank_all((team_filter,), season)[team_filter]
 
-    def rank_all(self, team_filters, season: str) -> dict[str, list[str]]:
+    def rank_all(
+        self, team_filters, season: str, *, publication_snapshot=None
+    ) -> dict[str, list[str]]:
         """Rank several Team Filters from one publication generation.
 
         Every filter in a request is answered from a single snapshot, so a
@@ -225,7 +228,9 @@ class TeamFilterRankingService:
             if team_filter not in TEAM_FILTER_RANKINGS:
                 raise ValueError(f"Unsupported team filter: {team_filter!r}")
         bases = {TEAM_FILTER_RANKINGS[name].base for name in requested}
-        rows_by_base = self._rows_by_base(bases, season)
+        rows_by_base = self._rows_by_base(
+            bases, season, publication_snapshot=publication_snapshot
+        )
         for team_filter in requested:
             ranking = TEAM_FILTER_RANKINGS[team_filter]
             rankings[team_filter] = self._rank(
@@ -266,14 +271,23 @@ class TeamFilterRankingService:
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [tricode for _value, tricode in scored]
 
-    def _rows_by_base(self, bases, season: str) -> dict:
+    def _rows_by_base(
+        self, bases, season: str, *, publication_snapshot=None
+    ) -> dict:
         """Read every needed Season publication in one generation."""
 
         if self.publication_reader is None:
             return {base: None for base in bases}
         stream_by_base = {base: _STREAM_KEY_BY_BASE[base] for base in bases}
-        reads = self.publication_reader.read_many(
-            tuple(stream_by_base.values()), season=season
+        reads = (
+            {
+                stream_key: publication_snapshot.read(stream_key)
+                for stream_key in stream_by_base.values()
+            }
+            if publication_snapshot is not None
+            else self.publication_reader.read_many(
+                tuple(stream_by_base.values()), season=season
+            )
         )
         cutoff = assume_utc(self._clock()).astimezone(EASTERN).date()
         return {
@@ -394,6 +408,7 @@ class TeamFilterRankingService:
 
 __all__ = [
     "TEAM_FILTER_RANKINGS",
+    "TEAM_FILTER_PUBLICATION_STREAM_KEYS",
     "TeamFilterRanking",
     "TeamFilterRankingService",
 ]
@@ -414,5 +429,17 @@ class PlayerDietReader:
     def __init__(self, diet_repository) -> None:
         self._diets = diet_repository
 
-    def get_for_players(self, season: str, player_ids):
-        return self._diets.get_for_players(season, player_ids)
+    def get_for_players(
+        self,
+        season: str,
+        player_ids,
+        *,
+        publication_snapshot=None,
+        connection=None,
+    ):
+        return self._diets.get_for_players(
+            season,
+            player_ids,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )

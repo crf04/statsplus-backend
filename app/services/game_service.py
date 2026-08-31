@@ -20,12 +20,21 @@ import pandas as pd
 from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.domain.play_type_matchup import play_type_matchup
+from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.models.game_logs import GameLogQuery, GameLogResponse
+from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_read_scope,
+)
+from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
 from .nba_cache import NBAGameCache
-from .team_filter_rankings import TEAM_FILTER_RANKINGS
+from .team_filter_rankings import (
+    TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    TEAM_FILTER_RANKINGS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +45,13 @@ logger = logging.getLogger(__name__)
 _PLAY_TYPE_BASE = "play_types"
 _PLAY_TYPE_STAT_KEY = "PTS"
 _DEFAULT_PLAYSTYLE_RANGE = (0.0, 200.0)
+_PUBLICATION_STREAM_KEYS = tuple(sorted({
+    "player_game_logs",
+    *PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    *TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    *TEAM_MATCHUP_PUBLICATION_STREAM_KEYS["season"],
+}))
+_PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 
 
 def _records(frame: pd.DataFrame):
@@ -59,6 +75,7 @@ class GameService:
         player_diets=None,
         team_matchups=None,
         team_filter_rankings=None,
+        publication_reader=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -77,6 +94,7 @@ class GameService:
         # database, which leaves PLAYTYPE_RTG null rather than failing.
         self.player_diets = player_diets
         self.team_matchups = team_matchups
+        self.publication_reader = publication_reader
 
         # Initialize cache
         if redis_client is None:
@@ -96,7 +114,9 @@ class GameService:
         else:
             raise ValueError(f"No matching player found for {player_name}.")
 
-    def _get_game_logs(self, player_name, season=None):
+    def _get_game_logs(
+        self, player_name, season=None, *, publication_snapshot=None
+    ):
         """Read player game logs directly from durable facts."""
         season = season or self.settings.nba.current_season
         if self.game_logs_source is None:
@@ -108,9 +128,21 @@ class GameService:
 
         # The pre-issues-9 contract deliberately leaves next_game unset.  Keep
         # that behavior until a separately specified provider seam exists.
-        return self.game_logs_source.get_player_logs(player_id, season), None
+        return call_with_read_scope(
+            self.game_logs_source.get_player_logs,
+            player_id,
+            season,
+            publication_snapshot=publication_snapshot,
+        ), None
 
-    def get_common_games(self, primary_player_logs, other_players_names, season=None):
+    def get_common_games(
+        self,
+        primary_player_logs,
+        other_players_names,
+        season=None,
+        *,
+        publication_snapshot=None,
+    ):
         """Find common games between players"""
         season = season or self.settings.nba.current_season
         primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
@@ -118,7 +150,12 @@ class GameService:
         # Loop through other players and find intersections based on game IDs and team abbreviations
         for player_name in other_players_names:
             # Reuse existing cached game logs function - returns tuple (gamelogs, next_team)
-            player_gamelogs, _ = self._get_game_logs(player_name, season)
+            player_gamelogs, _ = call_with_read_scope(
+                self._get_game_logs,
+                player_name,
+                season,
+                publication_snapshot=publication_snapshot,
+            )
             player_game_team_pairs = set(zip(player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']))
 
             primary_game_team_pairs = primary_game_team_pairs.intersection(player_game_team_pairs)
@@ -129,7 +166,14 @@ class GameService:
         common_game_ids = {pair[0] for pair in primary_game_team_pairs}
         return set(common_game_ids)
 
-    def get_games_to_exclude(self, player_logs, players_off_names, season=None):
+    def get_games_to_exclude(
+        self,
+        player_logs,
+        players_off_names,
+        season=None,
+        *,
+        publication_snapshot=None,
+    ):
         """Find same-team games where any named player appeared."""
         season = season or self.settings.nba.current_season
         exclude_game_ids = set()
@@ -139,7 +183,12 @@ class GameService:
 
         # Union same-team appearances for every player named as "off".
         for player_name in players_off_names:
-            player_gamelogs, _ = self._get_game_logs(player_name, season)
+            player_gamelogs, _ = call_with_read_scope(
+                self._get_game_logs,
+                player_name,
+                season,
+                publication_snapshot=publication_snapshot,
+            )
             player_game_team_pairs = set(zip(
                 player_gamelogs['GAME_ID'], player_gamelogs['TEAM_ABBREVIATION']
             ))
@@ -150,19 +199,39 @@ class GameService:
 
         return exclude_game_ids
 
-    def filter_players_on_off(self, df, players_on, players_off, season):
+    def filter_players_on_off(
+        self,
+        df,
+        players_on,
+        players_off,
+        season,
+        *,
+        publication_snapshot=None,
+    ):
         """Filter games based on players on/off"""
         if players_on:
-            common_games = self.get_common_games(df, players_on, season)
+            common_games = self.get_common_games(
+                df,
+                players_on,
+                season,
+                publication_snapshot=publication_snapshot,
+            )
             df = df[df['GAME_ID'].isin(common_games)]
 
         if players_off:
-            exclude_games = self.get_games_to_exclude(df, players_off, season)
+            exclude_games = self.get_games_to_exclude(
+                df,
+                players_off,
+                season,
+                publication_snapshot=publication_snapshot,
+            )
             df = df[~df['GAME_ID'].isin(exclude_games)]
 
         return df
 
-    def apply_filters(self, df, query, teams_against=None):
+    def apply_filters(
+        self, df, query, teams_against=None, *, publication_snapshot=None
+    ):
         """Apply all filters to game logs dataframe using one typed query."""
         min_filter, max_filter = query.minutes_filter
         df = df[(df['MIN'] >= min_filter) & (df['MIN'] <= max_filter)]
@@ -198,7 +267,11 @@ class GameService:
         # Apply players on/off filter
         if query.players_on or query.players_off:
             df = self.filter_players_on_off(
-                df, query.players_on, query.players_off, query.season_filter
+                df,
+                query.players_on,
+                query.players_off,
+                query.season_filter,
+                publication_snapshot=publication_snapshot,
             )
 
         # Apply typed self filters.  HTTP ``min,max`` ranges have already been
@@ -216,14 +289,18 @@ class GameService:
 
         return df
 
-    def _with_playtype_rating(self, df, player_name, season):
+    def _with_playtype_rating(
+        self, df, player_name, season, *, publication_snapshot=None
+    ):
         """Return a copy of the frame carrying one PLAYTYPE_RTG per row.
 
         The rating depends only on (player, opponent), so the governed facts
         are read once per request and every row is scored from that map.
         """
         df = df.copy()
-        ratings = self._playtype_ratings(player_name, season)
+        ratings = self._playtype_ratings(
+            player_name, season, publication_snapshot=publication_snapshot
+        )
         if not ratings or 'MATCHUP' not in df.columns:
             df['PLAYTYPE_RTG'] = pd.Series(
                 float('nan'), index=df.index, dtype='float64'
@@ -243,7 +320,9 @@ class GameService:
         )
         return df
 
-    def _playtype_ratings(self, player_name, season):
+    def _playtype_ratings(
+        self, player_name, season, *, publication_snapshot=None
+    ):
         """Map every opponent team id to its PLAYTYPE_RTG for this player.
 
         One Diet read plus one team-window read; ``100`` is a league-average
@@ -253,16 +332,25 @@ class GameService:
             return {}
 
         player_id = int(self.get_player_id(player_name))
-        diets = self.player_diets.get_for_players(season, (player_id,))
-        shares = {
-            fact.slice_key: fact.share
+        diets = call_with_read_scope(
+            self.player_diets.get_for_players,
+            season,
+            (player_id,),
+            publication_snapshot=publication_snapshot,
+        )
+        shares = complete_play_type_shares(
+            (fact.slice_key, fact.share)
             for fact in diets.players.get(player_id, ())
             if fact.base == _PLAY_TYPE_BASE
-        }
-        if not shares:
+        )
+        if shares is None:
             return {}
 
-        window = self.team_matchups.get_latest_window(season)
+        window = call_with_read_scope(
+            self.team_matchups.get_latest_window,
+            season,
+            publication_snapshot=publication_snapshot,
+        )
         if window is None:
             return {}
         league_allowed = self._play_type_allowed(
@@ -290,9 +378,18 @@ class GameService:
 
     def get_filtered_logs(self, player_name, query: GameLogQuery):
         """Get filtered game logs based on one typed :class:`GameLogQuery`."""
-        full_game_logs, next_team = self._get_game_logs(player_name, query.season_filter)
+        publication_snapshot = self._publication_snapshot(query.season_filter)
+        full_game_logs, next_team = call_with_read_scope(
+            self._get_game_logs,
+            player_name,
+            query.season_filter,
+            publication_snapshot=publication_snapshot,
+        )
         full_game_logs = self._with_playtype_rating(
-            full_game_logs, player_name, query.season_filter
+            full_game_logs,
+            player_name,
+            query.season_filter,
+            publication_snapshot=publication_snapshot,
         )
 
         # Resolve opponent filters into one intersecting team set, read from
@@ -301,7 +398,9 @@ class GameService:
         resolved_teams = None
         if query.teams_against:
             rankings = self._season_rankings(
-                query.teams_against, query.season_filter
+                query.teams_against,
+                query.season_filter,
+                publication_snapshot=publication_snapshot,
             )
             for index, team_filter in enumerate(query.teams_against):
                 matching = set(
@@ -312,7 +411,12 @@ class GameService:
                 resolved_teams = matching if resolved_teams is None else resolved_teams & matching
             resolved_teams = resolved_teams or set()
 
-        filtered_logs = self.apply_filters(full_game_logs.copy(), query, teams_against=resolved_teams)
+        filtered_logs = self.apply_filters(
+            full_game_logs.copy(),
+            query,
+            teams_against=resolved_teams,
+            publication_snapshot=publication_snapshot,
+        )
 
         # Calculate statistics
         average_columns = ['MIN', 'PTS', 'REB', 'AST', 'PRA', 'PA', 'PR', 'RA',
@@ -339,6 +443,21 @@ class GameService:
         )
         return result.model_dump()
 
+    def _publication_snapshot(self, season):
+        """Capture all immutable publications composed by this request."""
+
+        if self.publication_reader is None:
+            return None
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if not callable(snapshot):
+            snapshot = getattr(self.publication_reader, "read_snapshot", None)
+        if not callable(snapshot):
+            return None
+        keyword = {}
+        if accepts_keyword(snapshot, "projection_only_keys"):
+            keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
+
     def filter_teams(self, team_filter, rank_filter, season):
         """Select the top-N or bottom-N opponents by Season Rankings.
 
@@ -352,7 +471,9 @@ class GameService:
         ranked = self._season_rankings((team_filter,), season)[team_filter]
         return self._select_rank(ranked, rank_filter)
 
-    def _season_rankings(self, team_filters, season):
+    def _season_rankings(
+        self, team_filters, season, *, publication_snapshot=None
+    ):
         """Rank every requested Team Filter from one publication generation."""
 
         for team_filter in team_filters:
@@ -364,7 +485,12 @@ class GameService:
                 list(team_filters),
             )
             return {team_filter: [] for team_filter in team_filters}
-        return self.team_filter_rankings.rank_all(tuple(team_filters), season)
+        return call_with_read_scope(
+            self.team_filter_rankings.rank_all,
+            tuple(team_filters),
+            season,
+            publication_snapshot=publication_snapshot,
+        )
 
     @staticmethod
     def _select_rank(ranked, rank_filter):
