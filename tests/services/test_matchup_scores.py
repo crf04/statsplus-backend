@@ -31,6 +31,35 @@ from app.services.team_matchup_repository import (
 )
 
 
+def _computed_scores(player):
+    """The computed score cells, with the additive input naming checked once.
+
+    Every window carries `missing_inputs` naming the score-contract inputs it
+    could not consume. These tests assert the arithmetic, so the additive key
+    is verified here and removed from the compared shape; its exact values are
+    asserted in `tests/services/test_matchup_service.py`.
+    """
+
+    windows = [
+        window
+        for market in player["scores"].values()
+        for window in market.values()
+    ]
+    assert windows
+    assert all(isinstance(window["missing_inputs"], list) for window in windows)
+    return {
+        market: {
+            name: {
+                key: value
+                for key, value in window.items()
+                if key != "missing_inputs"
+            }
+            for name, window in market_windows.items()
+        }
+        for market, market_windows in player["scores"].items()
+    }
+
+
 SEASON = "2025-26"
 GAME_ID = "0022500584"
 LAL = 1610612747
@@ -319,7 +348,7 @@ def test_play_type_score_is_a_hand_computed_posted_market_row():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"] == {
+    assert _computed_scores(player) == {
         "PTS": {
             "season": {
                 "components": {
@@ -365,7 +394,7 @@ def test_shot_zone_score_uses_independent_season_and_last_15_concessions():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["FGA"] == {
+    assert _computed_scores(player)["FGA"] == {
         "season": {
             "components": {"shot_zones": {"value": 0.1, "thin": False}},
             "blend": {"value": 0.1, "thin": False},
@@ -395,7 +424,7 @@ def test_shot_type_score_derives_fga_from_stored_two_and_three_attempts():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["FGA"]["season"] == {
+    assert _computed_scores(player)["FGA"]["season"] == {
         "components": {"shot_types": {"value": 0.05, "thin": False}},
         "blend": {"value": 0.05, "thin": False},
     }
@@ -438,15 +467,15 @@ def test_structural_zero_shot_types_do_not_poison_supported_3pm_and_fg3a_slices(
         per_game={"PTS": 30.0, "AST": 10.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["3PM"]["season"] == {
+    assert _computed_scores(player)["3PM"]["season"] == {
         "components": {"shot_types": {"value": -0.05, "thin": False}},
         "blend": {"value": -0.05, "thin": False},
     }
-    assert player["scores"]["FG3A"]["season"] == {
+    assert _computed_scores(player)["FG3A"]["season"] == {
         "components": {"shot_types": {"value": -0.05, "thin": False}},
         "blend": {"value": -0.05, "thin": False},
     }
-    assert player["scores"]["PA"]["season"] == {
+    assert _computed_scores(player)["PA"]["season"] == {
         "components": {
             "shot_types": {"value": -0.01125, "thin": False},
             "assist_locations": {"value": 0.0, "thin": False},
@@ -473,7 +502,7 @@ def test_all_structural_zero_slices_emit_no_component_or_blend():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["3PM"]["season"] == {
+    assert _computed_scores(player)["3PM"]["season"] == {
         "components": {},
         "blend": None,
     }
@@ -494,7 +523,7 @@ def test_zero_league_with_positive_team_evidence_fails_closed():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["FG3A"]["season"] == {
+    assert _computed_scores(player)["FG3A"]["season"] == {
         "components": {},
         "blend": None,
     }
@@ -525,7 +554,7 @@ def test_assist_location_score_uses_the_player_assist_diet():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["AST"]["season"] == {
+    assert _computed_scores(player)["AST"]["season"] == {
         "components": {"assist_locations": {"value": 0.2, "thin": False}},
         "blend": {"value": 0.2, "thin": False},
     }
@@ -565,8 +594,8 @@ def test_combo_score_weights_component_markets_by_season_volumes():
         per_game={"PTS": 30.0, "AST": 10.0, "PA": 40.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert set(player["scores"]) == {"PA"}
-    assert player["scores"]["PA"] == {
+    assert set(_computed_scores(player)) == {"PA"}
+    assert _computed_scores(player)["PA"] == {
         "season": {
             "components": {
                 "play_types": {"value": 0.15, "thin": False},
@@ -596,10 +625,10 @@ def test_defensive_scores_use_one_traditional_component_and_no_blend():
         per_game={"TOV": 4.0, "STL": 2.0, "BLK": 1.0, "STKS": 3.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["TOV"]["season"] == {
+    assert _computed_scores(player)["TOV"]["season"] == {
         "components": {"traditional": {"value": 0.2, "thin": False}}
     }
-    assert player["scores"]["STKS"]["season"] == {
+    assert _computed_scores(player)["STKS"]["season"] == {
         "components": {
             "traditional": {"value": 0.033333, "thin": False}
         }
@@ -653,7 +682,7 @@ def test_offensive_blend_is_the_mean_of_computable_base_components():
         season_metrics=tuple(metrics),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PTS"]["season"] == {
+    assert _computed_scores(player)["PTS"]["season"] == {
         "components": {
             "play_types": {"value": 0.2, "thin": False},
             "shot_zones": {"value": 0.1, "thin": False},
@@ -682,7 +711,7 @@ def test_thin_flag_marks_low_player_season_volume_without_blanking_the_score():
         season_metrics=metrics,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["FGA"]["season"] == {
+    assert _computed_scores(player)["FGA"]["season"] == {
         "components": {"shot_types": {"value": 0.2, "thin": True}},
         "blend": {"value": 0.2, "thin": True},
     }
@@ -699,7 +728,7 @@ def test_thin_flag_marks_a_low_player_game_sample():
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PTS"]["season"] == {
+    assert _computed_scores(player)["PTS"]["season"] == {
         "components": {"play_types": {"value": 0.2, "thin": True}},
         "blend": {"value": 0.2, "thin": True},
     }
@@ -724,8 +753,8 @@ def test_rebound_score_does_not_use_the_player_season_game_floor():
         "components": {"traditional": {"value": 0.1, "thin": False}},
         "blend": {"value": 0.1, "thin": False},
     }
-    assert player["scores"]["REB"]["season"] == expected
-    assert player["scores"]["REB"]["last_15"] == expected
+    assert _computed_scores(player)["REB"]["season"] == expected
+    assert _computed_scores(player)["REB"]["last_15"] == expected
 
 
 def test_combo_components_and_blend_share_the_season_rate_game_floor():
@@ -756,7 +785,7 @@ def test_combo_components_and_blend_share_the_season_rate_game_floor():
         game_count=4,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PA"]["season"] == {
+    assert _computed_scores(player)["PA"]["season"] == {
         "components": {
             "play_types": {"value": 0.15, "thin": True},
             "assist_locations": {"value": -0.125, "thin": True},
@@ -795,11 +824,11 @@ def test_complete_provider_rounded_diet_partitions_score_without_normalization()
         season_metrics=metrics,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PTS"]["season"] == {
+    assert _computed_scores(player)["PTS"]["season"] == {
         "components": {"play_types": {"value": 0.0998, "thin": False}},
         "blend": {"value": 0.0998, "thin": False},
     }
-    assert player["scores"]["FGA"]["season"] == {
+    assert _computed_scores(player)["FGA"]["season"] == {
         "components": {"shot_types": {"value": 0.0999, "thin": False}},
         "blend": {"value": 0.0999, "thin": False},
     }
@@ -847,11 +876,11 @@ def test_unobserved_rounded_diet_residual_is_neutral_for_primitives_and_combos()
         per_game={"PTS": 30.0, "AST": 10.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PTS"]["season"] == {
+    assert _computed_scores(player)["PTS"]["season"] == {
         "components": {"shot_types": {"value": 0.0, "thin": False}},
         "blend": {"value": 0.0, "thin": False},
     }
-    assert player["scores"]["PA"]["season"] == {
+    assert _computed_scores(player)["PA"]["season"] == {
         "components": {
             "shot_types": {"value": 0.0, "thin": False},
             "assist_locations": {"value": 0.05, "thin": False},
@@ -887,11 +916,11 @@ def test_missing_diet_slices_fail_closed_except_for_the_partial_play_type_partit
         ),
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PTS"]["season"] == {
+    assert _computed_scores(player)["PTS"]["season"] == {
         "components": {"play_types": {"value": 0.1, "thin": False}},
         "blend": {"value": 0.1, "thin": False},
     }
-    assert player["scores"]["FGA"]["season"] == {
+    assert _computed_scores(player)["FGA"]["season"] == {
         "components": {},
         "blend": None,
     }
@@ -997,10 +1026,10 @@ def test_common_posted_market_union_has_decoder_safe_blends_for_every_offensive_
         },
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert tuple(player["scores"]) == markets
+    assert tuple(_computed_scores(player)) == markets
     for market in markets:
         for window_name in ("season", "last_15"):
-            window = player["scores"][market][window_name]
+            window = _computed_scores(player)[market][window_name]
             if market in {"TOV", "STL", "BLK", "STKS"}:
                 assert "blend" not in window
             else:
@@ -1061,7 +1090,7 @@ def test_combo_uses_full_season_volume_when_a_positive_part_is_unavailable(
         per_game={"PTS": 20.0, "REB": 10.0, "AST": 5.0},
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"][market]["season"] == {
+    assert _computed_scores(player)[market]["season"] == {
         "components": {
             base: {"value": value, "thin": True}
             for base, value in expected.items()
@@ -1084,7 +1113,7 @@ def test_public_matchup_indexes_each_window_once_and_memoizes_shared_primitives(
         metric_trackers=trackers,
     ).get_matchup(game_id=GAME_ID)["players"][0]
 
-    assert player["scores"]["PTS"]["season"]["blend"]["value"] == 0.2
+    assert _computed_scores(player)["PTS"]["season"]["blend"]["value"] == 0.2
     assert all(tracker.iterations == 1 for tracker in trackers)
     # One player-row serialization read plus one computation for the available
     # Season scope; that computation reads once for completeness and weighting.

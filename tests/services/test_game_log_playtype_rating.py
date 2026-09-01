@@ -14,6 +14,18 @@ from sqlalchemy import create_engine, event, text
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.domain.play_type_matchup import play_type_matchup
 from app.models.game_logs import GameLogQuery
+from app.services.game_logs_source import StoredGameLogsSource
+from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+from app.services.publication_snapshot_calls import accepts_keyword
+from app.services.team_filter_rankings import (
+    PlayerDietReader,
+    TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+    TeamFilterRankingService,
+)
+from app.services.team_matchup_query import (
+    TEAM_MATCHUP_PUBLICATION_STREAM_KEYS,
+    TeamMatchupQueryService,
+)
 
 
 LAL = 1610612747
@@ -64,6 +76,48 @@ class _Window:
 class _DietResult:
     def __init__(self, players):
         self.players = players
+
+
+class _RequiredSnapshotReader:
+    def __init__(self):
+        self.generation = object()
+        self.calls = 0
+
+    def snapshot(self, stream_keys, *, season, projection_only_keys=frozenset()):
+        assert set(stream_keys) == {
+            "player_game_logs",
+            *PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+            *TEAM_FILTER_PUBLICATION_STREAM_KEYS,
+            *TEAM_MATCHUP_PUBLICATION_STREAM_KEYS["season"],
+        }
+        assert season == "2025-26"
+        assert projection_only_keys == frozenset({"player_game_logs"})
+        self.calls += 1
+        return self.generation
+
+
+class _SnapshotGameLogs:
+    def __init__(self, required_snapshot):
+        self.required_snapshot = required_snapshot
+
+    def get_player_logs(self, player_id, season, *, publication_snapshot=None):
+        assert player_id == 2544
+        assert season == "2025-26"
+        assert publication_snapshot is self.required_snapshot
+        return _game_logs()
+
+
+class _SnapshotRankings:
+    def __init__(self, required_snapshot):
+        self.required_snapshot = required_snapshot
+
+    def rank_all(
+        self, team_filters, season, *, publication_snapshot=None
+    ):
+        assert tuple(team_filters) == ("OPP_PTS",)
+        assert season == "2025-26"
+        assert publication_snapshot is self.required_snapshot
+        return {"OPP_PTS": ["GSW"]}
 
 
 class _DietReader:
@@ -120,6 +174,28 @@ class _WindowReader:
             else:
                 teams.setdefault(row["team_id"], []).append(metric)
         return _Window(tuple(league), {key: tuple(value) for key, value in teams.items()})
+
+
+class _SnapshotDietReader(_DietReader):
+    def __init__(self, engine, required_snapshot):
+        super().__init__(engine)
+        self.required_snapshot = required_snapshot
+
+    def get_for_players(
+        self, season, player_ids, *, publication_snapshot=None, **kwargs
+    ):
+        assert publication_snapshot is self.required_snapshot
+        return super().get_for_players(season, player_ids, **kwargs)
+
+
+class _SnapshotWindowReader(_WindowReader):
+    def __init__(self, engine, required_snapshot):
+        super().__init__(engine)
+        self.required_snapshot = required_snapshot
+
+    def get_latest_window(self, season, *, publication_snapshot=None, **kwargs):
+        assert publication_snapshot is self.required_snapshot
+        return super().get_latest_window(season, **kwargs)
 
 
 @pytest.fixture
@@ -293,6 +369,25 @@ def test_a_player_without_a_diet_share_yields_an_empty_non_default_range(
     assert len(result["season_averages"]) == 1
 
 
+def test_an_invalid_play_type_diet_scores_null_like_the_matchup_page(
+    rating_engine, monkeypatch
+):
+    service = _service(rating_engine, monkeypatch)
+    with rating_engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE diet_shares SET share = 0.6 "
+                "WHERE slice_key = 'Transition'"
+            )
+        )
+
+    result = service.get_filtered_logs(
+        "LeBron James", GameLogQuery(season_filter="2025-26")
+    )
+
+    assert _ratings(result) == [None, None, None]
+
+
 def test_the_demo_database_scores_null_without_failing(rating_engine, monkeypatch):
     """No governed readers is the read-only demo branch, not an error."""
     service = _service(
@@ -350,6 +445,94 @@ def test_the_governed_facts_are_read_once_per_request_not_once_per_row(
     assert len(result["game_logs"]) == 3
     assert len([item for item in statements if "diet_shares" in item]) == 1
     assert len([item for item in statements if "team_windows" in item]) == 1
+
+
+def test_game_log_request_reads_one_publication_generation(
+    rating_engine, monkeypatch
+):
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(
+        game_service_module, "get_redis_client", lambda *args, **kwargs: None
+    )
+    publications = _RequiredSnapshotReader()
+    service = game_service_module.GameService(
+        rating_engine,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+        game_logs_source=_SnapshotGameLogs(publications.generation),
+        player_diets=_SnapshotDietReader(
+            rating_engine, publications.generation
+        ),
+        team_matchups=_SnapshotWindowReader(
+            rating_engine, publications.generation
+        ),
+        publication_reader=publications,
+    )
+
+    result = service.get_filtered_logs(
+        "LeBron James", GameLogQuery(season_filter="2025-26")
+    )
+
+    assert _ratings(result) == [_expected(GSW), _expected(BOS), _expected(GSW)]
+    assert publications.calls == 1
+
+
+def test_team_filters_and_playtype_ratings_share_one_publication_generation(
+    rating_engine, monkeypatch
+):
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(
+        game_service_module, "get_redis_client", lambda *args, **kwargs: None
+    )
+    publications = _RequiredSnapshotReader()
+    service = game_service_module.GameService(
+        rating_engine,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+        game_logs_source=_SnapshotGameLogs(publications.generation),
+        player_diets=_SnapshotDietReader(
+            rating_engine, publications.generation
+        ),
+        team_matchups=_SnapshotWindowReader(
+            rating_engine, publications.generation
+        ),
+        team_filter_rankings=_SnapshotRankings(publications.generation),
+        publication_reader=publications,
+    )
+
+    result = service.get_filtered_logs(
+        "LeBron James",
+        GameLogQuery(
+            season_filter="2025-26",
+            teams_against=("OPP_PTS",),
+            rank_filter=(1,),
+        ),
+    )
+
+    assert [row["MATCHUP"] for row in result["game_logs"]] == [
+        "LAL vs. GSW",
+        "LAL @ GSW",
+    ]
+    assert publications.calls == 1
+
+
+def test_production_game_log_readers_accept_one_publication_generation():
+    methods = (
+        StoredGameLogsSource.get_player_logs,
+        PlayerDietReader.get_for_players,
+        TeamMatchupQueryService.get_latest_window,
+        TeamFilterRankingService.rank_all,
+    )
+
+    assert all(
+        accepts_keyword(method, "publication_snapshot") for method in methods
+    )
 
 
 # --- route contract ----------------------------------------------------------

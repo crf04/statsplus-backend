@@ -8,11 +8,16 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from math import isfinite
 from statistics import fmean, pstdev
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.engine import Connection
 
 from app.domain.utc import assume_utc, parse_utc_iso
+from app.domain.team_matchup_taxonomy import (
+    NBA_PUBLICATION_WINDOWS,
+    matchup_stream_key,
+)
 from app.services.team_matchup_repository import (
     StoredTeamMatchupFact,
     StoredTeamMatchupObservation,
@@ -42,6 +47,23 @@ from app.services.team_matchup_publications import (
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+TEAM_MATCHUP_PUBLICATION_STREAMS = MappingProxyType({
+    window: MappingProxyType({
+        "traditional": matchup_stream_key("traditional", window),
+        "assist_locations": matchup_stream_key("assist_locations", window),
+        **{
+            base: template.format(window=window)
+            for base, template in NBA_PUBLICATION_STREAMS.items()
+        },
+    })
+    for window in NBA_PUBLICATION_WINDOWS
+})
+TEAM_MATCHUP_PUBLICATION_STREAM_KEYS = MappingProxyType({
+    window: frozenset(stream_by_base.values())
+    for window, stream_by_base in TEAM_MATCHUP_PUBLICATION_STREAMS.items()
+})
+
 
 @dataclass(frozen=True, slots=True)
 class LeagueMatchupMetric:
@@ -103,8 +125,61 @@ class TeamMatchupQueryService:
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
-        """Read the newest stored window on or before an optional slate date."""
+        """Read the newest stored window on or before an optional slate date.
 
+        This is the hindsight-display read. It honors the #41 completed-season
+        exemption, so a finished season's aggregate answers for any date inside
+        that season. Analytical callers must use ``get_focal_safe_window``.
+        """
+
+        return self._window_on_or_before(
+            season,
+            window_games=window_games,
+            as_of=as_of,
+            strict_as_of=False,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+
+    def get_focal_safe_window(
+        self,
+        season: str,
+        *,
+        as_of: date,
+        window_games: int | None = None,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> TeamMatchupWindow | None:
+        """Read a window that provably contains no game after ``as_of``.
+
+        The completed-season exemption serves a finished season's aggregate for
+        any date inside it. That is sound for hindsight display and unsound as
+        an analytical input about one of those dates, because the aggregate
+        contains that date's games. This read refuses it, so an evidence gap
+        surfaces as an unavailable surface rather than a contaminated number.
+        Analytical callers name this method instead of setting a flag, so a
+        read cannot silently fall back to the display rule.
+        """
+
+        return self._window_on_or_before(
+            season,
+            window_games=window_games,
+            as_of=as_of,
+            strict_as_of=True,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+
+    def _window_on_or_before(
+        self,
+        season: str,
+        *,
+        window_games: int | None,
+        as_of: date | None,
+        strict_as_of: bool,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> TeamMatchupWindow | None:
         current_date = assume_utc(self._clock()).astimezone(EASTERN).date()
         if as_of is not None and as_of > current_date:
             raise ValueError("future as_of dates cannot be queried")
@@ -121,6 +196,7 @@ class TeamMatchupQueryService:
                 cutoff=cutoff,
                 window_games=window_games,
                 legacy=None,
+                strict_as_of=strict_as_of,
                 publication_snapshot=publication_snapshot,
             )
         observation_snapshot = self.repository.get_snapshot(
@@ -159,6 +235,7 @@ class TeamMatchupQueryService:
             cutoff=cutoff,
             window_games=window_games,
             legacy=legacy_window,
+            strict_as_of=strict_as_of,
             publication_snapshot=publication_snapshot,
         )
 
@@ -187,6 +264,7 @@ class TeamMatchupQueryService:
         cutoff: date,
         window_games: int | None,
         legacy: TeamMatchupWindow | None,
+        strict_as_of: bool = False,
         publication_snapshot=None,
     ) -> TeamMatchupWindow | None:
         """Overlay only activated windows; inactive bases remain legacy-backed."""
@@ -194,14 +272,7 @@ class TeamMatchupQueryService:
         if self._publication_reader is None:
             return legacy
         window = "l15" if window_games is not None else "season"
-        stream_by_base = {
-            "traditional": f"traditional_opponent_{window}",
-            "assist_locations": f"assist_locations_{window}",
-        }
-        stream_by_base.update({
-            base: NBA_PUBLICATION_STREAMS[base].format(window=window)
-            for base in NBA_PUBLICATION_STREAMS
-        })
+        stream_by_base = TEAM_MATCHUP_PUBLICATION_STREAMS[window]
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key)
@@ -252,7 +323,9 @@ class TeamMatchupQueryService:
         snapshot_reasons: dict[str, str] = {}
         for base, read in active.items():
             cutoff_reason = publication_cutoff_reason(read, cutoff)
-            if cutoff_reason == "publication_cutoff_after_as_of" and (
+            if not strict_as_of and cutoff_reason == (
+                "publication_cutoff_after_as_of"
+            ) and (
                 season_complete_snapshot_accepted(
                     read,
                     base=base,
@@ -769,6 +842,8 @@ class TeamMatchupQueryService:
 
 __all__ = [
     "LeagueMatchupMetric",
+    "TEAM_MATCHUP_PUBLICATION_STREAM_KEYS",
+    "TEAM_MATCHUP_PUBLICATION_STREAMS",
     "TeamMatchupMetric",
     "TeamMatchupQueryService",
     "TeamMatchupWindow",

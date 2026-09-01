@@ -576,6 +576,7 @@ def build_dependencies(
             if publication_reader is not None
             else None
         ),
+        publication_reader=publication_reader,
     )
     matchup_player_pool_reader = projection_player_pool_reader
     selection_player_pool_reader = (
@@ -601,6 +602,7 @@ def build_dependencies(
         team_matchups=team_matchup_query_service,
         stats_freshness=stats_freshness_repository,
         settings=settings,
+        statistic_catalog=statistic_catalog,
         injuries=matchup_injury_service,
         database_only=not demo_database,
         publication_reader=publication_reader,

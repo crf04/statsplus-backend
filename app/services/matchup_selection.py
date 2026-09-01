@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
+from app.domain.matchup_experience import (
+    experience_mode,
+    is_historical_matchup,
+    player_source,
+)
 from app.domain.nba_events import resolve_stored_event_classification
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
@@ -18,10 +23,15 @@ from app.services.player_game_log_repository import (
     PlayerSeasonRate,
 )
 from app.services.player_game_log_values import (
+    player_game_log_focal_line,
     selected_player_game_log_market_values,
     validate_player_game_log_components,
 )
-from app.services.player_pool import PoolPlayer, SingleGamePlayerPoolReader
+from app.services.player_pool import (
+    PlayerPool,
+    PoolPlayer,
+    SingleGamePlayerPoolReader,
+)
 from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
@@ -136,28 +146,63 @@ class MatchupSelectionService:
                 connection=connection,
             )
         )
-        if pool is None:
-            raise ProviderUnavailableError(
-                "The stored matchup Player Pool is currently unavailable."
+        team_ids = (int(event["away_team_id"]), int(event["home_team_id"]))
+        pool_players = (
+            ()
+            if pool is None
+            else tuple(
+                candidate
+                for candidate in pool.players
+                if candidate.team_id in team_ids
             )
+        )
         player = next(
             (
                 candidate
-                for candidate in pool.players
+                for candidate in pool_players
                 if candidate.canonical_player_id == player_id
             ),
             None,
         )
-        if player is None:
-            raise ResourceNotFoundError("The requested matchup player was not found.")
-        opponent_team_id = self._opponent_team_id(event, player)
-        markets = player.market_categories
+        # A Historical Matchup keeps a canonical game-log participant
+        # selectable without any Player Pool membership. The eligibility rule
+        # is the one the Matchup response declares.
+        historical = is_historical_matchup(event, pool_players)
+        focal_record = None
+        if historical:
+            focal_record = self._focal_record(
+                season,
+                game_id,
+                player_id,
+                publication_snapshot=publication_snapshot,
+                connection=connection,
+            )
+            opponent_team_id = int(focal_record.opponent_team_id)
+            markets = tuple(sorted(self._statistics))
+        else:
+            if pool is None:
+                raise ProviderUnavailableError(
+                    "The stored matchup Player Pool is currently unavailable."
+                )
+            if player is None:
+                raise ResourceNotFoundError(
+                    "The requested matchup player was not found."
+                )
+            opponent_team_id = self._opponent_team_id(event, player)
+            markets = player.market_categories
         missing_markets = sorted(set(markets) - self._statistics.keys())
         if missing_markets:
             raise ProviderUnavailableError(
                 "The stored Player Pool categories are incompatible with the current "
                 "Statistic Catalog."
             )
+        # Pregame samples use games strictly before the focal game, and the
+        # baseline excludes the focal result, so the analysis never grades
+        # itself with the outcome it is contextualizing.
+        sample_scope = (
+            {"before_date": focal_record.game_date} if historical else {}
+        )
+        baseline_scope = {"exclude_game_id": game_id} if historical else {}
         log_freshness = call_with_read_scope(
             self.player_logs.get_read_freshness,
             season,
@@ -170,6 +215,7 @@ class MatchupSelectionService:
             player_id,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            **baseline_scope,
         )
         h2h_records = call_with_read_scope(
             self.player_logs.list_h2h_rows,
@@ -178,6 +224,7 @@ class MatchupSelectionService:
             opponent_team_id,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            **sample_scope,
         )
         h2h_rated = self._rate_rows(h2h_records, markets, {player_id: rate})
 
@@ -191,6 +238,7 @@ class MatchupSelectionService:
             opponent_team_id,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            **sample_scope,
         )
         summaries = call_with_read_scope(
             self.player_logs.get_player_summaries,
@@ -198,6 +246,7 @@ class MatchupSelectionService:
             peer_ids,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            **baseline_scope,
         )
         peer_rates = {
             peer_id: summary.season_rate for peer_id, summary in summaries.items()
@@ -205,8 +254,13 @@ class MatchupSelectionService:
         archetype_rated = self._rate_rows(archetype_records, markets, peer_rates)
         return {
             "player_id": player_id,
+            "experience": self._experience(historical, focal_record, markets),
             "freshness": {
-                "player_pool": dict(pool.freshness),
+                "player_pool": (
+                    PlayerPool.missing_projection_freshness()
+                    if pool is None
+                    else dict(pool.freshness)
+                ),
                 "player_game_logs": {
                     "status": log_freshness.status,
                     "retrieved_at": (
@@ -218,6 +272,76 @@ class MatchupSelectionService:
             },
             "h2h": self._table(h2h_rated, self.h2h_thin_min_games),
             "archetype": self._table(archetype_rated, self.archetype_thin_min_games),
+        }
+
+    def _focal_record(
+        self,
+        season: str,
+        game_id: str,
+        player_id: int,
+        *,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+    ) -> PlayerGameLogRecord:
+        # The Matchup route withholds Participants entirely until this game's
+        # canonical synchronization is complete, so selection reads the same
+        # evidence rather than resolving a participant from partial rows.
+        sync = call_with_read_scope(
+            self.player_logs.get_sync_status,
+            season,
+            game_id,
+            connection=connection,
+        )
+        if sync is None or sync.status != "complete":
+            raise ProviderUnavailableError(
+                "The stored canonical game logs for this matchup are incomplete."
+            )
+        rows = call_with_read_scope(
+            self.player_logs.list_game_rows,
+            season,
+            game_id,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+        record = next(
+            (row for row in rows if int(row.player_id) == player_id), None
+        )
+        if record is None:
+            raise ResourceNotFoundError("The requested matchup player was not found.")
+        return record
+
+    def _experience(
+        self,
+        historical: bool,
+        focal_record: PlayerGameLogRecord | None,
+        markets: Sequence[str],
+    ) -> dict[str, Any]:
+        """Declare the selection's mode, focal line, and sample provenance."""
+
+        if not historical or focal_record is None:
+            return {
+                "mode": experience_mode(False),
+                "player_source": player_source(False),
+                "focal_game": None,
+                "samples": {
+                    "context": "season_to_date",
+                    "excludes_focal_game": False,
+                },
+                "baseline": {
+                    "context": "season_to_date",
+                    "hindsight": False,
+                },
+            }
+        return {
+            "mode": experience_mode(True),
+            "player_source": player_source(True),
+            "focal_game": player_game_log_focal_line(
+                focal_record, markets, self._statistics
+            ),
+            "samples": {"context": "pregame", "excludes_focal_game": True},
+            # The stored Regular Season baseline spans the completed season,
+            # so it is labeled hindsight rather than pregame evidence.
+            "baseline": {"context": "completed_season", "hindsight": True},
         }
 
     def _publication_snapshot(self, season: str, *, session: Session | None = None):

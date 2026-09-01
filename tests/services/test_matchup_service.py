@@ -27,7 +27,9 @@ from app.services.player_diet import (
 )
 from app.services.player_game_log_repository import (
     PlayerGameLogReadFreshness,
+    PlayerGameLogRecord,
     PlayerGameLogRepository,
+    PlayerGameLogSyncStatus,
     PlayerSeasonLogSummary,
     PlayerSeasonRate,
 )
@@ -168,14 +170,46 @@ class RecordedDiets:
 
 
 class RecordedTeamWindows:
-    def __init__(self, season_window, last_15_window):
+    def __init__(
+        self,
+        season_window,
+        last_15_window,
+        *,
+        pre_focal_season_window=None,
+        pre_focal_cutoff=None,
+    ):
         self.season_window = season_window
         self.last_15_window = last_15_window
+        # A snapshot stored strictly before the focal game's date cannot
+        # contain that game; scopes carry a date, so nothing dated on the game
+        # date can be proven pre-tip.
+        self.pre_focal_season_window = pre_focal_season_window
+        self.pre_focal_cutoff = pre_focal_cutoff
         self.calls = []
 
     def get_latest_window(self, season, *, window_games=None, as_of=None):
-        self.calls.append((season, window_games, as_of))
-        return self.season_window if window_games is None else self.last_15_window
+        return self._window(season, window_games, as_of, focal_safe=False)
+
+    def get_focal_safe_window(self, season, *, as_of, window_games=None):
+        return self._window(season, window_games, as_of, focal_safe=True)
+
+    def _window(self, season, window_games, as_of, *, focal_safe):
+        self.calls.append((season, window_games, as_of, focal_safe))
+        if window_games is not None:
+            return self.last_15_window
+        if (
+            self.pre_focal_cutoff is not None
+            and as_of is not None
+            and as_of <= self.pre_focal_cutoff
+        ):
+            # Issue 41 serves the completed-season snapshot for any earlier
+            # date in that season. Only the focal-safe read refuses it.
+            return (
+                self.pre_focal_season_window
+                if focal_safe
+                else self.season_window
+            )
+        return self.season_window
 
 
 class RecordedInjuries:
@@ -479,6 +513,9 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         "name": "LeBron James",
         "team_id": LAL,
         "tricode": "LAL",
+        "player_source": "player_pool",
+        "stat_categories": ["PTS", "FGA"],
+        "focal_game_line": None,
         "posted_markets": ["PTS", "FGA"],
         "provenance": {
             "prizepicks": ["PTS", "FGA"],
@@ -521,12 +558,38 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                         "play_types": {"value": -0.011875, "thin": True}
                     },
                     "blend": {"value": -0.011875, "thin": True},
+                    "missing_inputs": [
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
                 },
-                "last_15": {"components": {}, "blend": None},
+                "last_15": {
+                    "components": {},
+                    "blend": None,
+                    "missing_inputs": [
+                        "team_defense:play_types",
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
+                },
             },
             "FGA": {
-                "season": {"components": {}, "blend": None},
-                "last_15": {"components": {}, "blend": None},
+                "season": {
+                    "components": {},
+                    "blend": None,
+                    "missing_inputs": [
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
+                },
+                "last_15": {
+                    "components": {},
+                    "blend": None,
+                    "missing_inputs": [
+                        "player_diet:shot_zones",
+                        "player_diet:shot_types",
+                    ],
+                },
             },
         },
         "injury_badge_ref": None,
@@ -852,17 +915,21 @@ def test_legacy_traditional_without_rebounds_keeps_defensive_scores_available(
             assert scores[market][window_name] == {
                 "components": {
                     "traditional": {"value": value, "thin": False}
-                }
+                },
+                "missing_inputs": [],
             }
     assert scores["REB"][missing_rebound_window] == {
         "components": {},
         "blend": None,
+        # The legacy scope has no stored OPP_REB identity to consume.
+        "missing_inputs": ["team_defense:traditional"],
     }
     assert scores["REB"][present_rebound_window] == {
         "components": {
             "traditional": {"value": -0.1, "thin": False}
         },
         "blend": {"value": -0.1, "thin": False},
+        "missing_inputs": [],
     }
 
 
@@ -934,9 +1001,11 @@ def test_past_matchup_queries_both_team_windows_at_the_slate_date():
     payload = service.get_matchup(game_id=GAME_ID)
 
     assert payload["game"]["game_id"] == GAME_ID
+    # A current-slate read is never strict: it asks the same question it
+    # always asked.
     assert service.team_matchups.calls == [
-        (SEASON, None, date(2026, 1, 13)),
-        (SEASON, 15, date(2026, 1, 13)),
+        (SEASON, None, date(2026, 1, 13), False),
+        (SEASON, 15, date(2026, 1, 13), False),
     ]
 
 
@@ -947,8 +1016,8 @@ def test_future_matchup_queries_both_team_windows_without_a_future_cutoff():
 
     assert payload["game"]["game_id"] == GAME_ID
     assert service.team_matchups.calls == [
-        (SEASON, None, None),
-        (SEASON, 15, None),
+        (SEASON, None, None, False),
+        (SEASON, 15, None, False),
     ]
 
 
@@ -1349,3 +1418,899 @@ def test_matchup_without_the_projection_degrades_without_a_legacy_fallback(
     }
     assert payload["players"][0]["season_scoring"] is None
     assert payload["players"][0]["last_10_minutes"] == []
+
+
+HISTORICAL_GAME_DATE = date(2026, 1, 10)
+AWAY_PARTICIPANT = 1629661
+HOME_PARTICIPANT = 203507
+
+
+def _final_event(**overrides):
+    """A completed Regular Season event whose tip is already in the past."""
+
+    return {
+        **_event(),
+        "scheduled_at": "2026-01-11T00:30:00+00:00",
+        "status_text": "Final",
+        "status_code": 3,
+        **overrides,
+    }
+
+
+def _pool_with_freshness(freshness):
+    return PlayerPool(
+        players=(
+            PoolPlayer(
+                2544,
+                "LeBron James",
+                LAL,
+                ("PTS", "FGA"),
+                {"prizepicks": ("PTS", "FGA")},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness=freshness,
+    )
+
+
+def _empty_projection_pool():
+    """The production pattern: a final game whose closing sets are empty."""
+
+    return PlayerPool(
+        players=(),
+        team_counts={},
+        freshness=PlayerPool.missing_projection_freshness(),
+    )
+
+
+def _closing_projection_freshness():
+    freshness = PlayerPool.unavailable_freshness()
+    freshness.update(
+        {
+            "state": "closing",
+            "observed_at": RETRIEVED_AT.isoformat(),
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+        }
+    )
+    return freshness
+
+
+def _game_log_record(
+    *,
+    player_id,
+    player_name,
+    team_id,
+    team_tricode,
+    opponent_team_id,
+    opponent_team_tricode,
+    game_id=GAME_ID,
+    game_date=HISTORICAL_GAME_DATE,
+    minutes=34.0,
+    points=24,
+):
+    return PlayerGameLogRecord(
+        season=SEASON,
+        season_type="Regular Season",
+        player_id=player_id,
+        game_id=game_id,
+        player_name=player_name,
+        game_date=game_date,
+        team_id=team_id,
+        team_tricode=team_tricode,
+        opponent_team_id=opponent_team_id,
+        opponent_team_tricode=opponent_team_tricode,
+        is_home=False,
+        minutes=minutes,
+        points=points,
+        rebounds=5,
+        assists=7,
+        field_goals_made=9,
+        field_goals_attempted=18,
+        three_pointers_made=3,
+        three_pointers_attempted=7,
+        free_throws_made=3,
+        free_throws_attempted=4,
+        offensive_rebounds=1,
+        defensive_rebounds=4,
+        turnovers=2,
+        steals=1,
+        blocks=1,
+        personal_fouls=2,
+    )
+
+
+def _historical_rows():
+    return (
+        _game_log_record(
+            player_id=AWAY_PARTICIPANT,
+            player_name="Away Participant",
+            # The identity recorded for this game. A later trade must not
+            # rewrite which side the participant played for.
+            team_id=LAL,
+            team_tricode="LAL",
+            opponent_team_id=BOS,
+            opponent_team_tricode="BOS",
+        ),
+        _game_log_record(
+            player_id=HOME_PARTICIPANT,
+            player_name="Home Participant",
+            team_id=BOS,
+            team_tricode="BOS",
+            opponent_team_id=LAL,
+            opponent_team_tricode="LAL",
+            points=31,
+        ),
+    )
+
+
+class RecordedGameLogs:
+    """A player-log seam that also serves one game's canonical rows."""
+
+    def __init__(
+        self,
+        rows=None,
+        *,
+        sync_status="complete",
+        season_rate=True,
+        focal_points=0.0,
+    ):
+        self.rows = _historical_rows() if rows is None else rows
+        self.sync_status = sync_status
+        self.season_rate = season_rate
+        # What the focal game itself contributes to the completed-season rate.
+        # A read that excludes the focal game must not see it.
+        self.focal_points = focal_points
+        self.summary_calls = []
+        self.game_row_calls = []
+
+    def list_game_rows(self, season, game_id):
+        assert season == SEASON
+        self.game_row_calls.append(game_id)
+        return tuple(row for row in self.rows if row.game_id == game_id)
+
+    def get_sync_status(self, season, game_id):
+        assert season == SEASON
+        if self.sync_status is None:
+            return None
+        return PlayerGameLogSyncStatus(
+            season=SEASON,
+            game_id=game_id,
+            season_type="Regular Season",
+            status=self.sync_status,
+            checksum="abc",
+            row_count=len(self.rows),
+            source_provider="pbp_stats",
+            retrieved_at=RETRIEVED_AT,
+        )
+
+    def get_player_summaries(self, season, player_ids, *, exclude_game_id=None):
+        assert season == SEASON
+        self.summary_calls.append((tuple(player_ids), exclude_game_id))
+        focal = 0.0 if exclude_game_id is not None else self.focal_points
+        return {
+            player_id: PlayerSeasonLogSummary(
+                season=SEASON,
+                player_id=player_id,
+                season_rate=(
+                    PlayerSeasonRate(
+                        season=SEASON,
+                        player_id=player_id,
+                        game_count=20,
+                        total_minutes=700,
+                        per_game={
+                            "PTS": 21.0 + focal,
+                            "REB": 5.0,
+                            "AST": 4.0,
+                        },
+                        per_minute={"PTS": 0.03, "REB": 0.007, "AST": 0.006},
+                    )
+                    if self.season_rate
+                    else None
+                ),
+                last_ten_minutes=(31.0 + focal, 32.0),
+            )
+            for player_id in player_ids
+        }
+
+    def get_read_freshness(self, season):
+        assert season == SEASON
+        return PlayerGameLogReadFreshness("fresh", RETRIEVED_AT)
+
+
+class RecordedEmptyDiets:
+    def get_for_players(self, season, player_ids):
+        assert season == SEASON
+        return PlayerDietResult(season=SEASON, players={}, observations=())
+
+
+class RecordedPartialDiets:
+    """Stored Diet for two of PTS's three Bases, so a Blend would be partial."""
+
+    def get_for_players(self, season, player_ids):
+        assert season == SEASON
+        return PlayerDietResult(
+            season=SEASON,
+            players={
+                player_id: (
+                    StoredPlayerDietFact(
+                        player_id,
+                        "play_types",
+                        "Transition",
+                        0.19,
+                        95.0,
+                        20,
+                        "possessions",
+                        "nba_synergy",
+                        RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id,
+                        "shot_zones",
+                        "Restricted Area",
+                        0.27,
+                        108.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        RETRIEVED_AT,
+                    ),
+                )
+                for player_id in player_ids
+            },
+            observations=tuple(
+                StoredPlayerDietObservation(base, "available", None, RETRIEVED_AT)
+                for base in BASES
+                if base != "traditional"
+            ),
+        )
+
+
+def _historical_service(
+    *,
+    player_logs=None,
+    pool=None,
+    season_window=None,
+    last_15_window=None,
+    injuries=None,
+    events=None,
+    diets=None,
+    stats_at=None,
+    team_windows=None,
+):
+    return MatchupService(
+        event_catalog=(
+            events if events is not None else RecordedEvents(events=[_final_event()])
+        ),
+        player_pool=RecordedPool(
+            _empty_projection_pool() if pool is None else pool
+        ),
+        player_logs=player_logs if player_logs is not None else RecordedGameLogs(),
+        player_diets=diets if diets is not None else RecordedEmptyDiets(),
+        team_matchups=team_windows or RecordedTeamWindows(
+            season_window if season_window is not None else _window(),
+            last_15_window,
+        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(stats_at)),
+        statistic_catalog=StatisticCatalog.load_default(),
+        injuries=injuries,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+        ),
+        clock=lambda: NOW,
+    )
+
+
+def test_final_regular_season_game_without_archived_projections_is_historical():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["experience"]["player_source"] == "game_logs"
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "completed_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": RETRIEVED_AT.isoformat(),
+    }
+    # The declaration is explicit: a client never has to read an empty array
+    # or a freshness marker to learn the mode.
+    assert payload["freshness"]["pool"]["state"] == "missing"
+
+
+def test_completed_season_schedule_keeps_provenance_without_a_stale_warning():
+    aged = NOW - timedelta(days=30)
+
+    payload = _historical_service(
+        events=RecordedEvents(events=[_final_event()], retrieved_at=aged)
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["freshness"]["schedule"] == {
+        "status": "stale",
+        "retrieved_at": aged.isoformat(),
+    }
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "completed_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": aged.isoformat(),
+    }
+
+
+def test_final_game_with_archived_closing_projections_stays_current():
+    logs = RecordedGameLogs()
+
+    payload = _historical_service(
+        pool=_pool_with_freshness(_closing_projection_freshness()),
+        player_logs=logs,
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert payload["experience"]["player_source"] == "player_pool"
+    assert payload["experience"]["sections"]["schedule"]["context"] == (
+        "current_season_catalog"
+    )
+    assert [row["canonical_id"] for row in payload["players"]] == [2544]
+    assert payload["players"][0]["player_source"] == "player_pool"
+    assert payload["players"][0]["posted_markets"] == ["PTS", "FGA"]
+    assert payload["players"][0]["focal_game_line"] is None
+    assert payload["game"]["away_team"]["targetable_player_count"] == 1
+    # Governed archived projection evidence keeps the existing experience, so
+    # the canonical game-log rail is never read.
+    assert logs.game_row_calls == []
+
+
+def test_a_final_game_with_a_servable_stored_pool_stays_current():
+    """A landed stored pool is still governed evidence for a past game."""
+
+    logs = RecordedGameLogs()
+
+    payload = _historical_service(
+        pool=_pool_with_freshness(
+            {
+                "status": "stale-served",
+                "retrieved_at": RETRIEVED_AT.isoformat(),
+                "providers": {},
+            }
+        ),
+        player_logs=logs,
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert [row["canonical_id"] for row in payload["players"]] == [2544]
+    assert logs.game_row_calls == []
+
+
+def test_a_past_tip_that_is_not_final_is_not_a_historical_matchup():
+    past = {**_event(), "scheduled_at": "2026-01-11T00:30:00+00:00"}
+
+    payload = _historical_service(
+        events=RecordedEvents(events=[past])
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert payload["players"] == []
+
+
+def test_a_postponed_event_is_not_a_historical_matchup():
+    payload = _historical_service(
+        events=RecordedEvents(events=[_final_event(postponed_status="postponed")])
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+
+
+def test_historical_matchup_reports_section_owned_evidence():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    sections = payload["experience"]["sections"]
+    assert sections["participants"] == {
+        "status": "available",
+        "source": "player_game_logs",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert sections["season_defense"] == {
+        "status": "available",
+        "source": "team_matchup_publication",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert sections["last_15_defense"] == {
+        "status": "unavailable",
+        "source": None,
+        "context": None,
+        "unavailable_reason": "no_point_in_time_snapshot",
+    }
+    assert sections["injuries"] == {
+        "status": "unavailable",
+        "source": None,
+        "context": None,
+        "unavailable_reason": "no_pregame_snapshot",
+    }
+    # Section provenance never replaces the per-Base authority.
+    assert payload["league"]["surface_availability"]["shot_zones"]["season"] == {
+        "status": "available",
+        "unavailable_reason": None,
+    }
+
+
+def test_a_retained_pregame_snapshot_is_labeled_pregame_and_removes_nobody():
+    # A stopped game serves only its retained pre-tip snapshot, so available
+    # historical injury evidence is pregame rather than current.
+    injury_block = {
+        "status": "fresh",
+        "unavailable_reason": None,
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+        "source": "rotowire",
+        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "teams": [],
+    }
+    injuries = RecordedInjuries(
+        MatchupInjuryResult(
+            injury_block,
+            frozenset({AWAY_PARTICIPANT}),
+            {AWAY_PARTICIPANT: "rotowire:6504"},
+        )
+    )
+
+    payload = _historical_service(injuries=injuries).get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["sections"]["injuries"] == {
+        "status": "available",
+        "source": "rotowire",
+        "context": "pregame",
+        "unavailable_reason": None,
+    }
+    # A canonical row means the player appeared: injury evidence never removes
+    # or badges a participant.
+    players = {row["canonical_id"]: row for row in payload["players"]}
+    assert set(players) == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    assert players[AWAY_PARTICIPANT]["injury_badge_ref"] is None
+
+
+def test_historical_participants_come_from_game_logs_on_both_sides():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    players = {row["canonical_id"]: row for row in payload["players"]}
+    assert set(players) == {AWAY_PARTICIPANT, HOME_PARTICIPANT}
+    assert players[AWAY_PARTICIPANT]["team_id"] == LAL
+    assert players[AWAY_PARTICIPANT]["tricode"] == "LAL"
+    assert players[HOME_PARTICIPANT]["team_id"] == BOS
+    assert players[HOME_PARTICIPANT]["tricode"] == "BOS"
+    for player in players.values():
+        assert player["player_source"] == "game_logs"
+        # Box-score participants carry no posted-market claim.
+        assert player["posted_markets"] == []
+        assert player["provenance"] == {}
+        assert player["injury_badge_ref"] is None
+        assert set(player["scores"]) == set(player["stat_categories"])
+        assert "PTS" in player["stat_categories"]
+    assert payload["game"]["away_team"]["targetable_player_count"] == 0
+    assert payload["game"]["home_team"]["targetable_player_count"] == 0
+
+
+def test_historical_participants_use_the_game_time_team_not_a_current_roster():
+    traded = _game_log_record(
+        player_id=AWAY_PARTICIPANT,
+        player_name="Away Participant",
+        team_id=LAL,
+        team_tricode="LAL",
+        opponent_team_id=BOS,
+        opponent_team_tricode="BOS",
+    )
+
+    # The catalog now carries a newer tricode for the same franchise; the
+    # identity recorded for that game still governs the rail.
+    renamed = _final_event(
+        away_team_tricode="LAK",
+        away_team={"id": LAL, "name": "Los Angeles Lakers", "tricode": "LAK"},
+    )
+
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(rows=(traded,)),
+        events=RecordedEvents(events=[renamed]),
+    ).get_matchup(game_id=GAME_ID)
+
+    (player,) = payload["players"]
+    assert (player["team_id"], player["tricode"]) == (LAL, "LAL")
+    # The opposing rail is rendered from this identity alone.
+    assert [
+        row["canonical_id"]
+        for row in payload["players"]
+        if row["team_id"] != BOS
+    ] == [AWAY_PARTICIPANT]
+
+
+def test_historical_participants_carry_the_focal_line_excluded_from_inputs():
+    logs = RecordedGameLogs()
+
+    payload = _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
+
+    player = next(
+        row for row in payload["players"] if row["canonical_id"] == AWAY_PARTICIPANT
+    )
+    assert player["focal_game_line"]["game_id"] == GAME_ID
+    assert player["focal_game_line"]["game_date"] == "2026-01-10"
+    assert player["focal_game_line"]["matchup"] == "LAL @ BOS"
+    assert player["focal_game_line"]["minutes"] == 34.0
+    assert player["focal_game_line"]["stats"]["PTS"] == 24.0
+    # 24 points in the focal game against 21.0 completed-season context. The
+    # displayed context is the completed season under its hindsight label; the
+    # analytical read that feeds scores and samples drops the focal row.
+    assert player["season_scoring"] == 21.0
+    assert (
+        (AWAY_PARTICIPANT, HOME_PARTICIPANT),
+        GAME_ID,
+    ) in logs.summary_calls
+
+
+def test_historical_scores_name_missing_inputs_without_a_partial_blend():
+    payload = _historical_service().get_matchup(game_id=GAME_ID)
+
+    scores = payload["players"][0]["scores"]
+    # No stored Diet evidence, so every Diet-backed window is unavailable
+    # rather than silently partial.
+    assert scores["PTS"]["season"] == {
+        "components": {},
+        "blend": None,
+        "missing_inputs": [
+            "player_diet:play_types",
+            "player_diet:shot_zones",
+            "player_diet:shot_types",
+        ],
+    }
+    assert scores["PTS"]["last_15"]["missing_inputs"][0] == (
+        "team_defense:play_types"
+    )
+    # The traditional Base consumes no Diet, so it still scores.
+    assert scores["TOV"]["season"]["components"]["traditional"]["value"] is not None
+    assert scores["TOV"]["season"]["missing_inputs"] == []
+
+
+def test_a_historical_blend_is_withheld_while_its_components_still_show():
+    # A window carrying OPP_REB lets the REB part score from team defense
+    # alone, so a combo has one usable component and several unusable ones.
+    rebounding = _window(
+        traditional_metrics=(
+            ("traditional", "OPP_REB", "OPP_REB", 44.0),
+            ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+            ("traditional", "OPP_STL", "OPP_STL", 7.0),
+            ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+        )
+    )
+    windows = RecordedTeamWindows(
+        _window(),
+        None,
+        pre_focal_season_window=rebounding,
+        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
+    )
+
+    payload = _historical_service(
+        diets=RecordedPartialDiets(), team_windows=windows
+    ).get_matchup(game_id=GAME_ID)
+
+    season = payload["players"][0]["scores"]["PRA"]["season"]
+    # The REB part's evidence is still shown, but a mean of the survivors is
+    # not a Blend of the contract's required inputs, so none is returned.
+    assert season["components"]["traditional"]["value"] is not None
+    assert season["blend"] is None
+    assert season["missing_inputs"] == [
+        "player_diet:play_types",
+        "player_diet:shot_zones",
+        "player_diet:shot_types",
+        "player_diet:assist_locations",
+    ]
+
+
+def test_the_focal_row_moves_historical_display_but_never_the_score():
+    # Display carries completed-season hindsight under its declared label;
+    # analytical score and sample inputs exclude the focal row. Changing only
+    # what the focal game contributes must move the first and not the second.
+    # The window carries OPP_REB so the REB part scores, which makes the PRA
+    # combo weight its component by the player's Season per-game volumes. The
+    # focal contribution therefore reaches a real number if it leaks.
+    def payload(focal_points):
+        return _historical_service(
+            player_logs=RecordedGameLogs(focal_points=focal_points),
+            season_window=_window(
+                traditional_metrics=(
+                    ("traditional", "OPP_REB", "OPP_REB", 44.0),
+                    ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+                    ("traditional", "OPP_STL", "OPP_STL", 7.0),
+                    ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+                )
+            ),
+        ).get_matchup(game_id=GAME_ID)
+
+    small = payload(3.0)
+    large = payload(9.0)
+
+    # A combo component really is computed from the Season rate, so the
+    # comparison below is not vacuous.
+    combo = small["players"][0]["scores"]["PRA"]["season"]
+    assert combo["components"]["traditional"]["value"] is not None
+
+    assert small["players"][0]["season_scoring"] == 24.0
+    assert large["players"][0]["season_scoring"] == 30.0
+    assert small["players"][0]["last_10_minutes"] == [34.0, 32.0]
+    assert large["players"][0]["last_10_minutes"] == [40.0, 32.0]
+    assert [row["scores"] for row in small["players"]] == [
+        row["scores"] for row in large["players"]
+    ]
+
+
+def test_historical_display_and_analysis_read_the_summary_separately():
+    logs = RecordedGameLogs(focal_points=3.0)
+
+    _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
+
+    # One read keeps the focal game for the labeled hindsight display, one
+    # drops it for the analysis. Neither borrows the other's summary.
+    assert {
+        exclude_game_id for _ids, exclude_game_id in logs.summary_calls
+    } == {GAME_ID, None}
+
+
+def test_changing_the_focal_contribution_to_diet_cannot_move_a_historical_score():
+    # The stored Player Diet is one completed-season aggregate per slice with
+    # no game dimension, so its focal contribution cannot be subtracted. The
+    # property the issue requires is therefore proven negatively: whatever the
+    # aggregate says, the presented historical score is identical.
+    without_diet = _historical_service().get_matchup(game_id=GAME_ID)
+    with_diet = _historical_service(diets=RecordedPartialDiets()).get_matchup(
+        game_id=GAME_ID
+    )
+
+    assert [row["scores"] for row in with_diet["players"]] == [
+        row["scores"] for row in without_diet["players"]
+    ]
+    # The raw Diet evidence is independent of the score and still displayed.
+    assert with_diet["players"][0]["diet_shares"]["play_types"]
+    assert without_diet["players"][0]["diet_shares"]["play_types"] == []
+
+
+def test_a_historical_score_names_player_diet_as_unusable_evidence():
+    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
+        game_id=GAME_ID
+    )
+
+    season = payload["players"][0]["scores"]["PTS"]["season"]
+    # No Diet-backed component survives, and the response says which inputs it
+    # could not use rather than consuming a focal-contaminated aggregate.
+    assert season["components"] == {}
+    assert season["blend"] is None
+    assert season["missing_inputs"] == [
+        "player_diet:play_types",
+        "player_diet:shot_zones",
+        "player_diet:shot_types",
+    ]
+
+
+def test_a_historical_score_reads_team_defense_from_before_the_focal_game():
+    contaminated = _window(
+        traditional_metrics=(
+            ("traditional", "OPP_TOV", "OPP_TOV", 99.0),
+            ("traditional", "OPP_STL", "OPP_STL", 99.0),
+            ("traditional", "OPP_BLK", "OPP_BLK", 99.0),
+        )
+    )
+    windows = RecordedTeamWindows(
+        contaminated,
+        None,
+        pre_focal_season_window=_window(),
+        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
+    )
+
+    payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
+
+    # Scores consume the snapshot stored strictly before the focal date; the
+    # completed-season sheet the focal game is inside is display-only.
+    baseline = _historical_service().get_matchup(game_id=GAME_ID)
+    assert [row["scores"] for row in payload["players"]] == [
+        row["scores"] for row in baseline["players"]
+    ]
+    assert payload["league"]["defense_sheet"]["traditional"]
+    assert any(
+        as_of == HISTORICAL_GAME_DATE - timedelta(days=1) and strict
+        for _season, _games, as_of, strict in windows.calls
+    )
+
+
+def test_only_a_later_completed_season_snapshot_scores_nothing_but_still_shows():
+    # The issue 41 exemption hands a non-strict read the completed-season
+    # snapshot for any earlier date in that season. That snapshot contains the
+    # focal game, so scoring must refuse it while the sheet still renders.
+    windows = RecordedTeamWindows(
+        _window(),
+        None,
+        pre_focal_season_window=None,
+        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
+    )
+
+    payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
+
+    # Display: the completed-season Defense Sheet is available and labeled.
+    assert payload["experience"]["sections"]["season_defense"] == {
+        "status": "available",
+        "source": "team_matchup_publication",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert payload["league"]["defense_sheet"]["shot_zones"]
+    assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
+    # Scoring: the same evidence is refused and named, not silently consumed.
+    for player in payload["players"]:
+        for windows_by_name in player["scores"].values():
+            season = windows_by_name["season"]
+            assert season["components"] == {}
+            assert season.get("blend") is None
+            assert season["missing_inputs"]
+    assert payload["players"][0]["scores"]["TOV"]["season"]["missing_inputs"] == [
+        "team_defense:traditional"
+    ]
+    # The scoring read asked strictly; the display read did not.
+    assert (SEASON, None, HISTORICAL_GAME_DATE - timedelta(days=1), True) in (
+        windows.calls
+    )
+    assert (SEASON, None, HISTORICAL_GAME_DATE, False) in windows.calls
+
+
+def test_a_historical_score_is_withheld_without_a_pre_focal_defense_window():
+    windows = RecordedTeamWindows(
+        _window(),
+        None,
+        pre_focal_season_window=None,
+        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
+    )
+
+    payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
+
+    season = payload["players"][0]["scores"]["TOV"]["season"]
+    assert season["components"] == {}
+    assert season["missing_inputs"] == ["team_defense:traditional"]
+    # The completed-season Defense Sheet still renders for the reader.
+    assert payload["experience"]["sections"]["season_defense"]["status"] == (
+        "available"
+    )
+    assert payload["league"]["defense_sheet"]["shot_zones"]
+
+
+def test_a_historical_window_with_every_required_input_keeps_its_cells():
+    payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
+        game_id=GAME_ID
+    )
+
+    # The traditional Base consumes no Diet, so TOV needs nothing it lacks and
+    # its cells are exactly what they were. Defensive windows omit `blend`.
+    season = payload["players"][0]["scores"]["TOV"]["season"]
+    assert season["missing_inputs"] == []
+    assert season["components"]["traditional"]["value"] is not None
+
+
+def test_a_current_matchup_keeps_its_partial_blend_unchanged():
+    payload = _service().get_matchup(game_id=GAME_ID)
+
+    # Current-slate scoring is untouched: a mean of the present Bases is still
+    # returned beside the named gaps.
+    assert payload["players"][0]["scores"]["PTS"]["season"] == {
+        "components": {"play_types": {"value": -0.011875, "thin": True}},
+        "blend": {"value": -0.011875, "thin": True},
+        "missing_inputs": ["player_diet:shot_zones", "player_diet:shot_types"],
+    }
+
+
+def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(season_rate=False)
+    ).get_matchup(game_id=GAME_ID)
+
+    assert len(payload["players"]) == 2
+    for player in payload["players"]:
+        assert player["season_scoring"] is None
+        assert player["scores"]["PRA"]["season"] == {
+            "components": {},
+            "blend": None,
+            "missing_inputs": ["player_season_rate"],
+        }
+    # Participants without a score sort last but are never dropped.
+    assert {row["canonical_id"] for row in payload["players"]} == {
+        AWAY_PARTICIPANT,
+        HOME_PARTICIPANT,
+    }
+
+
+def test_incomplete_game_logs_remove_only_participants():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(sync_status="in_progress")
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["participants"] == {
+        "status": "unavailable",
+        "source": "player_game_logs",
+        "context": None,
+        "unavailable_reason": "game_logs_incomplete",
+    }
+    # The available completed-season Defense Sheet still renders.
+    assert payload["experience"]["sections"]["season_defense"]["status"] == (
+        "available"
+    )
+    assert payload["league"]["defense_sheet"]["shot_zones"]
+    assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
+
+
+def test_a_game_without_canonical_rows_names_its_own_reason():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(rows=())
+    ).get_matchup(game_id=GAME_ID)
+
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["participants"][
+        "unavailable_reason"
+    ] == "no_game_log_rows"
+
+
+def test_available_season_defense_survives_every_other_missing_surface():
+    payload = _historical_service(
+        player_logs=RecordedGameLogs(sync_status=None)
+    ).get_matchup(game_id=GAME_ID)
+
+    # No pool, no legacy stats_tables marker, no Last 15, no injuries, no
+    # participants: none of them governs the Season Defense Sheet.
+    assert payload["freshness"]["pool"]["state"] == "missing"
+    assert payload["freshness"]["stats"] == {
+        "status": "missing",
+        "retrieved_at": None,
+    }
+    assert payload["freshness"]["injuries"]["status"] == "unavailable"
+    assert payload["freshness"]["team_matchups"]["last_15"]["status"] == (
+        "unavailable"
+    )
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["season_defense"]["status"] == (
+        "available"
+    )
+    assert payload["league"]["surface_availability"]["traditional"]["season"][
+        "status"
+    ] == "available"
+    assert payload["teams"][1]["defense_sheet"]["traditional"][0]["season"]
+
+
+def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
+    payload = _service().get_matchup(game_id=GAME_ID)
+
+    assert payload["experience"]["mode"] == "current"
+    assert payload["experience"]["player_source"] == "player_pool"
+    assert payload["experience"]["sections"]["schedule"] == {
+        "status": "available",
+        "source": "event_catalog",
+        "context": "current_season_catalog",
+        "unavailable_reason": None,
+        "collected_at": RETRIEVED_AT.isoformat(),
+    }
+    assert payload["experience"]["sections"]["participants"] == {
+        "status": "available",
+        "source": "player_pool",
+        "context": "posted_markets",
+        "unavailable_reason": None,
+    }
+    assert payload["experience"]["sections"]["injuries"] == {
+        "status": "unavailable",
+        "source": "rotowire",
+        "context": "current",
+        "unavailable_reason": "disabled",
+    }
+    assert payload["players"][0]["posted_markets"] == ["PTS", "FGA"]
+    assert set(payload) == {
+        "game",
+        "league",
+        "teams",
+        "players",
+        "injuries",
+        "freshness",
+        "provenance",
+        "coverage",
+        "experience",
+    }
