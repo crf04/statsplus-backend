@@ -3721,7 +3721,8 @@ def test_authenticated_production_pattern_game_serves_its_participants(
         assert player["posted_markets"] == []
         assert player["provenance"] == {}
         assert player["focal_game_line"]["game_id"] == PRODUCTION_GAME_ID
-        assert player["focal_game_line"]["matchup"] in {"LAC @ MIL", "MIL vs. LAC"}
+        expected_matchup = "MIL vs. LAC" if player["team_id"] == MIL else "LAC @ MIL"
+        assert player["focal_game_line"]["matchup"] == expected_matchup
         assert set(player["scores"]) == set(player["stat_categories"])
         for windows in player["scores"].values():
             for window in windows.values():
