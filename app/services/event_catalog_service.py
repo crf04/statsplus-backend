@@ -149,6 +149,24 @@ class EventCatalogService:
             validate_canonical_season(season), game_ids
         )
 
+    def get_event(
+        self,
+        season: str,
+        nba_game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        return self.repository.get_event(
+            validate_canonical_season(season), nba_game_id, connection=connection
+        )
+
+    def latest_final_scheduled_at(
+        self, season: str, *, connection: Connection | None = None
+    ) -> datetime | None:
+        return self.repository.latest_final_scheduled_at(
+            validate_canonical_season(season), connection=connection
+        )
+
     def count_events(
         self, season: str, *, connection: Connection | None = None
     ) -> int:

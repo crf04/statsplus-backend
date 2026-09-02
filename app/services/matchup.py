@@ -27,11 +27,7 @@ from app.domain.matchup_experience import (
     is_historical_matchup,
     player_source,
 )
-from app.domain.nba_events import (
-    is_final_event,
-    is_postponed_event,
-    resolve_stored_event_classification,
-)
+from app.domain.nba_events import resolve_stored_event_classification
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
@@ -224,7 +220,9 @@ _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 class EventCatalogReader(Protocol):
     def count_events(self, season: str) -> int: ...
 
-    def get_events(self, season: str) -> Sequence[Mapping[str, Any]]: ...
+    def get_event(self, season: str, nba_game_id: str) -> Mapping[str, Any] | None: ...
+
+    def latest_final_scheduled_at(self, season: str) -> datetime | None: ...
 
     def get_freshness(self, season: str, *, now: datetime) -> Mapping[str, Any]: ...
 
@@ -411,7 +409,7 @@ class MatchupService:
         season = self.settings.nba.current_season
         observed_at = assume_utc(self._clock())
         publication_snapshot = self._publication_snapshot(season, session=session)
-        event, events = self._event(season, game_id, connection=connection)
+        event = self._event(season, game_id, connection=connection)
         schedule_freshness = self._schedule_freshness(
             season, observed_at=observed_at, connection=connection
         )
@@ -607,7 +605,7 @@ class MatchupService:
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
-                "stats": self._stats_freshness(events, connection=connection),
+                "stats": self._stats_freshness(season, connection=connection),
                 "team_matchups": {
                     name: self._team_window_freshness(
                         window,
@@ -915,27 +913,30 @@ class MatchupService:
         game_id: str,
         *,
         connection: Connection | None = None,
-    ) -> tuple[Mapping[str, Any], Sequence[Mapping[str, Any]]]:
-        if self.event_catalog is None or call_with_read_scope(
+    ) -> Mapping[str, Any]:
+        if self.event_catalog is None:
+            raise ProviderUnavailableError(
+                "The matchup schedule is currently unavailable."
+            )
+        event = call_with_read_scope(
+            self.event_catalog.get_event, season, game_id, connection=connection
+        )
+        if event is not None:
+            classification = resolve_stored_event_classification(
+                game_id,
+                str(event.get("classification", event.get("season_type", ""))),
+            )
+            if classification.kind != "Regular Season":
+                raise ResourceNotFoundError(
+                    "The requested matchup is outside the Regular Season window."
+                )
+            return event
+        if call_with_read_scope(
             self.event_catalog.count_events, season, connection=connection
         ) == 0:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
-        events = call_with_read_scope(
-            self.event_catalog.get_events, season, connection=connection
-        )
-        for event in events:
-            if str(event.get("nba_game_id")) == game_id:
-                classification = resolve_stored_event_classification(
-                    game_id,
-                    str(event.get("classification", event.get("season_type", ""))),
-                )
-                if classification.kind != "Regular Season":
-                    raise ResourceNotFoundError(
-                        "The requested matchup is outside the Regular Season window."
-                    )
-                return event, events
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
     def _schedule_freshness(
@@ -2006,7 +2007,7 @@ class MatchupService:
 
     def _stats_freshness(
         self,
-        events: Sequence[Mapping[str, Any]],
+        season: str,
         *,
         connection: Connection | None = None,
     ) -> dict[str, Any]:
@@ -2016,13 +2017,10 @@ class MatchupService:
         status = "missing"
         if completed is not None:
             completed = assume_utc(completed)
-            latest_completed_game = max(
-                (
-                    parse_utc_iso(str(event["scheduled_at"]))
-                    for event in events
-                    if is_final_event(event) and not is_postponed_event(event)
-                ),
-                default=None,
+            latest_completed_game = call_with_read_scope(
+                self.event_catalog.latest_final_scheduled_at,
+                season,
+                connection=connection,
             )
             status = (
                 "stale"

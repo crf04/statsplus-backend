@@ -104,6 +104,83 @@ def test_game_id_read_returns_only_requested_events(tmp_path):
     assert [row["nba_game_id"] for row in rows] == ["0022500002"]
 
 
+def test_get_event_reads_one_stored_row_by_season_and_game_id(tmp_path):
+    service = EventCatalogService(_engine(tmp_path), FakeScheduleProvider())
+    service.refresh("2025-26")
+
+    postponed = service.get_event("2025-26", "0022500002")
+
+    assert postponed == next(
+        row for row in service.get_events("2025-26") if row["nba_game_id"] == "0022500002"
+    )
+    assert postponed["is_postponed"] is True
+    assert service.get_event("2025-26", "0022599999") is None
+    assert service.get_event("2024-25", "0022500002") is None
+
+
+def _insert_event(connection, *, game_id, scheduled_at, status_text, status_code,
+                  postponed_status=None, postponement_evidence=None, season="2025-26"):
+    connection.execute(
+        insert(EventCatalogEntry.__table__).values(
+            nba_game_id=game_id,
+            season=season,
+            home_team_id=2,
+            home_team_name="Home",
+            home_team_tricode="HME",
+            away_team_id=1,
+            away_team_name="Away",
+            away_team_tricode="AWY",
+            scheduled_at=scheduled_at,
+            status_text=status_text,
+            status_code=status_code,
+            postponed_status=postponed_status,
+            postponement_evidence=postponement_evidence,
+            classification="Regular Season",
+            first_seen_at=scheduled_at,
+            last_seen_at=scheduled_at,
+        )
+    )
+
+
+def test_latest_final_scheduled_at_is_the_newest_completed_non_postponed_game(tmp_path):
+    engine = _engine(tmp_path)
+    service = EventCatalogService(engine, FakeScheduleProvider())
+    assert service.latest_final_scheduled_at("2025-26") is None
+
+    with engine.begin() as connection:
+        _insert_event(connection, game_id="0022500001",
+                      scheduled_at=datetime(2025, 10, 23, tzinfo=timezone.utc),
+                      status_text="Final", status_code=3)
+        # Terminal text alone marks a final game even when the code is absent.
+        _insert_event(connection, game_id="0022500002",
+                      scheduled_at=datetime(2025, 10, 24, tzinfo=timezone.utc),
+                      status_text="Final/OT", status_code=None)
+        # A postponed game is never a completed game, whatever its code says.
+        _insert_event(connection, game_id="0022500003",
+                      scheduled_at=datetime(2025, 10, 25, tzinfo=timezone.utc),
+                      status_text="Final", status_code=3, postponed_status="Postponed")
+        _insert_event(connection, game_id="0022500004",
+                      scheduled_at=datetime(2025, 10, 26, tzinfo=timezone.utc),
+                      status_text="Final", status_code=3,
+                      postponement_evidence='{"gameStatusText": "PPD"}')
+        _insert_event(connection, game_id="0022500005",
+                      scheduled_at=datetime(2025, 10, 27, tzinfo=timezone.utc),
+                      status_text="7:00 pm ET", status_code=1)
+        _insert_event(connection, game_id="0022400001", season="2024-25",
+                      scheduled_at=datetime(2025, 10, 28, tzinfo=timezone.utc),
+                      status_text="Final", status_code=3)
+
+        # Empty structured evidence decodes to nothing, so it postpones nothing.
+        _insert_event(connection, game_id="0022500006",
+                      scheduled_at=datetime(2025, 10, 24, 12, tzinfo=timezone.utc),
+                      status_text="Final", status_code=3, postponement_evidence="{}")
+
+    latest = service.latest_final_scheduled_at("2025-26")
+
+    assert latest == datetime(2025, 10, 24, 12, tzinfo=timezone.utc)
+    assert latest.tzinfo is not None
+
+
 def test_stored_event_without_refresh_row_is_available_to_slate(tmp_path):
     engine = _engine(tmp_path)
     observed_at = datetime(2025, 10, 23, 1, tzinfo=timezone.utc)

@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import create_engine, event, text
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.domain.nba_events import is_final_event, is_postponed_event
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.migrations import run_migrations
 from app.services.collection_control import PublicationService
@@ -68,16 +69,37 @@ class RecordedEvents:
         self.events = events if events is not None else [_event()]
         self.count = count
         self.retrieved_at = retrieved_at
-        self.get_events_calls = 0
+        self.count_events_calls = 0
+        self.get_event_calls = 0
+        self.latest_final_calls = 0
 
     def count_events(self, season):
         assert season == SEASON
+        self.count_events_calls += 1
         return self.count
 
-    def get_events(self, season):
+    def get_event(self, season, game_id):
         assert season == SEASON
-        self.get_events_calls += 1
-        return self.events
+        self.get_event_calls += 1
+        return next(
+            (event for event in self.events if event["nba_game_id"] == game_id),
+            None,
+        )
+
+    def get_events(self, season):
+        raise AssertionError("a matchup must read one event, not the whole season")
+
+    def latest_final_scheduled_at(self, season):
+        assert season == SEASON
+        self.latest_final_calls += 1
+        return max(
+            (
+                datetime.fromisoformat(event["scheduled_at"])
+                for event in self.events
+                if is_final_event(event) and not is_postponed_event(event)
+            ),
+            default=None,
+        )
 
     def get_freshness(self, season, *, now):
         assert season == SEASON
@@ -370,7 +392,11 @@ def _service(
             },
         )
     return MatchupService(
-        event_catalog=events if events is not None else RecordedEvents(),
+        event_catalog=(
+            None
+            if events is False
+            else events if events is not None else RecordedEvents()
+        ),
         player_pool=RecordedPool(pool) if pool is not False else None,
         player_logs=RecordedLogs(),
         player_diets=RecordedDiets(),
@@ -986,12 +1012,14 @@ def test_stats_freshness_is_stale_when_it_predates_the_latest_completed_game():
     }
 
 
-def test_matchup_reuses_the_resolved_event_catalog_read_for_stats_freshness():
+def test_matchup_reads_one_event_and_one_latest_final_time_for_stats_freshness():
     events = RecordedEvents()
 
     _service(events=events).get_matchup(game_id=GAME_ID)
 
-    assert events.get_events_calls == 1
+    assert events.get_event_calls == 1
+    assert events.latest_final_calls == 1
+    assert events.count_events_calls == 0
 
 
 def test_past_matchup_queries_both_team_windows_at_the_slate_date():
@@ -1177,10 +1205,10 @@ def test_non_governed_event_team_degrades_team_surfaces_without_losing_game():
 
 
 def test_unknown_game_is_404_while_an_empty_schedule_surface_is_503():
-    with pytest.raises(ResourceNotFoundError):
+    with pytest.raises(ResourceNotFoundError, match="matchup game was not found"):
         _service(events=RecordedEvents(events=[])).get_matchup(game_id="unknown")
 
-    with pytest.raises(ProviderUnavailableError):
+    with pytest.raises(ProviderUnavailableError, match="schedule is currently unavailable"):
         _service(events=RecordedEvents(events=[], count=0)).get_matchup(game_id=GAME_ID)
 
 

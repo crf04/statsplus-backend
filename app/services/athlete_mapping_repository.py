@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 from contextlib import contextmanager
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
@@ -159,6 +159,19 @@ def _normalized_key(provider: str, provider_athlete_id: str) -> tuple[str, str]:
     if not isinstance(provider_athlete_id, str) or not provider_athlete_id.strip():
         raise ValueError("provider athlete ID must be a non-empty string")
     return provider.strip().casefold(), provider_athlete_id.strip()
+
+
+def _normalized_keys(
+    provider: str, provider_athlete_ids: Iterable[str]
+) -> tuple[str, tuple[str, ...]]:
+    """Normalize one provider and every identity it names, without duplicates."""
+
+    normalized_provider, _ = _normalized_key(provider, "_placeholder")
+    ordered: dict[str, None] = {}
+    for provider_athlete_id in provider_athlete_ids:
+        _, normalized_id = _normalized_key(provider, provider_athlete_id)
+        ordered[normalized_id] = None
+    return normalized_provider, tuple(ordered)
 
 
 def _operator(operator_id: str) -> str:
@@ -576,6 +589,55 @@ class AthleteMappingRepository:
                 )
             ).mappings().one_or_none()
         return self._rejection_record(row)
+
+    @_translate_storage_failures
+    def get_mappings(
+        self, provider: str, provider_athlete_ids: Iterable[str]
+    ) -> dict[str, ProviderAthleteMappingRecord]:
+        """Return the stored mapping of every named identity, keyed by ID.
+
+        One board names hundreds of identities, so it reads them in one
+        statement rather than one per market.  An identity with no row is
+        absent from the result.
+        """
+
+        provider, provider_athlete_ids = _normalized_keys(provider, provider_athlete_ids)
+        if not provider_athlete_ids:
+            return {}
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(ProviderAthleteMapping.__table__).where(
+                    and_(
+                        ProviderAthleteMapping.provider == provider,
+                        ProviderAthleteMapping.provider_athlete_id.in_(provider_athlete_ids),
+                    )
+                )
+            ).mappings().all()
+        return {
+            str(row["provider_athlete_id"]): self._mapping_record(row) for row in rows
+        }
+
+    @_translate_storage_failures
+    def get_rejections(
+        self, provider: str, provider_athlete_ids: Iterable[str]
+    ) -> dict[str, MappingRejectionRecord]:
+        """Return the stored rejection of every named identity, keyed by ID."""
+
+        provider, provider_athlete_ids = _normalized_keys(provider, provider_athlete_ids)
+        if not provider_athlete_ids:
+            return {}
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(AthleteMappingRejection.__table__).where(
+                    and_(
+                        AthleteMappingRejection.provider == provider,
+                        AthleteMappingRejection.provider_athlete_id.in_(provider_athlete_ids),
+                    )
+                )
+            ).mappings().all()
+        return {
+            str(row["provider_athlete_id"]): self._rejection_record(row) for row in rows
+        }
 
     def is_rejected(self, provider: str, provider_athlete_id: str) -> bool:
         rejection = self.get_rejection(provider, provider_athlete_id)

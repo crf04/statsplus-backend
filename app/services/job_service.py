@@ -238,7 +238,7 @@ class DataRefreshJobService:
         handlers: Mapping[str, RefreshCallable] | None = None,
         settings: Any | None = None,
         lease_seconds: float = 60.0,
-        poll_interval: float = 1.0,
+        poll_interval: float = 15.0,
         max_workers: int = 2,
         dispatch_on_startup: bool = True,
         start_poller: bool | None = None,

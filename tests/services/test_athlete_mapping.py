@@ -2404,6 +2404,109 @@ def test_board_persists_the_first_qualifying_mapping_and_is_idempotent(mapping_d
     assert len(repository.history(provider="prizepicks", provider_athlete_id="pp-15")) == 1
 
 
+def test_batched_mapping_reads_return_only_stored_identities(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    repository.reject(
+        "prizepicks",
+        "pp-99",
+        operator_id="ops@example.com",
+        reason="not an NBA athlete",
+    )
+
+    mappings = repository.get_mappings("PrizePicks", ["pp-15", " pp-99 ", "pp-missing"])
+    rejections = repository.get_rejections("prizepicks", ["pp-15", "pp-99"])
+
+    assert set(mappings) == {"pp-15"}
+    assert mappings["pp-15"] == repository.get_mapping("prizepicks", "pp-15")
+    assert set(rejections) == {"pp-99"}
+    assert rejections["pp-99"] == repository.get_rejection("prizepicks", "pp-99")
+    assert repository.get_mappings("prizepicks", []) == {}
+
+
+class _CountingRepository(AthleteMappingRepository):
+    """The real repository, recording which read seam served the resolver."""
+
+    def __init__(self, engine, **kwargs):
+        super().__init__(engine, **kwargs)
+        self.single_reads: list[tuple[str, str]] = []
+        self.batched_reads: list[tuple[str, tuple[str, ...]]] = []
+
+    def get_mapping(self, provider, provider_athlete_id):
+        self.single_reads.append((provider, provider_athlete_id))
+        return super().get_mapping(provider, provider_athlete_id)
+
+    def get_rejection(self, provider, provider_athlete_id):
+        self.single_reads.append((provider, provider_athlete_id))
+        return super().get_rejection(provider, provider_athlete_id)
+
+    def get_mappings(self, provider, provider_athlete_ids):
+        self.batched_reads.append((provider, tuple(provider_athlete_ids)))
+        return super().get_mappings(provider, provider_athlete_ids)
+
+    def get_rejections(self, provider, provider_athlete_ids):
+        self.batched_reads.append((provider, tuple(provider_athlete_ids)))
+        return super().get_rejections(provider, provider_athlete_ids)
+
+
+def test_a_board_read_reads_the_catalog_and_mapping_state_once(mapping_db):
+    """One board is one read of the catalog and of every identity it names."""
+
+    engine, now = mapping_db
+    repository = _CountingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_auto_resolution())
+    catalog = FakeCatalog([_catalog_row(15, "Nikola Jokić"), _catalog_row(23, "LeBron James")])
+    resolver = AthleteResolver(catalog, mapping_repository=repository)
+    markets = (
+        _market("pp-15", "Nikola Jokic"),
+        _market("pp-23", "LeBron James"),
+        _market("pp-15", "Nikola Jokic", market_id="m-pp-15-reb"),
+        _market("pp-77", "Luka Doncic"),
+    )
+    expected = [resolver.resolve_market(market, "2024-25") for market in markets]
+    catalog.requested_seasons.clear()
+    repository.single_reads.clear()
+
+    board_resolver = resolver.for_board(
+        "2024-25", [(market.provider, market.athlete.provider_id) for market in markets]
+    )
+    resolved = [board_resolver.resolve_market(market, "2024-25") for market in markets]
+
+    assert resolved == expected
+    assert catalog.requested_seasons == ["2024-25"]
+    assert repository.single_reads == []
+    assert repository.batched_reads == [
+        ("prizepicks", ("pp-15", "pp-23", "pp-77")),
+        ("prizepicks", ("pp-15", "pp-23", "pp-77")),
+    ]
+
+
+def test_board_service_resolves_every_market_from_one_board_read(mapping_db):
+    engine, now = mapping_db
+    repository = _CountingRepository(engine, clock=lambda: now)
+    catalog = FakeCatalog([_catalog_row(15, "Nikola Jokić"), _catalog_row(23, "LeBron James")])
+    service = _board_service(
+        _snapshot(
+            _market("pp-15", "Nikola Jokic"),
+            _market("pp-23", "LeBron James"),
+            _market("pp-15", "Nikola Jokic", market_id="m-pp-15-reb"),
+        ),
+        resolver=AthleteResolver(catalog, mapping_repository=repository),
+        repository=repository,
+    )
+
+    board = service.get_board(NBAMarketQuery(season="2024-25"))
+
+    assert board.usable
+    assert catalog.requested_seasons == ["2024-25"]
+    assert repository.single_reads == []
+    assert len(repository.batched_reads) == 2
+    assert {
+        outcome.canonical_player_id for outcome in board.mapping_outcomes
+    } == {15, 23}
+    assert repository.get_active_mapping("prizepicks", "pp-23").canonical_player_id == 23
+
 def test_board_never_replaces_a_manual_decision(mapping_db):
     engine, now = mapping_db
     repository = AthleteMappingRepository(engine, clock=lambda: now)

@@ -8,11 +8,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.freshness import exact_seconds
-from app.domain.nba_events import is_postponed_event, is_started_event
+from app.domain.nba_events import NBAGameStatus, is_postponed_event, is_started_event
 from app.domain.utc import assume_utc
 from app.models.event_catalog import EventCatalogEntry, EventCatalogRefresh
 from app.services.request_reads import read_connection
@@ -139,6 +139,52 @@ class EventCatalogRepository:
                 .order_by(table.c.scheduled_at, table.c.nba_game_id)
             ).mappings()
             return [self._serialize(row) for row in rows]
+
+    def get_event(
+        self,
+        season: str,
+        nba_game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one season event by its NBA game identity, or ``None``."""
+
+        table = EventCatalogEntry.__table__
+        with read_connection(self.engine, connection) as connection:
+            row = connection.execute(
+                select(table).where(
+                    table.c.nba_game_id == nba_game_id, table.c.season == season
+                )
+            ).mappings().one_or_none()
+            return self._serialize(row) if row is not None else None
+
+    def latest_final_scheduled_at(
+        self, season: str, *, connection: Connection | None = None
+    ) -> datetime | None:
+        """Tip time of the newest final, non-postponed event in one season.
+
+        This is the SQL form of ``is_final_event`` and ``not is_postponed_event``
+        over serialized rows: a governed FINAL code or terminal status text,
+        with neither a postponed status nor stored postponement evidence.  An
+        empty stored container is no evidence, exactly as it decodes to none.
+        """
+
+        table = EventCatalogEntry.__table__
+        with read_connection(self.engine, connection) as connection:
+            latest = connection.execute(
+                select(func.max(table.c.scheduled_at)).where(
+                    table.c.season == season,
+                    or_(
+                        table.c.status_code == NBAGameStatus.FINAL,
+                        func.lower(table.c.status_text).like("final%"),
+                    ),
+                    func.coalesce(table.c.postponed_status, "") == "",
+                    func.coalesce(table.c.postponement_evidence, "").in_(
+                        ("", "{}", "[]")
+                    ),
+                )
+            ).scalar_one()
+        return assume_utc(latest) if latest is not None else None
 
     def count_events(
         self, season: str, *, connection: Connection | None = None

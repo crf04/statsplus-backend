@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -239,6 +239,143 @@ def _provider_name(value: str | None) -> str:
     return name
 
 
+def _market_evidence(market: PlayerProjectionMarket) -> AthleteEvidence:
+    """Return the athlete evidence one market carries, with its team."""
+
+    if not isinstance(market, PlayerProjectionMarket):
+        raise TypeError("market must be PlayerProjectionMarket")
+    if market.athlete is None:
+        raise ValueError("provider market has no athlete evidence")
+    evidence = market.athlete
+    if evidence.team is None and market.team is not None:
+        evidence = AthleteEvidence(
+            provider_id=evidence.provider_id,
+            canonical_id=evidence.canonical_id,
+            name=evidence.name,
+            team=market.team,
+        )
+    return evidence
+
+
+@dataclass(frozen=True, slots=True)
+class _CatalogIndex:
+    """One season's catalog, indexed for exact lookups.
+
+    ``by_name`` keeps catalog order under each normalized display name, so
+    duplicate-name candidates are reported in the order the catalog lists
+    them, exactly as a scan of the rows would.
+    """
+
+    by_name: Mapping[str, tuple[CanonicalAthlete, ...]]
+    by_player_id: Mapping[int, Mapping[str, Any]]
+
+    @classmethod
+    def build(cls, rows: Sequence[Mapping[str, Any]]) -> "_CatalogIndex":
+        by_name: dict[str, list[CanonicalAthlete]] = {}
+        by_player_id: dict[int, Mapping[str, Any]] = {}
+        for row in rows:
+            by_name.setdefault(
+                normalize_athlete_name(row.get("display_name")), []
+            ).append(CanonicalAthlete.from_row(row))
+            by_player_id.setdefault(int(row["player_id"]), row)
+        return cls(
+            by_name={name: tuple(athletes) for name, athletes in by_name.items()},
+            by_player_id=by_player_id,
+        )
+
+
+class _BoardReads:
+    """Collaborator reads served once for the resolutions that share them.
+
+    A fresh instance per ``resolve`` call reads exactly what that call needs.
+    One instance across a board read is what lets every market of the board
+    share one catalog read and one batched read of its mapping state.
+    """
+
+    def __init__(self, resolver: "AthleteResolver") -> None:
+        self._resolver = resolver
+        self._catalogs: dict[str, _CatalogIndex] = {}
+        self._mappings: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+        self._rejections: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+
+    def preload(self, identities: Iterable[tuple[str, str]]) -> None:
+        """Read the mapping state of every identity in one statement each."""
+
+        repository = self._resolver.mapping_repository
+        if repository is None:
+            return
+        by_provider: dict[str, dict[str, None]] = {}
+        for provider, provider_id in identities:
+            if provider_id:
+                by_provider.setdefault(_provider_name(provider), {})[provider_id] = None
+        for provider, provider_ids in by_provider.items():
+            mappings = repository.get_mappings(provider, provider_ids)
+            rejections = repository.get_rejections(provider, provider_ids)
+            for provider_id in provider_ids:
+                stored_id = provider_id.strip()
+                mapping = mappings.get(stored_id)
+                rejection = rejections.get(stored_id)
+                self._mappings[(provider, provider_id)] = (
+                    None if mapping is None else mapping.to_dict()
+                )
+                self._rejections[(provider, provider_id)] = (
+                    None if rejection is None else rejection.to_dict()
+                )
+
+    def catalog(self, season: str) -> _CatalogIndex:
+        catalog = self._catalogs.get(season)
+        if catalog is None:
+            catalog = _CatalogIndex.build(self._resolver._catalog_rows(season))
+            self._catalogs[season] = catalog
+        return catalog
+
+    def mapping(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
+        key = (provider, provider_id)
+        if key not in self._mappings:
+            self._mappings[key] = self._resolver._get_mapping(provider, provider_id)
+        return self._mappings[key]
+
+    def rejection(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
+        key = (provider, provider_id)
+        if key not in self._rejections:
+            self._rejections[key] = self._resolver._get_rejection(provider, provider_id)
+        return self._rejections[key]
+
+
+@dataclass(frozen=True, slots=True)
+class BoardAthleteResolver:
+    """One board read's view of an ``AthleteResolver``.
+
+    It resolves exactly as the resolver does, from the catalog and mapping
+    state read once for the board.
+    """
+
+    resolver: "AthleteResolver"
+    reads: _BoardReads
+
+    def resolve(
+        self,
+        provider: str,
+        evidence: AthleteEvidence,
+        season: str,
+        *,
+        observed_at: datetime | str | None = None,
+    ) -> AthleteResolution:
+        return self.resolver.resolve(
+            provider, evidence, season, observed_at=observed_at, reads=self.reads
+        )
+
+    def resolve_market(
+        self,
+        market: PlayerProjectionMarket,
+        season: str,
+        *,
+        observed_at: datetime | str | None = None,
+    ) -> AthleteResolution:
+        evidence = _market_evidence(market)
+        return self.resolve(market.provider, evidence, season, observed_at=observed_at)
+
+
 class AthleteResolver:
     """Resolve provider athlete evidence against one requested catalog season."""
 
@@ -260,6 +397,7 @@ class AthleteResolver:
         season: str,
         *,
         observed_at: datetime | str | None = None,
+        reads: _BoardReads | None = None,
     ) -> AthleteResolution:
         """Resolve one provider's typed athlete evidence for one season.
 
@@ -269,7 +407,7 @@ class AthleteResolver:
         decisions taken while the read was in flight.
         """
 
-        resolution = self._resolve(provider, evidence, season)
+        resolution = self._resolve(provider, evidence, season, reads or _BoardReads(self))
         if observed_at is None:
             return resolution
         return replace(resolution, observed_at=observed_at)
@@ -279,6 +417,7 @@ class AthleteResolver:
         provider: str,
         evidence: AthleteEvidence,
         season: str,
+        reads: _BoardReads,
     ) -> AthleteResolution:
         if not isinstance(evidence, AthleteEvidence):
             raise TypeError("evidence must be AthleteEvidence")
@@ -294,7 +433,7 @@ class AthleteResolver:
                 reason="missing_identity",
             )
 
-        existing = self._get_mapping(normalized_provider, evidence.provider_id)
+        existing = reads.mapping(normalized_provider, evidence.provider_id)
         if existing is not None:
             try:
                 state = MappingResolutionState(str(existing.get("mapping_state", "")))
@@ -333,7 +472,7 @@ class AthleteResolver:
                     reason=state.value,
                 )
 
-        rejection = self._get_rejection(normalized_provider, evidence.provider_id)
+        rejection = reads.rejection(normalized_provider, evidence.provider_id)
         if rejection is not None and bool(rejection.get("is_active", True)):
             return self._result(
                 normalized_provider,
@@ -352,13 +491,8 @@ class AthleteResolver:
                 reason="missing_name",
             )
 
-        rows = self._catalog_rows(canonical_season)
-        all_matches = tuple(
-            CanonicalAthlete.from_row(row)
-            for row in rows
-            if normalize_athlete_name(row.get("display_name"))
-            == normalize_athlete_name(evidence.name)
-        )
+        catalog = reads.catalog(canonical_season)
+        all_matches = catalog.by_name.get(normalize_athlete_name(evidence.name), ())
         active_matches = tuple(
             athlete for athlete in all_matches if athlete.is_active_for_season
         )
@@ -389,7 +523,7 @@ class AthleteResolver:
                         candidates=mismatched,
                         reason="mapping_conflict",
                     )
-                claimed = self._catalog_athlete(rows, claimed_player_id, canonical_season)
+                claimed = self._catalog_athlete(catalog, claimed_player_id, canonical_season)
                 if claimed is not None and claimed.is_active_for_season:
                     if self._team_conflicts(evidence.team, claimed):
                         # Preserving the canonical ID across a label change never
@@ -509,21 +643,24 @@ class AthleteResolver:
     ) -> AthleteResolution:
         """Resolve the athlete evidence carried by one normalized market."""
 
-        if not isinstance(market, PlayerProjectionMarket):
-            raise TypeError("market must be PlayerProjectionMarket")
-        if market.athlete is None:
-            raise ValueError("provider market has no athlete evidence")
-        evidence = market.athlete
-        if evidence.team is None and market.team is not None:
-            evidence = AthleteEvidence(
-                provider_id=evidence.provider_id,
-                canonical_id=evidence.canonical_id,
-                name=evidence.name,
-                team=market.team,
-            )
-        return self.resolve(
-            market.provider, evidence, season, observed_at=observed_at
-        )
+        evidence = _market_evidence(market)
+        return self.resolve(market.provider, evidence, season, observed_at=observed_at)
+
+    def for_board(
+        self, season: str, identities: Iterable[tuple[str, str]]
+    ) -> "BoardAthleteResolver":
+        """Return this resolver's view of one board read.
+
+        A board names hundreds of markets against one catalog season and one
+        mapping state, so the view reads the catalog once, reads the mapping
+        and rejection state of every named identity once, and serves every
+        market from those reads.  Resolution stays a pure function of the
+        evidence and the catalog; only how often the catalog is read changes.
+        """
+
+        reads = _BoardReads(self)
+        reads.preload(identities)
+        return BoardAthleteResolver(self, reads)
 
     def _catalog_rows(self, season: str) -> Sequence[Mapping[str, Any]]:
         try:
@@ -735,7 +872,7 @@ class AthleteResolver:
 
     @staticmethod
     def _catalog_athlete(
-        rows: Sequence[Mapping[str, Any]],
+        catalog: _CatalogIndex,
         player_id: int,
         season: str,
     ) -> CanonicalAthlete | None:
@@ -745,10 +882,10 @@ class AthleteResolver:
         the row's activity for this season are both what the catalog says now.
         """
 
-        for row in rows:
-            if int(row["player_id"]) == player_id:
-                return CanonicalAthlete.from_row({**row, "season": season})
-        return None
+        row = catalog.by_player_id.get(player_id)
+        if row is None:
+            return None
+        return CanonicalAthlete.from_row({**row, "season": season})
 
     @staticmethod
     def _provider_name_changed(
@@ -821,6 +958,7 @@ __all__ = [
     "WITHDRAWN_CLAIM_STATES",
     "AthleteResolution",
     "AthleteResolver",
+    "BoardAthleteResolver",
     "CanonicalAthlete",
     "MappingResolutionState",
     "normalize_athlete_name",

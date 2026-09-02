@@ -11,7 +11,7 @@ fabricated.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import Enum
@@ -303,6 +303,115 @@ class EventResolution:
         return self.contradictory_evidence or (self.provider_evidence,)
 
 
+
+def _market_evidence(market: PlayerProjectionMarket) -> EventEvidence:
+    """Return the event evidence one market carries."""
+
+    if not isinstance(market, PlayerProjectionMarket):
+        raise TypeError("market must be PlayerProjectionMarket")
+    if market.event is None:
+        raise ValueError("provider market has no event evidence")
+    return market.event
+
+
+class _BoardReads:
+    """Collaborator reads served once for the resolutions that share them.
+
+    A fresh instance per ``resolve`` call reads exactly what that call needs.
+    One instance across a board read is what lets every market of the board
+    share one read of the catalog, its freshness, and its mapping state.
+    """
+
+    def __init__(self, resolver: "EventResolver") -> None:
+        self._resolver = resolver
+        self._unavailable: dict[str, str | None] = {}
+        self._events: dict[str, tuple[CanonicalEvent, ...]] = {}
+        self._mappings: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+        self._rejections: dict[tuple[str, str], Mapping[str, Any] | None] = {}
+
+    def preload(self, identities: Iterable[tuple[str, str]]) -> None:
+        """Read the mapping state of every identity in one statement each."""
+
+        repository = self._resolver.mapping_repository
+        if repository is None:
+            return
+        by_provider: dict[str, dict[str, None]] = {}
+        for provider, provider_id in identities:
+            if provider_id:
+                by_provider.setdefault(_provider_name(provider), {})[provider_id] = None
+        for provider, provider_ids in by_provider.items():
+            mappings = repository.get_mappings(provider, provider_ids)
+            rejections = repository.get_rejections(provider, provider_ids)
+            for provider_id in provider_ids:
+                stored_id = provider_id.strip()
+                mapping = mappings.get(stored_id)
+                rejection = rejections.get(stored_id)
+                self._mappings[(provider, provider_id)] = (
+                    None if mapping is None else mapping.to_dict()
+                )
+                self._rejections[(provider, provider_id)] = (
+                    None if rejection is None else rejection.to_dict()
+                )
+
+    def unavailable_reason(self, season: str) -> str | None:
+        if season not in self._unavailable:
+            self._unavailable[season] = self._resolver._catalog_unavailable_reason(season)
+        return self._unavailable[season]
+
+    def events(self, season: str) -> tuple[CanonicalEvent, ...]:
+        events = self._events.get(season)
+        if events is None:
+            events = self._resolver._catalog_events(season)
+            self._events[season] = events
+        return events
+
+    def mapping(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
+        key = (provider, provider_id)
+        if key not in self._mappings:
+            self._mappings[key] = self._resolver._get_mapping(provider, provider_id)
+        return self._mappings[key]
+
+    def rejection(self, provider: str, provider_id: str) -> Mapping[str, Any] | None:
+        key = (provider, provider_id)
+        if key not in self._rejections:
+            self._rejections[key] = self._resolver._get_rejection(provider, provider_id)
+        return self._rejections[key]
+
+
+@dataclass(frozen=True, slots=True)
+class BoardEventResolver:
+    """One board read's view of an ``EventResolver``.
+
+    It resolves exactly as the resolver does, from the catalog, its
+    freshness, and the mapping state read once for the board.
+    """
+
+    resolver: "EventResolver"
+    reads: _BoardReads
+
+    def resolve(
+        self,
+        provider: str,
+        evidence: EventEvidence,
+        season: str,
+        *,
+        observed_at: datetime | str | None = None,
+    ) -> EventResolution:
+        return self.resolver.resolve(
+            provider, evidence, season, observed_at=observed_at, reads=self.reads
+        )
+
+    def resolve_market(
+        self,
+        market: PlayerProjectionMarket,
+        season: str,
+        *,
+        observed_at: datetime | str | None = None,
+    ) -> EventResolution:
+        evidence = _market_evidence(market)
+        return self.resolve(market.provider, evidence, season, observed_at=observed_at)
+
+
 class EventResolver:
     """Resolve provider event evidence against one requested catalog season."""
 
@@ -331,6 +440,7 @@ class EventResolver:
         season: str,
         *,
         observed_at: datetime | str | None = None,
+        reads: _BoardReads | None = None,
     ) -> EventResolution:
         """Resolve one provider's typed event evidence for one season.
 
@@ -340,7 +450,7 @@ class EventResolver:
         to order it against decisions taken while the read was in flight.
         """
 
-        resolution = self._resolve(provider, evidence, season)
+        resolution = self._resolve(provider, evidence, season, reads or _BoardReads(self))
         if observed_at is None:
             return resolution
         return replace(resolution, observed_at=observed_at)
@@ -354,19 +464,15 @@ class EventResolver:
     ) -> EventResolution:
         """Resolve the event evidence carried by one normalized market."""
 
-        if not isinstance(market, PlayerProjectionMarket):
-            raise TypeError("market must be PlayerProjectionMarket")
-        if market.event is None:
-            raise ValueError("provider market has no event evidence")
-        return self.resolve(
-            market.provider, market.event, season, observed_at=observed_at
-        )
+        evidence = _market_evidence(market)
+        return self.resolve(market.provider, evidence, season, observed_at=observed_at)
 
     def _resolve(
         self,
         provider: str,
         evidence: EventEvidence,
         season: str,
+        reads: _BoardReads,
     ) -> EventResolution:
         if not isinstance(evidence, EventEvidence):
             raise TypeError("evidence must be EventEvidence")
@@ -377,7 +483,7 @@ class EventResolver:
         existing = (
             None
             if not provider_event_id
-            else self._get_mapping(normalized_provider, provider_event_id)
+            else reads.mapping(normalized_provider, provider_event_id)
         )
         if existing is not None:
             governed = self._governed_result(
@@ -390,14 +496,14 @@ class EventResolver:
                 # neither handed to the board nor recorded against; the
                 # decision itself is untouched and returns with the next
                 # refresh.
-                unavailable = self._catalog_unavailable_reason(canonical_season)
+                unavailable = reads.unavailable_reason(canonical_season)
                 if unavailable is None:
                     return governed
                 return self._unavailable_result(
                     normalized_provider, evidence, canonical_season, unavailable
                 )
         if provider_event_id:
-            rejection = self._get_rejection(normalized_provider, provider_event_id)
+            rejection = reads.rejection(normalized_provider, provider_event_id)
             if rejection is not None and bool(rejection.get("is_active", True)):
                 return self._result(
                     normalized_provider,
@@ -407,12 +513,12 @@ class EventResolver:
                     reason="rejected",
                 )
 
-        unavailable = self._catalog_unavailable_reason(canonical_season)
+        unavailable = reads.unavailable_reason(canonical_season)
         if unavailable is not None:
             return self._unavailable_result(
                 normalized_provider, evidence, canonical_season, unavailable
             )
-        events = self._catalog_events(canonical_season)
+        events = reads.events(canonical_season)
         return self._match(
             normalized_provider, evidence, canonical_season, events, existing
         )
@@ -883,6 +989,23 @@ class EventResolver:
         record = self.mapping_repository.get_rejection(provider, provider_id)
         return None if record is None else record.to_dict()
 
+    def for_board(
+        self, season: str, identities: Iterable[tuple[str, str]]
+    ) -> "BoardEventResolver":
+        """Return this resolver's view of one board read.
+
+        A board names many markets against one Event Catalog season and one
+        mapping state, so the view reads the catalog and its freshness once,
+        reads the mapping and rejection state of every named identity once,
+        and serves every market from those reads.  Resolution stays a pure
+        function of the evidence, the catalog, and the governed mapping state;
+        only how often they are read changes.
+        """
+
+        reads = _BoardReads(self)
+        reads.preload(identities)
+        return BoardEventResolver(self, reads)
+
     @classmethod
     def _unavailable_result(
         cls,
@@ -927,6 +1050,7 @@ __all__ = [
     "CLAIMING_EVENT_MAPPING_STATES",
     "DEFAULT_EVENT_MATCH_WINDOW",
     "WITHDRAWN_EVENT_CLAIM_STATES",
+    "BoardEventResolver",
     "CanonicalEvent",
     "EventResolution",
     "EventResolutionState",
