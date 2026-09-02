@@ -416,6 +416,45 @@ def test_settings_parse_env_values(monkeypatch):
     assert settings.llm.enable_fallback is True
 
 
+def test_database_pool_settings_have_typed_defaults():
+    settings = load_settings(environ={"FLASK_ENV": "testing"})
+
+    assert settings.database.pool_size == 3
+    assert settings.database.max_overflow == 4
+    assert settings.database.pool_recycle_seconds == 300
+    assert settings.database.connect_timeout_seconds == 5
+
+
+def test_database_pool_settings_parse_env_values(monkeypatch):
+    monkeypatch.setenv("FLASK_ENV", "testing")
+    monkeypatch.setenv("DATABASE_POOL_SIZE", "10")
+    monkeypatch.setenv("DATABASE_MAX_OVERFLOW", "20")
+    monkeypatch.setenv("DATABASE_POOL_RECYCLE_SECONDS", "600")
+    monkeypatch.setenv("DATABASE_CONNECT_TIMEOUT_SECONDS", "15")
+
+    settings = load_settings()
+
+    assert settings.database.pool_size == 10
+    assert settings.database.max_overflow == 20
+    assert settings.database.pool_recycle_seconds == 600
+    assert settings.database.connect_timeout_seconds == 15
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DATABASE_POOL_SIZE", "0"),
+        ("DATABASE_POOL_SIZE", "not-an-integer"),
+        ("DATABASE_MAX_OVERFLOW", "-1"),
+        ("DATABASE_POOL_RECYCLE_SECONDS", "0"),
+        ("DATABASE_CONNECT_TIMEOUT_SECONDS", "0"),
+    ],
+)
+def test_database_pool_settings_reject_out_of_range_values(name, value):
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing", name: value})
+
+
 def test_llm_fallback_defaults_to_one_bounded_attempt(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "development")
     monkeypatch.setenv("DATABASE_URL", "sqlite:///nba_play_types.db")

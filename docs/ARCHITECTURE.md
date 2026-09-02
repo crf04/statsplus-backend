@@ -44,7 +44,7 @@ The app reads from five distinct sources:
 | NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Fail-closed traditional box-score fallback for governed ledger games whose primary PBP evidence is malformed; accepted composite observations retain both source documents |
 | RotoWire injuries | gated `app.providers.rotowire.RotoWireInjuryProvider` → injected `requests.Session` | Disabled by default; one current JSON observation only after both the feature and permission gates are explicit |
 
-Redis is an optional cache. Connection failure disables caching without blocking startup. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
+Redis is an optional cache. Connection failure disables caching without blocking startup. After startup, a Redis connection or timeout error opens a per-process breaker in `NBAGameCache` (`REDIS_FAILURE_COOLDOWN_SECONDS`, 30 s) during which `get`/`set`/`delete` bypass Redis instead of paying the socket timeout on every call; `get_cache_stats()` reports `circuit_open`. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
 
 The default database URL is `sqlite:///nba_play_types.db`, relative to the current working directory. Run commands from the repository root or set an absolute `DATABASE_URL`.
 
@@ -3733,6 +3733,14 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   Procfile defaults). A true cross-process bound would need shared locking
   (e.g. Redis) and is intentionally out of scope; operators scale the bound and
   worker count together.
+- `app.utils.db.get_engine()` applies `DatabaseSettings` pool configuration
+  (`pool_size`, `max_overflow`, `pool_recycle_seconds`,
+  `connect_timeout_seconds`) only to Postgres engines, so the worst-case
+  Postgres connection count is `processes × (pool_size + max_overflow)` — with
+  the Procfile's 4 gunicorn workers and the documented defaults, `4 × (3 + 4)
+  = 28`. Scripts that call `create_engine` directly
+  (`scripts/migrate.py`, `scripts/nightly_refresh.py`, and similar
+  one-shot/operator scripts) are not governed by these settings.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
 - The bundled provider-generated tables are validated as a public fixture; they
   are not application migration targets.

@@ -84,6 +84,10 @@ class DatabaseSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     url: str = DEFAULT_SQLITE_URL
+    pool_size: int = Field(default=3, ge=1)
+    max_overflow: int = Field(default=4, ge=0)
+    pool_recycle_seconds: int = Field(default=300, ge=1)
+    connect_timeout_seconds: int = Field(default=5, ge=1)
 
 
 class AuthenticationSettings(BaseModel):
@@ -682,6 +686,14 @@ def _build_settings(
 
     environment = reader.text("FLASK_ENV", "development") or "development"
     database_url = reader.text("DATABASE_URL", DEFAULT_SQLITE_URL) or DEFAULT_SQLITE_URL
+    database_pool_size = reader.integer("DATABASE_POOL_SIZE", 3)
+    database_max_overflow = reader.integer("DATABASE_MAX_OVERFLOW", 4)
+    database_pool_recycle_seconds = reader.integer(
+        "DATABASE_POOL_RECYCLE_SECONDS", 300
+    )
+    database_connect_timeout_seconds = reader.integer(
+        "DATABASE_CONNECT_TIMEOUT_SECONDS", 5
+    )
 
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
 
@@ -807,7 +819,14 @@ def _build_settings(
     try:
         settings = RuntimeSettings(
             environment=environment,
-            database=_validated_model(DatabaseSettings, url=database_url),
+            database=_validated_model(
+                DatabaseSettings,
+                url=database_url,
+                pool_size=database_pool_size,
+                max_overflow=database_max_overflow,
+                pool_recycle_seconds=database_pool_recycle_seconds,
+                connect_timeout_seconds=database_connect_timeout_seconds,
+            ),
             auth=auth,
             cache=cache,
             features=features,

@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import ArgumentError
 
-from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.config.settings import DatabaseSettings, RuntimeSettings, get_runtime_settings
 
 
 DEFAULT_SQLITE_PATH: Final[str] = "sqlite:///nba_play_types.db"
@@ -101,10 +101,26 @@ def is_demo_database_url(database_url: str) -> bool:
 
 
 @lru_cache(maxsize=8)
-def _create_engine(database_url: str) -> Engine:
-    """Create and cache an engine for one normalized database URL."""
+def _create_engine(
+    database_url: str, pool: DatabaseSettings | None = None
+) -> Engine:
+    """Create and cache an engine for one normalized URL and pool config.
 
-    return create_engine(database_url)
+    ``pool`` is applied only to Postgres engines; SQLite engines are built
+    with no extra keyword arguments. ``DatabaseSettings`` is frozen, so it is
+    hashable and takes part in the cache key.
+    """
+
+    if pool is None:
+        return create_engine(database_url)
+    return create_engine(
+        database_url,
+        pool_pre_ping=True,
+        pool_size=pool.pool_size,
+        max_overflow=pool.max_overflow,
+        pool_recycle=pool.pool_recycle_seconds,
+        connect_args={"connect_timeout": pool.connect_timeout_seconds},
+    )
 
 
 def get_engine(settings: RuntimeSettings | None = None) -> Engine:
@@ -112,7 +128,10 @@ def get_engine(settings: RuntimeSettings | None = None) -> Engine:
 
     The engine is created from the validated runtime settings object. The
     bundled SQLite database remains the safe local default, and engines are
-    memoized by normalized URL so imports across modules share a pool.
+    memoized by normalized URL and pool configuration so imports across
+    modules share a pool. Postgres engines apply the configured connection
+    pool (pre-ping, size, overflow, recycle, and connect timeout); SQLite
+    engines are built exactly as before, with no extra keyword arguments.
 
     Returns
     -------
@@ -121,8 +140,11 @@ def get_engine(settings: RuntimeSettings | None = None) -> Engine:
     """
 
     runtime_settings = settings or get_runtime_settings()
-    normalized_url = _normalize_database_url(runtime_settings.database.url)
-    return _create_engine(normalized_url)
+    database_settings = runtime_settings.database
+    normalized_url = _normalize_database_url(database_settings.url)
+    if make_url(normalized_url).get_backend_name() != "postgresql":
+        return _create_engine(normalized_url)
+    return _create_engine(normalized_url, database_settings)
 
 
 # Preserve the small cache-control surface callers historically got from the
