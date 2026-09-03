@@ -439,7 +439,6 @@ click==8.4.2 \
     # via
     #   -r requirements.txt
     #   flask
-    #   nltk
     #   spacy
 cloudpathlib==0.25.0 \
     --hash=sha256:63612e17778c5e3a51b472def8d785d0aaaf347486d6b6786dc7be627556d4c6 \
@@ -788,9 +787,7 @@ dateparser==1.4.2 \
 defusedxml==0.7.1 \
     --hash=sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69 \
     --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
-    # via
-    #   nltk
-    #   py-serializable
+    # via py-serializable
 dnspython==2.8.0 \
     --hash=sha256:01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af \
     --hash=sha256:181d3c6996452cb1189c4046c61599b84a5a86e099562ffde77d26984ff26d0f
@@ -1292,9 +1289,7 @@ jiter==0.16.0 \
 joblib==1.5.3 \
     --hash=sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713 \
     --hash=sha256:8561a3269e6801106863fd0d6d84bb737be9e7631e33aaed3fb9ce5953688da3
-    # via
-    #   nltk
-    #   scikit-learn
+    # via scikit-learn
 kiwisolver==1.5.0 \
     --hash=sha256:012b1eb16e28718fa782b5e61dc6f2da1f0792ca73bd05d54de6cb9561665fc9 \
     --hash=sha256:01808c6d15f4c3e8559595d6d1fe6411c68e4a3822b4b9972b44473b24f4e679 \
@@ -1719,10 +1714,6 @@ nba-api==1.11.4 \
     # via
     #   -r analysis/nba-archetypes/requirements.txt
     #   -r requirements.txt
-nltk==3.10.3 \
-    --hash=sha256:bb9327a461c3811c2fa4900e03840401f2126adfb30c0072827c433bd2444ea4 \
-    --hash=sha256:ff9598a8e20518ee0d557745890cc4435b9578489e2dcbc69c4f81fa060caf7c
-    # via -r requirements.txt
 numpy==2.4.6 \
     --hash=sha256:001fbb8e08d942dd57599e781f2472269ee7f2755fae407b4f67b2f0b17da3f1 \
     --hash=sha256:0280e0356c0829a18d9de1cb7eee50ec22ca639878d7240307ca0943d73cd2c4 \
@@ -2745,9 +2736,7 @@ regex==2026.7.19 \
     --hash=sha256:fcee38cd8e5089d6d4f048ba1233b3ad76e5954f545382180889112ff5cb712d \
     --hash=sha256:fe31f28c94402043161876a258a9c6f757cb485905c7614ce8d6cd40e6b7bdc1 \
     --hash=sha256:ffd8893ccc1c2fce6e0d6ca402d716fe1b29db70c7132609a05955e31b2aa8f2
-    # via
-    #   dateparser
-    #   nltk
+    # via dateparser
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
@@ -3224,9 +3213,7 @@ tomli-w==1.2.0 \
 tqdm==4.70.0 \
     --hash=sha256:55b0b0dbd97462d06ebee91e4dac24ed4d4702be82b24f07e6c1d27e08cea220 \
     --hash=sha256:7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953
-    # via
-    #   nltk
-    #   spacy
+    # via spacy
 truststore==0.10.4 \
     --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
     --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981

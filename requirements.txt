@@ -36,7 +36,6 @@ Werkzeug==3.1.8
 spacy==3.8.16
 rapidfuzz==3.14.5
 dateparser==1.4.2
-nltk==3.10.3
 word2number==1.1
 pyarrow==25.0.1
 PyYAML==6.0.3
