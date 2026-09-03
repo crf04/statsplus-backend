@@ -916,6 +916,22 @@ Redis key are gone along with the legacy `general_opponent_stats`,
 `processed_team_assists` reads.  Every Team Filter in one request is answered
 from a single publication snapshot, so two filters can never intersect two
 generations that never coexisted, and two filters sharing a base cost one read.
+
+Those six nightly ranking tables are now **retired for writes**.
+`RETIRED_LEGACY_RANKING_TABLES` in `app.services.table_publisher` refuses them
+at the publication boundary, so neither the `update_database` refresh operation
+nor a compatibility writer can produce them again, whatever the activation
+state of a stream.  The collectors that built them
+(`_collect_opp_shooting`, `_collect_team_play_types`, the opponent half of the
+assist frames, and the `_fetch_opponent_data`/`_fetch_opp_shooting_data`/
+`_fetch_team_play_type_data` provider calls behind them) are deleted rather
+than left unwired.  The tables themselves are **not yet dropped**:
+`GET /api/teams/stats` (`app.services.team_service`) still reads all six for
+its `Traditional`, `Playtypes`, `Assists`, and `Shooting Type` categories and
+has no publication-backed replacement, so it is the last reader standing
+between this fence and the drop migration.  `tests/services/
+test_legacy_ranking_tables.py` pins both facts, and its allow-list is the
+repository-wide search that the drop must first reduce to the fence itself.
 The read is not cached in Redis: an activation, a rollback, or a season
 rollover must never be shadowed by a previous generation.
 

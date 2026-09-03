@@ -27,9 +27,42 @@ logger = logging.getLogger(__name__)
 _STAGE_PREFIX = "__staging_"
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+#: The legacy nightly ranking tables retired by #199.  Every game-log Team
+#: Filter now ranks opponents from the durable Season publications (#198), so
+#: no refresh operation may produce these tables again.  The fence lives at the
+#: publication boundary rather than at each former collector, so a revived
+#: caller is refused by construction instead of by absence.
+RETIRED_LEGACY_RANKING_TABLES: frozenset[str] = frozenset({
+    "general_opponent_stats",
+    "catch_and_shoot",
+    "pullups",
+    "less_than_10_ft",
+    "team_play_types",
+    "processed_team_assists",
+})
+
+#: The stable reason a refresh records when it skips a retired table.  Log
+#: readers and tests compare against this constant rather than the rendered
+#: sentence, the same way they compare against ``LEGACY_WRITE_FENCED``.
+RETIRED_TABLE_REFUSED = "retired_table"
+
 
 class TablePublicationError(ValueError):
     """A table name or publication payload is invalid."""
+
+
+def refuse_retired_table(table_name: str) -> None:
+    """Raise when ``table_name`` is a retired legacy ranking table.
+
+    Both write paths -- the atomic publisher and the single-table
+    compatibility writer -- call this, so the refusal reads identically
+    wherever a caller meets it.
+    """
+
+    if table_name in RETIRED_LEGACY_RANKING_TABLES:
+        raise TablePublicationError(
+            f"Table {table_name!r} is retired and can no longer be published"
+        )
 
 
 # The callback deliberately receives the transaction's live connection.  A
@@ -114,6 +147,7 @@ class AtomicTablePublisher:
             raise TablePublicationError(
                 f"Invalid table name: {table_name!r}"
             )
+        refuse_retired_table(table_name)
         return table_name
 
     @staticmethod

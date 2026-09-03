@@ -282,6 +282,19 @@ Do not, in this activation:
 - remove the legacy writer code paths that are now fenced;
 - enable any Playoff or Play-In behavior.
 
+The six nightly ranking tables are the one completed exception. Under #199
+`general_opponent_stats`, `catch_and_shoot`, `pullups`, `less_than_10_ft`,
+`team_play_types`, and `processed_team_assists` are refused at the publication
+boundary unconditionally, and their collectors are deleted — the activation
+fence no longer decides their fate. Their rows stay in place and readable; the
+drop migration waits on `GET /api/teams/stats` losing its dependency on them.
+One consequence for operators: `LegacyParityDiagnosticReader` now compares the
+ledger for `traditional_opponent` against a permanently frozen pre-cutover
+`general_opponent_stats` snapshot rather than a refreshed one, and still raises
+`required legacy parity table … is unavailable` if that table is missing, so
+treat a divergence there as evidence about the frozen snapshot until the drop
+retires the diagnostic.
+
 Removal happens only under a separately approved cleanup issue, after the
 activated streams have served a full cycle and rollback is no longer expected
 to need the legacy read path.

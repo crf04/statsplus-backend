@@ -33,7 +33,13 @@ from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.collection_control import ControlPlaneError
 from app.services.database_first_activation import LEGACY_WRITE_FENCED
 from app.services.progress import RefreshProgress
-from app.services.table_publisher import AtomicTablePublisher, PublicationFence
+from app.services.table_publisher import (
+    RETIRED_LEGACY_RANKING_TABLES,
+    RETIRED_TABLE_REFUSED,
+    AtomicTablePublisher,
+    PublicationFence,
+    refuse_retired_table,
+)
 from app.services.stats_freshness_repository import StatsFreshnessWriter
 from app.services.team_matchup_publications import publication_stream
 from app.utils.performance_monitor import monitor_nba_api_calls
@@ -44,7 +50,9 @@ logger = logging.getLogger(__name__)
 #: the exact stream whose activation supersedes it.  One map keeps the refusal
 #: partition, the publication fence, and the single-table compatibility writers
 #: describing the same table/stream pairs.  A table absent from this map has no
-#: database-first replacement and always refreshes.
+#: database-first replacement and always refreshes.  The retired ranking tables
+#: stay listed here for their stream pairing, but
+#: :data:`RETIRED_LEGACY_RANKING_TABLES` refuses them first and unconditionally.
 _ACTIVATION_FENCED_TABLE_STREAMS: dict[str, str] = {
     "general_opponent_stats": "traditional_opponent_season",
     "player_per36_stats": "player_per36",
@@ -151,22 +159,37 @@ class DataService:
             return False
 
     def _refuse_activation_fenced_frames(self, frames):
-        """Return only the frames whose stream has not been activated.
+        """Return only the frames this refresh may still publish.
 
-        A table whose database-first stream is activated is refused explicitly
-        and skipped: it is never written, and it never aborts the publication
-        of the tables that are still the only source for their readers.  Any
-        other fence failure (an unreadable control plane) propagates, so an
-        unprovable activation state still fails the whole refresh closed.
+        A retired ranking table is refused first and unconditionally: #199
+        dropped its storage, so a revived collector must never reach the
+        publisher.  A table whose database-first stream is activated is then
+        refused explicitly and skipped: it is never written, and it never
+        aborts the publication of the tables that are still the only source
+        for their readers.  Any other fence failure (an unreadable control
+        plane) propagates, so an unprovable activation state still fails the
+        whole refresh closed.
         """
 
         checker = getattr(self.write_fence, "assert_writable", None)
-        if not callable(checker):
-            return frames
         publishable = {}
         for table_name, frame in frames.items():
+            if table_name in RETIRED_LEGACY_RANKING_TABLES:
+                # Unconditional, and ahead of the activation check: the
+                # storage is dropped, so a revived collector must never reach
+                # the publisher even where no write fence is configured.
+                logger.warning(
+                    "%s: refusing to refresh %s; the table is retired",
+                    RETIRED_TABLE_REFUSED,
+                    table_name,
+                    extra={
+                        "table": table_name,
+                        "reason": RETIRED_TABLE_REFUSED,
+                    },
+                )
+                continue
             stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
-            if stream_key is None:
+            if stream_key is None or not callable(checker):
                 publishable[table_name] = frame
                 continue
             try:
@@ -201,6 +224,7 @@ class DataService:
     def _publish_compat_frame(self, table_name: str, frame: pd.DataFrame) -> None:
         """Publish one legacy refresh frame without changing the job path."""
 
+        refuse_retired_table(table_name)
         if isinstance(self.engine, Engine):
             stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
             checker = getattr(self.write_fence, "assert_writable", None)
@@ -213,46 +237,11 @@ class DataService:
             return
         frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
 
-    def process_opponent_scoring(self):
-        """Build and store the opponent scoring table for legacy callers."""
-
-        frame = self._fetch_opponent_data()
-        self._publish_compat_frame("general_opponent_stats", frame)
-        return True
-
-    def process_opp_shooting(self):
-        """Build each opponent shooting table, continuing after one failure."""
-
-        table_names = {
-            shooting_type: shooting_type.replace(" ", "_").lower()
-            for shooting_type in SHOOTING_TYPES
-        }
-        for shooting_type, table_name in table_names.items():
-            try:
-                frame = self._fetch_opp_shooting_data(shooting_type)
-                for column in ("FG3M", "FG2M", "FG2A", "FG3A"):
-                    frame[f"{column}_RANK"] = frame[column].rank(
-                        method="min", ascending=True
-                    )
-                self._publish_compat_frame(table_name, frame)
-            except Exception as error:
-                logger.error("Error processing %s: %s", shooting_type, error)
-        return True
-
     def process_opp_shooting_zone(self):
         """Build and store opponent shooting-zone rankings."""
 
         self._publish_compat_frame(
             "opp_shooting_zone", self._collect_opp_shooting_zone()
-        )
-        return True
-
-    def process_and_store_team_data(self):
-        """Build and store normalized team play-type data."""
-
-        self._publish_compat_frame(
-            "team_play_types",
-            self._collect_team_play_types(continue_on_error=True),
         )
         return True
 
@@ -271,12 +260,11 @@ class DataService:
         return True
 
     def process_assist_data(self):
-        """Process the two published PBP totals into assist tables."""
+        """Process the published player PBP totals into the assist table."""
 
         try:
             player_frame = self._fetch_data_from_table("pbp_player_stats")
-            opponent_frame = self._fetch_data_from_table("pbp_opponent_stats")
-            frames = self._collect_assist_frames(player_frame, opponent_frame)
+            frames = self._collect_assist_frames(player_frame)
             for table_name, frame in frames.items():
                 self._publish_compat_frame(table_name, frame)
             return True
@@ -413,42 +401,22 @@ class DataService:
         """Gather every refreshable table without touching the live tables."""
         frames = {
             "player_information": self._collect_player_information(),
-            "general_opponent_stats": self._fetch_opponent_data(),
             "player_per36_stats": self._fetch_player_per36_stats(),
-            "team_play_types": self._collect_team_play_types(),
         }
-        frames.update(self._collect_opp_shooting())
         frames["opp_shooting_zone"] = self._collect_opp_shooting_zone()
         frames["player_play_types"] = self._collect_playtypes_frame()
         frames["player_shooting_zones"] = self._collect_player_zone()
 
         pbp_player = self._collect_pbp_frame("player")
-        pbp_opponent = self._collect_pbp_frame("opponent")
         frames["pbp_player_stats"] = pbp_player
-        frames["pbp_opponent_stats"] = pbp_opponent
-        frames.update(self._collect_assist_frames(pbp_player, pbp_opponent))
+        frames["pbp_opponent_stats"] = self._collect_pbp_frame("opponent")
+        frames.update(self._collect_assist_frames(pbp_player))
         return frames
 
     def _collect_player_information(self):
         """Build the active-player frame without writing to any table."""
         player_dict = players.get_active_players()
         return pd.DataFrame.from_dict(player_dict)
-
-    def _collect_opp_shooting(self):
-        """Build the three opponent shooting-type frames."""
-        types_table_names = [
-            (shooting_type, shooting_type.replace(" ", "_").lower())
-            for shooting_type in SHOOTING_TYPES
-        ]
-        frames = {}
-        for play_type, table_name in types_table_names:
-            df = self._fetch_opp_shooting_data(play_type)
-            df["FG3M_RANK"] = df["FG3M"].rank(method="min", ascending=True)
-            df["FG2M_RANK"] = df["FG2M"].rank(method="min", ascending=True)
-            df["FG2A_RANK"] = df["FG2A"].rank(method="min", ascending=True)
-            df["FG3A_RANK"] = df["FG3A"].rank(method="min", ascending=True)
-            frames[table_name] = df
-        return frames
 
     def _collect_opp_shooting_zone(self):
         """Build the opponent shooting-zone frame."""
@@ -467,69 +435,6 @@ class DataService:
                 method="min", ascending=True
             )
         return opp_zone_df
-
-    def _collect_team_play_types(self, *, continue_on_error: bool = False):
-        """Build the team play-type frame."""
-        playtypes = PLAY_TYPES
-        team_dfs = []
-
-        for play_type in playtypes:
-            try:
-                df = self._fetch_team_play_type_data(play_type)
-                df["PTS/G"] = df["PTS"] / df["GP"]
-                team_dfs.append(df)
-            except Exception:
-                if not continue_on_error:
-                    raise
-                logger.exception("Error fetching data for play type %s", play_type)
-
-        combined_team_df = pd.concat(team_dfs, ignore_index=True)
-
-        mean_pts_per_game = {
-            play_type: combined_team_df[
-                combined_team_df["PLAY_TYPE"] == play_type
-            ]["PTS/G"].mean()
-            for play_type in playtypes
-        }
-        for play_type in playtypes:
-            combined_team_df.loc[
-                combined_team_df["PLAY_TYPE"] == play_type, "PTS/G+"
-            ] = combined_team_df["PTS/G"] / mean_pts_per_game[play_type]
-
-        teams_df = combined_team_df.pivot_table(
-            index="TEAM_NAME",
-            columns="PLAY_TYPE",
-            values="PTS/G+",
-            aggfunc="first",
-        ).reset_index()
-
-        nba_teams = teams.get_teams()
-        teams_df.loc[
-            teams_df["TEAM_NAME"] == "LA Clippers", "TEAM_NAME"
-        ] = "Los Angeles Clippers"
-        team_ids = {team["full_name"]: team["id"] for team in nba_teams}
-        teams_df["Team_ID"] = teams_df["TEAM_NAME"].map(team_ids)
-        teams_df["team"] = teams_df["TEAM_NAME"].apply(
-            self._nba_team_to_abbreviation
-        )
-
-        new_order = [
-            "TEAM_NAME",
-            "Cut",
-            "Isolation",
-            "PRRollMan",
-            "PRBallHandler",
-            "OffRebound",
-            "Spotup",
-            "Handoff",
-            "OffScreen",
-            "Misc",
-            "Postup",
-            "Transition",
-            "Team_ID",
-            "team",
-        ]
-        return teams_df[new_order]
 
     def _collect_playtypes_frame(self):
         """Build the player play-type frame."""
@@ -651,30 +556,13 @@ class DataService:
         player_zones.fillna(0, inplace=True)
         return player_zones
 
-    def _collect_assist_frames(self, pbp_player_df, pbp_opponent_df):
-        """Build the processed assist tables from in-memory PBP frames."""
-        team_columns = [
-            "Name",
-            "Assists",
-            "AssistPoints",
-            "TwoPtAssists",
-            "ThreePtAssists",
-            "Arc3Assists",
-            "Corner3Assists",
-            "AtRimAssists",
-            "ShortMidRangeAssists",
-            "LongMidRangeAssists",
-        ]
-        teams_df = pbp_opponent_df[team_columns].copy()
+    def _collect_assist_frames(self, pbp_player_df):
+        """Build the processed player assist table from the in-memory PBP frame.
 
-        stat_columns = team_columns[1:]
-        means = teams_df[stat_columns].mean()
-        for column in stat_columns:
-            teams_df[column] = teams_df[column] / means[column]
-            teams_df[f"{column}_RANK"] = teams_df[column].rank(
-                method="min", ascending=True
-            )
-
+        The opponent half of this pair produced ``processed_team_assists``,
+        which the durable ``assist_locations_season`` publication replaced
+        (#198/#199).
+        """
         player_columns = [
             "Name",
             "TwoPtAssists",
@@ -709,10 +597,7 @@ class DataService:
             if column != "Name":
                 players_df[f"{column}+"] = players_df[column] / averages[column]
 
-        return {
-            "processed_team_assists": teams_df,
-            "processed_player_assists": players_df,
-        }
+        return {"processed_player_assists": players_df}
 
     def _collect_pbp_frame(self, data_type: PBPDataKind = "player"):
         """Fetch one PBP frame without writing anything yet."""
@@ -747,21 +632,6 @@ class DataService:
             )
         return canonical_type
 
-    def _fetch_opponent_data(self, date_filter=None):
-        return self.nba_stats.fetch_opponent_team_stats(
-            date_filter,
-            per_mode_detailed="Per48",
-            league_id="00",
-        )
-
-    def _fetch_opp_shooting_data(self, play_type, date_filter=None):
-        return self.nba_stats.fetch_opponent_shot_chart(
-            play_type,
-            date_filter,
-            per_mode_simple="PerGame",
-            league_id="00",
-        )
-
     def _fetch_opp_shooting_zone_data(self, date_filter=None):
         return self.nba_stats.fetch_opponent_shooting_zone(
             date_filter,
@@ -773,13 +643,6 @@ class DataService:
         return self.nba_stats.fetch_player_shooting_zone(
             date_filter,
             per_mode_detailed="PerGame",
-        )
-
-    def _fetch_team_play_type_data(self, play_type):
-        return self.nba_stats.fetch_synergy_play_types(
-            play_type,
-            player_or_team_abbreviation="T",
-            type_grouping="Defensive",
         )
 
     def _fetch_play_type_data(self, play_type):
@@ -801,11 +664,3 @@ class DataService:
         query = f"SELECT * FROM {normalized}"
         with self.engine.connect() as conn:
             return pd.read_sql(query, conn)
-
-    @staticmethod
-    def _nba_team_to_abbreviation(team_name):
-        nba_teams = teams.get_teams()
-        team_abbr_map = {
-            team["full_name"]: team["abbreviation"] for team in nba_teams
-        }
-        return team_abbr_map.get(team_name, "Unknown")
