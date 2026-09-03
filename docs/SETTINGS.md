@@ -10,7 +10,7 @@ The model is intentionally grouped by responsibility:
 
 | Model | Fields | Environment variables |
 | --- | --- | --- |
-| `DatabaseSettings` | `url` | `DATABASE_URL` |
+| `DatabaseSettings` | `url`, `pool_size`, `max_overflow`, `pool_recycle_seconds`, `connect_timeout_seconds` | `DATABASE_URL`, `DATABASE_POOL_SIZE` (default `3`), `DATABASE_MAX_OVERFLOW` (default `4`), `DATABASE_POOL_RECYCLE_SECONDS` (default `300`), `DATABASE_CONNECT_TIMEOUT_SECONDS` (default `5`) |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS` |
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |

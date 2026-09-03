@@ -62,6 +62,10 @@ the most important variables:
 | Variable | Required | Default or behavior |
 | --- | --- | --- |
 | `DATABASE_URL` | No | `sqlite:///nba_play_types.db` |
+| `DATABASE_POOL_SIZE` | No | `3`; Postgres-only connection pool size |
+| `DATABASE_MAX_OVERFLOW` | No | `4`; Postgres-only pool overflow above `DATABASE_POOL_SIZE` |
+| `DATABASE_POOL_RECYCLE_SECONDS` | No | `300`; Postgres-only max connection age before recycling |
+| `DATABASE_CONNECT_TIMEOUT_SECONDS` | No | `5`; Postgres-only `psycopg2` connect timeout |
 | `PORT` | No | `5000` |
 | `FLASK_DEBUG` | No | `1` in `run.py` |
 | `LOG_LEVEL` | No | `INFO` |

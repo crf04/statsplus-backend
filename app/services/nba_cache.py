@@ -9,7 +9,9 @@ import json
 import pickle
 import logging
 import hashlib
-from typing import Any, Optional, Union
+import threading
+import time
+from typing import Any, Callable, Optional, Union
 
 import redis
 import pandas as pd
@@ -23,6 +25,8 @@ from app.config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
+REDIS_FAILURE_COOLDOWN_SECONDS = 30
+
 class NBAGameCache:
     """
     NBA Game caching system with Redis backend.
@@ -35,6 +39,8 @@ class NBAGameCache:
         self,
         redis_client: Optional[redis.Redis] = None,
         settings: RuntimeSettings | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
     ):
         """
         Initialize NBA cache with Redis client.
@@ -45,11 +51,31 @@ class NBAGameCache:
         self.settings = settings or get_runtime_settings()
         self.redis_client = redis_client
         self.enabled = redis_client is not None and is_cache_enabled(self.settings)
+        self.clock = clock
+        self._breaker_lock = threading.Lock()
+        self._open_until = 0.0
         
         if self.enabled:
             logger.info("NBA cache initialized with Redis backend")
         else:
             logger.info("NBA cache disabled (no Redis client or cache disabled via config)")
+
+    def _circuit_open(self) -> bool:
+        with self._breaker_lock:
+            return self.clock() < self._open_until
+
+    def _open_circuit(self, error: Exception) -> None:
+        with self._breaker_lock:
+            now = self.clock()
+            already_open = now < self._open_until
+            self._open_until = now + REDIS_FAILURE_COOLDOWN_SECONDS
+        if already_open:
+            return
+        logger.warning(
+            "Redis unavailable (%s); bypassing cache for %ss",
+            error,
+            REDIS_FAILURE_COOLDOWN_SECONDS,
+        )
     
     def _generate_key(self, prefix: str, include_date: bool = False, 
                      function_name: str = '', *args, **kwargs) -> str:
@@ -179,6 +205,8 @@ class NBAGameCache:
         """
         if not self.enabled:
             return None
+        if self._circuit_open():
+            return None
             
         try:
             cached_data = self.redis_client.get(cache_key)
@@ -187,6 +215,9 @@ class NBAGameCache:
                 
             return self._deserialize_data(cached_data)
             
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+            self._open_circuit(e)
+            return None
         except Exception as e:
             logger.error(f"Cache get failed for key {cache_key}: {e}")
             return None
@@ -205,6 +236,8 @@ class NBAGameCache:
         """
         if not self.enabled:
             return False
+        if self._circuit_open():
+            return False
             
         try:
             serialized_data = self._serialize_data(data)
@@ -214,6 +247,9 @@ class NBAGameCache:
                 logger.debug(f"Cache set successful for key {cache_key} (TTL: {ttl}s)")
             return result
             
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+            self._open_circuit(e)
+            return False
         except Exception as e:
             logger.error(f"Cache set failed for key {cache_key}: {e}")
             return False
@@ -230,12 +266,17 @@ class NBAGameCache:
         """
         if not self.enabled:
             return False
+        if self._circuit_open():
+            return False
             
         try:
             result = self.redis_client.delete(cache_key)
             logger.debug(f"Cache delete for key {cache_key}")
             return bool(result)
             
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as e:
+            self._open_circuit(e)
+            return False
         except Exception as e:
             logger.error(f"Cache delete failed for key {cache_key}: {e}")
             return False
@@ -286,11 +327,14 @@ class NBAGameCache:
         """
         if not self.enabled:
             return {"enabled": False}
+        if self._circuit_open():
+            return {"enabled": True, "circuit_open": True}
             
         try:
             info = self.redis_client.info()
             stats = {
                 "enabled": True,
+                "circuit_open": False,
                 "connected_clients": info.get("connected_clients", 0),
                 "used_memory_human": info.get("used_memory_human", "Unknown"),
                 "keyspace_hits": info.get("keyspace_hits", 0),
