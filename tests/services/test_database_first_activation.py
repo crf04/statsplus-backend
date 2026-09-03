@@ -518,6 +518,80 @@ def test_refusing_every_frame_succeeds_without_publishing_or_freshness(
     )
 
 
+def test_refusal_is_recognized_by_reason_not_by_rendered_message(
+    tmp_path, monkeypatch
+):
+    import pandas as pd
+
+    from app.services.database_first_activation import LEGACY_WRITE_FENCED
+
+    class _MessageCarryingFence:
+        """A fence whose refusal carries human text beside its reason."""
+
+        def assert_writable(self, stream_key, *, connection=None):
+            if stream_key == "traditional_opponent_season":
+                raise ControlPlaneError(
+                    LEGACY_WRITE_FENCED, "traditional_opponent_season is activated"
+                )
+
+    engine = _db(tmp_path)
+    tables = ("general_opponent_stats", "player_information")
+    _seed_legacy_tables(engine, tables)
+    data_service = _activation_data_service(engine, completed_at=NOW)
+    data_service.write_fence = _MessageCarryingFence()
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda: {
+            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
+        },
+    )
+
+    assert data_service.update_all_data() is True
+    assert _table_values(engine, tables) == {
+        "general_opponent_stats": "old",
+        "player_information": "new",
+    }
+
+
+def test_activation_between_partition_and_swap_rolls_the_publication_back(
+    tmp_path, monkeypatch
+):
+    import pandas as pd
+
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
+
+    engine = _db(tmp_path)
+    _register_production_streams(engine)
+    tables = ("general_opponent_stats", "player_information")
+    _seed_legacy_tables(engine, tables)
+    data_service = _activation_data_service(engine, completed_at=NOW)
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda: {
+            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
+        },
+    )
+    # Stand in for an activation that lands after the partition read and before
+    # the swap: the partition hands every collected frame to the publisher.
+    monkeypatch.setattr(
+        data_service, "_refuse_activation_fenced_frames", lambda frames: frames
+    )
+
+    # The fence inside the publication transaction is the authoritative one,
+    # so the whole publication rolls back rather than overwriting a stream
+    # that is now activated.
+    assert data_service.update_all_data() is False
+    assert _table_values(engine, tables) == {
+        "general_opponent_stats": "old",
+        "player_information": "old",
+    }
+    assert (
+        StatsFreshnessRepository(engine).get().last_successful_completion is None
+    )
+
+
 def test_unavailable_fence_stream_still_aborts_the_whole_refresh(
     tmp_path, monkeypatch
 ):

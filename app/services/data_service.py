@@ -8,7 +8,7 @@ Then the collected frames are published together through
 transaction and preserves the previous tables if anything fails.
 
 A table whose database-first stream is activated is refused before that
-publication rather than inside it, so one superseded table cannot abort the
+publication rather than inside it, so one fenced table cannot abort the
 refresh of the tables that are still their readers' only source.
 """
 
@@ -31,6 +31,7 @@ from app.models.catalogs import (
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
 from app.services.collection_control import ControlPlaneError
+from app.services.database_first_activation import LEGACY_WRITE_FENCED
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import AtomicTablePublisher, PublicationFence
 from app.services.stats_freshness_repository import StatsFreshnessWriter
@@ -61,9 +62,6 @@ _ACTIVATION_FENCED_TABLE_STREAMS: dict[str, str] = {
         for shooting_type in SHOOTING_TYPES
     },
 }
-
-#: The refusal a legacy writer receives once its stream is activated.
-_LEGACY_WRITE_FENCED = "legacy_write_fenced"
 
 
 class DataService:
@@ -132,12 +130,12 @@ class DataService:
                     if stream_key is not None:
                         checker(stream_key, connection=connection)
             if not frames:
-                # Every collected table is superseded.  Nothing failed and a
+                # Every collected table is fenced.  Nothing failed and a
                 # retry cannot change that, so the refresh succeeds; stats
                 # freshness stays untouched because no table was published.
                 logger.warning(
                     "Stats refresh published no tables: every collected table "
-                    "is superseded by an activated publication stream"
+                    "is fenced by an activated publication stream"
                 )
             self.publisher.publish(
                 frames,
@@ -174,13 +172,21 @@ class DataService:
             try:
                 checker(stream_key)
             except ControlPlaneError as error:
-                if str(error) != _LEGACY_WRITE_FENCED:
+                # Compare the stable reason, not the rendered message: a
+                # refusal carrying human text must not read as an unreadable
+                # control plane and abort the whole refresh.
+                if error.reason != LEGACY_WRITE_FENCED:
                     raise
                 logger.warning(
                     "%s: refusing to refresh %s; stream %s is activated",
-                    _LEGACY_WRITE_FENCED,
+                    LEGACY_WRITE_FENCED,
                     table_name,
                     stream_key,
+                    extra={
+                        "table": table_name,
+                        "stream": stream_key,
+                        "reason": LEGACY_WRITE_FENCED,
+                    },
                 )
             else:
                 publishable[table_name] = frame

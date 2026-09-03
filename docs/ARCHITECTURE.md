@@ -2047,7 +2047,7 @@ aborting the publication of tables that have no database-first replacement,
 and the refresh succeeds. The authoritative fence check remains inside the
 publication transaction, so a stream activated between the partition and the
 swap still fails that publication closed. A fence that cannot be read still
-fails the whole refresh closed. When every collected table is superseded the
+fails the whole refresh closed. When every collected table is fenced the
 refresh publishes nothing and succeeds without advancing stats freshness; the
 per-table inventory is in
 [DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md).

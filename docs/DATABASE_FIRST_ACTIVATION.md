@@ -80,7 +80,7 @@ partitions the collected frames against the fence before publishing:
 
 - a table whose stream is activated is **refused and skipped** — it is never
   written, and the refusal is logged as `legacy_write_fenced` with the table
-  and the stream that superseded it;
+  and the stream whose activation fenced it;
 - every remaining table is published in one atomic set with the stats
   freshness completion, exactly as before.
 
@@ -91,7 +91,7 @@ the publication transaction, on the connection that swaps the tables, so a
 stream activated between the partition and the swap still fails that
 publication closed rather than overwriting a publication.
 
-When *every* collected table is superseded, the refresh publishes nothing,
+When *every* collected table is fenced, the refresh publishes nothing,
 logs that it published nothing, and still succeeds: no retry can change the
 outcome, and failing would fail the whole nightly unit. Stats freshness is
 deliberately **not** advanced in that case, because no legacy table was
@@ -104,23 +104,36 @@ plane) is not a refusal: it fails the whole refresh closed, as before.
 
 Production state is the 2026-08-24 activation cycle recorded on backend #87.
 
-| Legacy table | Stream | Activated in production | Disposition | Reader(s) |
-| --- | --- | --- | --- | --- |
-| `general_opponent_stats` | `traditional_opponent_season` | yes | superseded | `TeamService.get_team_stats` Traditional (`GET /api/teams/stats`); legacy parity snapshot |
-| `player_per36_stats` | `player_per36` | yes | superseded | `PlayerService._per36_frame`, only when the publication does not serve |
-| `team_play_types` | `synergy_play_types_opponent_season` | yes | superseded | `TeamService.get_team_stats` Playtypes |
-| `catch_and_shoot`, `pullups`, `less_than_10_ft` | `grouped_shot_types_opponent_season` | yes | superseded | `TeamService.get_team_stats` Shooting Type |
-| `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | superseded | `TeamService.get_team_stats` Zone Shooting |
-| `processed_team_assists` | `assist_locations_season` | yes | superseded | `TeamService.get_team_stats` Assists |
-| `pbp_opponent_stats` | `assist_locations_season` | yes | superseded | `DataService.process_assist_data` input |
-| `player_play_types` | `synergy_play_types` | no | still refreshed | `PlayerService.get_all_players`, player play-type profile, NL parser player names |
-| `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | player zone-shooting profile |
-| `processed_player_assists` | `player_assist_locations` | no | still refreshed | player assist-location profile |
-| `pbp_player_stats` | `player_assist_locations` | no | still refreshed | `DataService.process_assist_data` input |
-| `player_information` | — (no stream) | n/a | always refreshed | player name resolution, `GameService` allowed tables, `database_utils` |
+"Fenced" means the nightly refresh refuses the table. "Reader cut over" says
+whether the surface that reads it now serves the publication instead — a
+fenced table whose reader is *not* cut over is frozen, not superseded.
 
-The superseded rows stay in the refresh code and in this table on purpose:
-they are refused per night rather than deleted, so a rollback that disables a
+| Legacy table | Stream | Activated in production | Nightly refresh | Reader cut over | Reader(s) |
+| --- | --- | --- | --- | --- | --- |
+| `general_opponent_stats` | `traditional_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Traditional (`GET /api/teams/stats`); legacy parity snapshot |
+| `player_per36_stats` | `player_per36` | yes | fenced | yes — superseded | `PlayerService._per36_frame`, only when the publication does not serve |
+| `team_play_types` | `synergy_play_types_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Playtypes |
+| `catch_and_shoot`, `pullups`, `less_than_10_ft` | `grouped_shot_types_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Shooting Type |
+| `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Zone Shooting |
+| `processed_team_assists` | `assist_locations_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Assists |
+| `pbp_opponent_stats` | `assist_locations_season` | yes | fenced | n/a (refresh input) | `DataService.process_assist_data` input |
+| `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | `PlayerService.get_all_players`, player play-type profile, NL parser player names |
+| `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | n/a | player zone-shooting profile |
+| `processed_player_assists` | `player_assist_locations` | no | still refreshed | n/a | player assist-location profile |
+| `pbp_player_stats` | `player_assist_locations` | no | still refreshed | n/a | `DataService.process_assist_data` input |
+| `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables, `database_utils` |
+
+Every **frozen** row above is a live gap, not a completed cutover: the stream
+is activated so the nightly refresh refuses the table, but `GET
+/api/teams/stats` still reads the legacy table, so its Traditional,
+Playtypes, Shooting Type, Zone Shooting, and Assists categories stay at their
+2026-08-23 values until the Team Profile read cutover
+(crf04/statsplus#45) lands. `stats_freshness` advancing after a nightly
+refresh does **not** cover those tables — it records only the tables that were
+actually published, which excludes every fenced row.
+
+The fenced rows stay in the refresh code and in this table on purpose: they
+are refused per night rather than deleted, so a rollback that disables a
 stream restores that table's refresh with no code change. Removing a legacy
 writer is the separately approved cleanup below.
 

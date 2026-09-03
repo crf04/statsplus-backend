@@ -64,6 +64,12 @@ def _reject_duplicate_json_keys(pairs):
     return result
 
 
+#: The stable refusal reason a legacy writer receives once its stream is
+#: activated.  Callers that distinguish this refusal from an unreadable
+#: control plane compare against this constant, not against a literal.
+LEGACY_WRITE_FENCED = "legacy_write_fenced"
+
+
 class LegacyWriteFenceProtocol(Protocol):
     """Typed seam used by every legacy writer inside its transaction."""
 
@@ -1306,7 +1312,7 @@ class LegacyWriteFence:
         self, stream_key: str, *, connection: Connection | None = None
     ) -> None:
         if self.is_activated(stream_key, connection=connection):
-            raise ControlPlaneError("legacy_write_fenced")
+            raise ControlPlaneError(LEGACY_WRITE_FENCED)
 
     def guard(self, stream_key: str) -> Callable[[], None]:
         return lambda: self.assert_writable(stream_key)
@@ -1364,6 +1370,7 @@ __all__ = [
     "DatabaseFirstMatchupsReader",
     "DatabaseFirstPublicationReader",
     "DatabaseOnlyProviderGuard",
+    "LEGACY_WRITE_FENCED",
     "LegacyWriteFence",
     "LegacyWriteFenceProtocol",
     "PUBLICATION_FRESHNESS_SECONDS",
