@@ -136,6 +136,28 @@ def _normalize_names(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _board_resolver(
+    resolver: Any, season: str, identities: Iterable[tuple[str, str | None]]
+) -> Any:
+    """The resolver's view of one board read, when it offers one.
+
+    A resolver that can serve a whole board from one read of its catalog and
+    mapping state is asked to; any other resolver is used market by market.
+    """
+
+    for_board = getattr(resolver, "for_board", None)
+    if not callable(for_board):
+        return resolver
+    return for_board(
+        season,
+        [
+            (provider, provider_id)
+            for provider, provider_id in identities
+            if provider_id
+        ],
+    )
+
+
 def _identity_key(resolution: Any) -> tuple[str, str] | None:
     """The provider identity one resolution describes, if it names one."""
 
@@ -1215,13 +1237,23 @@ class DFSBoardService:
             or board.query.season is None
         ):
             return board
+        resolver = _board_resolver(
+            self.athlete_resolver,
+            board.query.season,
+            (
+                (market.provider, market.athlete.provider_id)
+                for snapshot in board.snapshots
+                for market in snapshot.markets
+                if market.athlete is not None
+            ),
+        )
         resolved: list[tuple[tuple[str, str] | None, Any]] = []
         for snapshot in board.snapshots:
             for market in snapshot.markets:
                 if market.athlete is None:
                     continue
                 try:
-                    resolution = self.athlete_resolver.resolve_market(
+                    resolution = resolver.resolve_market(
                         market,
                         board.query.season,
                         # The snapshot is temporally coherent, so its retrieval
@@ -1251,7 +1283,7 @@ class DFSBoardService:
                 # everything they reported about it.
                 try:
                     group = (
-                        _merged_observation(group, self.athlete_resolver.resolve),
+                        _merged_observation(group, resolver.resolve),
                     )
                 except AthleteMappingPersistenceError:
                     logger.warning("Could not observe one athlete mapping")
@@ -1305,13 +1337,23 @@ class DFSBoardService:
             or board.query.season is None
         ):
             return board
+        resolver = _board_resolver(
+            self.event_resolver,
+            board.query.season,
+            (
+                (market.provider, market.event.provider_id)
+                for snapshot in board.snapshots
+                for market in snapshot.markets
+                if market.event is not None
+            ),
+        )
         resolved: list[tuple[tuple[str, str] | None, Any]] = []
         for snapshot in board.snapshots:
             for market in snapshot.markets:
                 if market.event is None:
                     continue
                 try:
-                    resolution = self.event_resolver.resolve_market(
+                    resolution = resolver.resolve_market(
                         market,
                         board.query.season,
                         # The snapshot is temporally coherent, so its retrieval
@@ -1340,7 +1382,7 @@ class DFSBoardService:
             elif key is not None and len(group) > 1:
                 try:
                     group = (
-                        _merged_event_observation(group, self.event_resolver.resolve),
+                        _merged_event_observation(group, resolver.resolve),
                     )
                 except EventMappingPersistenceError:
                     logger.warning("Could not observe one event mapping")

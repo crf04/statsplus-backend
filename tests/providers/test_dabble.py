@@ -128,8 +128,8 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     }
 
 
-def test_session_factory_keeps_non_thread_safe_clients_out_of_concurrent_use():
-    """Detail fan-out must never share one mutable client between workers."""
+def test_session_factory_builds_one_shared_session_for_the_adapter_lifetime():
+    """Every request, including the detail fan-out, reuses one pooled client."""
 
     fixtures = _payload("fixtures.valid.json")
     details: dict[str, dict[str, object]] = {}
@@ -155,48 +155,36 @@ def test_session_factory_keeps_non_thread_safe_clients_out_of_concurrent_use():
     factory_lock = threading.Lock()
     sessions: list[object] = []
 
-    class GuardedSession:
-        def __init__(self) -> None:
-            self._in_flight = False
-            self._lock = threading.Lock()
-            self.headers: dict[str, str] = {}
+    class PooledSession:
+        headers: dict[str, str] = {}
 
         def get(self, url: str, **kwargs: object) -> FakeResponse:
             del kwargs
-            is_detail = "/details/" in url
-            if is_detail:
-                with self._lock:
-                    if self._in_flight:
-                        raise AssertionError("one session was used concurrently")
-                    self._in_flight = True
-                try:
-                    detail_barrier.wait(timeout=1.0)
-                    fixture_id = url.rsplit("/", 1)[-1]
-                    return FakeResponse(details[fixture_id])
-                finally:
-                    with self._lock:
-                        self._in_flight = False
+            if "/details/" in url:
+                # All three detail workers must reach here together, proving
+                # the shared client still serves the concurrent fan-out.
+                detail_barrier.wait(timeout=1.0)
+                return FakeResponse(details[url.rsplit("/", 1)[-1]])
             if url.endswith("/competitions"):
                 return FakeResponse(_payload("competitions.valid.json"))
             return FakeResponse(fixtures)
 
-    def session_factory() -> GuardedSession:
-        session = GuardedSession()
+    def session_factory() -> PooledSession:
+        session = PooledSession()
         with factory_lock:
             sessions.append(session)
         return session
 
-    snapshot = DabbleAdapter(
-        session_factory=session_factory,
-        detail_concurrency=3,
-    ).get_snapshot(NBAMarketQuery(), _context())
+    adapter = DabbleAdapter(session_factory=session_factory, detail_concurrency=3)
+
+    snapshot = adapter.get_snapshot(NBAMarketQuery(), _context())
+    second = adapter.get_snapshot(NBAMarketQuery(), _context())
 
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert len(snapshot.markets) == 3
-    detail_sessions = [
-        session for session in sessions if isinstance(session, GuardedSession)
-    ]
-    assert len(detail_sessions) >= 3
+    assert second.status is SnapshotStatus.COMPLETE
+    assert len(sessions) == 1
+    assert adapter.session is sessions[0]
 
 
 def test_serialized_session_drops_queued_detail_calls_after_deadline():

@@ -30,15 +30,15 @@ class RecordedEvents:
     def count_events(self, season):
         return 1
 
-    def get_events(self, season):
-        return [
-            {
-                "nba_game_id": GAME_ID,
-                "classification": "Regular Season",
-                "home_team_id": BOS,
-                "away_team_id": LAL,
-            }
-        ]
+    def get_event(self, season, game_id):
+        if game_id != GAME_ID:
+            return None
+        return {
+            "nba_game_id": GAME_ID,
+            "classification": "Regular Season",
+            "home_team_id": BOS,
+            "away_team_id": LAL,
+        }
 
 
 class RecordedPool:

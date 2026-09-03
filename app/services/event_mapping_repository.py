@@ -16,7 +16,7 @@ import json
 import logging
 import threading
 from contextlib import contextmanager
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -207,6 +207,19 @@ def _normalized_key(provider: str, provider_event_id: str) -> tuple[str, str]:
     if not isinstance(provider_event_id, str) or not provider_event_id.strip():
         raise ValueError("provider event ID must be a non-empty string")
     return provider.strip().casefold(), provider_event_id.strip()
+
+
+def _normalized_keys(
+    provider: str, provider_event_ids: Iterable[str]
+) -> tuple[str, tuple[str, ...]]:
+    """Normalize one provider and every identity it names, without duplicates."""
+
+    normalized_provider, _ = _normalized_key(provider, "_placeholder")
+    ordered: dict[str, None] = {}
+    for provider_event_id in provider_event_ids:
+        _, normalized_id = _normalized_key(provider, provider_event_id)
+        ordered[normalized_id] = None
+    return normalized_provider, tuple(ordered)
 
 
 def _operator(operator_id: str) -> str:
@@ -696,6 +709,50 @@ class EventMappingRepository:
         with self.engine.connect() as connection:
             row = self._select_rejection(connection, provider, provider_event_id)
         return self._rejection_record(row)
+
+    @_translate_storage_failures
+    def get_mappings(
+        self, provider: str, provider_event_ids: Iterable[str]
+    ) -> dict[str, ProviderEventMappingRecord]:
+        """Return the stored mapping of every named identity, keyed by ID.
+
+        One board names many fixtures, so it reads them in one statement
+        rather than one per market.  An identity with no row is absent.
+        """
+
+        provider, provider_event_ids = _normalized_keys(provider, provider_event_ids)
+        if not provider_event_ids:
+            return {}
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(ProviderEventMapping.__table__).where(
+                    and_(
+                        ProviderEventMapping.provider == provider,
+                        ProviderEventMapping.provider_event_id.in_(provider_event_ids),
+                    )
+                )
+            ).mappings().all()
+        return {str(row["provider_event_id"]): self._mapping_record(row) for row in rows}
+
+    @_translate_storage_failures
+    def get_rejections(
+        self, provider: str, provider_event_ids: Iterable[str]
+    ) -> dict[str, EventMappingRejectionRecord]:
+        """Return the stored rejection of every named identity, keyed by ID."""
+
+        provider, provider_event_ids = _normalized_keys(provider, provider_event_ids)
+        if not provider_event_ids:
+            return {}
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(EventMappingRejection.__table__).where(
+                    and_(
+                        EventMappingRejection.provider == provider,
+                        EventMappingRejection.provider_event_id.in_(provider_event_ids),
+                    )
+                )
+            ).mappings().all()
+        return {str(row["provider_event_id"]): self._rejection_record(row) for row in rows}
 
     def is_rejected(self, provider: str, provider_event_id: str) -> bool:
         rejection = self.get_rejection(provider, provider_event_id)

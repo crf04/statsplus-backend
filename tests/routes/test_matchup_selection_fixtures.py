@@ -36,11 +36,20 @@ RETRIEVED_AT = datetime(2026, 5, 2, tzinfo=timezone.utc)
 class RecordedEventCatalog:
     def __init__(self, game):
         self.game = game
+        self.get_event_calls = 0
+        self.count_events_calls = 0
+
+    def get_event(self, season, game_id):
+        self.get_event_calls += 1
+        if game_id != self.game["nba_game_id"]:
+            return None
+        return {"season": season, **self.game}
 
     def get_events(self, season):
-        return [{"season": season, **self.game}]
+        raise AssertionError("a selection must read one event, not the whole season")
 
     def count_events(self, season):
+        self.count_events_calls += 1
         return 1
 
 
@@ -363,13 +372,27 @@ def test_unknown_game_and_player_ids_return_resource_not_found(tmp_path):
     assert unknown_player.get_json()["error"]["code"] == "resource_not_found"
 
 
+def test_selection_reads_one_event_by_game_id(tmp_path):
+    client, fixture = _client(tmp_path)
+    catalog = client.application.config["DEPENDENCIES"].matchup_selection_service.event_catalog
+
+    response = client.get(
+        f"/api/games/matchup/selection?game_id={fixture['game']['nba_game_id']}"
+        "&player_id=101"
+    )
+
+    assert response.status_code == 200
+    assert catalog.get_event_calls == 1
+    assert catalog.count_events_calls == 0
+
+
 def test_empty_event_catalog_and_missing_stored_pool_are_unavailable(tmp_path):
     class EmptyEventCatalog:
         def count_events(self, season):
             return 0
 
-        def get_events(self, season):
-            raise AssertionError("an empty catalog must fail before an event read")
+        def get_event(self, season, game_id):
+            return None
 
     empty_catalog_client, _ = _client(tmp_path / "empty", event_catalog=EmptyEventCatalog())
     missing_pool_client, fixture = _client(tmp_path / "pool", seed_pool=False)

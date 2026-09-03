@@ -47,7 +47,7 @@ _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 class EventCatalogReader(Protocol):
     def count_events(self, season: str) -> int: ...
 
-    def get_events(self, season: str) -> Sequence[Mapping[str, Any]]: ...
+    def get_event(self, season: str, nba_game_id: str) -> Mapping[str, Any] | None: ...
 
 
 class ArchetypeReader(Protocol):
@@ -372,25 +372,25 @@ class MatchupSelectionService:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
+        event = call_with_read_scope(
+            self.event_catalog.get_event, season, game_id, connection=connection
+        )
+        if event is not None:
+            classification = resolve_stored_event_classification(
+                game_id,
+                str(event.get("classification", event.get("season_type", ""))),
+            )
+            if classification.kind != "Regular Season":
+                raise ResourceNotFoundError(
+                    "The requested matchup is outside the Regular Season window."
+                )
+            return event
         if call_with_read_scope(
             self.event_catalog.count_events, season, connection=connection
         ) == 0:
             raise ProviderUnavailableError(
                 "The matchup schedule is currently unavailable."
             )
-        for event in call_with_read_scope(
-            self.event_catalog.get_events, season, connection=connection
-        ):
-            if str(event.get("nba_game_id")) == game_id:
-                classification = resolve_stored_event_classification(
-                    game_id,
-                    str(event.get("classification", event.get("season_type", ""))),
-                )
-                if classification.kind != "Regular Season":
-                    raise ResourceNotFoundError(
-                        "The requested matchup is outside the Regular Season window."
-                    )
-                return event
         raise ResourceNotFoundError("The requested matchup game was not found.")
 
     @staticmethod

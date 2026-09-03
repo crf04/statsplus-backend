@@ -848,9 +848,15 @@ class _PostgresRouteEventCatalog:
         assert now == self.clock()
         return {"last_success_at": OBSERVED_AT.isoformat()}
 
-    def get_events(self, season):
+    def get_event(self, season, game_id):
         assert season == SEASON
-        return (self._event(),)
+        return self._event() if game_id == GAME_ID else None
+
+    @staticmethod
+    def latest_final_scheduled_at(season):
+        assert season == SEASON
+        # The only scheduled event has not started, so no game is complete.
+        return None
 
     def get_events_between(self, season, start, end):
         assert season == SEASON

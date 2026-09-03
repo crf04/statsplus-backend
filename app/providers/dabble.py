@@ -118,12 +118,19 @@ def canonical_stat_components(stats: Sequence[str]) -> list[str]:
 
 
 def _build_session() -> requests.Session:
+    """Build the one pooled client shared by every request of an adapter.
+
+    ``requests.Session`` may serve concurrent GETs from several threads; the
+    pool is sized so the capped detail fan-out plus discovery never waits for
+    a connection or opens one outside the pool.
+    """
+
     session = requests.Session()
     session.mount(
         "https://",
         requests.adapters.HTTPAdapter(
-            pool_connections=5,
-            pool_maxsize=10,
+            pool_connections=1,
+            pool_maxsize=DabbleAdapter.DETAIL_CONCURRENCY + 1,
         ),
     )
     session.headers.update(DabbleAdapter.DEFAULT_HEADERS)
@@ -201,21 +208,6 @@ class _SerializedSessionLease:
         if not self._released:
             self._released = True
             self._owner._get_lock.release()
-
-
-class _ThreadLocalSession:
-    """Create one independent client for each worker thread using the source."""
-
-    def __init__(self, factory: Callable[[], requests.Session | Any]) -> None:
-        self._factory = factory
-        self._local = threading.local()
-
-    def get(self, url: str, **kwargs: Any) -> Any:
-        session = getattr(self._local, "session", None)
-        if session is None:
-            session = self._factory()
-            self._local.session = session
-        return session.get(url, **kwargs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,11 +366,11 @@ class _PropEvidence:
 class DabbleAdapter:
     """Retrieve Dabble's eligible NBA player projection markets.
 
-    Production requests use a thread-local session factory, which keeps the
-    useful fixture fan-out while avoiding concurrent mutation of one Requests
-    session.  An explicitly injected ``session`` is treated as a test or
-    legacy client and its ``get`` calls are serialized.  Callers that provide
-    a concurrent-safe client source should use ``session_factory`` instead.
+    Production requests share one pooled Requests session built once per
+    adapter; the pool serves the bounded fixture fan-out concurrently.  An
+    explicitly injected ``session`` is treated as a test or legacy client and
+    its ``get`` calls are serialized.  Callers that provide a concurrent-safe
+    client should use ``session_factory`` instead; it is invoked exactly once.
     """
 
     BASE_URL = "https://api.dabble.com.au"
@@ -417,16 +409,13 @@ class DabbleAdapter:
         if connect_timeout_seconds <= 0 or read_timeout_seconds <= 0:
             raise ValueError("provider timeouts must be positive")
         self.monotonic = monotonic or time.monotonic
-        if session_factory is not None:
-            self.session = _ThreadLocalSession(session_factory)
-            self._request_session = self.session
-        elif session is not None:
+        if session is not None:
             # Keep the injected object visible for existing test seams while
             # routing actual calls through its concurrency-safe adapter.
             self.session = session
             self._request_session = _SerializedSession(session, monotonic=self.monotonic)
         else:
-            self.session = _ThreadLocalSession(_build_session)
+            self.session = (session_factory or _build_session)()
             self._request_session = self.session
         # The board contract caps Dabble fixture-detail fan-out at three even
         # when a caller supplies a larger experimental value.

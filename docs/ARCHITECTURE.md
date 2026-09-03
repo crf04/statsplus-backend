@@ -171,7 +171,7 @@ not counted twice:
 | NBA Stats | `NBAStatsAdapter` (via `nba_api`) | The closed `NBA_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `health_probe`, `player_game_logs`, `player_game_logs_season`, `player_game_logs_recorded`, `player_diets_recorded`, `player_roster`, `player_roster_recorded`, `league_opponent_team_stats`, `league_opponent_shot_chart`, `league_opponent_shooting_zone`, `team_game_log`, `league_player_shot_type`, `synergy_team_play_types`, `synergy_player_play_types`, `player_per36_stats`, `player_totals_stats`, `player_shooting_zone`, `player_shot_chart`, `player_gamelogs_against`, `schedule_whole_season` |
 | NBA LiveData | `NBALiveDataBoxscoreAdapter` | `game_boxscore`; used only after primary governed PBP evidence fails validation, with both source documents retained in the accepted composite observation |
 | PBP Stats | `PBPTotalsAdapter` (shared retrying session) | The closed `PBP_STATS_OPERATIONS` catalog in `app.utils.telemetry`: `get_totals_player`, `get_totals_player_diet`, `get_totals_opponent`, `health_probe`, `player_game_logs`, `game_player_stats`, `team_game_log` |
-| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests use a thread-local session factory; explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
+| Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | RotoWire | `RotoWireInjuryProvider` | One league-wide injury-table read with the closed operation `get_injuries`; raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically. |
@@ -1704,7 +1704,7 @@ Authenticated matchup-selection reads compose only stored seams:
 ```text
 GET /api/games/matchup/selection?game_id&player_id
   → strict query parsing + Firebase auth
-  → current-season Event Catalog game identity
+  → current-season Event Catalog game identity by NBA game ID (one row)
   → newest reusable persisted slate Player Pool containing the game
   → selected player and posted Market Categories
   → player_clusters peer IDs
@@ -1717,9 +1717,10 @@ Its dedicated read-only Player Pool seam scans stored canonical slate scopes,
 prefers the newest fresh scope containing the requested game, and uses the
 existing bounded stale-serve contract only when no fresh scope is available.
 It never constructs a one-game pool scope, acquires a refresh lease, or starts
-provider collection. An empty Event Catalog or unavailable stored pool surface
-is `503`; an unknown game within a populated catalog or player absent from a
-usable pool is `404`. It resolves the
+provider collection. The game is read by its NBA game ID; when that row is
+absent, an empty Event Catalog (checked only on the miss) or unavailable
+stored pool surface is `503`, while an unknown game within a populated catalog
+or a player absent from a usable pool is `404`. It resolves the
 opponent from the canonical event and the selected pool player's team, excludes
 the selected player from the archetype peer query, and asks the durable log
 repository for H2H/archetype rows. Rows without positive minutes or a usable
@@ -1747,7 +1748,7 @@ Authenticated full-matchup reads likewise compose stored seams only:
 ```text
 GET /api/games/matchup?game_id
   → strict query parsing + Firebase auth
-  → current-season Event Catalog game identity and schedule freshness
+  → current-season Event Catalog game identity by NBA game ID (one row), schedule freshness, and the newest completed-game tip time
   → newest reusable persisted Slate Player Pool containing the game
   → PlayerGameLogRepository bulk Season rates + combined-phase last ten
   → PlayerDietService bulk Season facts
@@ -1993,9 +1994,10 @@ completion, player-log read freshness, each Player Diet observation, each team
 Base/window observation, and injuries. This preserves the landed modules'
 truth instead of presenting one Nightly timestamp as if every source succeeded
 together. The stats-table status is stale when its successful completion
-predates the newest completed, non-postponed Event Catalog game. The already
-resolved Event Catalog collection supplies that comparison, so the full
-catalog is loaded once per request. Started and past games bound both team
+predates the newest completed, non-postponed Event Catalog game. That instant
+is one narrow catalog read (`latest_final_scheduled_at`, a `max(scheduled_at)`
+over final, non-postponed rows of the season); the full season catalog is
+never loaded for a matchup. Started and past games bound both team
 windows to their Eastern Slate Date; future tips query the current latest
 stored scopes with no future `as_of` value.
 
@@ -2011,7 +2013,10 @@ lease on completion/failure. The app factory creates one coordinator per app
 with the closed registry for `update_database`, both PBP refreshes,
 `fetch_players_with_teams`, and `fetch_players`; operation names, not callbacks,
 are persisted. A bounded dispatcher wakes immediately after enqueue and polls
-for restart recovery. The service takes an injectable executor and clock;
+every 15 seconds (`poll_interval`) per process for restart and expired-lease
+recovery; the 60-second lease is renewed by a separate 5-second heartbeat
+while a handler runs, so the poll cadence bounds only recovery latency, not
+lease health. The service takes an injectable executor and clock;
 tests use a `SynchronousExecutor` and `dispatch_once()` so job completion is
 deterministic.
 
@@ -2496,7 +2501,9 @@ database is rejected as a migration or catalog target.
 `AthleteResolver.resolve(provider, evidence, season)` accepts one typed
 provider `AthleteEvidence` value and an explicit requested season;
 `resolve_market(market, season)` is the board-facing spelling that lifts a
-market's athlete and team evidence. There is no other call shape. Resolution
+market's athlete and team evidence, and `for_board(season, identities)`
+returns the same two calls served from one read of the catalog and mapping
+state for a whole board. There is no other call shape. Resolution
 compares only the accent/case/punctuation-normalized official name among
 active `is_active_for_season` catalog rows. Normalization strips combining
 marks and folds the documented non-decomposing Latin letters (`ø`→`o`,
@@ -2613,7 +2620,13 @@ it never catches broad exceptions and still returns usable markets.
 An injected DFS board read may transactionally record the first qualifying
 automatic decision. The repository is idempotent under repeated and concurrent
 reads, never replaces manual approvals or overrides, and isolates persistence
-failures from the normalized market result. One board read resolves every
+failures from the normalized market result. The board asks the resolver for
+its view of one board read (`AthleteResolver.for_board(season, identities)`):
+the catalog is read and indexed by normalized name once, the mapping and
+rejection state of every named identity is read in one statement each per
+provider (`get_mappings`/`get_rejections`), and every market is resolved
+from those reads, so the read count no longer grows with the market count.
+One board read resolves every
 market before it writes anything, because a snapshot is temporally coherent:
 markets sharing one `(provider, provider_athlete_id)` are one observation of
 one athlete, not a sequence of observations that supersede each other. When
@@ -2770,7 +2783,9 @@ first.
 
 `EventResolver.resolve(provider, evidence, season)` accepts one typed provider
 `EventEvidence` value and an explicit requested season;
-`resolve_market(market, season)` is the board-facing spelling. Resolution asks
+`resolve_market(market, season)` is the board-facing spelling, and
+`for_board(season, identities)` returns the same two calls served from one
+read of the catalog and mapping state for a whole board. Resolution asks
 one question — which single scheduled NBA game does this evidence identify? —
 and answers it only from canonical home and away teams plus schedule proximity.
 Both sides must resolve to a canonical NBA team, from the provider's canonical
@@ -2864,7 +2879,13 @@ while the catalog is unusable, rather than lending an operator's decision to
 evidence no schedule can place.
 
 `DFSBoardService` receives the resolver and repository by injection and reports
-`board.event_mapping_outcomes`. One board read resolves every market before it
+`board.event_mapping_outcomes`. The board asks the resolver for its view of
+one board read (`EventResolver.for_board(season, identities)`): the catalog,
+its freshness, and the mapping and rejection state of every named identity
+(`get_mappings`/`get_rejections`, one statement each per provider) are read
+once and every market is resolved from those reads, so resolution stays a
+pure function of the same catalog and mapping state while the read count no
+longer grows with the market count. One board read resolves every market before it
 writes anything: markets sharing one `(provider, provider_event_id)` are one
 observation of one fixture, so compatible markets are combined into a single
 durable observation carrying every fact any of them reported and resolved as a

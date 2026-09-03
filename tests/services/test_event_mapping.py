@@ -1318,6 +1318,109 @@ def test_one_board_read_records_one_observation_per_fixture(event_db):
     assert len(repository.history(provider="underdog", provider_event_id="ud-1")) == 1
 
 
+def test_batched_event_mapping_reads_return_only_stored_identities(event_db):
+    engine, now = event_db
+    repository = _repository(engine, now)
+    repository.record_resolution(_resolver().resolve("underdog", _evidence(), SEASON))
+    repository.reject(
+        "underdog", "ud-99", operator_id="ops@example.com", reason="not an NBA game"
+    )
+
+    mappings = repository.get_mappings("Underdog", ["ud-1", " ud-99 ", "ud-missing"])
+    rejections = repository.get_rejections("underdog", ["ud-1", "ud-99"])
+
+    assert set(mappings) == {"ud-1"}
+    assert mappings["ud-1"] == repository.get_mapping("underdog", "ud-1")
+    assert set(rejections) == {"ud-99"}
+    assert rejections["ud-99"] == repository.get_rejection("underdog", "ud-99")
+    assert repository.get_mappings("underdog", []) == {}
+
+
+class _CountingRepository(EventMappingRepository):
+    """The real repository, recording which read seam served the resolver."""
+
+    def __init__(self, engine, **kwargs):
+        super().__init__(engine, **kwargs)
+        self.single_reads: list[tuple[str, str]] = []
+        self.batched_reads: list[tuple[str, tuple[str, ...]]] = []
+
+    def get_mapping(self, provider, provider_event_id):
+        self.single_reads.append((provider, provider_event_id))
+        return super().get_mapping(provider, provider_event_id)
+
+    def get_rejection(self, provider, provider_event_id):
+        self.single_reads.append((provider, provider_event_id))
+        return super().get_rejection(provider, provider_event_id)
+
+    def get_mappings(self, provider, provider_event_ids):
+        self.batched_reads.append((provider, tuple(provider_event_ids)))
+        return super().get_mappings(provider, provider_event_ids)
+
+    def get_rejections(self, provider, provider_event_ids):
+        self.batched_reads.append((provider, tuple(provider_event_ids)))
+        return super().get_rejections(provider, provider_event_ids)
+
+
+def test_a_board_read_reads_the_catalog_and_mapping_state_once(event_db):
+    """One board is one read of the catalog and of every fixture it names."""
+
+    engine, now = event_db
+    repository = _CountingRepository(engine, clock=lambda: now)
+    repository.record_resolution(_resolver().resolve("underdog", _evidence(), SEASON))
+    catalog = FakeEventCatalog(
+        [_event_row(), _event_row("0022500002", home_team_id=BOS, home_team_tricode="BOS")]
+    )
+    resolver = EventResolver(catalog, mapping_repository=repository)
+    markets = (
+        _market("m-1"),
+        _market("m-2", event=_evidence("ud-2", home=TeamEvidence(abbreviation="BOS"))),
+        _market("m-3"),
+        _market("m-4", event=_evidence("ud-77", label="Unknown vs Nobody")),
+    )
+    expected = [resolver.resolve_market(market, SEASON) for market in markets]
+    catalog.requested_seasons.clear()
+    repository.single_reads.clear()
+
+    board_resolver = resolver.for_board(
+        SEASON, [(market.provider, market.event.provider_id) for market in markets]
+    )
+    resolved = [board_resolver.resolve_market(market, SEASON) for market in markets]
+
+    assert resolved == expected
+    assert catalog.requested_seasons == [SEASON]
+    assert repository.single_reads == []
+    assert repository.batched_reads == [
+        ("underdog", ("ud-1", "ud-2", "ud-77")),
+        ("underdog", ("ud-1", "ud-2", "ud-77")),
+    ]
+
+
+def test_board_service_resolves_every_market_from_one_board_read(event_db):
+    engine, now = event_db
+    repository = _CountingRepository(engine, clock=lambda: now)
+    catalog = FakeEventCatalog(
+        [_event_row(), _event_row("0022500002", home_team_id=BOS, home_team_tricode="BOS")]
+    )
+    service = _board_service(
+        _snapshot(
+            _market("m-1"),
+            _market("m-2", event=_evidence("ud-2", home=TeamEvidence(abbreviation="BOS"))),
+            _market("m-3"),
+        ),
+        resolver=EventResolver(catalog, mapping_repository=repository),
+        repository=repository,
+    )
+
+    board = service.get_board(NBAMarketQuery(season=SEASON))
+
+    assert board.usable
+    assert catalog.requested_seasons == [SEASON]
+    assert repository.single_reads == []
+    assert len(repository.batched_reads) == 2
+    assert {
+        outcome.canonical_event_id for outcome in board.event_mapping_outcomes
+    } == {"0022500001", "0022500002"}
+
 def test_a_fixture_its_own_read_contradicts_fails_closed(event_db):
     engine, now = event_db
     repository = _repository(engine, now)

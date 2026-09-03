@@ -106,32 +106,35 @@ class _Events:
     def count_events(self, season):
         return 1
 
-    def get_events(self, season):
-        return [
-            {
-                "nba_game_id": GAME_ID,
-                "scheduled_at": "2026-01-15T20:00:00+00:00",
-                "status_code": 1,
-                "status_text": "Scheduled",
-                "classification": "Regular Season",
-                "away_team_id": LAL,
-                "away_team_name": "Los Angeles Lakers",
-                "away_team_tricode": "LAL",
-                "home_team_id": BOS,
-                "home_team_name": "Boston Celtics",
-                "home_team_tricode": "BOS",
-                "away_team": {
-                    "id": LAL,
-                    "name": "Los Angeles Lakers",
-                    "tricode": "LAL",
-                },
-                "home_team": {
-                    "id": BOS,
-                    "name": "Boston Celtics",
-                    "tricode": "BOS",
-                },
-            }
-        ]
+    def get_event(self, season, game_id):
+        if game_id != GAME_ID:
+            return None
+        return {
+            "nba_game_id": GAME_ID,
+            "scheduled_at": "2026-01-15T20:00:00+00:00",
+            "status_code": 1,
+            "status_text": "Scheduled",
+            "classification": "Regular Season",
+            "away_team_id": LAL,
+            "away_team_name": "Los Angeles Lakers",
+            "away_team_tricode": "LAL",
+            "home_team_id": BOS,
+            "home_team_name": "Boston Celtics",
+            "home_team_tricode": "BOS",
+            "away_team": {
+                "id": LAL,
+                "name": "Los Angeles Lakers",
+                "tricode": "LAL",
+            },
+            "home_team": {
+                "id": BOS,
+                "name": "Boston Celtics",
+                "tricode": "BOS",
+            },
+        }
+
+    def latest_final_scheduled_at(self, season):
+        return None
 
     def get_freshness(self, season, *, now):
         return {"last_success_at": RETRIEVED_AT.isoformat()}
