@@ -291,6 +291,75 @@ def test_legacy_write_fence_fails_only_after_stream_activation(tmp_path):
         raise AssertionError("activated stream accepted a legacy write")
 
 
+#: The activation state of every legacy refresh stream in production as of the
+#: 2026-08-24 cycle recorded on backend #87.  The remaining three streams are
+#: registered and still inactive, so their legacy tables must keep refreshing.
+_ACTIVATED_IN_PRODUCTION = (
+    "traditional_opponent_season",
+    "assist_locations_season",
+    "player_per36",
+    "synergy_play_types_opponent_season",
+    "exact_shot_zones_opponent_season",
+    "grouped_shot_types_opponent_season",
+)
+_INACTIVE_IN_PRODUCTION = (
+    "synergy_play_types",
+    "exact_shot_zones",
+    "player_assist_locations",
+)
+#: Legacy tables whose stream is activated in production, and the ones that are
+#: still the only source for their readers.
+_FENCED_TABLES = (
+    "general_opponent_stats",
+    "player_per36_stats",
+    "team_play_types",
+    "catch_and_shoot",
+    "pullups",
+    "less_than_10_ft",
+    "opp_shooting_zone",
+    "processed_team_assists",
+    "pbp_opponent_stats",
+)
+_STILL_REFRESHED_TABLES = (
+    "player_information",
+    "player_play_types",
+    "player_shooting_zones",
+    "pbp_player_stats",
+    "processed_player_assists",
+)
+
+
+def _register_production_streams(engine, *, activated=_ACTIVATED_IN_PRODUCTION):
+    service = PublicationService(engine, clock=lambda: NOW)
+    for stream_key in _ACTIVATED_IN_PRODUCTION + _INACTIVE_IN_PRODUCTION:
+        service.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=(),
+            publication_strategy="replace",
+            enabled=stream_key in activated,
+        )
+    return service
+
+
+def _seed_legacy_tables(engine, table_names):
+    with engine.begin() as connection:
+        for table_name in table_names:
+            connection.execute(text(f"CREATE TABLE {table_name} (value TEXT)"))
+            connection.execute(text(f"INSERT INTO {table_name} VALUES ('old')"))
+
+
+def _table_values(engine, table_names):
+    with engine.connect() as connection:
+        return {
+            table_name: connection.execute(
+                text(f"SELECT value FROM {table_name}")
+            ).scalar_one()
+            for table_name in table_names
+        }
+
+
 def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monkeypatch):
     import pandas as pd
 
@@ -322,11 +391,19 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
     )
     frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
     monkeypatch.setattr(data_service, "_fetch_opponent_data", lambda *args, **kwargs: frame)
+    _seed_legacy_tables(engine, ("general_opponent_stats", "player_information"))
     monkeypatch.setattr(data_service, "_collect_all_frames", lambda: {
-        "general_opponent_stats": frame,
+        "general_opponent_stats": pd.DataFrame([{"value": "new"}]),
+        "player_information": pd.DataFrame([{"value": "new"}]),
     })
 
-    assert data_service.update_all_data() is False
+    # The activated stream refuses its own table without aborting the rest of
+    # the publication: the unrelated table still refreshes.
+    assert data_service.update_all_data() is True
+    assert _table_values(engine, ("general_opponent_stats", "player_information")) == {
+        "general_opponent_stats": "old",
+        "player_information": "new",
+    }
     with pytest.raises(Exception, match="legacy_write_fenced"):
         data_service.process_opponent_scoring()
 
@@ -347,6 +424,129 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
                 (TeamMatchupObservation("traditional", "available"),),
             ),
         ), retrieved_at=NOW)
+
+
+def _activation_data_service(engine, *, completed_at):
+    from app.config.settings import load_settings
+    from app.services.data_service import DataService
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
+
+    return DataService(
+        engine,
+        settings=load_settings(),
+        clock=lambda: completed_at,
+        stats_freshness=StatsFreshnessRepository(engine),
+        write_fence=LegacyWriteFence(engine),
+    )
+
+
+def test_production_activation_refreshes_every_unfenced_table(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    import pandas as pd
+
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
+
+    engine = _db(tmp_path)
+    _register_production_streams(engine)
+    tables = _FENCED_TABLES + _STILL_REFRESHED_TABLES
+    _seed_legacy_tables(engine, tables)
+    completed_at = NOW + timedelta(days=1)
+    data_service = _activation_data_service(engine, completed_at=completed_at)
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda: {
+            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert data_service.update_all_data() is True
+
+    assert _table_values(engine, tables) == {
+        **{table_name: "old" for table_name in _FENCED_TABLES},
+        **{table_name: "new" for table_name in _STILL_REFRESHED_TABLES},
+    }
+    assert (
+        StatsFreshnessRepository(engine).get().last_successful_completion
+        == completed_at
+    )
+    refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if "legacy_write_fenced" in record.getMessage()
+    ]
+    assert len(refusals) == len(_FENCED_TABLES)
+    assert any(
+        "general_opponent_stats" in message
+        and "traditional_opponent_season" in message
+        for message in refusals
+    )
+
+
+def test_refusing_every_frame_succeeds_without_publishing_or_freshness(
+    tmp_path, monkeypatch
+):
+    import pandas as pd
+
+    from app.services.stats_freshness_repository import StatsFreshnessRepository
+
+    engine = _db(tmp_path)
+    _register_production_streams(engine)
+    _seed_legacy_tables(engine, _FENCED_TABLES)
+    data_service = _activation_data_service(engine, completed_at=NOW)
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda: {
+            table_name: pd.DataFrame([{"value": "new"}])
+            for table_name in _FENCED_TABLES
+        },
+    )
+
+    # Nothing is left to publish, but nothing failed either: a retry cannot
+    # change the outcome, so the nightly unit must not be marked failed.
+    assert data_service.update_all_data() is True
+    assert _table_values(engine, _FENCED_TABLES) == {
+        table_name: "old" for table_name in _FENCED_TABLES
+    }
+    assert (
+        StatsFreshnessRepository(engine).get().last_successful_completion is None
+    )
+
+
+def test_unavailable_fence_stream_still_aborts_the_whole_refresh(
+    tmp_path, monkeypatch
+):
+    import pandas as pd
+
+    engine = _db(tmp_path)
+    # ``player_per36`` is deliberately never registered: an unreadable control
+    # plane must fail closed rather than be treated as still-refreshed.
+    _register_production_streams(engine, activated=())
+    with engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM publication_streams WHERE stream_key = 'player_per36'")
+        )
+    _seed_legacy_tables(engine, ("player_per36_stats", "player_information"))
+    data_service = _activation_data_service(engine, completed_at=NOW)
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda: {
+            "player_per36_stats": pd.DataFrame([{"value": "new"}]),
+            "player_information": pd.DataFrame([{"value": "new"}]),
+        },
+    )
+
+    assert data_service.update_all_data() is False
+    assert _table_values(engine, ("player_per36_stats", "player_information")) == {
+        "player_per36_stats": "old",
+        "player_information": "old",
+    }
 
 
 def test_provider_guard_is_fail_closed():
