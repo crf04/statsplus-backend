@@ -119,6 +119,68 @@ AC recovery to restore the prior power state, and keep WakeToRun enabled. A
 private-network always-on device may provide manual Wake-on-LAN recovery; the
 Railway service never opens an inbound connection to the PC.
 
+## Opponent shot zones: Totals, not the provider's rate
+
+The NBA shot-location endpoint offers a `Per48` per-mode, and for opponent
+zones it is unusable. It divides each zone by a different hidden slice of
+minutes, so the numbers it returns are not true per-48 rates and the
+distortion differs per team -- which changes competitive ordering rather than
+merely the display scale. Field-goal percentage looked correct throughout,
+because makes and attempts share the same defective denominator, and that
+concealed the defect for a long time.
+
+The collector therefore requests `per_mode_detailed="Totals"` and the backend
+derives every published value as:
+
+```
+published_per_48 = zone_total * 48 / team_minutes_for_the_identical_window
+```
+
+The minutes come from the opponent TeamStats row for that exact window, not
+from the shot-location response's own arithmetic. The scope carries
+`value_mode: "totals_with_minutes"`; an observation still labelled `per48`
+cannot authorize a publication.
+
+### Exact reconciliation
+
+Each shot-location read is paired with an opponent TeamStats read using the
+identical season, phase, team, date boundary, Last-N-Games and cutoff, so the
+two responses describe one window. Two integer-count identities must then hold
+exactly -- there is no tolerance band, because these are counts:
+
+```
+Restricted Area + In The Paint (Non-RA) + Mid-Range + Corner 3
+    + Above the Break 3 + Backcourt == opponent TeamStats total   (FGM and FGA)
+
+Corner 3 == Left Corner 3 + Right Corner 3                        (FGM and FGA)
+```
+
+Backcourt and the Corner 3 sides exist only to make those equations closeable.
+They are retained on the observation as evidence and never become published
+zones; publications continue to expose exactly the five canonical zones.
+
+The second identity is also the clearest signature of the old defect: under
+`Totals` the sides are exact components of the combined corner, while under
+the endpoint's `Per48` the combined value sits near their mean.
+
+### One paired refetch
+
+The shot-location and TeamStats reads are two separate requests, so a mismatch
+can simply mean the provider updated between them. The first mismatch refetches
+the **complete pair** once. A coherent second result is accepted. A second
+mismatch is rejected rather than stored as acceptable evidence, and reports
+bounded diagnostics -- team, window, failing equation, expected, observed and
+residual -- so remediation is actionable without echoing the whole response.
+
+### Validated at two boundaries
+
+The collector refuses inconsistent evidence before it uploads. The backend then
+repeats the identical check against the immutable recorded observation before
+composing. A collector's success is a claim, not proof: an obsolete or
+tampered-with collector cannot publish the broken rate scale, because central
+validation re-derives the equations from the stored evidence rather than
+trusting the upload.
+
 ## Provider compatibility probes
 
 The default rehearsal runs deterministic sanitized recorded-shape schedule/roster, Synergy, grouped

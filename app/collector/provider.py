@@ -9,7 +9,11 @@ import math
 import os
 from typing import Any, Iterator, Protocol
 
-from .contracts import NormalizedObservation, ProviderContractError
+from .contracts import (
+    NormalizedObservation,
+    ProviderContractError,
+    ZoneReconciliationError,
+)
 from .normalizers import (
     PLAY_TYPES,
     SHOT_TYPES,
@@ -215,25 +219,43 @@ class ResidentialScopeExecutor:
                 team_id = parameters.get("team_id")
                 if team_id is None:
                     raise ProviderContractError("scope_team_required")
-                raw = _call(
-                    self.provider, "fetch_opponent_shooting_zone",
-                    parameters.get("date_from"), date_to=parameters.get("date_to"),
-                    season=work.season, season_type="Regular Season",
-                    # The endpoint refuses an empty LastNGames; the season
-                    # window is its explicit zero, not an omitted parameter.
-                    team_id=int(team_id), last_n_games=15 if window == "l15" else 0,
-                    per_mode_detailed=str(parameters.get("per_mode", "Per48")),
-                )
-                yield normalize_opponent_zone_response(
-                    raw, season=work.season, cutoff=work.cutoff,
-                    team_id=int(team_id), window=window,
-                    value_mode=str(parameters.get("value_mode", "per48")),
-                    endpoint_window={
-                        "last_n_games": 15 if window == "l15" else 0,
-                        "date_from": parameters.get("date_from"),
-                        "date_to": parameters.get("date_to"),
-                    },
-                )
+                def fetch_and_reconcile() -> NormalizedObservation:
+                    raw = _call(
+                        self.provider, "fetch_opponent_shooting_zone",
+                        parameters.get("date_from"),
+                        date_to=parameters.get("date_to"),
+                        season=work.season, season_type="Regular Season",
+                        # The endpoint refuses an empty LastNGames; the season
+                        # window is its explicit zero, not an omitted value.
+                        team_id=int(team_id),
+                        last_n_games=15 if window == "l15" else 0,
+                        per_mode_detailed=str(
+                            parameters.get("per_mode", "Totals")
+                        ),
+                    )
+                    return normalize_opponent_zone_response(
+                        raw, season=work.season, cutoff=work.cutoff,
+                        team_id=int(team_id), window=window,
+                        value_mode=str(parameters.get(
+                            "value_mode", "totals_with_minutes"
+                        )),
+                        endpoint_window={
+                            "last_n_games": 15 if window == "l15" else 0,
+                            "date_from": parameters.get("date_from"),
+                            "date_to": parameters.get("date_to"),
+                        },
+                    )
+
+                try:
+                    observation = fetch_and_reconcile()
+                except ZoneReconciliationError:
+                    # The shot-location and TeamStats reads are two requests,
+                    # so a mismatch can be the provider updating between them.
+                    # Refetch the complete pair once: a coherent second result
+                    # is accepted, and a repeated one is a real defect that is
+                    # reported rather than stored as valid evidence.
+                    observation = fetch_and_reconcile()
+                yield observation
                 return
             raw = _call(
                 self.provider, "fetch_player_shooting_zone",
@@ -309,19 +331,31 @@ class _StandaloneNBAProvider:
     def _team_window_evidence(
         self, *, season: str, season_type: str, team_id: int,
         last_n_games: int | None, date_from: str | None, date_to: str | None,
+        measure_type: str | None = None,
     ) -> Any:
+        """Fetch the window's authoritative team totals.
+
+        ``measure_type="Opponent"`` additionally yields the opponent FGM/FGA
+        the shot-location zones must reconcile against.  The season, phase,
+        team, date boundary and Last-N-Games are the identical parameters the
+        shot-location request uses, so the two responses describe one window.
+        """
+
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.LeagueDashTeamStats(
-            season=season,
-            season_type_all_star=season_type,
-            team_id_nullable=team_id,
-            last_n_games=str(last_n_games or 0),
-            date_from_nullable=date_from or "",
-            date_to_nullable=date_to or "",
-            per_mode_detailed="Totals",
-            league_id_nullable="00",
-            timeout=self.timeout,
-        ))
+        parameters: dict[str, Any] = {
+            "season": season,
+            "season_type_all_star": season_type,
+            "team_id_nullable": team_id,
+            "last_n_games": str(last_n_games or 0),
+            "date_from_nullable": date_from or "",
+            "date_to_nullable": date_to or "",
+            "per_mode_detailed": "Totals",
+            "league_id_nullable": "00",
+            "timeout": self.timeout,
+        }
+        if measure_type is not None:
+            parameters["measure_type_detailed_defense"] = measure_type
+        return self._request(lambda: endpoints.LeagueDashTeamStats(**parameters))
 
     def fetch_whole_season_schedule(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
@@ -466,8 +500,17 @@ class _StandaloneNBAProvider:
     def fetch_opponent_shooting_zone(
         self, date_from: str | None, *, date_to: str | None = None,
         season: str, season_type: str, team_id: int, last_n_games: int | None,
-        per_mode_detailed: str = "Per48",
+        per_mode_detailed: str = "Totals",
     ) -> Any:
+        """Fetch opponent shot locations as integer Totals beside their check.
+
+        The endpoint's own ``Per48`` divides each zone by a different hidden
+        slice of minutes, so a published rate has to be derived from Totals
+        and one authoritative minutes figure instead.  The opponent TeamStats
+        row for the identical window travels with the response as the
+        independent total the zones must add up to.
+        """
+
         from nba_api.stats import endpoints
         frame = self._request(lambda: endpoints.LeagueDashTeamShotLocations(
             distance_range="By Zone",
@@ -485,8 +528,36 @@ class _StandaloneNBAProvider:
         evidence = self._team_window_evidence(
             season=season, season_type=season_type, team_id=team_id,
             last_n_games=last_n_games, date_from=date_from, date_to=date_to,
+            measure_type="Opponent",
         )
-        return self._bind_window_gp(frame, evidence, team_id=team_id)
+        return self._bind_opponent_zone_evidence(
+            frame, evidence, team_id=team_id,
+        )
+
+    @classmethod
+    def _bind_opponent_zone_evidence(
+        cls, frame: Any, evidence: Any, *, team_id: int,
+    ) -> Any:
+        """Bind window games, minutes, and the opponent FGM/FGA totals."""
+
+        merged = cls._bind_window_gp(frame, evidence, team_id=team_id)
+        try:
+            flattened = _flatten_frame_columns(evidence)
+            rows = flattened.loc[flattened["TEAM_ID"] == team_id]
+            if len(rows.index) != 1:
+                raise ProviderContractError("provider_window_unverified")
+            row = rows.iloc[0]
+            merged = merged.copy()
+            for column, source in (
+                ("OPP_TOTAL_FGM", "OPP_FGM"), ("OPP_TOTAL_FGA", "OPP_FGA"),
+            ):
+                value = float(row[source])
+                if not math.isfinite(value) or value < 0:
+                    raise ProviderContractError("provider_window_unverified")
+                merged[column] = value
+            return merged
+        except (KeyError, TypeError, AttributeError, ValueError) as error:
+            raise ProviderContractError("provider_window_unverified") from error
 
 
 class NBAStatsProviderAdapter:

@@ -20,6 +20,7 @@ from app.collector.cache import InstructionCache
 from app.collector.config import CollectorConfig, CollectorConfigurationError, load_collector_config
 from app.collector.contracts import ProviderContractError
 from app.collector.normalizers import (
+    SHOT_ZONES,
     normalize_grouped_shot_response,
     normalize_opponent_grouped_shot_response,
     normalize_opponent_zone_response,
@@ -209,9 +210,8 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
             category="Catch and Shoot",
         )
 
-    columns = [("", "TEAM_ID")]
-    columns.append(("", "GP"))
-    values = [1610612737, 15]
+    columns = [("", "TEAM_ID"), ("", "GP"), ("", "MIN")]
+    values = [1610612737, 15, 725]
     for zone in (
         "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
         "Above the Break 3",
@@ -221,8 +221,17 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
     for zone in ("Left Corner 3", "Right Corner 3"):
         columns.extend(((zone, "OPP_FGM"), (zone, "OPP_FGA")))
         values.extend((2, 4))
+    # Backcourt completes the opponent's own field-goal totals: the five
+    # published zones are 20/40, so 21/43 leaves exactly 1/3 behind the arc's
+    # far side.
+    columns.extend((("Backcourt", "OPP_FGM"), ("Backcourt", "OPP_FGA")))
+    values.extend((1, 3))
+    reconciled = [*columns, ("", "OPP_TOTAL_FGM"), ("", "OPP_TOTAL_FGA")]
     zone = normalize_opponent_zone_response(
-        pd.DataFrame([values], columns=pd.MultiIndex.from_tuples(columns)),
+        pd.DataFrame(
+            [[*values, 21, 43]],
+            columns=pd.MultiIndex.from_tuples(reconciled),
+        ),
         season="2025-26", cutoff=NOW, team_id=1610612737,
     )
     assert zone.observation_type == "shot_zones_opponent"
@@ -237,47 +246,71 @@ def test_production_opponent_shot_frames_preserve_registered_raw_taxonomy():
             "Corner 3", "Above the Break 3",
         )
     }
-    bound = _StandaloneNBAProvider._bind_window_gp(
+    # Backcourt is reconciliation evidence, never a published zone.
+    assert zone.payload["reconciliation"]["Backcourt"] == {"FGM": 1, "FGA": 3}
+    assert "Backcourt" not in {
+        row["category"] for row in zone.payload["records"]
+    }
+
+    # The provider binds games, minutes, and the independent opponent totals
+    # from the TeamStats row for the identical window.
+    bound = _StandaloneNBAProvider._bind_opponent_zone_evidence(
         pd.DataFrame(
             [values], columns=pd.MultiIndex.from_tuples(columns)
-        ).drop(columns=[("", "GP")]),
-        pd.DataFrame([{"TEAM_ID": 1610612737, "GP": 15, "MIN": 725}]),
+        ).drop(columns=[("", "GP"), ("", "MIN")]),
+        pd.DataFrame([{
+            "TEAM_ID": 1610612737, "GP": 15, "MIN": 725,
+            "OPP_FGM": 21, "OPP_FGA": 43,
+        }]),
         team_id=1610612737,
     )
     assert bound["TEAM_ID"].tolist() == [1610612737]
     assert bound["GP"].tolist() == [15]
     assert bound["MIN"].tolist() == [725]
-    # A combined corner beside its split is the live shape; the combined
-    # value is authoritative.
+    assert bound["OPP_TOTAL_FGM"].tolist() == [21]
+    assert bound["OPP_TOTAL_FGA"].tolist() == [43]
+    # A combined corner beside its split is the live shape.  Under Totals the
+    # sides are exact components of it, so the two must agree.
+    corner_columns = pd.MultiIndex.from_tuples(
+        reconciled + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
+    )
     combined = normalize_opponent_zone_response(
-        pd.DataFrame(
-            [values + [5, 8]],
-            columns=pd.MultiIndex.from_tuples(
-                columns
-                + [("Corner 3", "OPP_FGM"), ("Corner 3", "OPP_FGA")]
-            ),
-        ),
+        pd.DataFrame([[*values, 21, 43, 4, 8]], columns=corner_columns),
         season="2025-26", cutoff=NOW, team_id=1610612737,
     )
     assert {
         (record["category"], record["FGM"], record["FGA"])
         for record in combined.payload["records"]
         if record["category"] == "Corner 3"
-    } == {("Corner 3", 5, 8)}
+    } == {("Corner 3", 4, 8)}
+
+    # The Per48 scale reported a combined corner near the sides' mean rather
+    # than their sum.  That disagreement is now the defect itself.
+    with pytest.raises(ProviderContractError) as drifted:
+        normalize_opponent_zone_response(
+            pd.DataFrame([[*values, 21, 43, 5, 8]], columns=corner_columns),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+    assert drifted.value.reason == "value_invariant_failed"
+    assert drifted.value.diagnostics["window"] == "season"
+
     wrong_team_values = list(values)
     wrong_team_values[0] = 1610612738
     with pytest.raises(ProviderContractError, match="manifest_scope_mismatch"):
         normalize_opponent_zone_response(
             pd.DataFrame(
-                [wrong_team_values], columns=pd.MultiIndex.from_tuples(columns)
+                [[*wrong_team_values, 21, 43]],
+                columns=pd.MultiIndex.from_tuples(reconciled),
             ),
             season="2025-26", cutoff=NOW, team_id=1610612737,
         )
     with pytest.raises(ProviderContractError, match="provider_window_unverified"):
         normalize_opponent_zone_response(
             pd.DataFrame(
-                [values[:1] + values[2:]],
-                columns=pd.MultiIndex.from_tuples(columns[:1] + columns[2:]),
+                [[values[0], *values[2:], 21, 43]],
+                columns=pd.MultiIndex.from_tuples(
+                    [reconciled[0], *reconciled[2:]]
+                ),
             ),
             season="2025-26", cutoff=NOW, team_id=1610612737,
         )
@@ -416,7 +449,11 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
     assert {
         item["parameters"]["per_mode"] for item in team_scoped
         if item["scope"] == "shot_zones_opponent"
-    } == {"Per48"}
+    } == {"Totals"}
+    assert {
+        item["parameters"]["value_mode"] for item in team_scoped
+        if item["scope"] == "shot_zones_opponent"
+    } == {"totals_with_minutes"}
     synergy = [item for item in opponent if item["scope"] == "synergy_opponent"]
     assert len(synergy) == 11
     assert {item["parameters"]["window"] for item in synergy} == {"season"}
@@ -577,10 +614,93 @@ def test_exact_window_opponent_breakdown_collapses_to_one_team_row():
     ).equals(season)
 
 
-def test_zone_response_prefers_the_combined_corner_over_its_sides():
-    # The live row reports "Corner 3" both combined and split; the split is
-    # not an additive decomposition under Per48, so the combined value wins
-    # whenever it is present and the sides are only summed in its absence.
+def _totals_zone_row(**overrides):
+    """One coherent opponent Totals row: five zones plus Backcourt reconcile."""
+
+    base = {
+        "TEAM_ID": 1610612737, "GP": 15, "MIN": 725,
+        **{f"{zone}_OPP_{stat}": value
+           for zone in ("Restricted Area", "In The Paint (Non-RA)",
+                        "Mid-Range", "Above the Break 3")
+           for stat, value in (("FGM", 4), ("FGA", 8))},
+        "Corner 3_OPP_FGM": 4, "Corner 3_OPP_FGA": 8,
+        "Left Corner 3_OPP_FGM": 2, "Left Corner 3_OPP_FGA": 4,
+        "Right Corner 3_OPP_FGM": 2, "Right Corner 3_OPP_FGA": 4,
+        "Backcourt_OPP_FGM": 1, "Backcourt_OPP_FGA": 3,
+        # Five zones (20/40) plus Backcourt (1/3).
+        "OPP_TOTAL_FGM": 21, "OPP_TOTAL_FGA": 43,
+    }
+    base.update(overrides)
+    return pd.DataFrame([{k: v for k, v in base.items() if v is not None}])
+
+
+def test_totals_zone_response_reconciles_against_the_opponent_totals():
+    """Under Totals the zones are exact components, so they must add up."""
+
+    observation = normalize_opponent_zone_response(
+        _totals_zone_row(), season="2025-26", cutoff=NOW, team_id=1610612737,
+    )
+    corner = next(
+        record for record in observation.payload["records"]
+        if record["category"] == "Corner 3"
+    )
+    assert (corner["FGM"], corner["FGA"]) == (4, 8)
+    assert corner["minutes"] == 725
+
+    # Backcourt and the Corner 3 sides are retained as evidence for the
+    # backend's independent check, and never as published zones.
+    reconciliation = observation.payload["reconciliation"]
+    assert reconciliation["opponent_totals"] == {"FGM": 21, "FGA": 43}
+    assert reconciliation["Backcourt"] == {"FGM": 1, "FGA": 3}
+    assert reconciliation["Left Corner 3"] == {"FGM": 2, "FGA": 4}
+    assert {record["category"] for record in observation.payload["records"]} == set(
+        SHOT_ZONES
+    )
+
+    # One zone short of the opponent total is a defect, not a rounding band,
+    # and it names the team, window, equation and residual so a persistent
+    # mismatch is actionable.
+    with pytest.raises(ProviderContractError) as short:
+        normalize_opponent_zone_response(
+            _totals_zone_row(**{"Mid-Range_OPP_FGA": 7}),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+    assert short.value.reason == "value_invariant_failed"
+    assert short.value.diagnostics == {
+        "team_id": 1610612737,
+        "window": "season",
+        "equation": "zones_plus_backcourt_equals_opponent_fga",
+        "expected": 43.0,
+        "observed": 42.0,
+        "residual": -1.0,
+    }
+
+    # A combined corner that disagrees with its own sides is the same defect.
+    with pytest.raises(ProviderContractError) as corner_split:
+        normalize_opponent_zone_response(
+            _totals_zone_row(**{"Left Corner 3_OPP_FGM": 3}),
+            season="2025-26", cutoff=NOW, team_id=1610612737,
+        )
+    assert corner_split.value.diagnostics["equation"] == (
+        "corner_3_fgm_equals_left_plus_right"
+    )
+    assert corner_split.value.diagnostics["residual"] == -1.0
+
+    # Missing reconciliation evidence cannot be waved through.
+    for missing in ("Backcourt_OPP_FGM", "OPP_TOTAL_FGA"):
+        with pytest.raises(ProviderContractError, match="provider_schema_changed"):
+            normalize_opponent_zone_response(
+                _totals_zone_row(**{missing: None}),
+                season="2025-26", cutoff=NOW, team_id=1610612737,
+            )
+
+
+def test_legacy_per48_zone_response_prefers_the_combined_corner_over_its_sides():
+    # The legacy rate-scale row reports "Corner 3" both combined and split;
+    # the split is not an additive decomposition under Per48, so the combined
+    # value wins whenever it is present and the sides are only summed in its
+    # absence.  This mode can no longer authorize a publication -- the backend
+    # requires ``totals_with_minutes`` -- but recorded evidence still parses.
     def row(**overrides):
         base = {
             "TEAM_ID": 1610612737, "GP": 15, "MIN": 725,
@@ -596,20 +716,22 @@ def test_zone_response_prefers_the_combined_corner_over_its_sides():
         return pd.DataFrame([{k: v for k, v in base.items() if v is not None}])
 
     observation = normalize_opponent_zone_response(
-        row(), season="2025-26", cutoff=NOW, team_id=1610612737
+        row(), season="2025-26", cutoff=NOW, team_id=1610612737,
+        value_mode="per48",
     )
     corner = next(
         record for record in observation.payload["records"]
         if record["category"] == "Corner 3"
     )
     assert (corner["FGM"], corner["FGA"]) == (40.8, 112.2)
+    assert "reconciliation" not in observation.payload
 
     # Without the combined columns the sides are summed.
     summed = normalize_opponent_zone_response(
         row(**{"Corner 3_OPP_FGM": None, "Corner 3_OPP_FGA": None,
                "Left Corner 3_OPP_FGM": 2, "Left Corner 3_OPP_FGA": 4,
                "Right Corner 3_OPP_FGM": 2, "Right Corner 3_OPP_FGA": 4}),
-        season="2025-26", cutoff=NOW, team_id=1610612737,
+        season="2025-26", cutoff=NOW, team_id=1610612737, value_mode="per48",
     )
     corner = next(
         record for record in summed.payload["records"]
@@ -623,6 +745,7 @@ def test_zone_response_prefers_the_combined_corner_over_its_sides():
             row(**{"Corner 3_OPP_FGM": None, "Corner 3_OPP_FGA": None,
                    "Right Corner 3_OPP_FGM": None}),
             season="2025-26", cutoff=NOW, team_id=1610612737,
+            value_mode="per48",
         )
 
 
@@ -763,13 +886,16 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             }]
 
         def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
-            assert kwargs["per_mode_detailed"] == "Per48"
+            assert kwargs["per_mode_detailed"] == "Totals"
             assert _date_from == (
                 l15_date_from if kwargs["last_n_games"] == 15 else None
             )
+            # Four zones at 4/8 plus a 2+2 / 4+4 corner is 20/40; Backcourt
+            # carries the remaining 1/3 up to the opponent's own totals.
             return [{
                 "team_id": kwargs["team_id"],
                 "GP": 15,
+                "MIN": 725,
                 **{
                     f"{zone}_{stat}": value
                     for zone in (
@@ -782,6 +908,10 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
                 "Left Corner 3_OPP_FGA": 4,
                 "Right Corner 3_OPP_FGM": 2,
                 "Right Corner 3_OPP_FGA": 4,
+                "Backcourt_OPP_FGM": 1,
+                "Backcourt_OPP_FGA": 3,
+                "OPP_TOTAL_FGM": 21,
+                "OPP_TOTAL_FGA": 43,
             }]
 
     collector, transport, outbox = _collector(
@@ -1147,8 +1277,9 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
         "synergy_play_types_opponent_season": ("Transition_PTS", 12 * 48 / 750),
         "grouped_shot_types_opponent_season": ("catch_and_shoot_FG2M", 40 * 48 / 725),
         "grouped_shot_types_opponent_l15": ("catch_and_shoot_FG2M", 40 * 48 / 725),
-        "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4),
-        "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4),
+        # Zones publish a derived rate now, not the provider's own scale.
+        "exact_shot_zones_opponent_season": ("Restricted Area_FGM", 4 * 48 / 725),
+        "exact_shot_zones_opponent_l15": ("Restricted Area_FGM", 4 * 48 / 725),
     }
     if evidence_mode == "partial":
         expected_values.pop("synergy_play_types_opponent_season")
@@ -2002,3 +2133,100 @@ def test_operator_enable_unblocks_the_first_collection_of_an_nba_stream(tmp_path
     )
     assert read.available and len(read.decoded or ()) == 30
     outbox.close()
+
+
+def _boston_zone_row(**overrides):
+    """Boston's 2025-26 Regular Season shape at realistic scale.
+
+    1,504 Restricted Area opponent attempts over 3,946 team minutes is about
+    18.3 per 48 -- the value the product should show.  The defective Per48
+    mode published 137.1 for the same window.
+    """
+
+    base = {
+        "TEAM_ID": 1610612738, "GP": 82, "MIN": 3946,
+        "Restricted Area_OPP_FGM": 902, "Restricted Area_OPP_FGA": 1504,
+        "In The Paint (Non-RA)_OPP_FGM": 380, "In The Paint (Non-RA)_OPP_FGA": 905,
+        "Mid-Range_OPP_FGM": 322, "Mid-Range_OPP_FGA": 780,
+        "Above the Break 3_OPP_FGM": 742, "Above the Break 3_OPP_FGA": 2075,
+        "Corner 3_OPP_FGM": 260, "Corner 3_OPP_FGA": 668,
+        "Left Corner 3_OPP_FGM": 129, "Left Corner 3_OPP_FGA": 331,
+        "Right Corner 3_OPP_FGM": 131, "Right Corner 3_OPP_FGA": 337,
+        "Backcourt_OPP_FGM": 2, "Backcourt_OPP_FGA": 33,
+        # 902+380+322+742+260+2 = 2608 makes; 1504+905+780+2075+668+33 = 5965.
+        "OPP_TOTAL_FGM": 2608, "OPP_TOTAL_FGA": 5965,
+    }
+    base.update(overrides)
+    return pd.DataFrame([{k: v for k, v in base.items() if v is not None}])
+
+
+def test_boston_restricted_area_publishes_a_true_per_48_rate():
+    """The defect this correction exists for, at realistic scale."""
+
+    observation = normalize_opponent_zone_response(
+        _boston_zone_row(), season="2025-26", cutoff=NOW, team_id=1610612738,
+    )
+    restricted = next(
+        record for record in observation.payload["records"]
+        if record["category"] == "Restricted Area"
+    )
+    # The observation carries integer Totals, never a provider rate.
+    assert restricted["FGA"] == 1504
+    assert restricted["minutes"] == 3946
+
+    published = restricted["FGA"] * 48.0 / restricted["minutes"]
+    assert published == pytest.approx(18.3, abs=0.05)
+    # The broken Per48 mode reported this same cell as 137.1.
+    assert published < 20
+
+
+def test_a_transient_zone_mismatch_refetches_the_pair_once():
+    """One incoherent read is retried as a pair; a repeated one is reported."""
+
+    from app.collector.provider import ResidentialScopeExecutor, ScopeWork
+
+    class FlakyProvider:
+        def __init__(self, *, failures: int):
+            self.failures = failures
+            self.calls = 0
+
+        def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
+            self.calls += 1
+            overrides = (
+                {"Backcourt_OPP_FGA": 34} if self.calls <= self.failures else {}
+            )
+            return _boston_zone_row(**overrides)
+
+    work = ScopeWork(
+        scope="shot_zones_opponent", observation_type="shot_zones_opponent",
+        season="2025-26", cutoff=NOW.isoformat(), instruction_id="probe",
+        manifest_id=None,
+        parameters={
+            "window": "season", "subject": "opponent", "team_id": 1610612738,
+            "date_from": None, "date_to": "08/13/2026",
+            "per_mode": "Totals", "value_mode": "totals_with_minutes",
+        },
+    )
+
+    transient = FlakyProvider(failures=1)
+    router = ResidentialScopeExecutor(transient, clock=lambda: NOW)
+    observations = router.execute_scope(
+        work, collector_id="collector", environment="testing",
+        retrieved_at=NOW,
+    )
+    assert transient.calls == 2
+    assert len(observations) == 1
+    assert observations[0].observation_type == "shot_zones_opponent"
+
+    persistent = FlakyProvider(failures=2)
+    router = ResidentialScopeExecutor(persistent, clock=lambda: NOW)
+    with pytest.raises(ProviderContractError) as failure:
+        router.execute_scope(
+            work, collector_id="collector", environment="testing",
+            retrieved_at=NOW,
+        )
+    # Exactly one retry, then the defect is reported with its residual.
+    assert persistent.calls == 2
+    assert failure.value.reason == "value_invariant_failed"
+    assert failure.value.diagnostics["team_id"] == 1610612738
+    assert failure.value.diagnostics["residual"] == 1.0
