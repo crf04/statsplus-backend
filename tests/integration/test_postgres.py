@@ -1783,8 +1783,13 @@ def test_grouped_promotion_commits_as_one_transaction_on_postgres(promotion):
     assert group.promoted_at is not None
 
 
-def test_a_concurrent_advance_fences_the_group_on_postgres(promotion):
-    """Postgres row locks and the declared guard both fence a moved pointer."""
+def test_an_advance_after_the_declaration_fences_the_group_on_postgres(promotion):
+    """The declared guard fences a member that moved since it was declared.
+
+    This is the sequential case -- the advance has already committed. Lock
+    contention between two simultaneous transactions is covered separately by
+    ``test_a_held_pointer_lock_blocks_the_promotion_on_postgres``.
+    """
     from app.services.collection_control import ControlPlaneError
     from tests.services.test_publication_repair_promotion import (
         L15_ZONES,
@@ -1809,6 +1814,79 @@ def test_a_concurrent_advance_fences_the_group_on_postgres(promotion):
         )
 
     assert _promotion_state(engine) == (before, statuses)
+
+
+def test_a_held_pointer_lock_blocks_the_promotion_on_postgres(promotion, postgres_url):
+    """A second live transaction holding a member pointer stalls the promotion.
+
+    Phase 1 takes ``SELECT ... FOR UPDATE`` on every member before composing
+    anything, so a pointer already locked elsewhere must make the promotion
+    wait rather than read a row someone else is about to move. The promoting
+    connection gets a short ``lock_timeout`` so that wait surfaces as an error
+    instead of hanging the suite; without the row lock there would be nothing
+    to wait on and the promotion would simply succeed.
+    """
+    from sqlalchemy import event
+    from sqlalchemy.exc import DBAPIError
+
+    from app.services.collection_control import (
+        CollectionOperationsService,
+        PublicationService,
+    )
+    from tests.services.test_publication_repair_promotion import SEASON_ZONES
+
+    engine = promotion["engine"]
+    fenced = create_engine(postgres_url)
+
+    @event.listens_for(fenced, "connect")
+    def _bound_lock_wait(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("SET SESSION lock_timeout = '1500ms'")
+        cursor.close()
+        dbapi_connection.commit()
+
+    source = promotion["publications"]
+    operations = CollectionOperationsService(
+        fenced,
+        publication_service=PublicationService(
+            fenced, clock=source.clock,
+            l15_expectation_resolver=source.l15_expectation_resolver,
+        ),
+        clock=source.clock,
+    )
+    before, statuses = _promotion_state(engine)
+
+    # Members are locked in stream-key order, so holding the *second* one lets
+    # the promotion get past its first lock before it stalls.
+    holder = engine.connect()
+    holding = holder.begin()
+    try:
+        holder.execute(
+            text(
+                "SELECT 1 FROM publication_pointers "
+                "WHERE stream_key = :stream_key FOR UPDATE"
+            ),
+            {"stream_key": SEASON_ZONES},
+        ).all()
+        with pytest.raises(DBAPIError):
+            operations.promote_repair_group(
+                promotion["manifest"].manifest_id,
+                actor="operator", reason="repair the pair",
+            )
+    finally:
+        holding.rollback()
+        holder.close()
+
+    assert _promotion_state(engine) == (before, statuses)
+
+    # Once the contending transaction lets go, the identical promotion runs.
+    operations.promote_repair_group(
+        promotion["manifest"].manifest_id, actor="operator", reason="repair the pair",
+    )
+    after, _ = _promotion_state(engine)
+    assert after[SEASON_ZONES][0] != before[SEASON_ZONES][0]
+    assert after[SEASON_ZONES][1] is None
+    fenced.dispose()
 
 
 def test_a_failed_promotion_rolls_back_and_can_be_retried_on_postgres(

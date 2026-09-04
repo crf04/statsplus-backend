@@ -2056,7 +2056,9 @@ category, all-30-team opponent identity, Season/exact-L15 window, and
 cutoff-derived `date_to`; the collector does not invent those parameters.
 Each manifest also contains an additive `repair_group`, `null` unless the
 manifest declares an atomic publication repair group. It carries `group_id`,
-the operator `reason`, the declaration `checksum`, `execution: "grouped"`, and
+the operator `reason`, the declaration `checksum`, `execution` (`"grouped"`
+while the declaration is waiting, `"promoted"` once a successful promotion has
+consumed it), and
 `members`: the group's stream keys filtered to the surfaces the caller's
 owner/provider/surface binding already authorizes. Expected publication
 identities and pointer fences are operator control-plane state and are never

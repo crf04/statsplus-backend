@@ -39,7 +39,11 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
 )
-from tests.services.test_collection_control import L15_ZONES, SEASON_ZONES
+from tests.services.test_collection_control import (
+    L15_ZONES,
+    SEASON_ZONES,
+    _zone_collector_claims,
+)
 
 UTC = timezone.utc
 SEASON = "2025-26"
@@ -520,6 +524,18 @@ def test_a_promoted_group_releases_its_members_and_cannot_be_replayed(repair):
     assert state["state"] == "promoted"
     assert state["promotable"] is False
     assert state["promoted_at"] is not None
+
+    # A collector polling the same manifest sees the consumed declaration too,
+    # and still never its pointer guards.
+    claims = _zone_collector_claims(
+        engine, now=NOW, label="promoted-view",
+        surfaces=[SEASON_ZONES, L15_ZONES],
+    )
+    view = control.get_manifest(
+        repair["manifest"].manifest_id, claims=claims,
+    )._repair_group
+    assert view["execution"] == "promoted"
+    assert "expected_fence" not in json.dumps(view)
 
     with pytest.raises(ControlPlaneError, match="repair_group_already_promoted"):
         repair["operations"].promote_repair_group(

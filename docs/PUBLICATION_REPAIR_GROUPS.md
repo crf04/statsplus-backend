@@ -110,18 +110,25 @@ state:
     }
   ],
   "stale_members": [],
+  "promoted_at": null,
   "promotable": true,
   "state": "waiting_for_grouped_execution"
 }
 ```
 
-`promotable` reports only that every declared guard still matches the live
-pointer. If any member's active publication or fence has moved since the
-declaration, `state` becomes `guard_stale`, `promotable` becomes `false`, and
-the group cannot enter a promotable state: the rollback target the operator
-agreed to discard is no longer the one that would actually be discarded.
-Evidence completeness is a separate, later gate re-checked by the grouped
-promotion itself.
+`state` is one of exactly three values:
+
+| `state` | `promotable` | Meaning |
+| --- | --- | --- |
+| `waiting_for_grouped_execution` | `true` | Every declared guard still matches the live pointer. |
+| `guard_stale` | `false` | At least one member's active publication or fence moved after the declaration; `stale_members` names them. |
+| `promoted` | `false` | The declaration was consumed by a successful promotion; `promoted_at` is set. |
+
+`promotable` reports only that the group has not been promoted and that every
+declared guard still matches the live pointer. A stale guard means the
+rollback target the operator agreed to discard is no longer the one that would
+actually be discarded. Evidence completeness is a separate, later gate
+re-checked by the grouped promotion itself.
 
 ### Collector
 
@@ -138,6 +145,10 @@ object, or `null`:
   "execution": "grouped"
 }
 ```
+
+`execution` is `"grouped"` while the declaration is still waiting, and
+`"promoted"` once a successful promotion has consumed it -- at which point the
+members publish independently again. Those are the only two values.
 
 This deliberately does **not** widen collector permissions:
 
