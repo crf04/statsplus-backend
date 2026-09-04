@@ -123,8 +123,15 @@ class RecordedPool:
 
 
 class RecordedLogs:
+    def __init__(self):
+        self.summary_calls = []
+
     def get_player_summaries(self, season, player_ids):
         assert season == SEASON
+        # No `exclude_game_id` parameter: a call that still passes one -- a
+        # reintroduced second, focal-excluding read -- raises `TypeError`
+        # here rather than silently matching this current-mode double.
+        self.summary_calls.append(tuple(player_ids))
         if tuple(player_ids) == ():
             return {}
         assert tuple(player_ids) == (2544,)
@@ -192,45 +199,33 @@ class RecordedDiets:
 
 
 class RecordedTeamWindows:
-    def __init__(
-        self,
-        season_window,
-        last_15_window,
-        *,
-        pre_focal_season_window=None,
-        pre_focal_cutoff=None,
-    ):
+    """A `get_latest_window` team-matchups seam.
+
+    #47 retired the focal-safe scoring rule, so `MatchupService` no longer
+    calls a second, strict `get_focal_safe_window` read; this double only
+    needs to serve the one display read both modes now share for scoring.
+    `get_focal_safe_window` stays defined, but raises: if the superseded
+    focal-safe branch is ever reintroduced, every historical test making a
+    real `get_matchup` call fails immediately instead of silently reusing
+    the display window.
+    """
+
+    def __init__(self, season_window, last_15_window):
         self.season_window = season_window
         self.last_15_window = last_15_window
-        # A snapshot stored strictly before the focal game's date cannot
-        # contain that game; scopes carry a date, so nothing dated on the game
-        # date can be proven pre-tip.
-        self.pre_focal_season_window = pre_focal_season_window
-        self.pre_focal_cutoff = pre_focal_cutoff
         self.calls = []
 
-    def get_latest_window(self, season, *, window_games=None, as_of=None):
-        return self._window(season, window_games, as_of, focal_safe=False)
-
     def get_focal_safe_window(self, season, *, as_of, window_games=None):
-        return self._window(season, window_games, as_of, focal_safe=True)
+        raise AssertionError(
+            "get_focal_safe_window must not be called; #47 retired the "
+            "focal-safe scoring rule in favor of the completed-season window "
+            "the display already reads"
+        )
 
-    def _window(self, season, window_games, as_of, *, focal_safe):
-        self.calls.append((season, window_games, as_of, focal_safe))
+    def get_latest_window(self, season, *, window_games=None, as_of=None):
+        self.calls.append((season, window_games, as_of, False))
         if window_games is not None:
             return self.last_15_window
-        if (
-            self.pre_focal_cutoff is not None
-            and as_of is not None
-            and as_of <= self.pre_focal_cutoff
-        ):
-            # Issue 41 serves the completed-season snapshot for any earlier
-            # date in that season. Only the focal-safe read refuses it.
-            return (
-                self.pre_focal_season_window
-                if focal_safe
-                else self.season_window
-            )
         return self.season_window
 
 
@@ -275,11 +270,16 @@ def _window(
     shot_zone_metrics=None,
     shot_type_metrics=None,
     traditional_metrics=None,
+    assist_location_metrics=None,
 ):
     metrics = [
         ("play_types", "Transition", "PTS", 16.0),
-        ("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),
     ]
+    metrics.extend(
+        assist_location_metrics
+        if assist_location_metrics is not None
+        else (("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),)
+    )
     metrics.extend(
         traditional_metrics
         if traditional_metrics is not None
@@ -367,6 +367,8 @@ def _service(
     last_15_window=None,
     stats_at=RETRIEVED_AT,
     injuries=None,
+    diets=None,
+    player_logs=None,
 ):
     if pool is None:
         pool = PlayerPool(
@@ -398,8 +400,8 @@ def _service(
             else events if events is not None else RecordedEvents()
         ),
         player_pool=RecordedPool(pool) if pool is not False else None,
-        player_logs=RecordedLogs(),
-        player_diets=RecordedDiets(),
+        player_logs=player_logs if player_logs is not None else RecordedLogs(),
+        player_diets=diets if diets is not None else RecordedDiets(),
         team_matchups=RecordedTeamWindows(
             season_window if season_window is not None else _window(),
             last_15_window if last_15_window is not None else _window(last_15=True),
@@ -1581,6 +1583,7 @@ class RecordedGameLogs:
         sync_status="complete",
         season_rate=True,
         focal_points=0.0,
+        extra_per_game=None,
     ):
         self.rows = _historical_rows() if rows is None else rows
         self.sync_status = sync_status
@@ -1588,6 +1591,9 @@ class RecordedGameLogs:
         # What the focal game itself contributes to the completed-season rate.
         # A read that excludes the focal game must not see it.
         self.focal_points = focal_points
+        # Additional per-game rate keys beyond PTS/REB/AST -- e.g. STL/BLK,
+        # which STKS weights -- merged into the base per-game dict below.
+        self.extra_per_game = extra_per_game or {}
         self.summary_calls = []
         self.game_row_calls = []
 
@@ -1629,6 +1635,7 @@ class RecordedGameLogs:
                             "PTS": 21.0 + focal,
                             "REB": 5.0,
                             "AST": 4.0,
+                            **self.extra_per_game,
                         },
                         per_minute={"PTS": 0.03, "REB": 0.007, "AST": 0.006},
                     )
@@ -1681,6 +1688,90 @@ class RecordedPartialDiets:
                         "field_goal_attempts",
                         "nba_stats",
                         RETRIEVED_AT,
+                    ),
+                )
+                for player_id in player_ids
+            },
+            observations=tuple(
+                StoredPlayerDietObservation(base, "available", None, RETRIEVED_AT)
+                for base in BASES
+                if base != "traditional"
+            ),
+        )
+
+
+class RecordedCompleteDiets:
+    """Stored Diet covering every Diet-backed Base as a whole partition.
+
+    play_types, shot_zones, shot_types, and assist_locations must each be
+    present to compute a complete Blend for a Diet-backed category;
+    shot_zones, shot_types, and assist_locations also need every slice
+    `_window` governs, since only play_types is complete from a subset.
+    """
+
+    def get_for_players(self, season, player_ids):
+        assert season == SEASON
+        return PlayerDietResult(
+            season=SEASON,
+            players={
+                player_id: (
+                    StoredPlayerDietFact(
+                        player_id, "play_types", "Transition", 0.19, 95.0, 20,
+                        "possessions", "nba_synergy", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_zones", "Restricted Area", 0.30, 40.0,
+                        20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_zones", "In The Paint (Non-RA)", 0.15,
+                        20.0, 20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_zones", "Mid-Range", 0.10, 13.0, 20,
+                        "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_zones", "Corner 3", 0.20, 27.0, 20,
+                        "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_zones", "Above the Break 3", 0.25,
+                        33.0, 20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    # Stored shot-type facts carry the display slice name;
+                    # `_diet_component` maps it to the taxonomy's stored form.
+                    StoredPlayerDietFact(
+                        player_id, "shot_types", "Catch and Shoot", 0.40, 12.0,
+                        20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_types", "Pullups", 0.35, 10.0, 20,
+                        "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "shot_types", "Less Than 10 ft", 0.25, 8.0,
+                        20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "Arc3Assists", 0.20, 6.0,
+                        20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "Corner3Assists", 0.20,
+                        6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "AtRimAssists", 0.20,
+                        6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "ShortMidRangeAssists",
+                        0.20, 6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "LongMidRangeAssists",
+                        0.20, 6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
                     ),
                 )
                 for player_id in player_ids
@@ -1951,7 +2042,7 @@ def test_historical_participants_use_the_game_time_team_not_a_current_roster():
     ] == [AWAY_PARTICIPANT]
 
 
-def test_historical_participants_carry_the_focal_line_excluded_from_inputs():
+def test_historical_participants_carry_the_focal_line_for_display():
     logs = RecordedGameLogs()
 
     payload = _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
@@ -1964,22 +2055,23 @@ def test_historical_participants_carry_the_focal_line_excluded_from_inputs():
     assert player["focal_game_line"]["matchup"] == "LAL @ BOS"
     assert player["focal_game_line"]["minutes"] == 34.0
     assert player["focal_game_line"]["stats"]["PTS"] == 24.0
-    # 24 points in the focal game against 21.0 completed-season context. The
-    # displayed context is the completed season under its hindsight label; the
-    # analytical read that feeds scores and samples drops the focal row.
+    # `focal_game_line` is the participant's literal line in the focal game,
+    # display-only regardless of #47: `season_scoring` is the completed-season
+    # rate, the same evidence #47 now also feeds into Matchup Score inputs.
     assert player["season_scoring"] == 21.0
-    assert (
-        (AWAY_PARTICIPANT, HOME_PARTICIPANT),
-        GAME_ID,
-    ) in logs.summary_calls
+    # #47 reads the completed-season summary once and reuses it for both the
+    # display fields and the score inputs; there is no second, focal-row-
+    # excluding read.
+    assert logs.summary_calls == [((AWAY_PARTICIPANT, HOME_PARTICIPANT), None)]
 
 
 def test_historical_scores_name_missing_inputs_without_a_partial_blend():
     payload = _historical_service().get_matchup(game_id=GAME_ID)
 
     scores = payload["players"][0]["scores"]
-    # No stored Diet evidence, so every Diet-backed window is unavailable
-    # rather than silently partial.
+    # #47: nothing is withheld by rule anymore. No Player Diet is stored at
+    # all here, so this is genuinely absent evidence, still named, not a
+    # focal-safety exclusion.
     assert scores["PTS"]["season"] == {
         "components": {},
         "blend": None,
@@ -2008,15 +2100,9 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
             ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
         )
     )
-    windows = RecordedTeamWindows(
-        _window(),
-        None,
-        pre_focal_season_window=rebounding,
-        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
-    )
 
     payload = _historical_service(
-        diets=RecordedPartialDiets(), team_windows=windows
+        diets=RecordedPartialDiets(), season_window=rebounding
     ).get_matchup(game_id=GAME_ID)
 
     season = payload["players"][0]["scores"]["PRA"]["season"]
@@ -2025,20 +2111,19 @@ def test_a_historical_blend_is_withheld_while_its_components_still_show():
     assert season["components"]["traditional"]["value"] is not None
     assert season["blend"] is None
     assert season["missing_inputs"] == [
-        "player_diet:play_types",
         "player_diet:shot_zones",
         "player_diet:shot_types",
         "player_diet:assist_locations",
     ]
 
 
-def test_the_focal_row_moves_historical_display_but_never_the_score():
-    # Display carries completed-season hindsight under its declared label;
-    # analytical score and sample inputs exclude the focal row. Changing only
-    # what the focal game contributes must move the first and not the second.
+def test_the_focal_row_moves_both_historical_display_and_score():
+    # #47 supersedes the earlier rule that display carries the focal game
+    # while score and sample inputs exclude it. Uniform full season means
+    # changing only what the focal game contributes must move both together.
     # The window carries OPP_REB so the REB part scores, which makes the PRA
-    # combo weight its component by the player's Season per-game volumes. The
-    # focal contribution therefore reaches a real number if it leaks.
+    # combo weight its component by the player's Season per-game volumes, so
+    # the focal contribution reaches a real, checkable number.
     def payload(focal_points):
         return _historical_service(
             player_logs=RecordedGameLogs(focal_points=focal_points),
@@ -2064,59 +2149,74 @@ def test_the_focal_row_moves_historical_display_but_never_the_score():
     assert large["players"][0]["season_scoring"] == 30.0
     assert small["players"][0]["last_10_minutes"] == [34.0, 32.0]
     assert large["players"][0]["last_10_minutes"] == [40.0, 32.0]
-    assert [row["scores"] for row in small["players"]] == [
-        row["scores"] for row in large["players"]
-    ]
+    # PRA needs the player's own Season rate, so a larger focal contribution
+    # now moves the score, unlike the superseded focal-free rule.
+    assert (
+        small["players"][0]["scores"]["PRA"]["season"]
+        != large["players"][0]["scores"]["PRA"]["season"]
+    )
+    # A market that consumes no Season rate (only team defense) is untouched
+    # by the focal contribution either way.
+    assert (
+        small["players"][0]["scores"]["TOV"]
+        == large["players"][0]["scores"]["TOV"]
+    )
 
 
-def test_historical_display_and_analysis_read_the_summary_separately():
+def test_historical_display_and_score_share_one_summary_read():
     logs = RecordedGameLogs(focal_points=3.0)
 
     _historical_service(player_logs=logs).get_matchup(game_id=GAME_ID)
 
-    # One read keeps the focal game for the labeled hindsight display, one
-    # drops it for the analysis. Neither borrows the other's summary.
-    assert {
-        exclude_game_id for _ids, exclude_game_id in logs.summary_calls
-    } == {GAME_ID, None}
+    # #47: one completed-season summary read now feeds both the rail's
+    # display fields and the Matchup Score inputs. There is no second,
+    # focal-excluding read to diverge from it.
+    assert logs.summary_calls == [((AWAY_PARTICIPANT, HOME_PARTICIPANT), None)]
 
 
-def test_changing_the_focal_contribution_to_diet_cannot_move_a_historical_score():
-    # The stored Player Diet is one completed-season aggregate per slice with
-    # no game dimension, so its focal contribution cannot be subtracted. The
-    # property the issue requires is therefore proven negatively: whatever the
-    # aggregate says, the presented historical score is identical.
+def test_stored_diet_now_feeds_a_historical_score():
+    # #47 supersedes the rule that Player Diet is never a historical input:
+    # the stored completed-season Diet aggregate is exactly the evidence the
+    # page already displays, so it is consumed like any other Season fact.
     without_diet = _historical_service().get_matchup(game_id=GAME_ID)
     with_diet = _historical_service(diets=RecordedPartialDiets()).get_matchup(
         game_id=GAME_ID
     )
 
-    assert [row["scores"] for row in with_diet["players"]] == [
+    assert [row["scores"] for row in with_diet["players"]] != [
         row["scores"] for row in without_diet["players"]
     ]
-    # The raw Diet evidence is independent of the score and still displayed.
+    # play_types is complete whenever every observed slice is governed, so
+    # its one stored slice now computes; shot_zones must arrive as a whole
+    # partition, and only one of its five required slices is stored, so it
+    # stays an unusable partial partition either way.
+    with_pts = with_diet["players"][0]["scores"]["PTS"]["season"]
+    assert with_pts["components"]["play_types"]["value"] is not None
+    assert "shot_zones" not in with_pts["components"]
+    without_pts = without_diet["players"][0]["scores"]["PTS"]["season"]
+    assert without_pts["components"] == {}
+    # The raw Diet evidence is independent display, returned either way.
     assert with_diet["players"][0]["diet_shares"]["play_types"]
     assert without_diet["players"][0]["diet_shares"]["play_types"] == []
 
 
-def test_a_historical_score_names_player_diet_as_unusable_evidence():
+def test_a_historical_score_uses_stored_player_diet_as_evidence():
     payload = _historical_service(diets=RecordedPartialDiets()).get_matchup(
         game_id=GAME_ID
     )
 
     season = payload["players"][0]["scores"]["PTS"]["season"]
-    # No Diet-backed component survives, and the response says which inputs it
-    # could not use rather than consuming a focal-contaminated aggregate.
-    assert season["components"] == {}
-    assert season["blend"] is None
+    # play_types is a complete partition with its one stored slice and now
+    # computes. shot_zones' one stored slice is not a whole partition and
+    # shot_types has no stored evidence at all; both are still named.
+    assert season["components"]["play_types"]["value"] is not None
     assert season["missing_inputs"] == [
-        "player_diet:play_types",
         "player_diet:shot_zones",
         "player_diet:shot_types",
     ]
 
 
-def test_a_historical_score_reads_team_defense_from_before_the_focal_game():
+def test_a_historical_score_reads_the_completed_season_defense_window():
     contaminated = _window(
         traditional_metrics=(
             ("traditional", "OPP_TOV", "OPP_TOV", 99.0),
@@ -2124,38 +2224,29 @@ def test_a_historical_score_reads_team_defense_from_before_the_focal_game():
             ("traditional", "OPP_BLK", "OPP_BLK", 99.0),
         )
     )
-    windows = RecordedTeamWindows(
-        contaminated,
-        None,
-        pre_focal_season_window=_window(),
-        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
+
+    payload = _historical_service(season_window=contaminated).get_matchup(
+        game_id=GAME_ID
     )
 
-    payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
-
-    # Scores consume the snapshot stored strictly before the focal date; the
-    # completed-season sheet the focal game is inside is display-only.
+    # #47: scoring now consumes the same completed-season window the Defense
+    # Sheet displays -- the "contaminated" window (it contains the focal
+    # game) is exactly the evidence a historical score is supposed to use.
     baseline = _historical_service().get_matchup(game_id=GAME_ID)
-    assert [row["scores"] for row in payload["players"]] == [
+    assert [row["scores"] for row in payload["players"]] != [
         row["scores"] for row in baseline["players"]
     ]
     assert payload["league"]["defense_sheet"]["traditional"]
-    assert any(
-        as_of == HISTORICAL_GAME_DATE - timedelta(days=1) and strict
-        for _season, _games, as_of, strict in windows.calls
-    )
+    assert payload["players"][0]["scores"]["TOV"]["season"]["components"][
+        "traditional"
+    ]["value"] is not None
 
 
-def test_only_a_later_completed_season_snapshot_scores_nothing_but_still_shows():
-    # The issue 41 exemption hands a non-strict read the completed-season
-    # snapshot for any earlier date in that season. That snapshot contains the
-    # focal game, so scoring must refuse it while the sheet still renders.
-    windows = RecordedTeamWindows(
-        _window(),
-        None,
-        pre_focal_season_window=None,
-        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
-    )
+def test_a_completed_season_snapshot_scores_the_same_evidence_it_displays():
+    # The issue 41 exemption hands the display read the completed-season
+    # snapshot for any date inside that season. #47 makes that snapshot the
+    # score input too, so the sheet and the score now agree, not diverge.
+    windows = RecordedTeamWindows(_window(), None)
 
     payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
 
@@ -2168,41 +2259,32 @@ def test_only_a_later_completed_season_snapshot_scores_nothing_but_still_shows()
     }
     assert payload["league"]["defense_sheet"]["shot_zones"]
     assert payload["teams"][0]["defense_sheet"]["shot_zones"][0]["season"]
-    # Scoring: the same evidence is refused and named, not silently consumed.
-    for player in payload["players"]:
-        for windows_by_name in player["scores"].values():
-            season = windows_by_name["season"]
-            assert season["components"] == {}
-            assert season.get("blend") is None
-            assert season["missing_inputs"]
-    assert payload["players"][0]["scores"]["TOV"]["season"]["missing_inputs"] == [
-        "team_defense:traditional"
+    # Scoring: the same completed-season evidence now scores, rather than
+    # being refused as focal-contaminated.
+    assert payload["players"][0]["scores"]["TOV"]["season"]["components"][
+        "traditional"
+    ]["value"] is not None
+    assert payload["players"][0]["scores"]["TOV"]["season"]["missing_inputs"] == []
+    # One non-strict read serves both the sheet and the score.
+    assert windows.calls == [
+        (SEASON, None, HISTORICAL_GAME_DATE, False),
+        (SEASON, 15, HISTORICAL_GAME_DATE, False),
     ]
-    # The scoring read asked strictly; the display read did not.
-    assert (SEASON, None, HISTORICAL_GAME_DATE - timedelta(days=1), True) in (
-        windows.calls
-    )
-    assert (SEASON, None, HISTORICAL_GAME_DATE, False) in windows.calls
 
 
-def test_a_historical_score_is_withheld_without_a_pre_focal_defense_window():
-    windows = RecordedTeamWindows(
-        _window(),
-        None,
-        pre_focal_season_window=None,
-        pre_focal_cutoff=HISTORICAL_GAME_DATE - timedelta(days=1),
-    )
+def test_a_historical_score_is_withheld_without_any_stored_defense_window():
+    windows = RecordedTeamWindows(None, None)
 
     payload = _historical_service(team_windows=windows).get_matchup(game_id=GAME_ID)
 
     season = payload["players"][0]["scores"]["TOV"]["season"]
     assert season["components"] == {}
     assert season["missing_inputs"] == ["team_defense:traditional"]
-    # The completed-season Defense Sheet still renders for the reader.
+    # #47: a historical score is withheld only for genuinely absent evidence
+    # now; the Defense Sheet reports the same gap, not a divergent one.
     assert payload["experience"]["sections"]["season_defense"]["status"] == (
-        "available"
+        "missing"
     )
-    assert payload["league"]["defense_sheet"]["shot_zones"]
 
 
 def test_a_historical_window_with_every_required_input_keeps_its_cells():
@@ -2227,6 +2309,171 @@ def test_a_current_matchup_keeps_its_partial_blend_unchanged():
         "blend": {"value": -0.011875, "thin": True},
         "missing_inputs": ["player_diet:shot_zones", "player_diet:shot_types"],
     }
+
+
+def test_a_current_matchup_reads_each_shared_dependency_exactly_once():
+    # #47 collapsed the historical-only second summary read and the
+    # historical-only strict team-window read into the one shared read each
+    # mode already made. This pins the current-mode call sequence so a
+    # reintroduced redundant read (an extra `get_player_summaries` call, or
+    # an extra/strict `get_latest_window` call) fails here even though it
+    # cannot change a payload two identical reads already agree on.
+    service = _service()
+
+    service.get_matchup(game_id=GAME_ID)
+
+    # Exactly one summary read, and its double has no `exclude_game_id`
+    # parameter at all -- a reintroduced second, focal-excluding read raises
+    # `TypeError` there rather than passing silently.
+    assert service.player_logs.summary_calls == [(2544,)]
+    # Exactly two team-window reads -- season and Last-15 -- and both
+    # non-strict (`get_latest_window`, not `get_focal_safe_window`).
+    assert service.team_matchups.calls == [
+        (SEASON, None, None, False),
+        (SEASON, 15, None, False),
+    ]
+    # `get_focal_safe_window` raises if called at all (see
+    # `RecordedTeamWindows`); reaching this line without an `AssertionError`
+    # from that seam already proves it was never called.
+
+
+#: Every governed historical Stat Category (`MatchupService._historical_
+#: categories`), asserted against the actual response below so a shrunk
+#: catalog fails loudly instead of silently narrowing this test's coverage.
+_PARITY_MARKETS = (
+    "3PM", "AST", "BLK", "FG2A", "FG3A", "FGA", "PA", "PR", "PRA", "PTS",
+    "RA", "REB", "STKS", "STL", "TOV",
+)
+
+
+def _parity_evidence():
+    """Complete Diet and Defense Sheet evidence for every governed category.
+
+    Every Diet-backed Base (play_types, shot_zones, shot_types,
+    assist_locations) is a whole partition, and the season Defense Sheet
+    carries every metric identity `_PRIMITIVE_SCORE_INPUTS` and the
+    defensive/rebounding columns require, so each of `_PARITY_MARKETS`
+    actually produces a component/blend rather than naming a gap.
+    """
+
+    diets = RecordedCompleteDiets()
+    shot_zone_metrics = tuple(
+        ("shot_zones", slice_key, stat, 20.0)
+        for slice_key in (
+            "Restricted Area",
+            "In The Paint (Non-RA)",
+            "Mid-Range",
+            "Corner 3",
+            "Above the Break 3",
+        )
+        for stat in ("FGM", "FGA")
+    )
+    shot_type_metrics = tuple(
+        ("shot_types", slice_key, stat, 7.0)
+        for slice_key in ("catch_and_shoot", "pullups", "less_than_10_ft")
+        for stat in ("FG2M", "FG3M", "FG2A", "FG3A")
+    )
+    traditional_metrics = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+        ("traditional", "OPP_REB", "OPP_REB", 44.0),
+    )
+    assist_location_metrics = tuple(
+        ("assist_locations", slice_key, slice_key, 6.0)
+        for slice_key in (
+            "Arc3Assists",
+            "Corner3Assists",
+            "AtRimAssists",
+            "ShortMidRangeAssists",
+            "LongMidRangeAssists",
+        )
+    )
+    season_window = _window(
+        shot_zone_metrics=shot_zone_metrics,
+        shot_type_metrics=shot_type_metrics,
+        traditional_metrics=traditional_metrics,
+        assist_location_metrics=assist_location_metrics,
+    )
+    # Normalization compares the season and Last-15 metric identities, so
+    # current mode's real Last-15 window must share this same shape or the
+    # mismatch degrades both windows as `legacy_surface_incomplete`.
+    # Historical has no Last-15 window by default, so it needs no match.
+    last_15_window = _window(
+        last_15=True,
+        shot_zone_metrics=shot_zone_metrics,
+        shot_type_metrics=shot_type_metrics,
+        traditional_metrics=traditional_metrics,
+        assist_location_metrics=assist_location_metrics,
+    )
+    return diets, season_window, last_15_window
+
+
+def _parity_current_pool():
+    """The current-mode pool player, carrying every `_PARITY_MARKETS` entry
+    so its scores are directly comparable to the historical participant's."""
+
+    return PlayerPool(
+        players=(
+            PoolPlayer(
+                2544, "LeBron James", LAL, _PARITY_MARKETS,
+                {"prizepicks": _PARITY_MARKETS},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={
+            "status": "fresh",
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+            "providers": {
+                "prizepicks": {
+                    "status": "fresh",
+                    "retrieved_at": RETRIEVED_AT.isoformat(),
+                }
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("market", _PARITY_MARKETS)
+def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
+    # #47's contract, over every governed historical Stat Category, not just
+    # PTS: a historical participant whose completed-season evidence is
+    # complete gets the same whole window (components, blend, missing_
+    # inputs) a current-mode pool player would get from that same evidence.
+    # A shared per-game rate -- covering every combo part (PTS/REB/AST) and
+    # STKS's STL/BLK weights -- gives both modes the identical Season rate
+    # those markets weight by. Both the historical participant
+    # (AWAY_PARTICIPANT) and the current-mode pool player are on LAL against
+    # BOS, so the opponent side matches too.
+    diets, season_window, last_15_window = _parity_evidence()
+    extra_per_game = {"STL": 3.0, "BLK": 2.0}
+
+    historical = _historical_service(
+        diets=diets,
+        season_window=season_window,
+        player_logs=RecordedGameLogs(extra_per_game=extra_per_game),
+    ).get_matchup(game_id=GAME_ID)
+    current = _service(
+        diets=diets,
+        season_window=season_window,
+        last_15_window=last_15_window,
+        player_logs=RecordedGameLogs(extra_per_game=extra_per_game),
+        pool=_parity_current_pool(),
+    ).get_matchup(game_id=GAME_ID)
+
+    away = next(
+        row
+        for row in historical["players"]
+        if row["canonical_id"] == AWAY_PARTICIPANT
+    )
+    assert set(away["scores"]) == set(_PARITY_MARKETS)
+    lebron = next(
+        row for row in current["players"] if row["canonical_id"] == 2544
+    )
+
+    historical_window = away["scores"][market]["season"]
+    assert historical_window["missing_inputs"] == []
+    assert historical_window == lebron["scores"][market]["season"]
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():

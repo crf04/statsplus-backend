@@ -935,42 +935,34 @@ the same shape as a stored pool player, with these differences:
 - `focal_game_line` is that participant's actual line in the focal game:
   `{ game_id, game_date, matchup, minutes, stats }`, where `stats` covers the
   governed Stat Categories. It is display-only.
-- Display and analysis read the participant's season summary separately.
-  `season_scoring` and `last_10_minutes` are the completed-season context the
-  rail displays under the declared `completed_season` hindsight label, so they
-  include the focal game. Everything analytical — Matchup Score inputs and the
-  selection route's comparison samples and delta baseline — reads its own
-  summary with the focal row dropped, so a participant's result never grades
-  itself.
-- Every Matchup Score input must be provably free of the focal game, and an
-  input that cannot be proven focal-free is not used. Two consequences follow
-  from what this deployment stores:
-  - **Team defense.** Scores read the newest team-defense snapshot stored
-    strictly *before* the focal game's date, through a strict-as-of read. A
-    snapshot scope carries a date and no time, so a snapshot dated on the
-    game's own date cannot be shown to predate tip-off and is not a score
-    input. The strict read also refuses the #41 completed-season exemption:
-    that exemption serves a finished season's aggregate for any date inside
-    the season, which is correct for hindsight display and wrong as a score
-    input, because that aggregate contains the focal game. When no qualifying
-    earlier snapshot exists, the window reports `team_defense:<base>` in
-    `missing_inputs` and computes no component. This is a scoring rule only:
-    the Defense Sheet in `league` and `teams` still renders from the
-    completed-season Publication under the #41 cutoff, labeled
-    `completed_season` hindsight, and `league.surface_availability` is
-    unchanged.
-  - **Player Diet.** `player_diet_facts` stores one completed-season aggregate
-    per `(season, player, base, slice)` with no game dimension, and no stored
-    surface decomposes play-type, shot-zone, or shot-type slices per game. The
-    focal contribution therefore cannot be subtracted and no strictly
-    pre-focal Diet can be reconstructed without new persistence. Player Diet
-    is consequently **never** a historical score input: every Diet-backed Base
-    reports `player_diet:<base>` in `missing_inputs` and contributes no
-    component. The raw `diet_shares` field is unchanged and still returned as
-    its own independent completed-season evidence; it is not a score input.
-  - Only the `traditional` Base can be a historical score input, so in
-    practice a historical Blend is available only for the traditional-only
-    categories and only when a strictly pre-focal snapshot exists.
+- crf04/statsplus#47 supersedes the earlier focal-free scoring rule from #42.
+  Display and score inputs now read the participant's completed-season
+  summary once, together: `season_scoring`, `last_10_minutes`, and Matchup
+  Score inputs all come from the same read and all include the focal game.
+  Hindsight is disclosed by the `completed_season` label, not by excluding the
+  focal game from an input. The selection route's comparison samples and delta
+  baseline are unaffected by #47 and keep dropping the focal row, so a
+  participant's result never grades itself there.
+- A historical Matchup Score input is the same completed-season evidence the
+  page already displays:
+  - **Team defense.** Scores read the same season Defense Sheet window
+    `league` and `teams` display — the newest stored window honoring the #41
+    completed-season exemption. When that window is unavailable or missing,
+    the window reports `team_defense:<base>` in `missing_inputs` and computes
+    no component; `league.surface_availability` is unchanged.
+  - **Last 15.** There is still no point-in-time Last-15 snapshot for a
+    completed season, so a historical Last-15 score reports
+    `team_defense:<base>` in `missing_inputs` and computes no component,
+    exactly as before #47.
+  - **Player Diet.** `player_diet_facts` is the one completed-season aggregate
+    per `(season, player, base, slice)` the `diet_shares` field already
+    displays, and it is now consumed as a Matchup Score input too, exactly as
+    a current-mode pool player's Diet would be. Genuinely absent Diet evidence
+    still reports `player_diet:<base>` in `missing_inputs` and contributes no
+    component.
+  - A historical participant whose completed-season evidence is complete gets
+    a complete Blend for a governed Stat Category, exactly as a current-mode
+    pool player with the same evidence would.
 - Injury evidence never removes or badges a participant: a canonical row means
   the player appeared.
 - Participants with unavailable scores stay in the response, sort after

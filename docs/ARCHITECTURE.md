@@ -1838,42 +1838,36 @@ authority, and `list_game_rows` returns the exact game's canonical rows; both
 follow the same publication-projection, publication-payload, then legacy read
 order as every other player-log seam. Each row becomes one `_Participant`
 carrying the identity recorded for that game, so a later trade cannot rewrite
-which side a player was on. `get_player_summaries(exclude_game_id=…)` drops the
-focal row, so the participant's own result never feeds its own baseline or
-Matchup Score inputs.
+which side a player was on.
 
-`MatchupService` reads the participant summary twice in historical mode. The
-display read keeps the focal game, because `season_scoring` and
-`last_10_minutes` are the completed-season context the rail shows under its
-declared hindsight label. The analytical read passes `exclude_game_id`, and it
-is the only one that reaches Matchup Score inputs. Current mode asks the one
-question once and reuses the answer for both, so its payload is unchanged.
-
-A historical score input must be provably free of the focal game, and the two
-team-side surfaces answer that differently. Team defense can:
-`TeamMatchupQueryService` exposes the distinction as two named reads rather
-than a flag on one. `get_latest_window` is the hindsight-display read and
-honors the #41 completed-season exemption; `get_focal_safe_window` refuses it.
-That exemption deliberately serves a finished season's aggregate for any date
-inside the season — sound for display, unsound as an analytical input about a
-game the aggregate contains — so an analytical caller names the focal-safe read
-and cannot reach the display rule by forgetting an argument. `MatchupService`
-scores from `_focal_safe_team_window(as_of=slate_date - 1 day)`, because a
-`TeamMatchupSnapshotScope` carries a date and a scope dated strictly before the
-game cannot contain it, while a scope dated on the game's own date cannot be
-shown to predate tip-off. Those pre-focal windows drive scoring only; the
-display windows and `league.surface_availability` are unchanged, so the Defense
-Sheet still renders the completed-season Publication under the #41 cutoff. Player Diet cannot: `player_diet_facts` is unique on
-`(season, player_id, base, slice_key)` with `share`, `volume`, and
-`games_played` and no game dimension, and no stored surface carries per-game
-play-type, shot-zone, or shot-type slices — `player_game_logs` and
-`canonical_game_ledger_player_facts` are traditional box-score primitives
-(the ledger's nullable assist-location columns are the only per-game slice
-evidence of any kind). Subtracting the focal contribution or rebuilding a
-pre-focal Diet would require new persistence, so `MatchupService` passes no
-Diet facts into historical scoring and each Diet-backed Base names itself in
-`missing_inputs` instead. The raw `diet_shares` display is untouched, being
-independent evidence rather than a score input.
+crf04/statsplus#47 supersedes #42's focal-free scoring rule: a Historical
+Matchup now scores uniformly from the completed-season evidence the page
+already displays, focal game included, with hindsight disclosed by label
+rather than by withholding an input.
+`MatchupService` reads one shared player season-summary once, in both modes,
+and that one read feeds `season_scoring`, `last_10_minutes`, and the Matchup
+Score inputs alike; there is no second, focal-row-excluding read. That summary
+is season-to-date evidence in current mode and completed-season evidence,
+focal game included, in historical mode specifically. A historical Matchup
+Score consumes the same season Defense Sheet window
+`TeamMatchupQueryService.get_latest_window` returns for both modes — the
+completed-season read that honors the #41 completed-season exemption — and the
+same stored Player Diet facts the Diet Shares display reads.
+`MatchupService._focal_safe_team_window`,
+which called the strict, pre-focal `get_focal_safe_window` read, is retired
+along with the `score_windows`/`score_diets` split it fed; `windows`,
+`metric_indexes`, and `availability` now drive both display and scoring in
+every mode. `TeamMatchupQueryService.get_focal_safe_window` itself stays: it
+is still exercised directly at the query-service level (see
+`tests/services/test_nba_publication_matchup_materialization.py`),
+independent of `MatchupService`. Player Diet is no longer excluded from
+scoring either — `player_diet_facts` is the one completed-season aggregate
+per `(season, player_id, base, slice_key)` the Diet Shares display already
+reads, and a historical score now consumes it exactly as a current-mode pool
+player's Diet would. Last-15 still has no point-in-time snapshot for a
+completed season, so its `team_defense:<base>` inputs still name themselves in
+`missing_inputs` and Last-15 Matchup Scores stay unavailable, unchanged from
+before.
 
 Score formulas and thresholds are unchanged; each window gains a
 `missing_inputs` list naming the score-contract inputs it could not consume. In historical mode `MatchupService._presented_window` then withholds
