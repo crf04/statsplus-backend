@@ -120,6 +120,49 @@ def test_matchup_score_thin_thresholds_reject_invalid_values(name, value):
         load_settings(environ={"FLASK_ENV": "testing", name: value})
 
 
+def test_player_diet_baseline_floors_are_named_configuration():
+    defaults = load_settings(environ={"FLASK_ENV": "testing"})
+    configured = load_settings(
+        environ={
+            "FLASK_ENV": "testing",
+            "PLAYER_DIET_BASELINE_MIN_GAMES": "8",
+            "PLAYER_DIET_BASELINE_PLAY_TYPES_MIN_VOLUME_PER_GAME": "7.5",
+            "PLAYER_DIET_BASELINE_SHOT_ZONES_MIN_VOLUME_PER_GAME": "8.5",
+            "PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME": "9.5",
+            "PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME": "3.5",
+        }
+    )
+
+    assert defaults.player_diet_baseline.min_games == 5
+    assert defaults.player_diet_baseline.play_types_min_volume_per_game == 6.0
+    assert defaults.player_diet_baseline.shot_zones_min_volume_per_game == 6.0
+    assert defaults.player_diet_baseline.shot_types_min_volume_per_game == 6.0
+    assert defaults.player_diet_baseline.assist_locations_min_volume_per_game == 2.0
+    assert configured.player_diet_baseline.min_games == 8
+    assert configured.player_diet_baseline.play_types_min_volume_per_game == 7.5
+    assert configured.player_diet_baseline.shot_zones_min_volume_per_game == 8.5
+    assert configured.player_diet_baseline.shot_types_min_volume_per_game == 9.5
+    assert (
+        configured.player_diet_baseline.assist_locations_min_volume_per_game == 3.5
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PLAYER_DIET_BASELINE_MIN_GAMES", "0"),
+        ("PLAYER_DIET_BASELINE_MIN_GAMES", "not-an-integer"),
+        ("PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "-1"),
+        ("PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "not-a-number"),
+        ("PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "nan"),
+        ("PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME", "inf"),
+    ],
+)
+def test_player_diet_baseline_floors_reject_invalid_values(name, value):
+    with pytest.raises(ConfigurationError):
+        load_settings(environ={"FLASK_ENV": "testing", name: value})
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "not-an-integer"])
 def test_matchup_selection_thin_thresholds_must_be_positive_integers(value):
     with pytest.raises(ConfigurationError):

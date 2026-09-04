@@ -1087,6 +1087,13 @@ class MatchupService:
             )
             diet_by_base = {base: [] for base in PLAYER_DIET_BASES}
             for fact in diets.players.get(player.canonical_player_id, ()):
+                baseline = diets.baselines.get((fact.base, fact.slice_key))
+                league_average_share = (
+                    None if baseline is None else baseline.league_average_share
+                )
+                sigma_deviation = (
+                    None if baseline is None else baseline.sigma_deviation(fact.share)
+                )
                 diet_by_base[fact.base].append(
                     {
                         "key": fact.slice_key,
@@ -1095,6 +1102,16 @@ class MatchupService:
                             "volume": self._number(fact.volume),
                             "games_played": fact.games_played,
                             "volume_unit": fact.volume_unit,
+                            "league_average_share": (
+                                None
+                                if league_average_share is None
+                                else self._number(league_average_share)
+                            ),
+                            "sigma_deviation": (
+                                None
+                                if sigma_deviation is None
+                                else self._number(sigma_deviation)
+                            ),
                         },
                     }
                 )

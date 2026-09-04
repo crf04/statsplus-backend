@@ -641,7 +641,9 @@ Each stored pool player has this shape:
           "share": 0.19,
           "volume": 95.0,
           "games_played": 20,
-          "volume_unit": "possessions"
+          "volume_unit": "possessions",
+          "league_average_share": 0.321,
+          "sigma_deviation": 1.08
         }
       }
     ],
@@ -696,7 +698,32 @@ and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
 
-Player Diet facts are unthresholded raw Season shares and volumes. There is no
+Player Diet facts are unthresholded raw Season shares and volumes; `share` and
+`volume` are never filtered or floored. Each fact additionally carries
+`league_average_share` and `sigma_deviation`, backend-derived against a
+per-Base league population and always present together: `league_average_share`
+is the arithmetic mean of `share` across the population for that (Base,
+slice), and `sigma_deviation` is `(share - league_average_share)` divided by
+the population standard deviation (`statistics.pstdev`), mirroring the team
+Defense Sheet convention -- `0.0` when the population sigma is zero. Both
+fields are `null` together when the population has fewer than two players. A
+player's own fact belongs to its (Base, slice) population when that fact's
+own `games_played` clears `PLAYER_DIET_BASELINE_MIN_GAMES` (default 5), and
+their total Base volume per game -- the sum, over every stored fact of that
+player in the Base, of that fact's own `volume ÷ games_played` -- clears the
+Base's floor: `PLAYER_DIET_BASELINE_PLAY_TYPES_MIN_VOLUME_PER_GAME` (default
+6.0 possessions), `PLAYER_DIET_BASELINE_SHOT_ZONES_MIN_VOLUME_PER_GAME`
+(default 6.0 FGA), `PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME`
+(default 6.0 FGA), and `PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME`
+(default 2.0 assists). Summing each fact's own `volume ÷ games_played`, rather
+than dividing total volume by one shared games-played value, keeps this total
+equal to total volume divided by games played when games played is uniform
+across the Base, and keeps it independent of fact order and of which slice is
+being baselined when it is not. The population is the whole stored season
+fact set for the Base -- the activated publication payload when a Base is
+served from a publication, otherwise the `player_diet_facts` rows for the
+season, never mixed within a Base -- so a delivered fact is scored against the
+full population even when its own player fails that Base's floors. There is no
 player Last-15 field and no manufactured traditional Diet Base. Missing player
 logs yield `season_scoring: null` and an empty minutes series rather than zero.
 
