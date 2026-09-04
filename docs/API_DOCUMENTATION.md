@@ -1293,9 +1293,11 @@ are durable Synergy possession shares multiplied by 100; its player name and
 team are the current canonical catalog values. `assists` keeps its historical
 one-element array shape and derives two-point, three-point, and `+` values from
 durable assist-location facts and Player Diet league baselines. Missing
-play-type slices are returned as zero; missing assist-location facts and any
-totals that require them remain absent. Neither durable category calls an
-upstream provider at request time. On the
+play-type slices are returned as zero. The assist object retains its fixed key
+set, using JSON `null` for a missing location, a total requiring a missing
+location, or a `+` value whose complete league baseline is unavailable; those
+states are never represented by a synthetic zero. Neither durable category
+calls an upstream provider at request time. On the
 bundled demo database these two durable-only categories report a missing player;
 they never fall back to `player_play_types` or `processed_player_assists`.
 

@@ -328,7 +328,7 @@ def test_player_list_includes_the_complete_current_season_fact_population():
     assert reader.catalog_calls == [("2025-26", False)]
 
 
-def test_sparse_assist_facts_remain_absent_from_profile_and_derived_totals():
+def test_sparse_assist_facts_preserve_keys_as_explicitly_unavailable():
     player_id = 111
     reader = _DurableProfileReader(
         [_catalog_row(player_id, "Jayson Tatum")],
@@ -356,14 +356,73 @@ def test_sparse_assist_facts_remain_absent_from_profile_and_derived_totals():
 
     profile = service.get_player_profile("Jayson Tatum", "assists")[0]
 
+    assist_keys = {
+        "TwoPtAssists",
+        "ThreePtAssists",
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
+    }
+    assert set(profile) == {
+        "Name",
+        *assist_keys,
+        *(f"{key}+" for key in assist_keys),
+    }
     assert profile["AtRimAssists"] == pytest.approx(30.0)
     assert profile["AtRimAssists+"] == pytest.approx(1.5)
-    assert "ShortMidRangeAssists" not in profile
-    assert "ShortMidRangeAssists+" not in profile
-    assert "TwoPtAssists" not in profile
-    assert "TwoPtAssists+" not in profile
-    assert "ThreePtAssists" not in profile
-    assert "ThreePtAssists+" not in profile
+    assert profile["ShortMidRangeAssists"] is None
+    assert profile["ShortMidRangeAssists+"] is None
+    assert profile["TwoPtAssists"] is None
+    assert profile["TwoPtAssists+"] is None
+    assert profile["ThreePtAssists"] is None
+    assert profile["ThreePtAssists+"] is None
+
+
+def test_assist_plus_values_require_complete_league_baselines():
+    player_id = 111
+    facts = tuple(
+        _fact(player_id, "assist_locations", slice_key, share)
+        for slice_key, share in {
+            "Arc3Assists": 0.20,
+            "Corner3Assists": 0.10,
+            "AtRimAssists": 0.30,
+            "ShortMidRangeAssists": 0.15,
+            "LongMidRangeAssists": 0.05,
+        }.items()
+    )
+    reader = _DurableProfileReader(
+        [_catalog_row(player_id, "Jayson Tatum")],
+        PlayerDietResult(
+            season="2025-26",
+            players={player_id: facts},
+            observations=(),
+            baselines={
+                ("assist_locations", "Arc3Assists"): PlayerDietBaseline(
+                    0.1, 0.1
+                ),
+                ("assist_locations", "Corner3Assists"): PlayerDietBaseline(
+                    0.1, 0.1
+                ),
+                ("assist_locations", "AtRimAssists"): PlayerDietBaseline(
+                    0.2, 0.1
+                ),
+                ("assist_locations", "ShortMidRangeAssists"): PlayerDietBaseline(
+                    None, None
+                ),
+            },
+        ),
+    )
+    service = PlayerService(object(), reader, settings=_settings())
+
+    profile = service.get_player_profile("Jayson Tatum", "assists")[0]
+
+    assert profile["TwoPtAssists"] == pytest.approx(50.0)
+    assert profile["TwoPtAssists+"] is None
+    assert profile["ThreePtAssists+"] == pytest.approx(1.5)
+    assert profile["ShortMidRangeAssists+"] is None
+    assert profile["LongMidRangeAssists+"] is None
 
 
 def test_player_list_does_not_hide_durable_reader_failures():

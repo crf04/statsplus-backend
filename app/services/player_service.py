@@ -244,13 +244,12 @@ class PlayerService:
         baselines = result.baselines
 
         def baseline_share(slice_keys):
-            values = [
-                baselines.get(("assist_locations", slice_key)).league_average_share
-                for slice_key in slice_keys
-                if baselines.get(("assist_locations", slice_key)) is not None
-                and baselines.get(("assist_locations", slice_key)).league_average_share
-                is not None
-            ]
+            values = []
+            for slice_key in slice_keys:
+                baseline = baselines.get(("assist_locations", slice_key))
+                if baseline is None or baseline.league_average_share is None:
+                    return None
+                values.append(baseline.league_average_share)
             total = sum(values)
             return total if total > 0 else None
 
@@ -278,9 +277,8 @@ class PlayerService:
             "ThreePtAssists",
             *_ASSIST_LOCATION_SLICES,
         ):
-            if key not in all_shares:
-                continue
-            value = all_shares[key] * 100
+            share = all_shares.get(key)
+            value = None if share is None else share * 100
             output[key] = value
             baseline_key = all_baseline_slices[key]
             if isinstance(baseline_key[1], tuple):
@@ -292,7 +290,11 @@ class PlayerService:
                     if baseline is None
                     else baseline.league_average_share
                 )
-            output[f"{key}+"] = value / (denominator * 100) if denominator else 0
+            output[f"{key}+"] = (
+                value / (denominator * 100)
+                if value is not None and denominator is not None and denominator > 0
+                else None
+            )
         return [output]
         
     def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
