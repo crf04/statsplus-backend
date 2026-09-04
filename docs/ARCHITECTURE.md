@@ -917,21 +917,24 @@ Redis key are gone along with the legacy `general_opponent_stats`,
 from a single publication snapshot, so two filters can never intersect two
 generations that never coexisted, and two filters sharing a base cost one read.
 
-Those six nightly ranking tables are now **retired for writes**.
+Those six nightly ranking tables are now **retired and dropped**.
 `RETIRED_LEGACY_RANKING_TABLES` in `app.services.table_publisher` refuses them
 at the publication boundary, so neither the `update_database` refresh operation
 nor a compatibility writer can produce them again, whatever the activation
-state of a stream.  The collectors that built them
-(`_collect_opp_shooting`, `_collect_team_play_types`, the opponent half of the
-assist frames, and the `_fetch_opponent_data`/`_fetch_opp_shooting_data`/
-`_fetch_team_play_type_data` provider calls behind them) are deleted rather
-than left unwired.  The tables themselves are **not yet dropped**:
-`GET /api/teams/stats` (`app.services.team_service`) still reads all six for
-its `Traditional`, `Playtypes`, `Assists`, and `Shooting Type` categories and
-has no publication-backed replacement, so it is the last reader standing
-between this fence and the drop migration.  `tests/services/
-test_legacy_ranking_tables.py` pins both facts, and its allow-list is the
-repository-wide search that the drop must first reduce to the fence itself.
+state of a stream; `DataService._refuse_activation_fenced_frames` refuses them
+one step earlier, with the reason `retired_table` and ahead of any activation
+check, so a revived collector never reaches the publisher at all.  The
+collectors that built them (`_collect_opp_shooting`, `_collect_team_play_types`,
+the opponent half of the assist frames, and the
+`_fetch_opponent_data`/`_fetch_opp_shooting_data`/`_fetch_team_play_type_data`
+provider calls behind them) are deleted rather than left unwired.  Migration
+`048_drop_legacy_ranking_tables` then drops the storage: with
+`GET /api/teams/stats` cut over to the publications, the tables had no reader
+left, so there was nothing to keep them for.  `opp_shooting_zone` is
+deliberately not part of that drop -- it is fenced, not retired.
+`tests/services/test_legacy_ranking_tables.py` pins the fence, and its
+allow-list is the repository-wide search proving no reader survives: every
+remaining mention is the fence, the migration, or shared vocabulary.
 The read is not cached in Redis: an activation, a rollback, or a season
 rollover must never be shadowed by a previous generation.
 
@@ -1687,10 +1690,10 @@ at the shared cutoff with exact `canonical_game_ledger` scope and envelope
 version; final/postponed decisions use canonical Event Catalog helpers.
 Historical equality considers only ledger game dates through that cutoff.
 Composition jobs finish independently: incomplete assist evidence leaves its
-jobs retryable while unrelated candidates advance. Traditional parity reads
-the season-level `general_opponent_stats` 30-team Per48 semantics keyed by
-`TEAM_ID`; missing diagnostics are unavailable evidence, never a fabricated
-empty comparison. Runtime refresh resolves the active unexpired manifest and
+jobs retryable while unrelated candidates advance. Traditional parity has no
+legacy diagnostic left to read -- #199 dropped `general_opponent_stats` -- so
+both `traditional_opponent` windows record unavailable evidence, never a
+fabricated empty comparison; the same rule governs any missing diagnostic. Runtime refresh resolves the active unexpired manifest and
 its exact authorized Event Catalog snapshot before entering the
 provider-capable backfill boundary.
 Collection authorization and composition governance are intentionally

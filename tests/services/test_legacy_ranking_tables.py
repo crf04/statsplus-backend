@@ -1,16 +1,17 @@
-"""The legacy nightly ranking tables are fenced against every writer (#199).
+"""The legacy nightly ranking tables are retired and dropped (#199).
 
-The Season Rankings cutover (#198) moved every game-log Team Filter onto the
-durable Matchup publications, so nothing in the refresh path needs to produce
+The Season Rankings cutover (#198/#225) moved every game-log Team Filter onto
+the durable Matchup publications, so nothing reads or produces
 ``general_opponent_stats``, ``catch_and_shoot``, ``pullups``,
 ``less_than_10_ft``, ``team_play_types``, or ``processed_team_assists`` any
-more.  These tests pin the fence rather than the absence of one call site: a
-reintroduced collector or a revived compatibility writer fails here.
+more.  Migration ``048_drop_legacy_ranking_tables`` drops the storage; these
+tests pin the fence rather than the absence of one call site, so a reintroduced
+collector or a revived compatibility writer fails here.
 
-The tables themselves are not dropped.  ``GET /api/teams/stats`` still reads
-all six and has no publication-backed replacement, so
-``ALLOWED_RETIRED_TABLE_MENTIONS`` below records what the drop migration must
-cut over first, along with the limits of that record.
+The read cutover is complete, so ``ALLOWED_RETIRED_TABLE_MENTIONS`` below no
+longer lists a single reader: what remains is the fence itself, the drop
+migration, and domain vocabulary that merely shares the retired tables'
+spelling.
 """
 
 from __future__ import annotations
@@ -36,34 +37,35 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = ("app", "scripts")
 
 #: Every production file that may still name a retired ranking table, with the
-#: reason it is allowed to.  Three of these issue real SQL or schema
-#: expectations against the tables and must be cut over before the drop; the
-#: rest are domain vocabulary -- publication slice keys and provider operation
-#: names -- that merely share the retired tables' spelling and must not be
-#: renamed with them.
+#: reason it is allowed to.  No entry is a reader: the cutover is complete and
+#: the storage is dropped.  What is left is the fence, the migration that
+#: performs the drop, and domain vocabulary -- publication slice keys, provider
+#: operation names, display labels -- that merely shares the retired tables'
+#: spelling and must not be renamed with them.
 ALLOWED_RETIRED_TABLE_MENTIONS: dict[str, str] = {
-    # --- real dependencies on the tables, blocking the drop migration ---
-    "app/services/team_service.py": (
-        "SQL READER: GET /api/teams/stats reads all six for its Traditional, "
-        "Playtypes, Assists, and Shooting Type categories"
+    # --- the fence and the drop ---
+    "app/services/table_publisher.py": "the retired-table fence itself",
+    "app/migrations.py": (
+        "048_drop_legacy_ranking_tables names the six tables it drops"
     ),
-    "app/services/ledger_parity.py": (
-        "SQL READER: LegacyParityDiagnosticReader selects general_opponent_stats "
-        "for the traditional_opponent parity comparison, and raises when the "
-        "table is absent"
-    ),
-    "scripts/validate_demo_db.py": (
-        "SCHEMA CONTRACT: requires team_play_types and processed_team_assists in "
-        "the tracked demo database, so a drop must update this validator too"
+    "app/services/data_service.py": (
+        "the retired names in the activation-fence map, whose retirement "
+        "refusal fires ahead of the activation check"
     ),
     # --- vocabulary that shares the spelling ---
-    "app/services/table_publisher.py": "the retired-table fence itself",
+    "app/services/ledger_parity.py": (
+        "a docstring recording that the traditional_opponent diagnostic read "
+        "is retired; LegacyParityDiagnosticReader.TABLES no longer names it"
+    ),
+    "app/services/ledger_materialization.py": (
+        "the reason string on the unavailable traditional_opponent_season "
+        "parity report"
+    ),
     "app/domain/team_matchup_taxonomy.py": "shot-type slice keys in publications",
     "app/services/team_filter_rankings.py": "published shot-type metric keys",
     "app/services/nba_stats_adapter.py": "the synergy_team_play_types operation name",
     "app/utils/telemetry.py": "the synergy_team_play_types operation name",
     "app/utils/tables.py": "legacy display-name normalization",
-    "app/services/data_service.py": "a docstring naming the removed collector's table",
     "scripts/generate_benchmark_fixture.py": "the catch_and_shoot publication slice key",
 }
 
@@ -138,23 +140,25 @@ def test_the_compatibility_writer_refuses_a_retired_ranking_table(
 def test_every_remaining_mention_of_a_retired_table_is_accounted_for():
     """The repository-wide search behind #199's first Done-when checkbox.
 
-    A production file that names one of these tables is either the fence, a
-    real dependency that must be cut over before the tables can be dropped, or
-    vocabulary that merely shares their spelling.  Anything else has to be
-    classified in the allow-list before it can land.
+    The read cutover is complete and migration 048 drops the storage, so a
+    production file that names one of these tables is now only ever the fence,
+    the drop migration, or vocabulary that shares their spelling.  Anything
+    else -- in particular a revived reader -- has to be classified in the
+    allow-list before it can land.
 
     Two limits are deliberate and must not be read as stronger than they are:
 
     * It is a **per-file** substring allow-list.  A new SQL read added inside a
-      file that is already allowed -- another query in ``team_service.py``, say
-      -- does not fail this test.  Only a new *file* does.
+      file that is already allowed -- another query in ``ledger_parity.py``,
+      say -- does not fail this test.  Only a new *file* does.
     * It cannot see a **dynamic** reader.  ``database_utils.fetch_data_from_table``
       and ``PlayerService._fetch_data_from_table`` take a table name as an
       argument, so a caller that passes a retired name through a variable never
       spells it in the source and is invisible here.
 
-    The behavioural fences above are what actually stop a write; this test
-    records what is left to cut over before the drop migration can land.
+    The behavioural fences above are what actually stop a write, and the
+    dropped storage is what actually stops a read; this test records the
+    vocabulary that legitimately survives both.
     """
 
     found = {
