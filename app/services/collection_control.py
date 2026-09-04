@@ -4574,9 +4574,13 @@ class PublicationService(_SessionService):
             group, members = found
             if group.promoted_at is not None:
                 raise ControlPlaneError("repair_group_already_promoted")
+            # The group row carries a foreign key to the manifest, so the
+            # row always exists; what matters is that it is still the season's
+            # authority.  A superseded manifest's catalog binding no longer
+            # governs, so its declaration must not discard anything.
             manifest = session.get(CollectionManifest, manifest_id)
-            if manifest is None:
-                raise ControlPlaneError("manifest_not_found")
+            if manifest.status != "active":
+                raise ControlPlaneError("repair_group_manifest_inactive")
             cutoff = _aware(manifest.cutoff)
 
             # Phase 1 -- lock, guard, compose, and validate every member.

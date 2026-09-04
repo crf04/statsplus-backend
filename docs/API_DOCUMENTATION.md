@@ -2019,6 +2019,7 @@ POST /api/admin/collection/streams/<stream_key>/activate
 POST /api/admin/collection/compositions/<job_id>/retry
 POST /api/admin/collection/cycles/start
 POST /api/admin/collection/repair
+GET /api/admin/collection/manifests/<manifest_id>/repair-group
 POST /api/admin/collection/manifests/<manifest_id>/repair-group/promote
 POST /api/admin/collection/cycles/<cycle_id>/finish
 POST /api/admin/collection/cycles/<cycle_id>/not-applicable
@@ -2062,18 +2063,25 @@ consumed it), and
 `members`: the group's stream keys filtered to the surfaces the caller's
 owner/provider/surface binding already authorizes. Expected publication
 identities and pointer fences are operator control-plane state and are never
-returned to a collector; the group is omitted entirely when the caller
+returned to a collector; `repair_group` is `null` when the caller
 authorizes none of its members. `GET /api/collector/manifest/<manifest_id>`
 renders the identical object. A composition that belongs to a declared group
 is held for grouped execution and refuses the independent publication path
 with `409 operation_conflict` and detail `grouped_repair_pending`.
+`GET /api/admin/collection/manifests/<manifest_id>/repair-group` is the
+operator read: unlike the collector object it returns every member's declared
+and live publication identity and fence, `guard_satisfied`, `stale_members`,
+`promoted_at`, `promotable`, and `state`. It is `404 resource_not_found` with
+detail `repair_group_not_found` when the manifest declares no group, and
+`manifest_not_found` when the manifest itself is unknown.
 `POST /api/admin/collection/manifests/<manifest_id>/repair-group/promote`
 publishes the whole declared group as one transaction and returns the durable
 operator job beside the discarded and published publication identities. It is
 `404` when the manifest declares no group, and `409` when the declaration was
 already consumed (`repair_group_already_promoted`) or a member's active
 publication or fence moved after it was declared
-(`repair_group_guard_stale`). A stream repaired this way reports
+(`repair_group_guard_stale`), or the declaring manifest is no longer the
+season's active authority (`repair_group_manifest_inactive`). A stream repaired this way reports
 `rollback_unavailable` until a later ordinary publication establishes a
 trustworthy previous version. See
 [PUBLICATION_REPAIR_GROUPS.md](PUBLICATION_REPAIR_GROUPS.md).

@@ -563,3 +563,82 @@ def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, ap
     with engine.connect() as connection:
         polled = connection.execute(sa_select(CollectorUsage)).one()
     assert (polled.envelope_count, polled.poll_count) == (3, 1)
+
+
+def test_repair_group_read_returns_operator_guards_or_404(client, app):
+    """The operator read exposes the guards the collector object withholds."""
+    dependencies = _install_collection_services(app)
+    state = {
+        "group_id": "group-1",
+        "manifest_id": "manifest-1",
+        "season": "2025-26",
+        "cutoff": "2026-08-11T00:00:00+00:00",
+        "reason": "broken per48",
+        "checksum": "c" * 64,
+        "members": [{
+            "stream_key": "exact_shot_zones_opponent_season",
+            "expected_publication_id": "publication-1",
+            "expected_fence": 7,
+            "active_publication_id": "publication-1",
+            "fence": 7,
+            "guard_satisfied": True,
+        }],
+        "stale_members": [],
+        "promoted_at": None,
+        "promotable": True,
+        "state": "waiting_for_grouped_execution",
+    }
+    dependencies.collection_control.repair_group_state.return_value = state
+    response = client.get(
+        "/api/admin/collection/manifests/manifest-1/repair-group"
+    )
+    assert response.status_code == 200
+    assert response.json == state
+    dependencies.collection_control.repair_group_state.assert_called_once_with(
+        "manifest-1"
+    )
+
+    # An ordinary manifest has no group to read.
+    dependencies.collection_control.repair_group_state.return_value = None
+    missing = client.get(
+        "/api/admin/collection/manifests/manifest-2/repair-group"
+    )
+    assert missing.status_code == 404
+    assert missing.json["error"]["code"] == "resource_not_found"
+
+    dependencies.collection_control.repair_group_state.side_effect = (
+        ControlPlaneError("manifest_not_found")
+    )
+    unknown = client.get(
+        "/api/admin/collection/manifests/manifest-3/repair-group"
+    )
+    assert unknown.status_code == 404
+    assert unknown.json["error"]["code"] == "resource_not_found"
+
+
+def test_repair_group_promotion_conflicts_are_stable(client, app):
+    dependencies = _install_collection_services(app)
+    for reason in (
+        "repair_group_guard_stale",
+        "repair_group_already_promoted",
+        "repair_group_manifest_inactive",
+    ):
+        dependencies.collection_operations.promote_repair_group.side_effect = (
+            ControlPlaneError(reason)
+        )
+        response = client.post(
+            "/api/admin/collection/manifests/manifest-1/repair-group/promote",
+            json={"reason": "repair the pair"},
+        )
+        assert response.status_code == 409, reason
+        assert response.json["error"]["code"] == "operation_conflict", reason
+
+    dependencies.collection_operations.promote_repair_group.side_effect = (
+        ControlPlaneError("repair_group_not_found")
+    )
+    absent = client.post(
+        "/api/admin/collection/manifests/manifest-1/repair-group/promote",
+        json={"reason": "repair the pair"},
+    )
+    assert absent.status_code == 404
+    assert absent.json["error"]["code"] == "resource_not_found"

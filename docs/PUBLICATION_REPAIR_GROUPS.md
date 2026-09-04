@@ -87,9 +87,10 @@ goes live around a group that could not be executed:
 
 ### Operator
 
-`CollectionControlService.repair_group_state(manifest_id)` returns `None` for
-an ordinary manifest, and otherwise the full declaration beside live pointer
-state:
+`GET /api/admin/collection/manifests/<manifest_id>/repair-group`, backed by
+`CollectionControlService.repair_group_state(manifest_id)`, returns the full
+declaration beside live pointer state. An ordinary manifest has no group, and
+the route answers `404` with detail `repair_group_not_found`:
 
 ```json
 {
@@ -154,7 +155,7 @@ This deliberately does **not** widen collector permissions:
 
 - `members` is filtered to the surfaces the caller's owner/provider/surface
   binding already authorizes. A collector authorized for only one member sees
-  only that member, and the group is omitted entirely if it authorizes none.
+  only that member, and `repair_group` is `null` if it authorizes none.
 - Expected publication identities and pointer fences are never included. They
   are operator control-plane state and no collector scope grants them.
 
@@ -171,8 +172,18 @@ It is then held rather than promoted:
   stranding in `running`, and their `claimed_generation` stays `NULL`.
 - `PublicationService.compose_from_observations` refuses a grouped member with
   `grouped_repair_pending` (HTTP `409 operation_conflict`). The refusal lives
-  at the choke point, not only in the worker, so no caller of the independent
-  path can advance half a group.
+  at the choke point and not only in the worker, so the scheduled path cannot
+  advance half a group.
+
+This covers the scheduled composition path, which is the one that would
+otherwise promote a member on its own. It is not a lock on the pointer. An
+explicit operator action that advances a stream by another route -- notably
+`POST /api/admin/collection/streams/<stream_key>/activate`, which promotes a
+candidate directly -- still moves the pointer. That does not half-repair the
+group silently: the member's guard no longer matches its declaration, so
+`repair_group_state` reports `guard_stale` and the promotion refuses with
+`repair_group_guard_stale` rather than discarding a rollback target the
+operator never agreed to discard.
 
 Manifests without a declared group, and unrelated composition jobs on the same
 cutoff, keep their existing independent behavior.
@@ -243,6 +254,7 @@ group's `promoted_at`, and the operator audit all roll back together:
 | `repair_group_not_found` | The manifest declares no group (`404`). |
 | `repair_group_already_promoted` | The declaration was already consumed (`409`). |
 | `repair_group_guard_stale` | A member's active publication or fence moved after the declaration (`409`). |
+| `repair_group_manifest_inactive` | The declaring manifest was superseded or expired, so its catalog binding no longer governs (`409`). |
 | `incomplete_publication`, `base_incomplete` | A member has no, or partial, evidence for this season and cutoff. |
 | `publication_candidate_invalid` | A member's replacement failed validation. |
 | any composition or infrastructure failure | Including a failure between two members' pointer updates. |

@@ -42,6 +42,7 @@ from app.services.collection_control import (
 from tests.services.test_collection_control import (
     L15_ZONES,
     SEASON_ZONES,
+    ZONE_REPAIR_SCOPES,
     _zone_collector_claims,
 )
 
@@ -589,3 +590,66 @@ def test_promotion_requires_a_declared_group(repair):
         repair["operations"].promote_repair_group(
             ordinary.manifest_id, actor="operator", reason="nothing to repair",
         )
+
+
+def test_a_validation_failure_on_one_member_rolls_the_whole_group_back(
+    repair, monkeypatch,
+):
+    """A replacement that fails validation stops the group before any advance."""
+
+    engine = repair["engine"]
+    before, statuses = read_pointers(engine), read_statuses(engine)
+    expected = repair["expected"]
+
+    def derive(*args, **kwargs):
+        payload = _derived_payload(expected, per48_value=2.0)
+        if kwargs["stream_key"] == L15_ZONES:
+            # One team short of the governed thirty: the composed replacement
+            # is real, but it cannot pass activation validation.
+            payload["rows"] = payload["rows"][:-1]
+        return payload
+
+    monkeypatch.setattr(
+        collection_control_module, "_compose_nba_observation_payload", derive,
+    )
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        repair["operations"].promote_repair_group(
+            repair["manifest"].manifest_id, actor="operator", reason="repair the pair",
+        )
+
+    assert read_pointers(engine) == before
+    assert read_statuses(engine) == statuses
+    with engine.connect() as connection:
+        assert connection.execute(select(AuditEvent).where(
+            AuditEvent.action == "publication.repair_group.promote"
+        )).all() == []
+        assert connection.execute(
+            select(PublicationRepairGroup)
+        ).one().promoted_at is None
+        assert {
+            row.status for row in connection.execute(select(CompositionJob))
+        } == {"queued"}
+
+
+def test_a_superseded_manifest_can_no_longer_promote_its_group(repair):
+    """A manifest that lost the season's authority must not discard anything."""
+
+    engine, control = repair["engine"], repair["control"]
+    before, statuses = read_pointers(engine), read_statuses(engine)
+
+    # Any later manifest for the season supersedes this one, and with it the
+    # catalog binding the declaration was made against.
+    control.create_manifest(
+        SEASON,
+        cutoff=REPAIR_CUTOFF,
+        scopes=list(ZONE_REPAIR_SCOPES),
+        collect_before=NOW + timedelta(hours=1),
+    )
+
+    with pytest.raises(ControlPlaneError, match="repair_group_manifest_inactive"):
+        repair["operations"].promote_repair_group(
+            repair["manifest"].manifest_id, actor="operator", reason="repair the pair",
+        )
+
+    assert read_pointers(engine) == before
+    assert read_statuses(engine) == statuses

@@ -91,7 +91,7 @@ def _control_error(error: Exception) -> AppError:
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
         "grouped_repair_pending", "repair_group_guard_stale",
-        "repair_group_already_promoted",
+        "repair_group_already_promoted", "repair_group_manifest_inactive",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)
@@ -602,6 +602,20 @@ def scoped_repair():
     except (KeyError, TypeError, ValueError) as error:
         raise _control_error(error) from error
     return jsonify({"job_id": result.job_id, "composition_job_id": job.job_id, "status": job.status}), 202
+
+
+@collection_bp.get("/admin/collection/manifests/<manifest_id>/repair-group")
+@require_admin
+@route_error_boundary("Failed to read the publication repair group.")
+def read_repair_group(manifest_id: str):
+    """Operator view of one manifest's repair group beside live pointer state."""
+    try:
+        state = _service("collection_control").repair_group_state(manifest_id)
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    if state is None:
+        raise _control_error(ControlPlaneError("repair_group_not_found"))
+    return jsonify(state)
 
 
 @collection_bp.post("/admin/collection/manifests/<manifest_id>/repair-group/promote")
