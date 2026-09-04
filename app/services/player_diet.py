@@ -135,32 +135,30 @@ def compute_player_diet_baselines(
 ) -> dict[tuple[str, str], PlayerDietBaseline]:
     """League average share and population sigma per (Base, slice).
 
-    A player belongs to a slice's baseline population when they have a stored
-    fact for that slice, their games played clears `settings.min_games`, and
-    their total volume per game across every slice in the Base clears the
-    Base's floor. `facts` must be the Base's whole stored season fact set --
-    one source only -- so a player who fails the floors for one Base can still
+    A player's fact belongs to its slice's baseline population when that
+    fact's own `games_played` clears `settings.min_games` and the player's
+    total Base volume per game clears the Base's floor. Total Base volume per
+    game is the sum, over every stored fact of that player in the Base, of
+    that fact's own `volume / games_played` -- equal to total volume divided
+    by games played when games played is uniform across the Base, and
+    independent of fact order and of which slice is being baselined when it
+    is not. `facts` must be the Base's whole stored season fact set -- one
+    source only -- so a player who fails the floor for one Base can still
     anchor another Base's population.
     """
 
     all_facts = list(facts)
-    total_volume: dict[tuple[int, str], float] = defaultdict(float)
-    games_played: dict[tuple[int, str], int] = {}
+    base_volume_per_game: dict[tuple[int, str], float] = defaultdict(float)
     for fact in all_facts:
-        key = (fact.player_id, fact.base)
-        total_volume[key] += fact.volume
-        games_played[key] = fact.games_played
-    eligible: set[tuple[int, str]] = set()
-    for key, volume in total_volume.items():
-        _, base = key
-        games = games_played[key]
-        if games < settings.min_games:
-            continue
-        if volume / games >= settings.minimum_volume_per_game(base):
-            eligible.add(key)
+        base_volume_per_game[(fact.player_id, fact.base)] += (
+            fact.volume / fact.games_played
+        )
     shares_by_slice: dict[tuple[str, str], list[float]] = defaultdict(list)
     for fact in all_facts:
-        if (fact.player_id, fact.base) in eligible:
+        if fact.games_played < settings.min_games:
+            continue
+        key = (fact.player_id, fact.base)
+        if base_volume_per_game[key] >= settings.minimum_volume_per_game(fact.base):
             shares_by_slice[(fact.base, fact.slice_key)].append(fact.share)
     return {
         slice_identity: (

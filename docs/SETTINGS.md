@@ -40,11 +40,18 @@ display-threshold setting of its own: the durable bulk seam always returns raw
 shares and volumes, unfiltered and unfloored, and the frontend owns the chip
 *display* gate. The backend does own the population that
 `league_average_share` and `sigma_deviation` are computed against --
-`PlayerDietBaselineSettings` -- so a delivered fact whose own player fails
-those floors is still scored against the population that excludes it. It also
-has no Last-15 or request-time fallback setting; `NBASeasonSettings.current_season`
-selects the explicit Nightly Season and each stored Base carries its own
-timezone-aware retrieval time and availability observation.
+`PlayerDietBaselineSettings`. A player's own fact joins its (Base, slice)
+population when that fact's own `games_played` clears
+`PLAYER_DIET_BASELINE_MIN_GAMES`, and the sum, over every stored fact of that
+player in the Base, of that fact's own `volume ÷ games_played` clears the
+Base's configured floor -- equal to total volume divided by games played when
+games played is uniform across the Base, and independent of fact order and of
+which slice is being baselined when it is not. A delivered fact whose own
+player fails those floors is still scored against the population that
+excludes it. It also has no Last-15 or request-time fallback setting;
+`NBASeasonSettings.current_season` selects the explicit Nightly Season and
+each stored Base carries its own timezone-aware retrieval time and
+availability observation.
 
 Matchup Score thin thresholds are independent from the frontend's Diet-chip
 display gates. A component is thin when its Season player Diet has fewer than

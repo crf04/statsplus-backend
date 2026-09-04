@@ -1035,3 +1035,119 @@ def test_legacy_get_for_players_baselines_over_the_whole_stored_season_fact_set(
     population_shares = [0.5, 0.3, 0.2, 0.1]
     assert baseline.league_average_share == pytest.approx(fmean(population_shares))
     assert baseline.population_sigma == pytest.approx(pstdev(population_shares))
+
+
+def test_baseline_eligibility_is_independent_of_a_players_own_fact_order():
+    # X's own facts have different games_played per slice (5 vs 20). Each
+    # slice's volume/game alone is below the play_types floor (6.0), but the
+    # per-fact volume/games_played sum across the Base clears it (6.0 + 1.0 =
+    # 7.0), so X must be eligible for both slice populations regardless of
+    # which of X's own facts is processed first.
+    player_x_transition = PlayerDietFact(
+        4001, "play_types", "Transition", 0.9, 30.0, 5, "possessions", "nba_synergy"
+    )
+    player_x_spotup = PlayerDietFact(
+        4001, "play_types", "Spotup", 0.8, 20.0, 20, "possessions", "nba_synergy"
+    )
+    # One stable comparison player anchors both slice populations.
+    comparison_transition = PlayerDietFact(
+        4002, "play_types", "Transition", 0.4, 90.0, 25, "possessions", "nba_synergy"
+    )
+    comparison_spotup = PlayerDietFact(
+        4002, "play_types", "Spotup", 0.35, 60.0, 25, "possessions", "nba_synergy"
+    )
+
+    order_one = [
+        player_x_transition, player_x_spotup, comparison_transition, comparison_spotup,
+    ]
+    order_two = [
+        player_x_spotup, player_x_transition, comparison_spotup, comparison_transition,
+    ]
+
+    baselines_one = compute_player_diet_baselines(order_one, settings=_BASELINE_SETTINGS)
+    baselines_two = compute_player_diet_baselines(order_two, settings=_BASELINE_SETTINGS)
+
+    assert baselines_one == baselines_two
+    transition = baselines_one[("play_types", "Transition")]
+    spotup = baselines_one[("play_types", "Spotup")]
+    # X is actually included in both populations, not just consistently
+    # excluded in both orders.
+    assert transition.league_average_share == pytest.approx(fmean([0.4, 0.9]))
+    assert spotup.league_average_share == pytest.approx(fmean([0.35, 0.8]))
+
+
+def test_baseline_excludes_a_player_below_min_games_but_still_scores_their_fact():
+    comparison_one = PlayerDietFact(
+        5001, "assist_locations", "AtRimAssists", 0.3, 25.0, 10, "assists", "pbp_stats"
+    )
+    comparison_two = PlayerDietFact(
+        5002, "assist_locations", "AtRimAssists", 0.5, 30.0, 15, "assists", "pbp_stats"
+    )
+    # Well above the 2.0/game volume floor, but fewer than the 5-game floor.
+    below_min_games = PlayerDietFact(
+        5003, "assist_locations", "AtRimAssists", 0.9, 100.0, 3, "assists", "pbp_stats"
+    )
+
+    with_low_games = compute_player_diet_baselines(
+        [comparison_one, comparison_two, below_min_games], settings=_BASELINE_SETTINGS
+    )
+    without_low_games = compute_player_diet_baselines(
+        [comparison_one, comparison_two], settings=_BASELINE_SETTINGS
+    )
+
+    key = ("assist_locations", "AtRimAssists")
+    assert with_low_games[key] == without_low_games[key]
+    assert with_low_games[key].league_average_share == pytest.approx(fmean([0.3, 0.5]))
+    # The excluded player's own fact is still scored against the population
+    # that excludes them.
+    assert with_low_games[key].sigma_deviation(0.9) is not None
+
+
+def test_baseline_does_not_synthesize_a_zero_share_for_a_slice_a_player_lacks():
+    comparison_one = PlayerDietFact(
+        6001, "shot_zones", "Corner 3", 0.5, 150.0, 25,
+        "field_goal_attempts", "nba_stats",
+    )
+    comparison_two = PlayerDietFact(
+        6002, "shot_zones", "Corner 3", 0.3, 150.0, 25,
+        "field_goal_attempts", "nba_stats",
+    )
+    # Eligible for the Base (own volume/game clears the floor) but has no
+    # stored fact for Corner 3 at all.
+    other_slice_only = PlayerDietFact(
+        6003, "shot_zones", "Above the Break 3", 0.6, 150.0, 25,
+        "field_goal_attempts", "nba_stats",
+    )
+
+    baselines = compute_player_diet_baselines(
+        [comparison_one, comparison_two, other_slice_only], settings=_BASELINE_SETTINGS
+    )
+
+    baseline = baselines[("shot_zones", "Corner 3")]
+    assert baseline.league_average_share == pytest.approx(fmean([0.5, 0.3]))
+    assert baseline.population_sigma == pytest.approx(pstdev([0.5, 0.3]))
+
+
+def test_baseline_accumulates_volume_across_the_base_not_just_the_last_slice():
+    # Neither of W's own facts alone clears the play_types 6.0/game floor
+    # (0.4 and 5.6), but their sum (6.0) does.
+    target_slice = PlayerDietFact(
+        7001, "play_types", "PRBallHandler", 0.7, 10.0, 25,
+        "possessions", "nba_synergy",
+    )
+    other_slice = PlayerDietFact(
+        7001, "play_types", "OffScreen", 0.3, 140.0, 25,
+        "possessions", "nba_synergy",
+    )
+    comparison = PlayerDietFact(
+        7002, "play_types", "PRBallHandler", 0.4, 150.0, 25,
+        "possessions", "nba_synergy",
+    )
+
+    for facts in (
+        [target_slice, other_slice, comparison],
+        [other_slice, target_slice, comparison],
+    ):
+        baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
+        baseline = baselines[("play_types", "PRBallHandler")]
+        assert baseline.league_average_share == pytest.approx(fmean([0.4, 0.7]))
