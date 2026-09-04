@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -240,6 +241,59 @@ class TraditionalOpponentRebuildService:
             return staged
         return self.promote(rebuild_id, owner=owner)
 
+    def claimable(self, *, session: Session | None = None) -> tuple[str, ...]:
+        """The unfinished rebuilds this worker could pick up right now.
+
+        A rebuild is claimable when nobody holds it or the holder's lease has
+        expired.  That is the whole restart story: the operation lives in the
+        database, so a worker that died mid-phase leaves a row whose lease
+        simply runs out, and the next pass resumes it from its recorded phase
+        rather than from the beginning.
+        """
+
+        now = self.clock()
+        with self.publications._session_scope(session) as session:
+            rows = session.scalars(
+                select(PublicationRebuild)
+                .where(
+                    PublicationRebuild.family == self.family,
+                    PublicationRebuild.state.in_(ACTIVE_REBUILD_STATES),
+                )
+                .order_by(PublicationRebuild.created_at)
+            ).all()
+            return tuple(
+                row.rebuild_id
+                for row in rows
+                if not row.lease_owner
+                or row.lease_expires_at is None
+                or _aware(row.lease_expires_at) <= now
+            )
+
+    def run_pending(
+        self, *, owner: str = "worker", limit: int | None = None
+    ) -> tuple[PublicationRebuild, ...]:
+        """Drive every claimable rebuild of this family to a terminal state.
+
+        This is the execution seam an operator command or scheduled pass
+        calls.  Starting a rebuild only records the approved intent; this is
+        what makes it progress.  A rebuild another worker claimed between the
+        scan and the claim is skipped rather than contended for -- it is
+        already being driven.
+        """
+
+        claimable = self.claimable()
+        if limit is not None:
+            claimable = claimable[: max(int(limit), 0)]
+        finished = []
+        for rebuild_id in claimable:
+            try:
+                finished.append(self.run(rebuild_id, owner=owner))
+            except ControlPlaneError as error:
+                if error.reason == "rebuild_lease_held":
+                    continue
+                raise
+        return tuple(finished)
+
     def stage(self, rebuild_id: str, *, owner: str = "worker") -> PublicationRebuild:
         """Compose and validate both candidates without touching a pointer.
 
@@ -252,7 +306,9 @@ class TraditionalOpponentRebuildService:
         if claimed.state in TERMINAL_REBUILD_STATES:
             return claimed
         if claimed.staged_season_publication_id and claimed.staged_l15_publication_id:
-            return self._transition(rebuild_id, state="validating")
+            return self._transition(
+                rebuild_id, owner=owner, state="validating"
+            )
         try:
             sources = self._sources(claimed)
             payloads = self.compose(sources)
@@ -263,12 +319,15 @@ class TraditionalOpponentRebuildService:
                 for stream_key in self.stream_keys
             }
         except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
-            return self._fail(rebuild_id, code=self._failure_code(error))
+            return self._fail(
+                rebuild_id, owner=owner, code=self._failure_code(error)
+            )
         except KeyError:
-            return self._fail(rebuild_id, code="publication_candidate_invalid")
+            return self._fail(
+                rebuild_id, owner=owner, code="publication_candidate_invalid"
+            )
         del validated
-        staged = self._stage_candidates(claimed, payloads)
-        return staged
+        return self._stage_candidates(claimed, payloads, owner=owner)
 
     def promote(self, rebuild_id: str, *, owner: str = "worker") -> PublicationRebuild:
         """Revalidate every precondition and move both pointers, or neither."""
@@ -280,7 +339,9 @@ class TraditionalOpponentRebuildService:
             claimed.staged_season_publication_id
             and claimed.staged_l15_publication_id
         ):
-            return self._fail(rebuild_id, code="publication_candidate_invalid")
+            return self._fail(
+                rebuild_id, owner=owner, code="publication_candidate_invalid"
+            )
         promotions = tuple(
             FamilyPromotion(
                 stream_key=stream_key,
@@ -301,21 +362,27 @@ class TraditionalOpponentRebuildService:
                     game_ids=self._governed_game_ids(session, claimed),
                 ) != claimed.source_checksum:
                     raise ControlPlaneError("stale_publication_family")
+                self._assert_staged_still_valid(session, claimed)
                 promoted = self.publications.promote_publication_family(
                     promotions,
                     actor=claimed.actor,
                     reason=claimed.reason,
                     validate_payload=self._assert_target_payload,
+                    validate_family=self._assert_coherent_family,
                     session=session,
                 )
         except ControlPlaneError as error:
             self._supersede_staged(rebuild_id)
-            return self._fail(rebuild_id, code=self._promotion_code(error))
+            return self._fail(
+                rebuild_id, owner=owner, code=self._promotion_code(error)
+            )
         except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
             self._supersede_staged(rebuild_id)
-            return self._fail(rebuild_id, code=self._failure_code(error))
+            return self._fail(
+                rebuild_id, owner=owner, code=self._failure_code(error)
+            )
         by_stream = {version.stream_key: version for version in promoted}
-        return self._succeed(rebuild_id, promoted=by_stream)
+        return self._succeed(rebuild_id, owner=owner, promoted=by_stream)
 
     # --- Observing --------------------------------------------------------
 
@@ -420,6 +487,7 @@ class TraditionalOpponentRebuildService:
                 reason=reason,
                 expected_fences=expected_fences,
                 validate_payload=self._assert_supported_payload,
+                validate_family=self._assert_coherent_family,
                 session=session,
             )
         except TraditionalOpponentFormatError as error:
@@ -599,7 +667,7 @@ class TraditionalOpponentRebuildService:
             source_checksum=rebuild.source_checksum,
         )
 
-    def _stage_candidates(self, rebuild, payloads) -> PublicationRebuild:
+    def _stage_candidates(self, rebuild, payloads, *, owner: str) -> PublicationRebuild:
         """Persist both candidates, reusing the active pair's provenance."""
 
         staged: dict[str, PublicationVersion] = {}
@@ -619,6 +687,7 @@ class TraditionalOpponentRebuildService:
                 )
         return self._transition(
             rebuild.rebuild_id,
+            owner=owner,
             state="validating",
             values={
                 "staged_season_publication_id": staged[SEASON_STREAM].publication_id,
@@ -659,7 +728,18 @@ class TraditionalOpponentRebuildService:
             for observation_id, game_id in bound.items()
         }
 
-    def _claim(self, rebuild_id: str, *, owner: str, state: str) -> PublicationRebuild:
+    @contextmanager
+    def _fenced(self, rebuild_id: str, *, owner: str | None):
+        """Load one rebuild under a row lock, optionally proving ownership.
+
+        Every state write goes through here.  A worker whose lease expired may
+        still be running: without this fence its in-flight code could overwrite
+        the successor that legitimately took the rebuild over, and in the worst
+        case revert ``succeeded`` back to an active phase.  Ownership is the
+        lease owner *and* the claimed generation, so a reclaim under a bumped
+        generation retires the previous claim as well.
+        """
+
         now = self.clock()
         with self.publications._session_scope(None) as session:
             rebuild = session.scalar(
@@ -670,6 +750,23 @@ class TraditionalOpponentRebuildService:
             )
             if rebuild is None or rebuild.family != self.family:
                 raise ControlPlaneError("rebuild_not_found")
+            if owner is not None and not self._owns(rebuild, owner):
+                raise ControlPlaneError("rebuild_lease_held")
+            yield session, rebuild
+            rebuild.updated_at = now
+            session.flush()
+
+    @staticmethod
+    def _owns(rebuild: PublicationRebuild, owner: str) -> bool:
+        return (
+            rebuild.lease_owner == owner
+            and rebuild.claimed_generation is not None
+            and int(rebuild.claimed_generation) == int(rebuild.generation or 1)
+        )
+
+    def _claim(self, rebuild_id: str, *, owner: str, state: str) -> PublicationRebuild:
+        now = self.clock()
+        with self._fenced(rebuild_id, owner=None) as (_session, rebuild):
             if rebuild.state in TERMINAL_REBUILD_STATES:
                 return rebuild
             held_by_other = (
@@ -685,59 +782,39 @@ class TraditionalOpponentRebuildService:
             rebuild.claimed_generation = int(rebuild.generation or 1)
             rebuild.attempts = int(rebuild.attempts or 0) + 1
             rebuild.state = state
-            rebuild.updated_at = now
-            session.flush()
         return rebuild
 
-    def _transition(self, rebuild_id, *, state, values=None) -> PublicationRebuild:
-        now = self.clock()
-        with self.publications._session_scope(None) as session:
-            rebuild = session.scalar(
-                select(PublicationRebuild)
-                .where(PublicationRebuild.rebuild_id == rebuild_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            if rebuild is None:
-                raise ControlPlaneError("rebuild_not_found")
+    def _transition(
+        self, rebuild_id, *, owner: str, state, values=None
+    ) -> PublicationRebuild:
+        with self._fenced(rebuild_id, owner=owner) as (_session, rebuild):
+            if rebuild.state in TERMINAL_REBUILD_STATES:
+                # Someone already finished this rebuild; a later phase write
+                # from this worker would be a regression, not progress.
+                return rebuild
             for key, value in dict(values or {}).items():
                 setattr(rebuild, key, value)
             rebuild.state = state
-            rebuild.updated_at = now
-            session.flush()
         return rebuild
 
-    def _fail(self, rebuild_id, *, code: str) -> PublicationRebuild:
+    def _fail(self, rebuild_id, *, owner: str, code: str) -> PublicationRebuild:
         now = self.clock()
-        with self.publications._session_scope(None) as session:
-            rebuild = session.scalar(
-                select(PublicationRebuild)
-                .where(PublicationRebuild.rebuild_id == rebuild_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            if rebuild is None:
-                raise ControlPlaneError("rebuild_not_found")
+        with self._fenced(rebuild_id, owner=owner) as (_session, rebuild):
+            if rebuild.state in TERMINAL_REBUILD_STATES:
+                return rebuild
             rebuild.state = "failed"
             rebuild.error_code = code[:64]
             rebuild.lease_owner = None
             rebuild.lease_expires_at = None
+            rebuild.claimed_generation = None
             rebuild.completed_at = now
-            rebuild.updated_at = now
-            session.flush()
         return rebuild
 
-    def _succeed(self, rebuild_id, *, promoted) -> PublicationRebuild:
+    def _succeed(self, rebuild_id, *, owner: str, promoted) -> PublicationRebuild:
         now = self.clock()
-        with self.publications._session_scope(None) as session:
-            rebuild = session.scalar(
-                select(PublicationRebuild)
-                .where(PublicationRebuild.rebuild_id == rebuild_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            if rebuild is None:
-                raise ControlPlaneError("rebuild_not_found")
+        with self._fenced(rebuild_id, owner=owner) as (_session, rebuild):
+            if rebuild.state in TERMINAL_REBUILD_STATES:
+                return rebuild
             rebuild.promoted_season_publication_id = promoted[
                 SEASON_STREAM
             ].publication_id
@@ -748,9 +825,8 @@ class TraditionalOpponentRebuildService:
             rebuild.error_code = None
             rebuild.lease_owner = None
             rebuild.lease_expires_at = None
+            rebuild.claimed_generation = None
             rebuild.completed_at = now
-            rebuild.updated_at = now
-            session.flush()
         return rebuild
 
     def _supersede_staged(self, rebuild_id) -> None:
@@ -775,6 +851,68 @@ class TraditionalOpponentRebuildService:
                 if candidate is not None and candidate.status == "candidate":
                     candidate.status = "superseded"
             session.flush()
+
+    def _assert_staged_still_valid(self, session, rebuild) -> None:
+        """Prove the staged pair is still exactly what this rebuild staged.
+
+        The pointer fences prove nothing moved underneath; these prove the
+        candidates themselves did not.  A candidate whose stored bytes no
+        longer hash to the checksum this rebuild recorded is not the thing the
+        operator approved, and a candidate whose accepted evidence was rebound
+        by a ledger correction no longer rests on the authority it claimed.
+        Either way the rebuild is stale rather than promotable.
+        """
+
+        for stream_key in self.stream_keys:
+            staged_id = self._staged_id(rebuild, stream_key)
+            candidate = session.get(PublicationVersion, staged_id)
+            if candidate is None or candidate.checksum != self._staged_checksum(
+                rebuild, stream_key
+            ):
+                raise ControlPlaneError("stale_publication_family")
+            # ``_provenance`` resolves each recorded observation against the
+            # ledger's *current* source binding, so a correction that rebound
+            # any governed game raises here.
+            staged_provenance = self._provenance(session, staged_id)
+            expected_provenance = self._provenance(
+                session, self._expected_id(rebuild, stream_key)
+            )
+            if staged_provenance != expected_provenance:
+                raise ControlPlaneError("stale_publication_family")
+
+    def _assert_coherent_family(self, targets) -> None:
+        """Prove a set of publications is one coherent family generation.
+
+        Promotion and rollback both move the family as a unit, so the pair
+        being moved *to* has to be a pair that could have existed together:
+        one format, one season, one cutoff, one authority.  Validating each
+        window on its own would accept a Season from one generation beside a
+        Last 15 from another, which is the mixed state the coupling exists to
+        prevent.
+        """
+
+        formats, seasons, cutoffs, authorities = set(), set(), set(), set()
+        for stream_key, version in targets:
+            formats.add(self._payload_format(stream_key, version.payload))
+            seasons.add(version.season)
+            cutoffs.add(_aware(version.cutoff))
+            authorities.add((
+                version.manifest_id,
+                version.event_catalog_publication_id,
+                version.event_catalog_checksum,
+            ))
+        if len(formats) != 1:
+            raise ControlPlaneError("publication_family_mixed_format")
+        if len(seasons) != 1 or len(cutoffs) != 1 or len(authorities) != 1:
+            raise ControlPlaneError("publication_family_authority_mismatch")
+
+    @staticmethod
+    def _staged_checksum(rebuild, stream_key: str) -> str:
+        return (
+            rebuild.staged_season_checksum
+            if stream_key == SEASON_STREAM
+            else rebuild.staged_l15_checksum
+        )
 
     def _payload_format(self, stream_key: str, payload: str):
         window = normalize_traditional_opponent_window(
@@ -822,6 +960,10 @@ class TraditionalOpponentRebuildService:
             "stale_composition",
             "stale_publication_family",
             "ledger_provenance_manifest_mismatch",
+            # A correction that rebound or withdrew a game's accepted source
+            # is exactly the race the rebuild must lose.
+            "ledger_provenance_not_accepted",
+            "ledger_provenance_required",
         }:
             return "stale_publication_family"
         return error.reason

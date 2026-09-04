@@ -2056,6 +2056,10 @@ deployed code owns the target, so an operator cannot ask for one this
 deployment cannot produce or validate. The response is `202` with
 `job_id`, `rebuild_id`, `state`, and `target_format`.
 
+The `202` records the approved rebuild; it does not execute it. A worker pass
+(`scripts/publication_rebuild.py`) drives the durable row through its phases
+and is safe to re-run after a restart.
+
 `GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>` returns
 the bounded status: one of `queued`, `composing`, `validating`, `promoting`,
 `succeeded`, or `failed`, plus counts, expected/staged/promoted publication

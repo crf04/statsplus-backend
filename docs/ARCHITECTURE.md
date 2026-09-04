@@ -2533,9 +2533,12 @@ a database guarantee rather than a read-then-write race.
 Phases are `queued`, `composing`, `validating`, `promoting`, `succeeded`, and
 `failed`. Composition and validation run **without holding pointer locks**, so
 a rebuild may take as long as it takes while current reads continue on the old
-pair. Only promotion opens a short transaction: it locks both pointers,
-revalidates the expected IDs and fences, the authority, the ledger source
-checksum, and both candidate payloads, and only then moves anything. Season
+pair. Only promotion opens a short transaction: it locks both pointers and
+revalidates the expected IDs and fences, the shared authority, the ledger
+source checksum, the staged candidates' recorded checksums, the exact accepted
+source-observation bindings behind each candidate, and both candidate payloads
+-- and only then moves anything. It also proves the pair being promoted is one
+coherent generation: one format, one season, one cutoff, one authority. Season
 and Last 15 promote together or neither moves.
 
 Idempotency is decided from the request alone, before any live state is read:
@@ -2554,9 +2557,14 @@ that was valid but lost its race is retained as `superseded` audit evidence —
 readable as what the rebuild proposed, permanently ineligible for a later
 accidental activation.
 
-Rollback is atomic across the family, and per-stream rollback of a coupled
-family is refused with `publication_family_coupled` so an administrative action
-cannot create a mixed generation. Under strict code, a rollback target in an
+Rollback is atomic across the family, and both per-stream rollback and
+per-stream activation of a coupled family are refused with
+`publication_family_coupled` so an administrative action cannot create a mixed
+generation. Initial activation stays available: binding a pointer for the
+first time is the ledger cutover, and there is no sibling generation to
+disagree with yet. The rollback target is held to the same pair-coherence
+proof as a promotion, so recovery cannot land on two windows that never
+existed together. Under strict code, a rollback target in an
 unsupported format is refused with `publication_format_unsupported`: safe
 recovery restores the retained dual-format application release first, then
 moves the family.

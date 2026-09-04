@@ -807,3 +807,293 @@ def test_the_composer_without_facts_refuses_rather_than_staging_nothing():
 
     with pytest.raises(ControlPlaneError, match="rebuild_composer_unavailable"):
         compose_from_ledger(_ledger_sources(_league_games()))
+
+
+# --- Generation fencing on every state write (review finding 2) ------------
+
+
+def test_an_expired_worker_cannot_overwrite_its_successors_state(family):
+    """A revived worker must not revert a rebuild its successor completed."""
+
+    engine, publications = family
+    clock = [NOW]
+    service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    successor = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+
+    def slow_compose(sources):
+        # While worker-1 composes, its lease expires and worker-2 takes the
+        # rebuild all the way to succeeded.
+        clock[0] = NOW + timedelta(minutes=5)
+        successor.run(rebuild.rebuild_id, owner="worker-2")
+        return {stream_key: v2_payload() for stream_key in sources.stream_keys}
+
+    slow = _service(engine, compose=slow_compose, clock=lambda: clock[0],
+                    lease_seconds=60)
+
+    # Worker-1 is refused loudly rather than silently reverting the rebuild.
+    with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
+        slow.stage(rebuild.rebuild_id, owner="worker-1")
+
+    status = service.status(rebuild.rebuild_id)
+    assert status["state"] == "succeeded"
+    assert status["promoted"]["season"]["publication_id"]
+
+
+def test_a_write_from_a_worker_that_lost_the_lease_is_refused(family):
+    engine, publications = family
+    clock = [NOW]
+    service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.stage(rebuild.rebuild_id, owner="worker-1")
+    # The lease expires and a successor claims the still-active rebuild.
+    clock[0] = NOW + timedelta(minutes=5)
+    service._claim(rebuild.rebuild_id, owner="worker-2", state="promoting")
+
+    with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
+        service._transition(
+            rebuild.rebuild_id, owner="worker-1", state="validating"
+        )
+
+
+# --- Coupled-family activation (review finding 3) --------------------------
+
+
+def test_activating_one_bound_window_cannot_split_the_family(family):
+    engine, publications = family
+
+    with pytest.raises(ControlPlaneError, match="publication_family_coupled"):
+        publications.activate_stream(
+            SEASON_STREAM, reason="promote one window only"
+        )
+
+
+def test_the_sibling_window_is_equally_protected(family):
+    engine, publications = family
+
+    with pytest.raises(ControlPlaneError, match="publication_family_coupled"):
+        publications.activate_stream(
+            L15_STREAM, reason="promote one window only"
+        )
+
+
+def test_an_unbound_family_stream_is_not_refused_as_coupled(tmp_path):
+    """Initial binding is the ledger cutover, not a split.
+
+    It still faces every ordinary activation gate; it simply is not refused
+    for coupling, because there is no sibling generation to disagree with.
+    """
+
+    from sqlalchemy import create_engine
+    from app.migrations import run_migrations
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'initial.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: NOW)
+    publications.register_stream(
+        SEASON_STREAM, provider="ledger", owner="railway",
+        required_observations=(), publication_strategy="replace", enabled=False,
+    )
+
+    with pytest.raises(ControlPlaneError) as refusal:
+        publications.activate_stream(
+            SEASON_STREAM, reason="initial ledger cutover"
+        )
+
+    assert refusal.value.reason != "publication_family_coupled"
+
+
+# --- Family rollback pair coherence (review finding 4) ---------------------
+
+
+def test_family_rollback_refuses_a_target_pair_that_is_not_one_generation(
+    family,
+):
+    """Both windows must fall back to one coherent format and authority."""
+
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.run(rebuild.rebuild_id, owner="worker-1")
+    # A correction advances only the Last 15 window, so its rollback target
+    # becomes v2 while the Season rollback target is still v1: a mixed pair
+    # that never existed together.
+    publications.recompose_ledger(
+        L15_STREAM, season=SEASON, cutoff=CUTOFF,
+        payload=v2_payload(mutate=_bump_points),
+        provenance={f"pbp:game-{index}": f"game-{index}" for index in range(15)},
+        reason="ledger correction",
+    )
+    before = _pointers(engine)
+
+    with pytest.raises(ControlPlaneError, match="publication_family_mixed_format"):
+        service.rollback(actor=ACTOR, reason="restore the previous format")
+    assert _pointers(engine) == before
+
+
+# --- Promotion revalidation depth (review finding 5) -----------------------
+
+
+def test_a_staged_candidate_whose_bytes_changed_cannot_promote(family):
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    staged = service.stage(rebuild.rebuild_id, owner="worker-1")
+    with publications.session() as session, session.begin():
+        candidate = session.get(
+            PublicationVersion, staged.staged_season_publication_id
+        )
+        candidate.checksum = "f" * 64
+    before = _pointers(engine)
+
+    failed = service.promote(rebuild.rebuild_id, owner="worker-1")
+
+    assert failed.state == "failed"
+    assert _pointers(engine) == before
+
+
+def test_a_correction_that_rebinds_a_games_source_prevents_promotion(family):
+    """The candidate must still rest on the exact accepted evidence."""
+
+    from app.models.canonical_game_ledger import CanonicalGameLedgerGame
+
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.stage(rebuild.rebuild_id, owner="worker-1")
+    with engine.begin() as connection:
+        connection.execute(
+            CanonicalGameLedgerGame.__table__.update()
+            .where(CanonicalGameLedgerGame.game_id == "game-5")
+            .values(source_observation_id="pbp:corrected-game-5")
+        )
+    before = _pointers(engine)
+
+    failed = service.promote(rebuild.rebuild_id, owner="worker-1")
+
+    assert failed.state == "failed"
+    assert failed.error_code == "stale_publication_family"
+    assert _pointers(engine) == before
+
+
+# --- Execution driver (review finding 1) -----------------------------------
+
+
+def test_a_started_rebuild_is_driven_to_completion_by_the_worker_pass(family):
+    """Starting records intent; the driver is what makes it progress."""
+
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    before = _pointers(engine)
+
+    driven = service.run_pending(owner="worker-1")
+
+    assert [row.rebuild_id for row in driven] == [rebuild.rebuild_id]
+    assert service.status(rebuild.rebuild_id)["state"] == "succeeded"
+    after = _pointers(engine)
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        assert after[stream_key][1] == before[stream_key][1] + 1
+
+
+def test_a_worker_pass_with_nothing_queued_does_nothing(family):
+    engine, _publications = family
+
+    assert _service(engine).run_pending(owner="worker-1") == ()
+
+
+def test_a_completed_rebuild_is_not_picked_up_again(family):
+    engine, publications = family
+    service = _service(engine)
+    service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.run_pending(owner="worker-1")
+
+    assert service.claimable() == ()
+    assert service.run_pending(owner="worker-1") == ()
+
+
+def test_a_rebuild_abandoned_mid_phase_resumes_on_the_next_pass(tmp_path):
+    """A worker that died leaves a row whose lease simply runs out."""
+
+    clock = [NOW]
+    engine = seed_family(tmp_path, clock=lambda: clock[0])
+    publications = PublicationService(engine, clock=lambda: clock[0])
+    crashed = _service(
+        engine,
+        compose=lambda sources: (_ for _ in ()).throw(TimeoutError("worker died")),
+        clock=lambda: clock[0],
+        lease_seconds=60,
+    )
+    rebuild = crashed.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    with pytest.raises(TimeoutError):
+        crashed.run_pending(owner="worker-1")
+    assert crashed.status(rebuild.rebuild_id)["state"] in ACTIVE_REBUILD_STATES
+
+    # The lease expires; a fresh worker resumes the same durable rebuild.
+    clock[0] = NOW + timedelta(minutes=5)
+    healthy = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+
+    driven = healthy.run_pending(owner="worker-2")
+
+    assert [row.rebuild_id for row in driven] == [rebuild.rebuild_id]
+    assert healthy.status(rebuild.rebuild_id)["state"] == "succeeded"
+
+
+def test_a_rebuild_another_worker_holds_is_not_contended_for(family):
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.stage(rebuild.rebuild_id, owner="worker-1")
+
+    assert service.claimable() == ()
+    assert service.run_pending(owner="worker-2") == ()
+
+
+def test_the_executable_adapter_drives_and_reports_one_rebuild(tmp_path, capsys):
+    """The operator command is a thin adapter over the same service."""
+
+    import json as _json
+
+    from scripts.publication_rebuild import main
+
+    engine = seed_family(tmp_path)
+    publications = PublicationService(engine, clock=lambda: NOW)
+    database_url = str(engine.url)
+    service = TraditionalOpponentRebuildService(
+        engine,
+        publication_service=publications,
+        compose=_v2_composer(),
+        clock=lambda: NOW,
+    )
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+
+    status_code = main(["--database-url", database_url, "--status", rebuild.rebuild_id])
+    reported = _json.loads(capsys.readouterr().out)
+
+    assert status_code == 0
+    assert reported["rebuild_id"] == rebuild.rebuild_id
+    assert reported["state"] == "queued"
+
+    missing = main(["--database-url", database_url, "--status", "no-such-id"])
+    assert missing == 3
+    assert _json.loads(capsys.readouterr().out)["error_code"] == "rebuild_not_found"

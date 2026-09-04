@@ -3067,6 +3067,23 @@ class PublicationService(_SessionService):
                 raise ControlPlaneError("stream_not_found")
             if stream_key in {"traditional_opponent", "assist_locations"}:
                 raise ControlPlaneError("stream_unavailable")
+            if any(
+                stream_key in family
+                for family in COUPLED_PUBLICATION_STREAM_FAMILIES
+            ):
+                # Activation moves one pointer.  Once a coupled family is
+                # bound, that would leave the product observing two
+                # generations of one fact, so the family promotion path owns
+                # every later move.  Initial binding is still allowed: it is
+                # the ledger cutover, and there is no sibling generation to
+                # disagree with yet.
+                bound = session.scalar(
+                    select(PublicationPointer).where(
+                        PublicationPointer.stream_key == stream_key
+                    )
+                )
+                if bound is not None and bound.active_publication_id:
+                    raise ControlPlaneError("publication_family_coupled")
             definition = next((item for item in SURFACE_REGISTRY if item.stream_key == stream_key), None)
             if definition is not None and definition.strategy == "never_schedule":
                 raise ControlPlaneError("stream_unavailable")
@@ -4511,6 +4528,7 @@ class PublicationService(_SessionService):
         actor: str,
         reason: str,
         validate_payload: Callable[[str, str], None] | None = None,
+        validate_family: Callable[[Sequence[tuple[str, PublicationVersion]]], None] | None = None,
         session: Session | None = None,
     ) -> tuple[PublicationVersion, ...]:
         """Move several coupled pointers to staged candidates, or move none.
@@ -4593,6 +4611,14 @@ class PublicationService(_SessionService):
                 pointers[item.stream_key] = pointer
                 candidates[item.stream_key] = candidate
                 currents[item.stream_key] = current
+            if validate_family is not None:
+                # The family proves the candidates are one coherent generation
+                # before any pointer moves.  Per-window checks alone would
+                # accept two windows that never existed together.
+                validate_family(tuple(
+                    (item.stream_key, candidates[item.stream_key])
+                    for item in ordered
+                ))
             promoted = []
             for item in ordered:
                 pointer = pointers[item.stream_key]
@@ -4625,6 +4651,7 @@ class PublicationService(_SessionService):
         reason: str,
         expected_fences: Mapping[str, int] | None = None,
         validate_payload: Callable[[str, str], None] | None = None,
+        validate_family: Callable[[Sequence[tuple[str, PublicationVersion]]], None] | None = None,
         session: Session | None = None,
     ) -> tuple[PublicationVersion, ...]:
         """Roll a coupled family back together, or roll none of it back.
@@ -4672,6 +4699,13 @@ class PublicationService(_SessionService):
                 if validate_payload is not None:
                     validate_payload(stream_key, prior.payload)
                 plans.append((stream_key, pointer, prior, current))
+            if validate_family is not None:
+                # The target pair has to be a pair that could have existed
+                # together, or recovery would create the very mixed-format
+                # family that atomic promotion exists to prevent.
+                validate_family(tuple(
+                    (stream_key, prior) for stream_key, _p, prior, _c in plans
+                ))
             for stream_key, pointer, prior, current in plans:
                 pointer.fence = int(pointer.fence) + 1
                 version = PublicationVersion(
