@@ -939,6 +939,25 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+#: Publication families whose windows are one product fact: they promote and
+#: roll back together, and a per-stream operation on any of them is refused so
+#: an administrative action cannot create a mixed-generation family.  Kept here
+#: rather than imported so the control plane stays free of format knowledge.
+COUPLED_PUBLICATION_STREAM_FAMILIES: tuple[tuple[str, ...], ...] = (
+    ("traditional_opponent_season", "traditional_opponent_l15"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FamilyPromotion:
+    """One window's move in an atomic publication-family promotion."""
+
+    stream_key: str
+    candidate_publication_id: str
+    expected_publication_id: str
+    expected_fence: int
+
+
 class ControlPlaneError(ValueError):
     """A stable, safe reason for a rejected control-plane operation."""
 
@@ -4428,6 +4447,15 @@ class PublicationService(_SessionService):
                  session: Session | None = None) -> PublicationVersion:
         if not reason or len(reason.strip()) < 3:
             raise ControlPlaneError("reason_required")
+        if any(
+            stream_key in family
+            for family in COUPLED_PUBLICATION_STREAM_FAMILIES
+        ):
+            # Moving one window of a coupled family back would leave the
+            # product observing two generations of one fact.  Recovery for
+            # these streams goes through the family rollback, which moves
+            # every window or none.
+            raise ControlPlaneError("publication_family_coupled")
         now = self.clock()
         with self._session_scope(session) as session:
             pointer = session.scalar(select(PublicationPointer).where(
@@ -4475,6 +4503,216 @@ class PublicationService(_SessionService):
             prior.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
         return version
+
+    def promote_publication_family(
+        self,
+        promotions: Sequence[FamilyPromotion],
+        *,
+        actor: str,
+        reason: str,
+        validate_payload: Callable[[str, str], None] | None = None,
+        session: Session | None = None,
+    ) -> tuple[PublicationVersion, ...]:
+        """Move several coupled pointers to staged candidates, or move none.
+
+        Some publication families are read as a set: the product must never
+        observe one window in one rendered format while its sibling is in
+        another.  Their pointers therefore advance in one short transaction
+        that locks every pointer, revalidates every expected identity, fence,
+        authority triple, checksum, and candidate payload, and only then
+        mutates.  A single failure leaves the whole family on its current
+        pair, which stays served throughout.
+
+        ``validate_payload`` is the family's own last-moment check on the
+        exact bytes about to become active.  The control plane deliberately
+        does not know what makes one family's payload acceptable.
+        """
+
+        if not promotions:
+            raise ControlPlaneError("stream_unsupported")
+        if not reason or len(reason.strip()) < 3:
+            raise ControlPlaneError("reason_required")
+        # Deterministic lock order: two concurrent family operations can then
+        # only ever queue behind each other, never deadlock against each other.
+        ordered = tuple(sorted(promotions, key=lambda item: item.stream_key))
+        if len({item.stream_key for item in ordered}) != len(ordered):
+            raise ControlPlaneError("duplicate_publication_stream")
+        now = self.clock()
+        with self._session_scope(session) as session:
+            pointers: dict[str, PublicationPointer] = {}
+            candidates: dict[str, PublicationVersion] = {}
+            currents: dict[str, PublicationVersion] = {}
+            for item in ordered:
+                pointer = session.scalar(
+                    select(PublicationPointer)
+                    .where(PublicationPointer.stream_key == item.stream_key)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    pointer is None
+                    or pointer.active_publication_id != item.expected_publication_id
+                    or int(pointer.fence) != int(item.expected_fence)
+                ):
+                    raise ControlPlaneError("stale_composition")
+                current = session.get(PublicationVersion, pointer.active_publication_id)
+                candidate = session.get(
+                    PublicationVersion, item.candidate_publication_id
+                )
+                if (
+                    current is None
+                    or candidate is None
+                    or candidate.stream_key != item.stream_key
+                    or candidate.status != "candidate"
+                ):
+                    raise ControlPlaneError("publication_candidate_invalid")
+                if candidate.season != current.season or _aware(
+                    candidate.cutoff
+                ) != _aware(current.cutoff):
+                    raise ControlPlaneError("publication_candidate_invalid")
+                # A candidate may not rest on weaker authority than the row it
+                # replaces.  A ledger-composed active version records no
+                # authority on the row -- it carries it through its accepted
+                # observations -- so an unbound active constrains nothing and
+                # the candidate's own binding is strictly stronger.  Where the
+                # active row is bound, the candidate must match it exactly.
+                if current.manifest_id is not None and (
+                    candidate.manifest_id != current.manifest_id
+                    or candidate.event_catalog_publication_id
+                    != current.event_catalog_publication_id
+                    or candidate.event_catalog_checksum
+                    != current.event_catalog_checksum
+                ):
+                    raise ControlPlaneError("ledger_provenance_manifest_mismatch")
+                if not publication_payload_matches_checksum(
+                    candidate.payload, candidate.checksum
+                ):
+                    raise ControlPlaneError("publication_checksum_mismatch")
+                if validate_payload is not None:
+                    validate_payload(item.stream_key, candidate.payload)
+                pointers[item.stream_key] = pointer
+                candidates[item.stream_key] = candidate
+                currents[item.stream_key] = current
+            promoted = []
+            for item in ordered:
+                pointer = pointers[item.stream_key]
+                candidate = candidates[item.stream_key]
+                current = currents[item.stream_key]
+                pointer.fence = int(pointer.fence) + 1
+                candidate.status = "active"
+                candidate.fence = int(pointer.fence)
+                current.status = "superseded"
+                pointer.previous_publication_id = current.publication_id
+                pointer.active_publication_id = candidate.publication_id
+                pointer.updated_at = now
+                session.add(PublicationActivation(
+                    activation_id=_uuid(),
+                    stream_key=item.stream_key,
+                    publication_id=candidate.publication_id,
+                    actor=(actor or "operator")[:128],
+                    reason=reason.strip()[:255],
+                    fence=int(pointer.fence),
+                    created_at=now,
+                ))
+                promoted.append(candidate)
+            session.flush()
+        return tuple(promoted)
+
+    def rollback_publication_family(
+        self,
+        stream_keys: Sequence[str],
+        *,
+        reason: str,
+        expected_fences: Mapping[str, int] | None = None,
+        validate_payload: Callable[[str, str], None] | None = None,
+        session: Session | None = None,
+    ) -> tuple[PublicationVersion, ...]:
+        """Roll a coupled family back together, or roll none of it back.
+
+        Recovery has to preserve the invariant promotion established: the two
+        windows are one product fact.  ``validate_payload`` lets the owning
+        family refuse a target its deployed code can no longer read, so an
+        administrative action cannot knowingly create an outage.
+        """
+
+        ordered = tuple(sorted(set(stream_keys)))
+        if not ordered:
+            raise ControlPlaneError("stream_unsupported")
+        if not reason or len(reason.strip()) < 3:
+            raise ControlPlaneError("reason_required")
+        now = self.clock()
+        rolled_back = []
+        with self._session_scope(session) as session:
+            plans = []
+            for stream_key in ordered:
+                pointer = session.scalar(
+                    select(PublicationPointer)
+                    .where(PublicationPointer.stream_key == stream_key)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if pointer is None or not pointer.previous_publication_id:
+                    raise ControlPlaneError("rollback_unavailable")
+                if expected_fences is not None:
+                    expected = expected_fences.get(stream_key)
+                    if expected is None or int(pointer.fence) != int(expected):
+                        raise ControlPlaneError("stale_composition")
+                prior = session.get(
+                    PublicationVersion, pointer.previous_publication_id
+                )
+                current = session.get(
+                    PublicationVersion, pointer.active_publication_id
+                )
+                if prior is None or current is None:
+                    raise ControlPlaneError("rollback_unavailable")
+                if not publication_payload_matches_checksum(
+                    prior.payload, prior.checksum
+                ):
+                    raise ControlPlaneError("publication_checksum_mismatch")
+                if validate_payload is not None:
+                    validate_payload(stream_key, prior.payload)
+                plans.append((stream_key, pointer, prior, current))
+            for stream_key, pointer, prior, current in plans:
+                pointer.fence = int(pointer.fence) + 1
+                version = PublicationVersion(
+                    publication_id=_uuid(),
+                    stream_key=stream_key,
+                    season=prior.season,
+                    cutoff=prior.cutoff,
+                    version=current.version + 1,
+                    status="rollback",
+                    checksum=prior.checksum,
+                    payload=prior.payload,
+                    manifest_id=prior.manifest_id,
+                    event_catalog_publication_id=(
+                        prior.event_catalog_publication_id
+                    ),
+                    event_catalog_checksum=prior.event_catalog_checksum,
+                    created_at=now,
+                    reason=reason.strip()[:255],
+                    fence=int(pointer.fence),
+                )
+                session.add(version)
+                session.flush()
+                _write_publication_projection(session, version, prior.payload)
+                for source_ref in session.scalars(select(PublicationObservation).where(
+                    PublicationObservation.publication_id == prior.publication_id,
+                )).all():
+                    session.add(PublicationObservation(
+                        publication_id=version.publication_id,
+                        observation_id=source_ref.observation_id,
+                        role=source_ref.role,
+                        slice_key=source_ref.slice_key,
+                        created_at=now,
+                    ))
+                current.status = "superseded"
+                prior.status = "superseded"
+                pointer.previous_publication_id = current.publication_id
+                pointer.active_publication_id = version.publication_id
+                pointer.updated_at = now
+                rolled_back.append(version)
+            session.flush()
+        return tuple(rolled_back)
 
     def prune_history(self, *, stream_key: str | None = None,
                       season: str | None = None,
@@ -4524,6 +4762,7 @@ class CollectionOperationsService(_SessionService):
                  alert_adapter: "EmailAlertAdapter | None" = None,
                  l15_expectation_resolver=None,
                  projection_collection: Any | None = None,
+                 publication_rebuilds: Mapping[str, Any] | None = None,
                  clock: Callable[[], datetime] = utcnow) -> None:
         super().__init__(engine, clock=clock)
         self.publication_service = publication_service
@@ -4532,6 +4771,8 @@ class CollectionOperationsService(_SessionService):
         self.alert_adapter = alert_adapter or EmailAlertAdapter()
         self.l15_expectation_resolver = l15_expectation_resolver
         self.projection_collection = projection_collection
+        # One durable rebuild service per publication family that has one.
+        self.publication_rebuilds = dict(publication_rebuilds or {})
 
     def set_projection_collection(self, coordinator: Any | None) -> None:
         """Attach the scheduled projection coordinator after graph assembly."""
@@ -4592,6 +4833,53 @@ class CollectionOperationsService(_SessionService):
                 stream_key, reason=reason, expected_fence=expected_fence, session=session
             ),
         )
+
+    def start_publication_rebuild(
+        self,
+        family: str,
+        *,
+        actor: str,
+        reason: str,
+        expected,
+        season: str | None = None,
+        cutoff: datetime | None = None,
+    ) -> OperatorActionResult:
+        """Start one durable publication-format rebuild for a family."""
+
+        service = self._rebuild_service(family)
+        return self._run_operator(
+            actor=actor, action="publication.rebuild", resource=family,
+            reason=reason,
+            mutation=lambda session: service.start(
+                actor=actor, reason=reason, expected=expected,
+                season=season, cutoff=cutoff, session=session,
+            ),
+        )
+
+    def rollback_publication_family(
+        self, family: str, *, actor: str, reason: str
+    ) -> OperatorActionResult:
+        """Roll one publication family back atomically."""
+
+        service = self._rebuild_service(family)
+        return self._run_operator(
+            actor=actor, action="publication.family_rollback", resource=family,
+            reason=reason,
+            mutation=lambda session: service.rollback(
+                actor=actor, reason=reason, session=session
+            ),
+        )
+
+    def publication_rebuild_status(self, family: str, rebuild_id: str) -> dict:
+        """Return one rebuild's bounded operator view."""
+
+        return self._rebuild_service(family).status(rebuild_id)
+
+    def _rebuild_service(self, family: str):
+        service = (self.publication_rebuilds or {}).get(family)
+        if service is None:
+            raise ControlPlaneError("stream_unsupported")
+        return service
 
     def activate_stream(
         self,

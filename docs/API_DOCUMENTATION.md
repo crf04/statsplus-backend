@@ -2028,7 +2028,35 @@ GET /api/admin/collection/credential-deliveries/<delivery_id>
 GET /api/admin/collection/reconciliation
 GET /api/admin/collection/diagnostics
 POST /api/admin/collection/reconciliation/<item_id>/resolve
+POST /api/admin/collection/publication-rebuilds
+GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>
+POST /api/admin/collection/publication-rebuilds/<family>/rollback
 ```
+
+`POST /api/admin/collection/publication-rebuilds` starts one durable
+publication-format rebuild. The body names the publication `family`, an
+operator `reason`, and the exact `expected` active pair and fences being
+approved (`{"season": {"publication_id", "fence"}, "l15": {...}}`); optional
+`season` and `cutoff` are assertions against that pair and are never accepted
+as replacement authority. The request never names a rendered format: the
+deployed code owns the target, so an operator cannot ask for one this
+deployment cannot produce or validate. The response is `202` with
+`job_id`, `rebuild_id`, `state`, and `target_format`.
+
+`GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>` returns
+the bounded status: one of `queued`, `composing`, `validating`, `promoting`,
+`succeeded`, or `failed`, plus counts, expected/staged/promoted publication
+IDs and checksums, the target format fingerprint, an actor fingerprint,
+timestamps, and a safe `error_code`. It never returns game identifiers,
+provider payloads, credentials, actors, or stack traces.
+
+`POST /api/admin/collection/publication-rebuilds/<family>/rollback` moves every
+window of the family back one generation atomically. A per-stream rollback of
+a coupled family is refused, and a target this deployment can no longer read
+is refused as `publication_format_unsupported`.
+
+A conflicting active rebuild for the family, a stale expected pair, and a held
+worker lease are `409 operation_conflict`; an unknown rebuild is `404`.
 
 `POST /api/collector/observations` accepts one complete normalized envelope
 and payload as a gzip-compressed JSON document (`Content-Encoding: gzip`). The

@@ -6,6 +6,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from app.services.collection_control import CollectorClaims, ControlPlaneError
 
 
@@ -288,6 +290,18 @@ def test_malformed_json_body_is_stable_400(client, app):
     assert response.json["error"]["code"] == "invalid_input"
 
 
+#: The admin start request: a family, an operator reason, and the exact active
+#: pair and fences being approved.  It deliberately names no rendered format.
+_REBUILD_BODY = {
+    "family": "traditional_opponent",
+    "reason": "publish the opponent rebound split",
+    "expected": {
+        "season": {"publication_id": "season-pub", "fence": 3},
+        "l15": {"publication_id": "l15-pub", "fence": 4},
+    },
+}
+
+
 def test_admin_mutations_return_durable_jobs_and_invoke_their_services(client, app):
     dependencies = _install_collection_services(app)
     now = datetime(2026, 8, 12)
@@ -314,6 +328,11 @@ def test_admin_mutations_return_durable_jobs_and_invoke_their_services(client, a
         ("rotate", "/api/admin/collection/collectors/collector/rotate", {"reason": "rotate"}, "rotate_collector", None),
         ("resolve", "/api/admin/collection/reconciliation/item/resolve", {"reason": "resolve"}, "resolve_reconciliation",
          SimpleNamespace(item_id="item", status="resolved")),
+        ("rebuild", "/api/admin/collection/publication-rebuilds", _REBUILD_BODY, "start_publication_rebuild",
+         SimpleNamespace(rebuild_id="rebuild-1", state="queued", target_format="traditional_opponent.v2")),
+        ("family_rollback", "/api/admin/collection/publication-rebuilds/traditional_opponent/rollback",
+         {"reason": "restore the previous format"}, "rollback_publication_family",
+         (SimpleNamespace(publication_id="pub-a"), SimpleNamespace(publication_id="pub-b"))),
     ]
     for key, path, body, method, resource in cases:
         result = SimpleNamespace(job_id=f"operator-{key}", resource=resource)
@@ -561,3 +580,145 @@ def test_observation_uploads_do_not_consume_the_collector_poll_budget(client, ap
     with engine.connect() as connection:
         polled = connection.execute(sa_select(CollectorUsage)).one()
     assert (polled.envelope_count, polled.poll_count) == (3, 1)
+
+
+# --- Publication rebuild admin surface -------------------------------------
+
+
+def test_publication_rebuild_start_returns_202_with_the_durable_identity(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.start_publication_rebuild.return_value = (
+        SimpleNamespace(
+            job_id="operator-1",
+            resource=SimpleNamespace(
+                rebuild_id="rebuild-1",
+                state="queued",
+                target_format="traditional_opponent.v2",
+            ),
+        )
+    )
+
+    response = client.post(
+        "/api/admin/collection/publication-rebuilds", json=_REBUILD_BODY
+    )
+
+    assert response.status_code == 202
+    assert response.json == {
+        "job_id": "operator-1",
+        "rebuild_id": "rebuild-1",
+        "state": "queued",
+        "target_format": "traditional_opponent.v2",
+    }
+
+
+def test_publication_rebuild_status_returns_the_bounded_projection(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.publication_rebuild_status.return_value = {
+        "rebuild_id": "rebuild-1", "state": "succeeded", "error_code": None
+    }
+
+    response = client.get(
+        "/api/admin/collection/publication-rebuilds/traditional_opponent/rebuild-1"
+    )
+
+    assert response.status_code == 200
+    assert response.json["state"] == "succeeded"
+    dependencies.collection_operations.publication_rebuild_status.assert_called_once_with(
+        "traditional_opponent", "rebuild-1"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"reason": "publish the split"}, id="no-family"),
+        pytest.param({**_REBUILD_BODY, "reason": "x"}, id="short-reason"),
+        pytest.param(
+            {**_REBUILD_BODY, "expected": {"season": {"publication_id": "p"}}},
+            id="incomplete-expectation",
+        ),
+        pytest.param(
+            {**_REBUILD_BODY, "cutoff": "not-a-timestamp"}, id="bad-cutoff"
+        ),
+    ],
+)
+def test_publication_rebuild_start_validates_its_request(client, app, body):
+    _install_collection_services(app)
+
+    assert client.post(
+        "/api/admin/collection/publication-rebuilds", json=body
+    ).status_code == 400
+
+
+def test_a_conflicting_rebuild_request_is_a_stable_409(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.start_publication_rebuild.side_effect = (
+        ControlPlaneError("duplicate_active_operation")
+    )
+
+    response = client.post(
+        "/api/admin/collection/publication-rebuilds", json=_REBUILD_BODY
+    )
+
+    assert response.status_code == 409
+    assert response.json["error"]["code"] == "operation_conflict"
+
+
+def test_an_unknown_rebuild_is_a_stable_404(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.publication_rebuild_status.side_effect = (
+        ControlPlaneError("rebuild_not_found")
+    )
+
+    response = client.get(
+        "/api/admin/collection/publication-rebuilds/traditional_opponent/missing"
+    )
+
+    assert response.status_code == 404
+
+
+def test_an_unsupported_rollback_target_is_a_stable_400(client, app):
+    dependencies = _install_collection_services(app)
+    dependencies.collection_operations.rollback_publication_family.side_effect = (
+        ControlPlaneError("publication_format_unsupported")
+    )
+
+    response = client.post(
+        "/api/admin/collection/publication-rebuilds/traditional_opponent/rollback",
+        json={"reason": "restore the previous format"},
+    )
+
+    assert response.status_code == 400
+    assert response.json["error"]["code"] == "invalid_input"
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/api/admin/collection/publication-rebuilds", "post"),
+        (
+            "/api/admin/collection/publication-rebuilds/traditional_opponent/rebuild-1",
+            "get",
+        ),
+        (
+            "/api/admin/collection/publication-rebuilds/traditional_opponent/rollback",
+            "post",
+        ),
+    ],
+)
+def test_publication_rebuild_routes_are_admin_only(
+    client, app, monkeypatch, authenticate, path, method
+):
+    _install_collection_services(app)
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+
+    unauthenticated = getattr(client, method)(path, json=_REBUILD_BODY)
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json["error"]["code"] == "authentication_required"
+
+    headers = authenticate({"admin": False})
+    forbidden = getattr(client, method)(path, json=_REBUILD_BODY, headers=headers)
+    assert forbidden.status_code == 403
+    assert forbidden.json["error"]["code"] == "forbidden"

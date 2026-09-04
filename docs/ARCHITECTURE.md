@@ -2466,6 +2466,71 @@ denominator. It is deliberately not asserted on `league_average`,
 `population_sigma`, or `competition_rank`: the mean of a sum equals the sum of
 means only up to rounding, and a rank is not additive at all.
 
+#### Publication Rebuild
+
+`app.services.traditional_opponent_rebuild` is the stateful half of the same
+family. It is a separate module only because it reaches the control plane,
+which in turn reaches the pure format core; keeping them in one file would
+close that import cycle.
+
+A **Publication Rebuild** regenerates every window of one family from
+Canonical Game Ledger facts that did not change, because the rendered format
+changed. It is deliberately distinct from the three lifecycle operations it
+resembles:
+
+- It is **not a composition job**. Composition jobs are created by new or
+  corrected observations, and the job for the active cutoff may already be
+  permanently successful — scoped repair would return that existing job and
+  retry would refuse successful work.
+- It is **not failed-data repair**. Nothing failed and no stored fact is
+  wrong.
+- It is **not initial parity activation**. That gate compared a candidate
+  against a legacy diagnostic that #199 retired. A format rebuild must not
+  fabricate new legacy parity evidence for a cutover that already happened,
+  and must not rerun a gate whose diagnostic source no longer exists.
+
+Overloading any of them would make operational history describe an event that
+never occurred, which is the specific debt this operation pays off.
+
+The `publication_rebuilds` row *is* the operation. It records the family, the
+deployed target format and its fingerprint, the actor and reason, the expected
+Season and Last 15 publication IDs and fences, the shared authority reused
+from the active pair, a fingerprint of the accepted ledger source, a worker
+lease and generation, staged and promoted IDs and checksums, and one bounded
+failure code. A partial unique index makes "one in-flight rebuild per family"
+a database guarantee rather than a read-then-write race.
+
+Phases are `queued`, `composing`, `validating`, `promoting`, `succeeded`, and
+`failed`. Composition and validation run **without holding pointer locks**, so
+a rebuild may take as long as it takes while current reads continue on the old
+pair. Only promotion opens a short transaction: it locks both pointers,
+revalidates the expected IDs and fences, the authority, the ledger source
+checksum, and both candidate payloads, and only then moves anything. Season
+and Last 15 promote together or neither moves.
+
+Idempotency is decided from the request alone, before any live state is read:
+an identical active request is the same rebuild, a conflicting active request
+for the family is `duplicate_active_operation`, and an identical completed
+request returns its receipt rather than failing against generations it already
+moved. Supplied season and cutoff are assertions against the active pair, never
+replacement authority.
+
+An accepted ledger correction always wins the race. It changes the source
+checksum or a pointer, the rebuild terminates as `stale_publication_family`,
+and a new operator request is required. Validation failures, unsupported
+formats, and mixed starting state are terminal; only transient worker and
+database failures retry under the same leased generation. A staged candidate
+that was valid but lost its race is retained as `superseded` audit evidence —
+readable as what the rebuild proposed, permanently ineligible for a later
+accidental activation.
+
+Rollback is atomic across the family, and per-stream rollback of a coupled
+family is refused with `publication_family_coupled` so an administrative action
+cannot create a mixed generation. Under strict code, a rollback target in an
+unsupported format is refused with `publication_format_unsupported`: safe
+recovery restores the retained dual-format application release first, then
+moves the family.
+
 #### Publication-format evolution policy
 
 This is the permanent policy for any publication family whose rendered format
