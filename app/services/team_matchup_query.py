@@ -430,6 +430,11 @@ class TeamMatchupQueryService:
                 )
                 active[base] = read
             if not read.available:
+                # The read boundary already decided why, and the observation
+                # below reports that reason.  It is deliberately not recorded
+                # as a validation failure: routine unavailability keeps its
+                # durable timestamp, and only evidence this code judged
+                # invalid suppresses freshness.
                 base_windows[base] = None
                 continue
             if read.retrieved_at is None:

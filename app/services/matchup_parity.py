@@ -472,7 +472,9 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
             "counts", "team_minutes",
         })
     except (ImportError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
-        raise MatchupParityError("publication_payload_invalid") from error
+        raise MatchupParityError(
+            getattr(error, "reason", None) or "publication_payload_invalid"
+        ) from error
 
     rows = []
     seen_team_ids: set[int] = set()

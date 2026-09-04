@@ -472,16 +472,28 @@ DUAL_FORMAT_DEPLOYMENT = "fd8d71b3-58cf-418c-8af2-4e28299d4820"
     "document",
     ["docs/ARCHITECTURE.md", "docs/DATABASE_FIRST_ACTIVATION.md"],
 )
-def test_the_retained_rollback_artifact_is_documented(document):
-    """Recovery is code-first, so the code artifact has to be recorded."""
+def test_the_retained_rollback_artifact_and_recovery_order_are_documented(document):
+    """Recovery is code-first, so the code artifact and its order are recorded."""
 
     import pathlib
+    import re
 
     text = pathlib.Path(document).read_text(encoding="utf-8")
 
-    assert DUAL_FORMAT_RELEASE in text
-    assert DUAL_FORMAT_DEPLOYMENT in text
-    # The order matters: restoring the release must precede moving the family.
-    assert text.index(DUAL_FORMAT_RELEASE) < text.index(
-        "rollback", text.index(DUAL_FORMAT_RELEASE)
+    assert DUAL_FORMAT_RELEASE in text, f"{document} omits the retained release"
+    assert DUAL_FORMAT_DEPLOYMENT in text, (
+        f"{document} omits the retained Railway deployment"
+    )
+    # The recovery instruction has to read "restore the release, then roll the
+    # family back".  Find the family-rollback route and require the release to
+    # be named before it.
+    rollback = re.search(
+        r"publication-rebuilds/[^\s]*rollback", text
+    )
+    assert rollback is not None, (
+        f"{document} does not name the family rollback route"
+    )
+    assert text.index(DUAL_FORMAT_RELEASE) < rollback.start(), (
+        f"{document} describes the family rollback before the release restore;"
+        " the documented recovery order must be code first, data second"
     )

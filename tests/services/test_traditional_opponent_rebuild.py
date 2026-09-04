@@ -593,20 +593,37 @@ def test_rollback_refuses_a_target_this_deployment_cannot_read(tmp_path):
     publications = PublicationService(engine, clock=lambda: NOW)
     service = _service(engine)
     before = _pointers(engine)
+    retained_before = _retained_v1(publications)
 
     with pytest.raises(ControlPlaneError, match="publication_format_unsupported"):
         service.rollback(actor=ACTOR, reason="restore the previous format")
 
     assert _pointers(engine) == before
-    # The immutable v1 payloads are untouched by the refusal.
+    # The immutable v1 payloads and their status are byte-identical after the
+    # refusal: a contraction reads nothing it cannot serve and rewrites
+    # nothing it refused.
+    assert _retained_v1(publications) == retained_before
+    assert len(retained_before) == 2
+
+
+def _retained_v1(publications):
+    """The exact retained v1 pair: identity, status, checksum, and bytes."""
+
     with publications.session() as session:
+        retained = {}
         for stream_key in (SEASON_STREAM, L15_STREAM):
             prior = session.get(
                 PublicationVersion,
                 session.get(PublicationPointer, stream_key).previous_publication_id,
             )
             assert prior is not None
-            assert prior.payload
+            retained[stream_key] = (
+                prior.publication_id,
+                prior.status,
+                prior.checksum,
+                prior.payload,
+            )
+        return retained
 
 
 def _v1_previous_v2_active(tmp_path):
