@@ -6,6 +6,10 @@ table, so a provider or transformation failure cannot corrupt the read path.
 Then the collected frames are published together through
 :class:`AtomicTablePublisher`, which swaps the whole set inside one
 transaction and preserves the previous tables if anything fails.
+
+A table whose database-first stream is activated is refused before that
+publication rather than inside it, so one fenced table cannot abort the
+refresh of the tables that are still their readers' only source.
 """
 
 import logging
@@ -26,6 +30,8 @@ from app.models.catalogs import (
 )
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
+from app.services.collection_control import ControlPlaneError
+from app.services.database_first_activation import LEGACY_WRITE_FENCED
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import AtomicTablePublisher, PublicationFence
 from app.services.stats_freshness_repository import StatsFreshnessWriter
@@ -33,6 +39,29 @@ from app.services.team_matchup_publications import publication_stream
 from app.utils.performance_monitor import monitor_nba_api_calls
 
 logger = logging.getLogger(__name__)
+
+#: Every legacy refresh table that a database-first stream can supersede, and
+#: the exact stream whose activation supersedes it.  One map keeps the refusal
+#: partition, the publication fence, and the single-table compatibility writers
+#: describing the same table/stream pairs.  A table absent from this map has no
+#: database-first replacement and always refreshes.
+_ACTIVATION_FENCED_TABLE_STREAMS: dict[str, str] = {
+    "general_opponent_stats": "traditional_opponent_season",
+    "player_per36_stats": "player_per36",
+    "team_play_types": publication_stream("play_types", "season"),
+    "player_play_types": "synergy_play_types",
+    "opp_shooting_zone": publication_stream("shot_zones", "season"),
+    "player_shooting_zones": "exact_shot_zones",
+    "processed_team_assists": "assist_locations_season",
+    "processed_player_assists": "player_assist_locations",
+    "pbp_opponent_stats": "assist_locations_season",
+    "pbp_player_stats": "player_assist_locations",
+    **{
+        shooting_type.replace(" ", "_").lower():
+        publication_stream("shot_types", "season")
+        for shooting_type in SHOOTING_TYPES
+    },
+}
 
 
 class DataService:
@@ -63,16 +92,19 @@ class DataService:
         progress_callback: Callable | None = None,
         publication_fence: PublicationFence | None = None,
     ):
-        """Fetch every provider frame, then publish the full set atomically.
+        """Fetch every provider frame, then publish the unfenced set atomically.
 
         Provider and transformation failures happen before any table is
         touched, so an interrupted refresh leaves the previous tables intact.
+        Tables whose stream is activated are refused and skipped; the refresh
+        succeeds as long as the tables it did publish were published.
         """
         progress = RefreshProgress(progress_callback)
         try:
             progress.fetch("Fetching provider data")
-            frames = self._collect_all_frames()
+            collected = self._collect_all_frames()
             progress.transform("Transforming provider data")
+            frames = self._refuse_activation_fenced_frames(collected)
             progress.publish("Publishing refreshed tables")
             publication_completion = None
             stats_freshness = self.stats_freshness
@@ -89,27 +121,22 @@ class DataService:
                 checker = getattr(self.write_fence, "assert_writable", None)
                 if not callable(checker):
                     return
-                table_streams = {
-                    "general_opponent_stats": "traditional_opponent_season",
-                    "player_per36_stats": "player_per36",
-                    "team_play_types": publication_stream("play_types", "season"),
-                    "player_play_types": "synergy_play_types",
-                    "opp_shooting_zone": publication_stream("shot_zones", "season"),
-                    "player_shooting_zones": "exact_shot_zones",
-                    "processed_team_assists": "assist_locations_season",
-                    "processed_player_assists": "player_assist_locations",
-                    "pbp_opponent_stats": "assist_locations_season",
-                    "pbp_player_stats": "player_assist_locations",
-                }
-                table_streams.update({
-                    shooting_type.replace(" ", "_").lower():
-                    publication_stream("shot_types", "season")
-                    for shooting_type in SHOOTING_TYPES
-                })
+                # The partition above decided what to publish, but activation
+                # can still land between that read and this transaction.  The
+                # authoritative check stays here, on the connection that swaps
+                # the tables, so a publication and its fence commit as one.
                 for table_name in frames:
-                    stream_key = table_streams.get(table_name)
+                    stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
                     if stream_key is not None:
                         checker(stream_key, connection=connection)
+            if not frames:
+                # Every collected table is fenced.  Nothing failed and a
+                # retry cannot change that, so the refresh succeeds; stats
+                # freshness stays untouched because no table was published.
+                logger.warning(
+                    "Stats refresh published no tables: every collected table "
+                    "is fenced by an activated publication stream"
+                )
             self.publisher.publish(
                 frames,
                 publication_fence=final_fence,
@@ -123,6 +150,48 @@ class DataService:
             logger.error("Error updating database: %s", error)
             return False
 
+    def _refuse_activation_fenced_frames(self, frames):
+        """Return only the frames whose stream has not been activated.
+
+        A table whose database-first stream is activated is refused explicitly
+        and skipped: it is never written, and it never aborts the publication
+        of the tables that are still the only source for their readers.  Any
+        other fence failure (an unreadable control plane) propagates, so an
+        unprovable activation state still fails the whole refresh closed.
+        """
+
+        checker = getattr(self.write_fence, "assert_writable", None)
+        if not callable(checker):
+            return frames
+        publishable = {}
+        for table_name, frame in frames.items():
+            stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
+            if stream_key is None:
+                publishable[table_name] = frame
+                continue
+            try:
+                checker(stream_key)
+            except ControlPlaneError as error:
+                # Compare the stable reason, not the rendered message: a
+                # refusal carrying human text must not read as an unreadable
+                # control plane and abort the whole refresh.
+                if error.reason != LEGACY_WRITE_FENCED:
+                    raise
+                logger.warning(
+                    "%s: refusing to refresh %s; stream %s is activated",
+                    LEGACY_WRITE_FENCED,
+                    table_name,
+                    stream_key,
+                    extra={
+                        "table": table_name,
+                        "stream": stream_key,
+                        "reason": LEGACY_WRITE_FENCED,
+                    },
+                )
+            else:
+                publishable[table_name] = frame
+        return publishable
+
     # The methods below retain the original single-table service surface for
     # callers that still run one refresh component at a time.  The job-backed
     # ``update_all_data`` path above deliberately uses ``_collect_all_frames``
@@ -133,24 +202,7 @@ class DataService:
         """Publish one legacy refresh frame without changing the job path."""
 
         if isinstance(self.engine, Engine):
-            stream_by_table = {
-                "general_opponent_stats": "traditional_opponent_season",
-                "player_per36_stats": "player_per36",
-                "team_play_types": publication_stream("play_types", "season"),
-                "player_play_types": "synergy_play_types",
-                "opp_shooting_zone": publication_stream("shot_zones", "season"),
-                "player_shooting_zones": "exact_shot_zones",
-                "processed_team_assists": "assist_locations_season",
-                "processed_player_assists": "player_assist_locations",
-                "pbp_opponent_stats": "assist_locations_season",
-                "pbp_player_stats": "player_assist_locations",
-            }
-            stream_by_table.update({
-                shooting_type.replace(" ", "_").lower():
-                publication_stream("shot_types", "season")
-                for shooting_type in SHOOTING_TYPES
-            })
-            stream_key = stream_by_table.get(table_name)
+            stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
             checker = getattr(self.write_fence, "assert_writable", None)
             if stream_key is not None and callable(checker):
                 with self.engine.begin() as connection:

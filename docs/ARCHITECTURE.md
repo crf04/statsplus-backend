@@ -2037,6 +2037,21 @@ name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
 
+`update_all_data` publishes the still-refreshed subset, not everything it
+collected. Before publishing it partitions the collected frames against the
+injected `LegacyWriteFence`: a table whose database-first stream is activated
+is refused with a logged `legacy_write_fenced` refusal and skipped, and the
+remaining tables are published as one atomic set with the stats-freshness
+completion. An activated stream therefore fences only its own table instead of
+aborting the publication of tables that have no database-first replacement,
+and the refresh succeeds. The authoritative fence check remains inside the
+publication transaction, so a stream activated between the partition and the
+swap still fails that publication closed. A fence that cannot be read still
+fails the whole refresh closed. When every collected table is fenced the
+refresh publishes nothing and succeeds without advancing stats freshness; the
+per-table inventory is in
+[DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md).
+
 ### Durable Season player Diet facts
 
 `PlayerDietService` is the Nightly Refresh's fifth ordered step, after the
