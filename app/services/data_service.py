@@ -399,10 +399,7 @@ class DataService:
         frames["player_play_types"] = self._collect_playtypes_frame()
         frames["player_shooting_zones"] = self._collect_player_zone()
 
-        pbp_player = self._collect_pbp_frame("player")
-        frames["pbp_player_stats"] = pbp_player
         frames["pbp_opponent_stats"] = self._collect_pbp_frame("opponent")
-        frames.update(self._collect_assist_frames(pbp_player))
         return frames
 
     def _collect_player_information(self):
