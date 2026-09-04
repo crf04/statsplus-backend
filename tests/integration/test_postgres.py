@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.models import Base
 
@@ -1538,3 +1539,176 @@ def test_the_configured_match_window_governs_the_recheck_on_postgres(
     assert repository.get_mapping("underdog", "ud-1").mapping_state == (
         "mapping_conflict"
     )
+
+
+# --- atomic publication repair groups (#230) --------------------------------
+
+
+def _repair_group_engine(postgres_url):
+    from app.migrations import run_migrations
+
+    engine = create_engine(postgres_url)
+    Base.metadata.drop_all(engine)
+    run_migrations(engine)
+    return engine
+
+
+@pytest.fixture
+def repair_group_engine(postgres_url):
+    engine = _repair_group_engine(postgres_url)
+    yield engine
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _seed_group_prerequisites(engine, *, manifest_id="manifest-1"):
+    """Insert the manifest and publication a repair group is declared against."""
+    from app.models.collection_control import (
+        CatalogPublication,
+        CollectionManifest,
+        PublicationVersion,
+    )
+
+    moment = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="catalog-1", season="2025-26", catalog_type="event",
+            cutoff=moment, version="v1", checksum="c" * 64,
+            payload="{}", complete=True, published_at=moment,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id, season="2025-26", cutoff=moment,
+            collect_before=moment + timedelta(hours=1),
+            accepted_versions="[1, 2]", scopes="[]",
+            checksum=f"{manifest_id}-checksum",
+            event_catalog_publication_id="catalog-1",
+            event_catalog_checksum="c" * 64,
+            status="active", created_at=moment,
+        ))
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="publication-1",
+            stream_key="exact_shot_zones_opponent_season",
+            season="2025-26", cutoff=moment, version=1, status="active",
+            checksum="a" * 64, payload="{}", created_at=moment, fence=1,
+        ))
+    return moment
+
+
+def test_repair_group_ddl_applies_to_postgres(repair_group_engine):
+    """Migration 049's tables, constraints, and indexes must build on Postgres."""
+    with repair_group_engine.connect() as connection:
+        group_columns = connection.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'publication_repair_groups'"
+        )).scalars().all()
+        member_columns = connection.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'publication_repair_group_members'"
+        )).scalars().all()
+        constraints = connection.execute(text(
+            "SELECT conname FROM pg_constraint WHERE conrelid IN ("
+            "'publication_repair_groups'::regclass, "
+            "'publication_repair_group_members'::regclass)"
+        )).scalars().all()
+
+    assert set(group_columns) == {
+        "group_id", "manifest_id", "season", "cutoff", "reason", "checksum",
+        "created_at",
+    }
+    assert set(member_columns) == {
+        "group_id", "stream_key", "expected_publication_id", "expected_fence",
+        "created_at",
+    }
+    assert {"ck_repair_group_reason", "ck_repair_group_member_fence"} <= set(constraints)
+
+
+def test_postgres_enforces_one_repair_group_per_manifest(repair_group_engine):
+    from app.models.collection_control import PublicationRepairGroup
+
+    moment = _seed_group_prerequisites(repair_group_engine)
+    rows = [{
+        "group_id": f"group-{index}", "manifest_id": "manifest-1",
+        "season": "2025-26", "cutoff": moment, "reason": "broken per48",
+        "checksum": "d" * 64, "created_at": moment,
+    } for index in (1, 2)]
+
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(rows[0]))
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationRepairGroup.__table__.insert().values(rows[1]))
+
+
+def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
+    repair_group_engine,
+):
+    from app.models.collection_control import (
+        PublicationRepairGroup,
+        PublicationRepairGroupMember,
+    )
+
+    moment = _seed_group_prerequisites(repair_group_engine)
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationRepairGroup.__table__.insert().values(
+                group_id="group-blank", manifest_id="manifest-1",
+                season="2025-26", cutoff=moment, reason="",
+                checksum="d" * 64, created_at=moment,
+            ))
+
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(
+            group_id="group-1", manifest_id="manifest-1", season="2025-26",
+            cutoff=moment, reason="broken per48", checksum="d" * 64,
+            created_at=moment,
+        ))
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationRepairGroupMember.__table__.insert().values(
+                group_id="group-1",
+                stream_key="exact_shot_zones_opponent_season",
+                expected_publication_id="publication-1",
+                expected_fence=-1, created_at=moment,
+            ))
+
+
+def test_postgres_refuses_to_drop_a_publication_a_repair_group_guards(
+    repair_group_engine,
+):
+    """The declared rollback target must survive until the group is resolved."""
+    from app.models.collection_control import (
+        PublicationRepairGroup,
+        PublicationRepairGroupMember,
+        PublicationVersion,
+    )
+
+    moment = _seed_group_prerequisites(repair_group_engine)
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(
+            group_id="group-1", manifest_id="manifest-1", season="2025-26",
+            cutoff=moment, reason="broken per48", checksum="d" * 64,
+            created_at=moment,
+        ))
+        connection.execute(PublicationRepairGroupMember.__table__.insert().values(
+            group_id="group-1",
+            stream_key="exact_shot_zones_opponent_season",
+            expected_publication_id="publication-1",
+            expected_fence=1, created_at=moment,
+        ))
+
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationVersion.__table__.delete().where(
+                PublicationVersion.publication_id == "publication-1"
+            ))
+
+    # Removing the group releases its members with it.
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.delete().where(
+            PublicationRepairGroup.group_id == "group-1"
+        ))
+    with repair_group_engine.connect() as connection:
+        assert connection.execute(
+            select(PublicationRepairGroupMember.__table__)
+        ).all() == []
+

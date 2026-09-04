@@ -2053,6 +2053,18 @@ Each returned manifest also contains additive `scope_descriptors`. Every
 descriptor is bound to one authorized frozen scope and fixes its subject,
 category, all-30-team opponent identity, Season/exact-L15 window, and
 cutoff-derived `date_to`; the collector does not invent those parameters.
+Each manifest also contains an additive `repair_group`, `null` unless the
+manifest declares an atomic publication repair group. It carries `group_id`,
+the operator `reason`, the declaration `checksum`, `execution: "grouped"`, and
+`members`: the group's stream keys filtered to the surfaces the caller's
+owner/provider/surface binding already authorizes. Expected publication
+identities and pointer fences are operator control-plane state and are never
+returned to a collector; the group is omitted entirely when the caller
+authorizes none of its members. `GET /api/collector/manifest/<manifest_id>`
+renders the identical object. A composition that belongs to a declared group
+is held for grouped execution and refuses the independent publication path
+with `409 operation_conflict` and detail `grouped_repair_pending`. See
+[PUBLICATION_REPAIR_GROUPS.md](PUBLICATION_REPAIR_GROUPS.md).
 Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload
 facts. A collector with the bootstrap/catalog scope publishes one catalog using

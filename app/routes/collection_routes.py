@@ -90,6 +90,7 @@ def _control_error(error: Exception) -> AppError:
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
+        "grouped_repair_pending",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)
@@ -427,6 +428,7 @@ def get_manifest(manifest_id: str):
         "accepted_versions": __import__("json").loads(manifest.accepted_versions),
         "scopes": getattr(manifest, "_authorized_scopes", __import__("json").loads(manifest.scopes)),
         "scope_descriptors": getattr(manifest, "_scope_descriptors", []),
+        "repair_group": getattr(manifest, "_repair_group", None),
         "checksum": manifest.checksum,
     })
 

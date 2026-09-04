@@ -296,6 +296,68 @@ class PublicationActivation(Base):
     )
 
 
+class PublicationRepairGroup(Base):
+    """One immutable operator declaration that a set of streams repairs together.
+
+    A repair discards the rollback targets the displaced publications would
+    otherwise offer, so the declaration is recorded before evidence is
+    collected and is bound into the manifest checksum.  The group is the unit
+    of promotion; its members never advance independently.
+    """
+
+    __tablename__ = "publication_repair_groups"
+
+    group_id = Column(String(36), primary_key=True)
+    manifest_id = Column(
+        String(36),
+        ForeignKey("collection_manifests.manifest_id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    season = Column(String(7), nullable=False)
+    cutoff = Column(DateTime(timezone=True), nullable=False)
+    reason = Column(String(255), nullable=False)
+    checksum = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("length(reason) > 0", name="ck_repair_group_reason"),
+        Index("ix_publication_repair_groups_season_cutoff", "season", "cutoff"),
+    )
+
+
+class PublicationRepairGroupMember(Base):
+    """One stream inside a repair group, with the guard it was declared against.
+
+    ``expected_publication_id`` and ``expected_fence`` are the operator's
+    declared view of the pointer at declaration time.  Grouped work is
+    promotable only while the live pointer still matches both, so a
+    publication that moved after the declaration cannot be silently
+    discarded.
+    """
+
+    __tablename__ = "publication_repair_group_members"
+
+    group_id = Column(
+        String(36),
+        ForeignKey("publication_repair_groups.group_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    stream_key = Column(String(96), primary_key=True)
+    expected_publication_id = Column(
+        String(36),
+        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    expected_fence = Column(Integer, nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("expected_fence >= 0", name="ck_repair_group_member_fence"),
+        Index("ix_repair_group_members_stream", "stream_key"),
+    )
+
+
 class CompositionJob(Base):
     __tablename__ = "composition_jobs"
 
@@ -486,6 +548,7 @@ __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectorStatusTransition", "CollectionObservation", "PublicationStream",
     "PublicationVersion", "PublicationObservation", "PublicationPointer", "PublicationActivation", "CompositionJob", "CollectorTokenReplay",
+    "PublicationRepairGroup", "PublicationRepairGroupMember",
     "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
     "CollectorUsage", "ValidationSummary",
