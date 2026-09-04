@@ -381,10 +381,13 @@ class LedgerMaterializationService:
                     "player_game_logs",
                     "legacy_rows",
                 ),
+                # Neither traditional_opponent window has a legacy diagnostic:
+                # #199 dropped general_opponent_stats, and the L15 window never
+                # had a counterpart.
                 (
                     "traditional_opponent_season",
-                    "traditional_opponent",
-                    "legacy_traditional_rows",
+                    None,
+                    None,
                 ),
                 (
                     "traditional_opponent_l15",
@@ -402,7 +405,7 @@ class LedgerMaterializationService:
                         canonical_season,
                         len(eligible),
                         candidate_key,
-                        ValueError("legacy diagnostic has no equivalent L15 window"),
+                        ValueError("legacy diagnostic has no equivalent window"),
                     )
                 else:
                     try:

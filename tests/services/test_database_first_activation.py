@@ -25,6 +25,7 @@ from app.services.database_first_drills import (
     same_database_identity,
 )
 from app.services.database_first_rehearsal import HistoricalRehearsalRunner
+from app.services.table_publisher import RETIRED_LEGACY_RANKING_TABLES
 
 
 UTC = timezone.utc
@@ -307,19 +308,20 @@ _INACTIVE_IN_PRODUCTION = (
     "exact_shot_zones",
     "player_assist_locations",
 )
-#: Legacy tables whose stream is activated in production, and the ones that are
-#: still the only source for their readers.
-_FENCED_TABLES = (
-    "general_opponent_stats",
+#: Legacy tables refused because #199 retired their storage.  The refresh skips
+#: them for that reason alone, ahead of and independently of any activation.
+#: Taken from the runtime constant rather than respelled, so this file cannot
+#: drift from the set the fence actually refuses.
+_RETIRED_TABLES = tuple(sorted(RETIRED_LEGACY_RANKING_TABLES))
+#: Legacy tables that still exist but whose stream is activated in production.
+_ACTIVATION_FENCED_TABLES = (
     "player_per36_stats",
-    "team_play_types",
-    "catch_and_shoot",
-    "pullups",
-    "less_than_10_ft",
     "opp_shooting_zone",
-    "processed_team_assists",
     "pbp_opponent_stats",
 )
+#: Every table a production refresh refuses, and the ones that are still the
+#: only source for their readers.
+_FENCED_TABLES = _RETIRED_TABLES + _ACTIVATION_FENCED_TABLES
 _STILL_REFRESHED_TABLES = (
     "player_information",
     "player_play_types",
@@ -390,22 +392,23 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
         write_fence=LegacyWriteFence(engine),
     )
     frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
-    monkeypatch.setattr(data_service, "_fetch_opponent_data", lambda *args, **kwargs: frame)
     _seed_legacy_tables(engine, ("general_opponent_stats", "player_information"))
     monkeypatch.setattr(data_service, "_collect_all_frames", lambda: {
         "general_opponent_stats": pd.DataFrame([{"value": "new"}]),
         "player_information": pd.DataFrame([{"value": "new"}]),
     })
 
-    # The activated stream refuses its own table without aborting the rest of
-    # the publication: the unrelated table still refreshes.
+    # The refusal skips its own table without aborting the rest of the
+    # publication: the unrelated table still refreshes.  general_opponent_stats
+    # is retired (#199), so the single-table writer refuses it unconditionally
+    # rather than only once the stream is activated.
     assert data_service.update_all_data() is True
     assert _table_values(engine, ("general_opponent_stats", "player_information")) == {
         "general_opponent_stats": "old",
         "player_information": "new",
     }
-    with pytest.raises(Exception, match="legacy_write_fenced"):
-        data_service.process_opponent_scoring()
+    with pytest.raises(Exception, match="retired"):
+        data_service._publish_compat_frame("general_opponent_stats", frame)
 
     from app.services.team_matchup_repository import (
         TeamMatchupFact, TeamMatchupObservation, TeamMatchupRepository,
@@ -474,17 +477,68 @@ def test_production_activation_refreshes_every_unfenced_table(
         StatsFreshnessRepository(engine).get().last_successful_completion
         == completed_at
     )
-    refusals = [
+    # Every fenced table is refused, and the two reasons stay distinguishable:
+    # a retired table is skipped because its storage is gone, an activated one
+    # because a durable publication took it over.
+    activation_refusals = [
         record.getMessage()
         for record in caplog.records
         if "legacy_write_fenced" in record.getMessage()
     ]
-    assert len(refusals) == len(_FENCED_TABLES)
+    retired_refusals = [
+        record.getMessage()
+        for record in caplog.records
+        if "retired_table" in record.getMessage()
+    ]
+    assert len(activation_refusals) == len(_ACTIVATION_FENCED_TABLES)
+    assert len(retired_refusals) == len(_RETIRED_TABLES)
     assert any(
-        "general_opponent_stats" in message
-        and "traditional_opponent_season" in message
-        for message in refusals
+        "player_per36_stats" in message and "player_per36" in message
+        for message in activation_refusals
     )
+    assert {
+        table_name
+        for table_name in _RETIRED_TABLES
+        if any(table_name in message for message in retired_refusals)
+    } == set(_RETIRED_TABLES)
+
+
+def test_retired_frame_is_refused_by_the_partition_before_the_publisher(
+    tmp_path, monkeypatch
+):
+    import pandas as pd
+
+    engine = _db(tmp_path)
+    # No stream is registered and no stream is activated: the retired table is
+    # refused on its own account, not because a publication superseded it.
+    tables = ("general_opponent_stats", "player_information")
+    _seed_legacy_tables(engine, tables)
+    data_service = _activation_data_service(engine, completed_at=NOW)
+    monkeypatch.setattr(
+        data_service,
+        "_collect_all_frames",
+        lambda: {
+            table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
+        },
+    )
+    published = []
+    original_publish = data_service.publisher.publish
+
+    def record_publish(frames, **kwargs):
+        published.append(tuple(frames))
+        return original_publish(frames, **kwargs)
+
+    monkeypatch.setattr(data_service.publisher, "publish", record_publish)
+
+    # A revived collector cannot resurrect the dropped table: the partition
+    # drops the frame, so the publisher never sees the name at all, and the
+    # unrelated table still refreshes.
+    assert data_service.update_all_data() is True
+    assert published == [("player_information",)]
+    assert _table_values(engine, tables) == {
+        "general_opponent_stats": "old",
+        "player_information": "new",
+    }
 
 
 def test_refusing_every_frame_succeeds_without_publishing_or_freshness(
@@ -529,13 +583,13 @@ def test_refusal_is_recognized_by_reason_not_by_rendered_message(
         """A fence whose refusal carries human text beside its reason."""
 
         def assert_writable(self, stream_key, *, connection=None):
-            if stream_key == "traditional_opponent_season":
+            if stream_key == "player_per36":
                 raise ControlPlaneError(
-                    LEGACY_WRITE_FENCED, "traditional_opponent_season is activated"
+                    LEGACY_WRITE_FENCED, "player_per36 is activated"
                 )
 
     engine = _db(tmp_path)
-    tables = ("general_opponent_stats", "player_information")
+    tables = ("player_per36_stats", "player_information")
     _seed_legacy_tables(engine, tables)
     data_service = _activation_data_service(engine, completed_at=NOW)
     data_service.write_fence = _MessageCarryingFence()
@@ -549,7 +603,7 @@ def test_refusal_is_recognized_by_reason_not_by_rendered_message(
 
     assert data_service.update_all_data() is True
     assert _table_values(engine, tables) == {
-        "general_opponent_stats": "old",
+        "player_per36_stats": "old",
         "player_information": "new",
     }
 
@@ -563,7 +617,7 @@ def test_activation_between_partition_and_swap_rolls_the_publication_back(
 
     engine = _db(tmp_path)
     _register_production_streams(engine)
-    tables = ("general_opponent_stats", "player_information")
+    tables = ("player_per36_stats", "player_information")
     _seed_legacy_tables(engine, tables)
     data_service = _activation_data_service(engine, completed_at=NOW)
     monkeypatch.setattr(
@@ -584,7 +638,7 @@ def test_activation_between_partition_and_swap_rolls_the_publication_back(
     # that is now activated.
     assert data_service.update_all_data() is False
     assert _table_values(engine, tables) == {
-        "general_opponent_stats": "old",
+        "player_per36_stats": "old",
         "player_information": "old",
     }
     assert (

@@ -495,10 +495,10 @@ def test_data_service_failure_before_publication_preserves_tables(
         lambda: pd.DataFrame({"id": [99]}),
     )
 
-    def fail_opponent():
-        raise ProviderUnavailableError(detail="opponent provider token=secret")
+    def fail_per36():
+        raise ProviderUnavailableError(detail="per36 provider token=secret")
 
-    monkeypatch.setattr(service, "_fetch_opponent_data", fail_opponent)
+    monkeypatch.setattr(service, "_fetch_player_per36_stats", fail_per36)
 
     with pytest.raises(ProviderUnavailableError):
         service.update_all_data()

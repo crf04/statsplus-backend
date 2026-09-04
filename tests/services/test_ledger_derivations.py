@@ -594,8 +594,15 @@ def test_assist_total_is_carried_into_derived_window_metrics():
     assert window.teams[0].league_average["assists"] == league_average
 
 
-def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'materialization.sqlite3'}")
+def _composable_ledger(tmp_path, database_name):
+    """Seed one league of accepted games ready for ``compose``.
+
+    Returns the pieces a materialization test needs: the engine, the ledger
+    repository, a publication service with the default streams registered, the
+    games, the candidate cutoff, and the expected season/L15 game-id sets.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / database_name}")
     run_migrations(engine)
     repository = CanonicalGameLedgerRepository(engine)
     publications = PublicationService(
@@ -668,6 +675,27 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         )
         for team_id in range(1, 31)
     }
+    return (
+        engine,
+        repository,
+        publications,
+        games,
+        candidate_cutoff,
+        expected,
+        expected_by_team,
+    )
+
+
+def test_materialization_persists_full_payloads_and_inactive_control_versions(tmp_path):
+    (
+        engine,
+        repository,
+        publications,
+        games,
+        candidate_cutoff,
+        expected,
+        expected_by_team,
+    ) = _composable_ledger(tmp_path, "materialization.sqlite3")
 
     service = LedgerMaterializationService(
         repository,
@@ -767,6 +795,79 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
     assert {"per48", "league_average", "population_sigma", "competition_rank"} <= set(
         traditional_payload[0]
     )
+
+
+def test_traditional_opponent_records_unavailable_parity_after_the_table_drop(
+    tmp_path,
+):
+    """#199 dropped ``general_opponent_stats``, the only traditional diagnostic.
+
+    Neither ``traditional_opponent`` window has a legacy table to compare
+    against any more, so both record unavailable evidence rather than a
+    comparison.  The two streams that still have diagnostics must keep
+    recording real comparisons, so the retirement cannot silently widen into
+    "parity is unavailable for everything".
+    """
+
+    (
+        engine,
+        repository,
+        publications,
+        games,
+        candidate_cutoff,
+        expected,
+        expected_by_team,
+    ) = _composable_ledger(tmp_path, "traditional-parity.sqlite3")
+
+    class _AvailableDiagnostics:
+        """Answers for the diagnostics that survived the drop.
+
+        Returning rows -- even non-matching ones -- makes the comparison a
+        real one, which is the property under test: the report is a
+        comparison, not a ``diagnostic_unavailable`` placeholder.
+        """
+
+        def __init__(self):
+            self.requested = []
+
+        def read(self, stream_key, **kwargs):
+            self.requested.append(stream_key)
+            return ()
+
+    reader = _AvailableDiagnostics()
+    service = LedgerMaterializationService(
+        repository,
+        parity_repository=LedgerParityArtifactRepository(engine),
+        parity_reader=reader,
+        publication_service=publications,
+    )
+
+    service.compose(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 15),
+        cutoff=candidate_cutoff,
+        expected_game_ids=expected,
+        expected_l15_game_ids=expected_by_team,
+        team_ids=frozenset(range(1, 31)),
+        require_assist_locations=True,
+    )
+
+    with engine.connect() as connection:
+        reports = {
+            row["stream_key"]: row["report"]
+            for row in connection.execute(
+                select(LedgerParityArtifact.__table__)
+            ).mappings()
+        }
+
+    # The retired stream is never even asked for a diagnostic.
+    assert "traditional_opponent" not in reader.requested
+    assert set(reader.requested) == {"player_game_logs", "player_per36"}
+    for stream_key in ("traditional_opponent_season", "traditional_opponent_l15"):
+        assert "diagnostic_unavailable" in reports[stream_key]
+    for stream_key in ("player_game_logs", "player_per36"):
+        assert "diagnostic_unavailable" not in reports[stream_key]
 
 
 def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
