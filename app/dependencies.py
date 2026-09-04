@@ -344,6 +344,7 @@ def build_dependencies(
             pbp_stats_provider=pbp_stats_provider,
             write_fence=write_fence,
             publication_reader=publication_reader,
+            baseline_settings=settings.player_diet_baseline,
         )
         team_matchup_repository = TeamMatchupRepository(
             engine,

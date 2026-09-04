@@ -563,6 +563,39 @@ class MatchupScoreSettings(BaseModel):
             raise ValueError(f"unsupported matchup score Base: {base}") from error
 
 
+class PlayerDietBaselineSettings(BaseModel):
+    """League population floors used to baseline Diet `sigma_deviation`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    min_games: int = Field(default=5, strict=True, ge=1)
+    play_types_min_volume_per_game: float = Field(
+        default=6.0, ge=0, allow_inf_nan=False
+    )
+    shot_zones_min_volume_per_game: float = Field(
+        default=6.0, ge=0, allow_inf_nan=False
+    )
+    shot_types_min_volume_per_game: float = Field(
+        default=6.0, ge=0, allow_inf_nan=False
+    )
+    assist_locations_min_volume_per_game: float = Field(
+        default=2.0, ge=0, allow_inf_nan=False
+    )
+
+    def minimum_volume_per_game(self, base: str) -> float:
+        try:
+            return {
+                "play_types": self.play_types_min_volume_per_game,
+                "shot_zones": self.shot_zones_min_volume_per_game,
+                "shot_types": self.shot_types_min_volume_per_game,
+                "assist_locations": self.assist_locations_min_volume_per_game,
+            }[base]
+        except KeyError as error:
+            raise ValueError(
+                f"unsupported player Diet baseline Base: {base}"
+            ) from error
+
+
 class RuntimeSettings(BaseModel):
     """Complete, typed settings object created during application startup."""
 
@@ -581,6 +614,9 @@ class RuntimeSettings(BaseModel):
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
     matchup_scores: MatchupScoreSettings = Field(default_factory=MatchupScoreSettings)
+    player_diet_baseline: PlayerDietBaselineSettings = Field(
+        default_factory=PlayerDietBaselineSettings
+    )
     # Event-catalog freshness is intentionally independent from athlete
     # catalog state.  Operators may lengthen/shorten the read-age window
     # without changing the provider timeout or a worker schedule.
@@ -874,6 +910,22 @@ def _build_settings(
                     "MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME", 1.0
                 ),
             ),
+            player_diet_baseline=_validated_model(
+                PlayerDietBaselineSettings,
+                min_games=reader.integer("PLAYER_DIET_BASELINE_MIN_GAMES", 5),
+                play_types_min_volume_per_game=reader.decimal(
+                    "PLAYER_DIET_BASELINE_PLAY_TYPES_MIN_VOLUME_PER_GAME", 6.0
+                ),
+                shot_zones_min_volume_per_game=reader.decimal(
+                    "PLAYER_DIET_BASELINE_SHOT_ZONES_MIN_VOLUME_PER_GAME", 6.0
+                ),
+                shot_types_min_volume_per_game=reader.decimal(
+                    "PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME", 6.0
+                ),
+                assist_locations_min_volume_per_game=reader.decimal(
+                    "PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME", 2.0
+                ),
+            ),
             # Every catalog window is read as written and bounded by the one
             # time-window authority, so none of them is ever rounded through a
             # float on the way to the duration a service compares against.
@@ -1145,6 +1197,7 @@ __all__ = [
     "LLMSettings",
     "MatchupScoreSettings",
     "NBASeasonSettings",
+    "PlayerDietBaselineSettings",
     "ProviderSettings",
     "RuntimeSettings",
     "current_nba_season",

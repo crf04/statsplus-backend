@@ -22,6 +22,7 @@ from app.services.database_first_activation import (
 )
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_diet import (
+    PlayerDietBaseline,
     PlayerDietResult,
     StoredPlayerDietFact,
     StoredPlayerDietObservation,
@@ -157,6 +158,9 @@ class RecordedLogs:
 
 
 class RecordedDiets:
+    def __init__(self, *, baselines=None):
+        self.baselines = baselines or {}
+
     def get_for_players(self, season, player_ids):
         assert season == SEASON
         if tuple(player_ids) == ():
@@ -195,6 +199,7 @@ class RecordedDiets:
                 for base in BASES
                 if base != "traditional"
             ),
+            baselines=self.baselines,
         )
 
 
@@ -560,6 +565,10 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                         "volume": 95.0,
                         "games_played": 20,
                         "volume_unit": "possessions",
+                        # RecordedDiets carries no baseline population, so
+                        # this fact reports nulls.
+                        "league_average_share": None,
+                        "sigma_deviation": None,
                     },
                 }
             ],
@@ -571,6 +580,8 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
                         "volume": 108.0,
                         "games_played": 20,
                         "volume_unit": "field_goal_attempts",
+                        "league_average_share": None,
+                        "sigma_deviation": None,
                     },
                 }
             ],
@@ -625,6 +636,36 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
     assert all(
         "last_15" not in row for rows in player["diet_shares"].values() for row in rows
     )
+
+
+def test_diet_share_season_row_carries_the_league_baseline_deviation():
+    diets = RecordedDiets(
+        baselines={
+            ("play_types", "Transition"): PlayerDietBaseline(0.1, 0.05),
+            ("shot_zones", "Restricted Area"): PlayerDietBaseline(0.3, 0.0),
+        }
+    )
+
+    player = _service(diets=diets).get_matchup(game_id=GAME_ID)["players"][0]
+
+    play_types = next(
+        row
+        for row in player["diet_shares"]["play_types"]
+        if row["key"] == "Transition"
+    )
+    assert play_types["season"]["league_average_share"] == 0.1
+    # (0.19 - 0.1) / 0.05 = 1.8
+    assert play_types["season"]["sigma_deviation"] == 1.8
+
+    shot_zones = next(
+        row
+        for row in player["diet_shares"]["shot_zones"]
+        if row["key"] == "Restricted Area"
+    )
+    assert shot_zones["season"]["league_average_share"] == 0.3
+    # A zero population sigma reports a 0.0 deviation, mirroring the team
+    # Defense Sheet convention.
+    assert shot_zones["season"]["sigma_deviation"] == 0.0
 
 
 def test_shot_zone_rows_expose_only_governed_compatible_markets():

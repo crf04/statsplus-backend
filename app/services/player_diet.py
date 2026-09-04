@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from math import isfinite
+from statistics import fmean, pstdev
 from types import MappingProxyType
 from typing import Any
 
@@ -14,6 +15,7 @@ import pandas as pd
 from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import Connection, Engine
 
+from app.config.settings import PlayerDietBaselineSettings
 from app.domain.team_matchup_taxonomy import SHOT_ZONE_SLICES
 from app.domain.utc import assume_utc
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
@@ -107,10 +109,75 @@ class StoredPlayerDietObservation(PlayerDietObservation):
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerDietBaseline:
+    """League mean and population sigma for one (Base, slice) population.
+
+    Mirrors the team Defense Sheet convention: `sigma_deviation` is `0.0` when
+    the population sigma is zero, and both fields are `None` together when the
+    population has fewer than two players.
+    """
+
+    league_average_share: float | None
+    population_sigma: float | None
+
+    def sigma_deviation(self, share: float) -> float | None:
+        if self.league_average_share is None:
+            return None
+        if not self.population_sigma:
+            return 0.0
+        return (share - self.league_average_share) / self.population_sigma
+
+
+def compute_player_diet_baselines(
+    facts: Iterable[PlayerDietFact],
+    *,
+    settings: PlayerDietBaselineSettings,
+) -> dict[tuple[str, str], PlayerDietBaseline]:
+    """League average share and population sigma per (Base, slice).
+
+    A player belongs to a slice's baseline population when they have a stored
+    fact for that slice, their games played clears `settings.min_games`, and
+    their total volume per game across every slice in the Base clears the
+    Base's floor. `facts` must be the Base's whole stored season fact set --
+    one source only -- so a player who fails the floors for one Base can still
+    anchor another Base's population.
+    """
+
+    all_facts = list(facts)
+    total_volume: dict[tuple[int, str], float] = defaultdict(float)
+    games_played: dict[tuple[int, str], int] = {}
+    for fact in all_facts:
+        key = (fact.player_id, fact.base)
+        total_volume[key] += fact.volume
+        games_played[key] = fact.games_played
+    eligible: set[tuple[int, str]] = set()
+    for key, volume in total_volume.items():
+        _, base = key
+        games = games_played[key]
+        if games < settings.min_games:
+            continue
+        if volume / games >= settings.minimum_volume_per_game(base):
+            eligible.add(key)
+    shares_by_slice: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for fact in all_facts:
+        if (fact.player_id, fact.base) in eligible:
+            shares_by_slice[(fact.base, fact.slice_key)].append(fact.share)
+    return {
+        slice_identity: (
+            PlayerDietBaseline(fmean(shares), pstdev(shares))
+            if len(shares) >= 2
+            else PlayerDietBaseline(None, None)
+        )
+        for slice_identity, shares in shares_by_slice.items()
+    }
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerDietResult:
     season: str
     players: dict[int, tuple[StoredPlayerDietFact, ...]]
     observations: tuple[StoredPlayerDietObservation, ...]
+    baselines: dict[tuple[str, str], PlayerDietBaseline] = field(default_factory=dict)
 
 
 class _AthleteJoinIncomplete(ValueError):
@@ -130,12 +197,14 @@ class PlayerDietRepository:
         *,
         write_fence: Any | None = None,
         publication_reader: Any | None = None,
+        baseline_settings: PlayerDietBaselineSettings | None = None,
     ) -> None:
         if is_demo_database_url(str(engine.url)):
             raise ValueError("the demo database cannot store player Diet facts")
         self.engine = engine
         self._write_fence = write_fence
         self._publication_reader = publication_reader
+        self._baseline_settings = baseline_settings or PlayerDietBaselineSettings()
 
     def publish(
         self,
@@ -377,6 +446,7 @@ class PlayerDietRepository:
         observation_table = PlayerDietSurfaceObservationRow.__table__
         with read_connection(self.engine, connection) as connection:
             fact_rows = []
+            baseline_rows = []
             if requested:
                 fact_rows = (
                     connection.execute(
@@ -390,6 +460,16 @@ class PlayerDietRepository:
                             fact_table.c.base,
                             fact_table.c.slice_key,
                         )
+                    )
+                    .mappings()
+                    .all()
+                )
+                # The baseline population is the whole stored season fact
+                # set for the Base, not just the requested players, so it is
+                # queried separately from the delivered rows above.
+                baseline_rows = (
+                    connection.execute(
+                        select(fact_table).where(fact_table.c.season == season)
                     )
                     .mappings()
                     .all()
@@ -418,6 +498,22 @@ class PlayerDietRepository:
                     retrieved_at=assume_utc(row["retrieved_at"]),
                 )
             )
+        baselines = compute_player_diet_baselines(
+            (
+                PlayerDietFact(
+                    player_id=row["player_id"],
+                    base=row["base"],
+                    slice_key=row["slice_key"],
+                    share=row["share"],
+                    volume=row["volume"],
+                    games_played=row["games_played"],
+                    volume_unit=row["volume_unit"],
+                    provider=row["provider"],
+                )
+                for row in baseline_rows
+            ),
+            settings=self._baseline_settings,
+        )
         return PlayerDietResult(
             season=season,
             players={player_id: tuple(players[player_id]) for player_id in sorted(players)},
@@ -430,6 +526,7 @@ class PlayerDietRepository:
                 )
                 for row in observation_rows
             ),
+            baselines=baselines,
         )
 
     def _publication_result(
@@ -446,6 +543,10 @@ class PlayerDietRepository:
             return None
         stream_by_base = PLAYER_DIET_PUBLICATION_STREAMS
         facts_by_player: dict[int, list[StoredPlayerDietFact]] = defaultdict(list)
+        # The baseline population is the whole stored season fact set for
+        # the Base, so every decoded/legacy fact is kept here regardless of
+        # whether its player was requested.
+        baseline_facts_by_base: dict[str, list[PlayerDietFact]] = defaultdict(list)
         observations: list[StoredPlayerDietObservation] = []
         fallback_bases: list[str] = []
         used_publication = False
@@ -511,6 +612,7 @@ class PlayerDietRepository:
                     retrieved_at=retrieved_at,
                 )
             )
+            baseline_facts_by_base[base].extend(facts)
             for fact in facts:
                 if fact.player_id in requested:
                     facts_by_player[fact.player_id].append(
@@ -540,6 +642,14 @@ class PlayerDietRepository:
                         fact_table.c.player_id.in_(requested) if requested else False,
                     )
                 ).mappings().all() if requested else ()
+                # The baseline population is the whole stored season fact
+                # set for the Base, not just the requested players.
+                legacy_baseline_facts = connection.execute(
+                    select(fact_table).where(
+                        fact_table.c.season == season,
+                        fact_table.c.base.in_(fallback_bases),
+                    )
+                ).mappings().all()
                 legacy_observations = connection.execute(
                     select(observation_table).where(
                         observation_table.c.season == season,
@@ -560,6 +670,19 @@ class PlayerDietRepository:
                         retrieved_at=assume_utc(row["retrieved_at"]),
                     )
                 )
+            for row in legacy_baseline_facts:
+                baseline_facts_by_base[row["base"]].append(
+                    PlayerDietFact(
+                        player_id=row["player_id"],
+                        base=row["base"],
+                        slice_key=row["slice_key"],
+                        share=row["share"],
+                        volume=row["volume"],
+                        games_played=row["games_played"],
+                        volume_unit=row["volume_unit"],
+                        provider=row["provider"],
+                    )
+                )
             observations.extend(
                 StoredPlayerDietObservation(
                     base=row["base"],
@@ -571,6 +694,10 @@ class PlayerDietRepository:
             )
         if not used_publication:
             return None
+        baselines = compute_player_diet_baselines(
+            (fact for facts in baseline_facts_by_base.values() for fact in facts),
+            settings=self._baseline_settings,
+        )
         return PlayerDietResult(
             season=season,
             players={
@@ -581,6 +708,7 @@ class PlayerDietRepository:
                 for player_id in sorted(facts_by_player)
             },
             observations=tuple(sorted(observations, key=lambda row: row.base)),
+            baselines=baselines,
         )
 
     @staticmethod
@@ -606,11 +734,13 @@ class PlayerDietService:
         clock: Callable[[], datetime] | None = None,
         write_fence: Any | None = None,
         publication_reader: Any | None = None,
+        baseline_settings: PlayerDietBaselineSettings | None = None,
     ) -> None:
         self.repository = PlayerDietRepository(
             engine,
             write_fence=write_fence,
             publication_reader=publication_reader,
+            baseline_settings=baseline_settings,
         )
         self.athlete_catalog = athlete_catalog
         self.nba_stats = nba_stats_provider
@@ -999,10 +1129,12 @@ __all__ = [
     "PLAYER_DIET_BASES",
     "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
     "PLAYER_DIET_PUBLICATION_STREAMS",
+    "PlayerDietBaseline",
     "PlayerDietFact",
     "PlayerDietObservation",
     "PlayerDietResult",
     "PlayerDietService",
     "StoredPlayerDietFact",
     "StoredPlayerDietObservation",
+    "compute_player_diet_baselines",
 ]

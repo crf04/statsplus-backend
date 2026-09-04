@@ -1242,6 +1242,10 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
             "volume": 95.0,
             "games_played": 20,
             "volume_unit": "possessions",
+            # This fixture stores only one player, so every slice's baseline
+            # population has fewer than two players and reports nulls.
+            "league_average_share": None,
+            "sigma_deviation": None,
         },
     }
     assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"

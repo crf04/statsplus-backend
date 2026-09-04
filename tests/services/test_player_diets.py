@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from statistics import fmean, pstdev
 
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine, event
 
+from app.config.settings import PlayerDietBaselineSettings
 from app.migrations import run_migrations
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
-from app.services.player_diet import PlayerDietRepository, PlayerDietService
+from app.services.database_first_activation import PublicationRead
+from app.services.player_diet import (
+    PlayerDietFact,
+    PlayerDietObservation,
+    PlayerDietRepository,
+    PlayerDietService,
+    compute_player_diet_baselines,
+)
 
 
 NOW = datetime(2026, 1, 6, 10, 0, tzinfo=timezone.utc)
@@ -814,3 +823,215 @@ def test_unjoined_nba_identity_marks_each_affected_base_unavailable(tmp_path):
         ) == ("unavailable", "athlete_catalog_join_incomplete")
     assert result.players[2544][0].base == "assist_locations"
     assert 999999 not in result.players
+
+
+# --- Diet Share league baseline (sigma_deviation) -----------------------
+
+_BASELINE_SETTINGS = PlayerDietBaselineSettings()
+
+
+def test_baseline_reports_a_deviation_above_one_sigma_for_a_fact_above_the_mean():
+    shares = [0.5, 0.3, 0.2, 0.1]
+    facts = [
+        PlayerDietFact(
+            player_id, "play_types", "Transition", share, 150.0, 25,
+            "possessions", "nba_synergy",
+        )
+        for player_id, share in zip((1001, 1002, 1003, 1004), shares)
+    ]
+
+    baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
+
+    baseline = baselines[("play_types", "Transition")]
+    assert baseline.league_average_share == pytest.approx(fmean(shares))
+    assert baseline.population_sigma == pytest.approx(pstdev(shares))
+    assert baseline.sigma_deviation(0.5) > 1
+
+
+def test_baseline_excludes_a_fact_below_the_population_floor_but_still_scores_it():
+    population_shares = [0.5, 0.3, 0.2, 0.1]
+    facts = [
+        PlayerDietFact(
+            player_id, "play_types", "Transition", share, 150.0, 25,
+            "possessions", "nba_synergy",
+        )
+        for player_id, share in zip((1001, 1002, 1003, 1004), population_shares)
+    ] + [
+        # 10 possessions over 25 games is 0.4/game, below the 6.0/game floor,
+        # so this player never joins the population even though a fact is
+        # delivered for them.
+        PlayerDietFact(
+            1005, "play_types", "Transition", 0.9, 10.0, 25,
+            "possessions", "nba_synergy",
+        ),
+    ]
+
+    baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
+
+    baseline = baselines[("play_types", "Transition")]
+    expected_average = fmean(population_shares)
+    expected_sigma = pstdev(population_shares)
+    assert baseline.league_average_share == pytest.approx(expected_average)
+    deviation = baseline.sigma_deviation(0.9)
+    assert deviation is not None
+    assert deviation == pytest.approx((0.9 - expected_average) / expected_sigma)
+
+
+def test_baseline_reports_nulls_for_a_slice_with_fewer_than_two_population_players():
+    facts = [
+        PlayerDietFact(
+            2001, "shot_zones", "Corner 3", 0.4, 140.0, 20,
+            "field_goal_attempts", "nba_stats",
+        ),
+    ]
+
+    baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
+
+    baseline = baselines[("shot_zones", "Corner 3")]
+    assert baseline.league_average_share is None
+    assert baseline.sigma_deviation(0.4) is None
+
+
+def test_baseline_reports_zero_deviation_when_the_population_sigma_is_zero():
+    facts = [
+        PlayerDietFact(
+            player_id, "play_types", "Spotup", 0.3, 150.0, 25,
+            "possessions", "nba_synergy",
+        )
+        for player_id in (3001, 3002)
+    ]
+
+    baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
+
+    baseline = baselines[("play_types", "Spotup")]
+    assert baseline.league_average_share == 0.3
+    # Mirrors the team Defense Sheet convention: a zero population sigma
+    # reports a 0.0 deviation rather than dividing by zero.
+    assert baseline.sigma_deviation(0.3) == 0.0
+    assert baseline.sigma_deviation(0.9) == 0.0
+
+
+_SHARED_TRANSITION_FACTS = [
+    PlayerDietFact(
+        player_id, "play_types", "Transition", share, 150.0, 25,
+        "possessions", "nba_synergy",
+    )
+    for player_id, share in zip((1001, 1002, 1003, 1004), (0.5, 0.3, 0.2, 0.1))
+] + [
+    PlayerDietFact(
+        1005, "play_types", "Transition", 0.9, 10.0, 25,
+        "possessions", "nba_synergy",
+    ),
+]
+
+
+def _legacy_repository_with_shared_facts(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy-baseline.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerDietRepository(engine)
+    repository.publish(
+        "2025-26",
+        _SHARED_TRANSITION_FACTS,
+        (
+            PlayerDietObservation("play_types", "available"),
+            PlayerDietObservation(
+                "shot_zones", "missing", "provider_no_observation"
+            ),
+            PlayerDietObservation(
+                "shot_types", "missing", "provider_no_observation"
+            ),
+            PlayerDietObservation(
+                "assist_locations", "missing", "provider_no_observation"
+            ),
+        ),
+        retrieved_at=NOW,
+    )
+    return repository
+
+
+class _RecordedPublicationReader:
+    """Serves `play_types` from an activated payload; the rest report missing."""
+
+    def __init__(self, decoded):
+        self._decoded = decoded
+
+    def read_many(self, stream_keys, *, season):
+        reads = {}
+        for stream_key in stream_keys:
+            if stream_key == "synergy_play_types":
+                reads[stream_key] = PublicationRead(
+                    stream_key=stream_key,
+                    publication_id="publication-1",
+                    season=season,
+                    cutoff=None,
+                    version=1,
+                    status="active",
+                    freshness="fresh",
+                    age_seconds=0,
+                    payload={"rows": []},
+                    decoded=self._decoded,
+                    retrieved_at=NOW,
+                )
+            else:
+                reads[stream_key] = PublicationRead(
+                    stream_key=stream_key,
+                    publication_id=None,
+                    season=season,
+                    cutoff=None,
+                    version=None,
+                    status="missing",
+                    freshness="missing",
+                    age_seconds=None,
+                    payload=None,
+                    retrieved_at=NOW,
+                )
+        return reads
+
+
+def _publication_repository_with_shared_facts(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'publication-baseline.sqlite3'}")
+    run_migrations(engine)
+    return PlayerDietRepository(
+        engine,
+        publication_reader=_RecordedPublicationReader(_SHARED_TRANSITION_FACTS),
+    )
+
+
+def test_legacy_and_publication_paths_agree_on_the_same_baseline_fixture(tmp_path):
+    requested = [1001, 1005]
+
+    legacy_result = _legacy_repository_with_shared_facts(tmp_path).get_for_players(
+        "2025-26", requested
+    )
+    publication_result = _publication_repository_with_shared_facts(
+        tmp_path
+    ).get_for_players("2025-26", requested)
+
+    key = ("play_types", "Transition")
+    legacy_baseline = legacy_result.baselines[key]
+    publication_baseline = publication_result.baselines[key]
+    assert legacy_baseline.league_average_share == pytest.approx(
+        publication_baseline.league_average_share
+    )
+    assert legacy_baseline.population_sigma == pytest.approx(
+        publication_baseline.population_sigma
+    )
+    assert legacy_baseline.sigma_deviation(0.9) == pytest.approx(
+        publication_baseline.sigma_deviation(0.9)
+    )
+    assert {player_id for player_id in legacy_result.players} == set(requested)
+    assert {player_id for player_id in publication_result.players} == set(requested)
+
+
+def test_legacy_get_for_players_baselines_over_the_whole_stored_season_fact_set(
+    tmp_path,
+):
+    repository = _legacy_repository_with_shared_facts(tmp_path)
+
+    result = repository.get_for_players("2025-26", [1001])
+
+    assert set(result.players) == {1001}
+    baseline = result.baselines[("play_types", "Transition")]
+    population_shares = [0.5, 0.3, 0.2, 0.1]
+    assert baseline.league_average_share == pytest.approx(fmean(population_shares))
+    assert baseline.population_sigma == pytest.approx(pstdev(population_shares))
