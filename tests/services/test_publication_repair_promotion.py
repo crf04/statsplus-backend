@@ -11,6 +11,7 @@ candidate so the assertions are about the promotion, not the provider.
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import uuid
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -193,7 +194,7 @@ def _insert_zone_evidence(engine, *, manifest_id, cutoff, marker):
 def _queue_jobs(engine, *, manifest_id, cutoff):
     with engine.begin() as connection:
         connection.execute(CompositionJob.__table__.insert(), [{
-            "job_id": f"{stream_key}-{manifest_id}", "stream_key": stream_key,
+            "job_id": str(uuid.uuid4()), "stream_key": stream_key,
             "manifest_id": manifest_id, "season": SEASON, "cutoff": cutoff,
             "status": "queued", "attempts": 0, "created_at": cutoff,
             "updated_at": cutoff,

@@ -1620,7 +1620,7 @@ def test_repair_group_ddl_applies_to_postgres(repair_group_engine):
 
     assert set(group_columns) == {
         "group_id", "manifest_id", "season", "cutoff", "reason", "checksum",
-        "created_at",
+        "created_at", "promoted_at",
     }
     assert set(member_columns) == {
         "group_id", "stream_key", "expected_publication_id", "expected_fence",
