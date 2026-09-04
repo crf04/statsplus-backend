@@ -131,23 +131,36 @@ class GameService:
 
     @staticmethod
     def _resolve_from_catalog(player_name, catalog_rows):
-        """Resolve a name against ``(player_id, display_name)`` catalog rows."""
-        normalized_target = player_name.strip().casefold()
-        for player_id, display_name in catalog_rows:
-            if display_name.strip().casefold() == normalized_target:
-                return int(player_id)
+        """Resolve a name against ``(player_id, display_name, is_active_for_season)``
+        catalog rows.
 
-        display_names = [display_name for _, display_name in catalog_rows]
-        closest_match = get_close_matches(player_name, display_names, n=1, cutoff=0.8)
+        The catalog carries every season a player appears in NBA history, so
+        a display name can repeat across eras (for example two different
+        "Nate Williams"). A tie is broken by preferring the row active for
+        the requested season, then by the lowest ``player_id`` so the choice
+        is deterministic.
+        """
+        def pick(rows):
+            return int(min(rows, key=lambda row: (not row[2], row[0]))[0])
+
+        normalized_target = player_name.strip().casefold()
+        exact_matches = [
+            row for row in catalog_rows
+            if row[1].strip().casefold() == normalized_target
+        ]
+        if exact_matches:
+            return pick(exact_matches)
+
+        unique_display_names = list(dict.fromkeys(row[1] for row in catalog_rows))
+        closest_match = get_close_matches(player_name, unique_display_names, n=1, cutoff=0.8)
         if closest_match:
-            for player_id, display_name in catalog_rows:
-                if display_name == closest_match[0]:
-                    return int(player_id)
+            candidates = [row for row in catalog_rows if row[1] == closest_match[0]]
+            return pick(candidates)
 
         raise ValueError(f"No matching player found for {player_name}.")
 
     def _fetch_athlete_catalog_rows(self, season):
-        """Read cached ``(player_id, display_name)`` pairs for one season."""
+        """Read cached ``(player_id, display_name, is_active_for_season)`` triples."""
         cache_key = None
         if self.cache and self.cache.enabled:
             cache_key = self.cache._generate_key('table_data', False, 'athlete_catalog', season)
@@ -157,7 +170,10 @@ class GameService:
                 return cached_result
 
         rows = self.athlete_catalog.get_catalog(season, active_only=False)
-        catalog_rows = [(row['player_id'], row['display_name']) for row in rows]
+        catalog_rows = [
+            (row['player_id'], row['display_name'], bool(row['is_active_for_season']))
+            for row in rows
+        ]
 
         if cache_key:
             ttl = self.cache._get_ttl('player_info')

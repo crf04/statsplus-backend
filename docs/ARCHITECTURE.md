@@ -872,10 +872,14 @@ GET /api/games/game_logs
 the injected Athlete Catalog (`AthleteCatalogService.get_catalog`) for the
 requested season first -- exact case-insensitive match, then fuzzy -- because
 that is the governed identity source durable game-log ingest already joins
-on. It falls back to the legacy `player_information` table (a nba_api static
-dump only the admin `fetch_players` job writes) when no catalog is injected
-or the season has no catalog rows, which keeps the read-only demo database and
-historical seasons working unchanged.
+on. The catalog carries every season a player has appeared in, so a display
+name can repeat across eras (a retired player and an active one sharing a
+name); a tie prefers the row active for the requested season, then the
+lowest `player_id`, so the name always resolves the current player rather
+than a same-named predecessor. It falls back to the legacy `player_information`
+table (a nba_api static dump only the admin `fetch_players` job writes) when
+no catalog is injected or the season has no catalog rows, which keeps the
+read-only demo database and historical seasons working unchanged.
 
 The request-time player-game-log source is one injected database-only seam
 (`app.services.game_logs_source.StoredGameLogsSource`). It captures the active

@@ -143,8 +143,8 @@ def catalog_service(game_engine, monkeypatch):
     catalog = _StubAthleteCatalog(
         "2025-26",
         [
-            {"player_id": 1642843, "display_name": "Cooper Flagg"},
-            {"player_id": 2544, "display_name": "LeBron James"},
+            {"player_id": 1642843, "display_name": "Cooper Flagg", "is_active_for_season": True},
+            {"player_id": 2544, "display_name": "LeBron James", "is_active_for_season": True},
         ],
     )
     return game_service_module.GameService(
@@ -181,6 +181,94 @@ def test_get_player_id_falls_back_to_player_information_when_the_catalog_has_no_
 
 def test_get_player_id_uses_the_legacy_path_when_no_catalog_is_injected(service):
     assert service.get_player_id("LeBron James", "2025-26") == 2544
+
+
+# --- namesake tie-break (#regression: Nate Williams, historical + active) --
+
+
+@pytest.fixture
+def namesake_service(game_engine, monkeypatch):
+    """A catalog with a historical/active namesake collision.
+
+    Production athlete_catalog carries CommonAllPlayers history, so
+    ``display_name`` repeats across eras. ``Nate Williams`` collides between
+    a retired player (78561) and an active 2025-26 Warrior (1631466); an
+    id-order resolution used to silently return the retired namesake.
+    """
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2025-26",
+        [
+            {"player_id": 78561, "display_name": "Nate Williams", "is_active_for_season": False},
+            {"player_id": 1631466, "display_name": "Nate Williams", "is_active_for_season": True},
+        ],
+    )
+    return game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+
+def test_get_player_id_prefers_the_active_namesake_on_an_exact_match(namesake_service):
+    assert namesake_service.get_player_id("Nate Williams", "2025-26") == 1631466
+
+
+def test_get_player_id_prefers_the_active_namesake_on_a_fuzzy_match(namesake_service):
+    assert namesake_service.get_player_id("Nate Wiliams", "2025-26") == 1631466
+
+
+def test_get_player_id_breaks_a_namesake_tie_by_lowest_id_when_none_are_active(
+    game_engine, monkeypatch
+):
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2025-26",
+        [
+            {"player_id": 999999, "display_name": "Retired Twin", "is_active_for_season": False},
+            {"player_id": 111111, "display_name": "Retired Twin", "is_active_for_season": False},
+        ],
+    )
+    service = game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+    assert service.get_player_id("Retired Twin", "2025-26") == 111111
+
+
+def test_fetch_athlete_catalog_rows_returns_three_tuples(catalog_service):
+    rows = catalog_service._fetch_athlete_catalog_rows("2025-26")
+
+    assert rows
+    assert all(isinstance(row, tuple) and len(row) == 3 for row in rows)
+    assert (1642843, "Cooper Flagg", True) in rows
+
+
+def test_get_player_id_resolves_when_the_cache_returns_list_shaped_rows(
+    catalog_service, monkeypatch
+):
+    """Redis JSON round-trips a cached tuple as a list; resolution must still work."""
+    catalog_service.cache.enabled = True
+    cached_rows = [
+        [78561, "Nate Williams", False],
+        [1631466, "Nate Williams", True],
+    ]
+    monkeypatch.setattr(catalog_service.cache, "get", lambda key: cached_rows)
+    monkeypatch.setattr(
+        catalog_service.cache,
+        "set",
+        lambda key, data, ttl: (_ for _ in ()).throw(
+            AssertionError("a cache hit must not re-fetch and re-cache")
+        ),
+    )
+
+    assert catalog_service.get_player_id("Nate Williams", "2025-26") == 1631466
 
 
 def test_get_team_name_by_id_returns_none_for_an_unknown_id(service):

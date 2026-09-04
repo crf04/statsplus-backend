@@ -346,7 +346,7 @@ def test_get_filtered_logs_resolves_a_player_only_present_in_the_athlete_catalog
         def get_catalog(self, season, *, active_only=False):
             if season != "2025-26":
                 return []
-            return [{"player_id": 1642843, "display_name": "Cooper Flagg"}]
+            return [{"player_id": 1642843, "display_name": "Cooper Flagg", "is_active_for_season": True}]
 
     class _RookieLogsSource:
         def get_player_logs(self, player_id, season):
