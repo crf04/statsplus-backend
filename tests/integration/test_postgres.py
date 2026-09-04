@@ -1549,6 +1549,13 @@ def _repair_group_engine(postgres_url):
 
     engine = create_engine(postgres_url)
     Base.metadata.drop_all(engine)
+    # ``schema_migrations`` is not part of ``Base.metadata``, so dropping the
+    # model tables alone leaves the applied-version ledger behind.  A later
+    # ``run_migrations`` would then believe the head was already applied and
+    # create nothing.  Drop the ledger too so this really is a from-scratch
+    # migration run against the shared integration database.
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
     run_migrations(engine)
     return engine
 
