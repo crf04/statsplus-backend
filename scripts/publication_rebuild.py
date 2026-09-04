@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
 from pathlib import Path
 
@@ -38,6 +40,19 @@ REBUILD_SERVICES = {
 }
 
 
+def default_owner() -> str:
+    """A lease owner unique to this invocation.
+
+    Two passes of the same command must be distinguishable: a constant name
+    would let an abandoned pass look like the one that replaced it to any
+    check that compared names.  The generation fence is the real protection,
+    but an owner that names the actual process makes operator evidence
+    readable and keeps the two mechanisms independent.
+    """
+
+    return f"publication-rebuild-worker@{socket.gethostname()}:{os.getpid()}"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", required=True)
@@ -48,8 +63,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--owner",
-        default="publication-rebuild-worker",
-        help="lease owner recorded for this pass",
+        default=None,
+        help="lease owner recorded for this pass (defaults to host:pid)",
     )
     parser.add_argument(
         "--status",
@@ -81,7 +96,9 @@ def main(argv=None) -> int:
             print(json.dumps({"error_code": error.reason}, sort_keys=True))
             return EXIT_UNAVAILABLE
         return EXIT_OK
-    finished = service.run_pending(owner=args.owner, limit=args.limit)
+    finished = service.run_pending(
+        owner=args.owner or default_owner(), limit=args.limit
+    )
     print(json.dumps({
         "family": args.family,
         "driven": len(finished),

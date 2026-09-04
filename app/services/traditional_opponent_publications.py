@@ -37,7 +37,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from app.services.ledger_derivations import TEAM_METRICS
+from app.services.ledger_derivations import TEAM_METRICS, competition_ranks
 
 
 class TraditionalOpponentFormatError(ValueError):
@@ -367,21 +367,6 @@ class NormalizedTraditionalOpponentWindow:
 _POPULATION_TOLERANCE = 1e-9
 
 
-def _competition_ranks(values: Mapping[int, float]) -> dict[int, int]:
-    """Ascending competition ranks: rank 1 allows the fewest, ties share."""
-
-    ordered = sorted(values.items(), key=lambda item: (item[1], item[0]))
-    ranks: dict[int, int] = {}
-    previous: float | None = None
-    rank = 1
-    for position, (team_id, value) in enumerate(ordered, start=1):
-        if previous is None or value != previous:
-            rank = position
-        ranks[team_id] = rank
-        previous = value
-    return ranks
-
-
 def _agrees(stored: float, computed: float) -> bool:
     return math.isclose(
         float(stored), float(computed),
@@ -447,7 +432,7 @@ def _assert_population_statistics(teams, recognized, *, stream_key: str) -> None
             f"{stream_key} publication ranks only some teams",
         )
     for metric in recognized.metrics:
-        expected = _competition_ranks(values_by_metric[metric])
+        expected = competition_ranks(values_by_metric[metric], descending=False)
         if any(
             int(team.competition_rank[metric]) != expected[team.team_id]
             for team in ranked

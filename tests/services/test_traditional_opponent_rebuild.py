@@ -6,6 +6,7 @@ asserts that a particular private helper was called, so the tests survive a
 restructuring of composition or persistence.
 """
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -13,11 +14,16 @@ from sqlalchemy import select
 
 from app.models.collection_control import (
     PublicationActivation,
+    PublicationObservation,
     PublicationPointer,
     PublicationRebuild,
     PublicationVersion,
 )
-from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.collection_control import (
+    ControlPlaneError,
+    FamilyPromotion,
+    PublicationService,
+)
 from app.services.database_first_activation import decode_team_window
 from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
@@ -849,14 +855,14 @@ def test_a_write_from_a_worker_that_lost_the_lease_is_refused(family):
     rebuild = service.start(
         actor=ACTOR, reason=REASON, expected=active_expectation(publications)
     )
-    service.stage(rebuild.rebuild_id, owner="worker-1")
+    first = service.claim(rebuild.rebuild_id, owner="worker-1")
     # The lease expires and a successor claims the still-active rebuild.
     clock[0] = NOW + timedelta(minutes=5)
-    service._claim(rebuild.rebuild_id, owner="worker-2", state="promoting")
+    service.claim(rebuild.rebuild_id, owner="worker-2", state="promoting")
 
     with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
         service._transition(
-            rebuild.rebuild_id, owner="worker-1", state="validating"
+            rebuild.rebuild_id, claim=first, state="validating"
         )
 
 
@@ -1097,3 +1103,272 @@ def test_the_executable_adapter_drives_and_reports_one_rebuild(tmp_path, capsys)
     missing = main(["--database-url", database_url, "--status", "no-such-id"])
     assert missing == 3
     assert _json.loads(capsys.readouterr().out)["error_code"] == "rebuild_not_found"
+
+
+# --- Generation fencing under one owner (round-2 review finding 1) ---------
+
+WORKER = "publication-rebuild-worker"
+
+
+def test_two_passes_under_the_same_owner_do_not_both_hold_the_rebuild(family):
+    """Ownership is a generation, not a name.
+
+    Two invocations of the same worker command share an owner string, so a
+    fence built only on the owner name would let an abandoned pass keep
+    writing over the pass that legitimately took the rebuild over.
+    """
+
+    engine, publications = family
+    clock = [NOW]
+    service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    first = service.claim(rebuild.rebuild_id, owner=WORKER)
+    clock[0] = NOW + timedelta(minutes=5)
+    second = service.claim(rebuild.rebuild_id, owner=WORKER)
+
+    assert second.generation > first.generation
+    with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
+        service._transition(rebuild.rebuild_id, claim=first, state="validating")
+    assert service._transition(
+        rebuild.rebuild_id, claim=second, state="validating"
+    ).state == "validating"
+
+
+def test_an_abandoned_same_owner_pass_cannot_revert_a_completed_rebuild(family):
+    engine, publications = family
+    clock = [NOW]
+    service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    abandoned = service.claim(rebuild.rebuild_id, owner=WORKER)
+    clock[0] = NOW + timedelta(minutes=5)
+    # A second invocation of the same command drives the rebuild home.
+    service.run_pending(owner=WORKER)
+    assert service.status(rebuild.rebuild_id)["state"] == "succeeded"
+
+    with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
+        service._fail(
+            rebuild.rebuild_id,
+            claim=abandoned,
+            code="publication_candidate_invalid",
+        )
+    assert service.status(rebuild.rebuild_id)["state"] == "succeeded"
+
+
+def test_every_claim_advances_the_lease_generation(family):
+    engine, publications = family
+    clock = [NOW]
+    service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+
+    generations = []
+    for minute in (0, 5, 10):
+        clock[0] = NOW + timedelta(minutes=minute)
+        generations.append(
+            service.claim(rebuild.rebuild_id, owner=WORKER).generation
+        )
+
+    assert generations == sorted(set(generations))
+    assert service.status(rebuild.rebuild_id)["generation"] == generations[-1]
+
+
+def test_the_worker_command_uses_an_owner_unique_to_its_invocation():
+    import os
+
+    from scripts.publication_rebuild import default_owner
+
+    assert default_owner() == default_owner()
+    assert str(os.getpid()) in default_owner()
+
+
+# --- Crash between promotion and the success write (finding 2) -------------
+
+
+def test_a_crash_after_promotion_resumes_as_success_not_stale(family):
+    """The pointers moved; the rebuild that moved them must say so."""
+
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    staged = service.stage(rebuild.rebuild_id, owner=WORKER)
+    # Simulate a process death between the pointer commit and the success
+    # write: promote the family directly, leaving the rebuild mid-phase.
+    expectation = active_expectation(publications)
+    publications.promote_publication_family(
+        (
+            FamilyPromotion(
+                stream_key=SEASON_STREAM,
+                candidate_publication_id=staged.staged_season_publication_id,
+                expected_publication_id=expectation.season_publication_id,
+                expected_fence=expectation.season_fence,
+            ),
+            FamilyPromotion(
+                stream_key=L15_STREAM,
+                candidate_publication_id=staged.staged_l15_publication_id,
+                expected_publication_id=expectation.l15_publication_id,
+                expected_fence=expectation.l15_fence,
+            ),
+        ),
+        actor=ACTOR,
+        reason=REASON,
+    )
+    promoted_pointers = _pointers(engine)
+
+    resumed = service.promote(rebuild.rebuild_id, owner=WORKER)
+
+    assert resumed.state == "succeeded"
+    assert resumed.error_code is None
+    assert resumed.promoted_season_publication_id == (
+        staged.staged_season_publication_id
+    )
+    assert _pointers(engine) == promoted_pointers
+
+
+def test_promotion_and_the_success_write_commit_together(family):
+    """No window exists in which the pointers moved but the row has not."""
+
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.stage(rebuild.rebuild_id, owner=WORKER)
+    observed_sessions = []
+    original = service.publications.promote_publication_family
+
+    def observe(promotions, **kwargs):
+        result = original(promotions, **kwargs)
+        observed_sessions.append(kwargs["session"])
+        return result
+
+    service.publications.promote_publication_family = observe
+    done = service.promote(rebuild.rebuild_id, owner=WORKER)
+
+    assert observed_sessions, "promotion did not run"
+    assert done.state == "succeeded"
+    with publications.session() as session:
+        row = session.get(PublicationRebuild, rebuild.rebuild_id)
+    assert row.state == "succeeded"
+    assert row.promoted_season_checksum
+
+
+# --- Rollback authority for provenance-bound rows (finding 3) -------------
+
+
+def _add_second_manifest(engine):
+    from app.models.collection_control import CollectionManifest
+
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="second-manifest", season=SEASON, cutoff=CUTOFF,
+            collect_before=CUTOFF + timedelta(hours=1),
+            accepted_versions="[1]", scopes='["canonical_game_ledger"]',
+            checksum="second-manifest",
+            event_catalog_publication_id="event-catalog",
+            event_catalog_checksum="0" * 64,
+            status="active", created_at=NOW,
+        ))
+
+
+def test_family_rollback_refuses_targets_from_different_manifests(family):
+    """Ledger rows carry authority through provenance, not on the row.
+
+    Both targets record ``manifest_id = None``, so a check that compared the
+    row columns would see two identical ``(None, None, None)`` authorities and
+    accept a pair that actually rests on two different manifests.
+    """
+
+    from app.models.canonical_game_ledger import (
+        CanonicalGameLedgerGame,
+        LedgerObservationEvidence,
+    )
+    from app.models.collection_control import CollectionObservation
+
+    engine, publications = family
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.run(rebuild.rebuild_id, owner=WORKER)
+    _add_second_manifest(engine)
+    _add_game_under_second_manifest(engine)
+
+    with publications.session() as session, session.begin():
+        priors = {
+            stream_key: session.get(
+                PublicationVersion,
+                session.get(PublicationPointer, stream_key).previous_publication_id,
+            )
+            for stream_key in (SEASON_STREAM, L15_STREAM)
+        }
+        # Both rollback targets record no authority on the row.
+        assert all(version.manifest_id is None for version in priors.values())
+        # Rebind only the Last 15 target's evidence to the second manifest's
+        # accepted observation.
+        session.execute(
+            PublicationObservation.__table__.delete().where(
+                PublicationObservation.publication_id
+                == priors[L15_STREAM].publication_id
+            )
+        )
+        session.add(PublicationObservation(
+            publication_id=priors[L15_STREAM].publication_id,
+            observation_id="pbp:game-15",
+            role="ledger_game",
+            slice_key="game-15",
+            created_at=NOW,
+        ))
+    del CanonicalGameLedgerGame, LedgerObservationEvidence, CollectionObservation
+    before = _pointers(engine)
+
+    with pytest.raises(
+        ControlPlaneError, match="publication_family_authority_mismatch"
+    ):
+        service.rollback(actor=ACTOR, reason="restore the previous format")
+    assert _pointers(engine) == before
+
+
+def _add_game_under_second_manifest(engine):
+    """One accepted game whose evidence belongs to the second manifest."""
+
+    from app.models.canonical_game_ledger import (
+        CanonicalGameLedgerGame,
+        LedgerObservationEvidence,
+    )
+    from app.models.collection_control import CollectionObservation
+    from tests.support.traditional_opponent_family import TEAM_IDS
+
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:game-15", client_observation_id="pbp:game-15",
+            collector_id="test", manifest_id="second-manifest",
+            environment="testing", provider="pbp+nba_live_data",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "game-15", "surface": "canonical_game_ledger",
+            }),
+            season=SEASON, cutoff=CUTOFF, schema_version=1,
+            checksum="pbp:game-15", payload="{}", payload_bytes=2,
+            retrieved_at=NOW, accepted_at=NOW,
+        ))
+        connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
+            game_id="game-15", season=SEASON, season_type="Regular Season",
+            game_date=CUTOFF.date(), home_team_id=int(TEAM_IDS[0]),
+            home_team_tricode="T00", away_team_id=int(TEAM_IDS[1]),
+            away_team_tricode="T01", status="final",
+            source_observation_id="pbp:game-15",
+            checksum="a" * 64, raw_checksum="a" * 64,
+            retrieved_at=NOW, updated_at=NOW,
+        ))
+        connection.execute(
+            LedgerObservationEvidence.__table__.insert().values(
+                observation_id="pbp:game-15", game_id="game-15", created_at=NOW,
+            )
+        )

@@ -286,8 +286,8 @@ without composing it. A worker pass drives the durable row through
 `composing`, `validating`, and `promoting`:
 
 ```
-scripts/publication_rebuild.py --database-url … --family traditional_opponent
-scripts/publication_rebuild.py --database-url … --status <rebuild_id>
+python scripts/publication_rebuild.py --database-url … --family traditional_opponent
+python scripts/publication_rebuild.py --database-url … --status <rebuild_id>
 ```
 
 The pass is restart-safe. A worker that dies mid-phase leaves a row whose

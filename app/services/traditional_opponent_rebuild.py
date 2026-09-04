@@ -113,6 +113,23 @@ class FamilyExpectation:
 
 
 @dataclass(frozen=True, slots=True)
+class RebuildClaim:
+    """Proof that one worker holds one rebuild at one exact generation.
+
+    A worker command is invoked many times and every invocation shares its
+    owner name, so a name alone cannot distinguish an abandoned pass from the
+    pass that replaced it.  Claiming therefore advances the row's lease
+    generation and hands back the value it advanced to; that number is the
+    capability every later write must present.  An abandoned worker still
+    holds the previous number and can no longer write anything.
+    """
+
+    rebuild_id: str
+    owner: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class RebuildSources:
     """The unchanged authority and facts a rebuild composes from.
 
@@ -302,45 +319,45 @@ class TraditionalOpponentRebuildService:
         result is caught at promotion rather than prevented by a long lock.
         """
 
-        claimed = self._claim(rebuild_id, owner=owner, state="composing")
-        if claimed.state in TERMINAL_REBUILD_STATES:
+        claimed, claim = self._claim(rebuild_id, owner=owner, state="composing")
+        if claim is None:
             return claimed
         if claimed.staged_season_publication_id and claimed.staged_l15_publication_id:
-            return self._transition(
-                rebuild_id, owner=owner, state="validating"
-            )
+            return self._transition(rebuild_id, claim=claim, state="validating")
         try:
             sources = self._sources(claimed)
             payloads = self.compose(sources)
-            validated = {
-                stream_key: self._validate_target(
-                    stream_key, payloads[stream_key]
-                )
-                for stream_key in self.stream_keys
-            }
+            for stream_key in self.stream_keys:
+                self._validate_target(stream_key, payloads[stream_key])
         except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
             return self._fail(
-                rebuild_id, owner=owner, code=self._failure_code(error)
+                rebuild_id, claim=claim, code=self._failure_code(error)
             )
         except KeyError:
             return self._fail(
-                rebuild_id, owner=owner, code="publication_candidate_invalid"
+                rebuild_id, claim=claim, code="publication_candidate_invalid"
             )
-        del validated
-        return self._stage_candidates(claimed, payloads, owner=owner)
+        return self._stage_candidates(claimed, payloads, claim=claim)
 
     def promote(self, rebuild_id: str, *, owner: str = "worker") -> PublicationRebuild:
-        """Revalidate every precondition and move both pointers, or neither."""
+        """Revalidate every precondition and move both pointers, or neither.
 
-        claimed = self._claim(rebuild_id, owner=owner, state="promoting")
-        if claimed.state in TERMINAL_REBUILD_STATES:
+        The pointer moves and this rebuild's own success write commit in one
+        transaction.  Splitting them would leave a window in which a crash
+        stranded promoted pointers behind a rebuild still recorded as
+        in-flight, and the resumed attempt would then fail against pointer
+        expectations its own earlier attempt had already satisfied.
+        """
+
+        claimed, claim = self._claim(rebuild_id, owner=owner, state="promoting")
+        if claim is None:
             return claimed
         if not (
             claimed.staged_season_publication_id
             and claimed.staged_l15_publication_id
         ):
             return self._fail(
-                rebuild_id, owner=owner, code="publication_candidate_invalid"
+                rebuild_id, claim=claim, code="publication_candidate_invalid"
             )
         promotions = tuple(
             FamilyPromotion(
@@ -353,36 +370,93 @@ class TraditionalOpponentRebuildService:
         )
         try:
             with self.publications._session_scope(None) as session:
+                rebuild = self._locked(session, rebuild_id, claim=claim)
+                if rebuild.state in TERMINAL_REBUILD_STATES:
+                    return rebuild
+                already = self._already_promoted(session, rebuild)
+                if already is not None:
+                    # A previous attempt moved the pointers and died before
+                    # recording it.  The work is done; say so rather than
+                    # reporting a stale precondition its own attempt created.
+                    self._record_success(rebuild, promoted=already)
+                    return rebuild
                 # An accepted ledger correction always wins: it changes the
                 # facts underneath the staged candidates, and a rebuild that
                 # promoted anyway would quietly discard a truth correction.
                 if self._source_checksum(
                     session,
-                    season=claimed.season,
-                    game_ids=self._governed_game_ids(session, claimed),
-                ) != claimed.source_checksum:
+                    season=rebuild.season,
+                    game_ids=self._governed_game_ids(session, rebuild),
+                ) != rebuild.source_checksum:
                     raise ControlPlaneError("stale_publication_family")
-                self._assert_staged_still_valid(session, claimed)
+                self._assert_staged_still_valid(session, rebuild)
                 promoted = self.publications.promote_publication_family(
                     promotions,
-                    actor=claimed.actor,
-                    reason=claimed.reason,
+                    actor=rebuild.actor,
+                    reason=rebuild.reason,
                     validate_payload=self._assert_target_payload,
                     validate_family=self._assert_coherent_family,
                     session=session,
                 )
+                self._record_success(rebuild, promoted={
+                    version.stream_key: version for version in promoted
+                })
+                return rebuild
         except ControlPlaneError as error:
-            self._supersede_staged(rebuild_id)
+            if error.reason == "rebuild_lease_held":
+                raise
+            self._supersede_staged(rebuild_id, claim=claim)
             return self._fail(
-                rebuild_id, owner=owner, code=self._promotion_code(error)
+                rebuild_id, claim=claim, code=self._promotion_code(error)
             )
         except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
-            self._supersede_staged(rebuild_id)
+            self._supersede_staged(rebuild_id, claim=claim)
             return self._fail(
-                rebuild_id, owner=owner, code=self._failure_code(error)
+                rebuild_id, claim=claim, code=self._failure_code(error)
             )
-        by_stream = {version.stream_key: version for version in promoted}
-        return self._succeed(rebuild_id, owner=owner, promoted=by_stream)
+
+    def _already_promoted(self, session, rebuild):
+        """Return the promoted pair when the pointers already hold it.
+
+        This is the resume path for a crash between the pointer commit and
+        the success write.  It is deliberately narrow: the active publication
+        of every window must be exactly the candidate *this* rebuild staged,
+        so it can never mistake somebody else's promotion for its own.
+        """
+
+        promoted = {}
+        for stream_key in self.stream_keys:
+            staged_id = self._staged_id(rebuild, stream_key)
+            pointer = session.scalar(
+                select(PublicationPointer).where(
+                    PublicationPointer.stream_key == stream_key
+                )
+            )
+            if pointer is None or pointer.active_publication_id != staged_id:
+                return None
+            version = session.get(PublicationVersion, staged_id)
+            if version is None or version.status != "active":
+                return None
+            promoted[stream_key] = version
+        return promoted
+
+    def _record_success(self, rebuild, *, promoted) -> None:
+        """Write the success onto an already-locked, already-fenced row."""
+
+        now = self.clock()
+        rebuild.promoted_season_publication_id = promoted[
+            SEASON_STREAM
+        ].publication_id
+        rebuild.promoted_season_checksum = promoted[SEASON_STREAM].checksum
+        rebuild.promoted_l15_publication_id = promoted[L15_STREAM].publication_id
+        rebuild.promoted_l15_checksum = promoted[L15_STREAM].checksum
+        rebuild.state = "succeeded"
+        rebuild.error_code = None
+        rebuild.lease_owner = None
+        rebuild.lease_expires_at = None
+        rebuild.claimed_generation = None
+        rebuild.completed_at = now
+        rebuild.updated_at = now
 
     # --- Observing --------------------------------------------------------
 
@@ -667,7 +741,9 @@ class TraditionalOpponentRebuildService:
             source_checksum=rebuild.source_checksum,
         )
 
-    def _stage_candidates(self, rebuild, payloads, *, owner: str) -> PublicationRebuild:
+    def _stage_candidates(
+        self, rebuild, payloads, *, claim: RebuildClaim
+    ) -> PublicationRebuild:
         """Persist both candidates, reusing the active pair's provenance."""
 
         staged: dict[str, PublicationVersion] = {}
@@ -687,7 +763,7 @@ class TraditionalOpponentRebuildService:
                 )
         return self._transition(
             rebuild.rebuild_id,
-            owner=owner,
+            claim=claim,
             state="validating",
             values={
                 "staged_season_publication_id": staged[SEASON_STREAM].publication_id,
@@ -728,78 +804,97 @@ class TraditionalOpponentRebuildService:
             for observation_id, game_id in bound.items()
         }
 
-    @contextmanager
-    def _fenced(self, rebuild_id: str, *, owner: str | None):
-        """Load one rebuild under a row lock, optionally proving ownership.
+    def _locked(self, session, rebuild_id: str, *, claim: RebuildClaim | None):
+        """Lock one rebuild row and, when a claim is supplied, prove it holds.
 
-        Every state write goes through here.  A worker whose lease expired may
-        still be running: without this fence its in-flight code could overwrite
-        the successor that legitimately took the rebuild over, and in the worst
-        case revert ``succeeded`` back to an active phase.  Ownership is the
-        lease owner *and* the claimed generation, so a reclaim under a bumped
-        generation retires the previous claim as well.
+        Ownership is the lease owner *and* the exact generation the holder
+        claimed.  Because every claim advances the generation, a worker that
+        was superseded -- even one running the same command under the same
+        owner name -- presents a stale number and is refused.
         """
 
-        now = self.clock()
+        rebuild = session.scalar(
+            select(PublicationRebuild)
+            .where(PublicationRebuild.rebuild_id == rebuild_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if rebuild is None or rebuild.family != self.family:
+            raise ControlPlaneError("rebuild_not_found")
+        if claim is not None and not (
+            rebuild.lease_owner == claim.owner
+            and int(rebuild.generation or 1) == claim.generation
+            and rebuild.claimed_generation is not None
+            and int(rebuild.claimed_generation) == claim.generation
+        ):
+            raise ControlPlaneError("rebuild_lease_held")
+        return rebuild
+
+    @contextmanager
+    def _fenced(self, rebuild_id: str, *, claim: RebuildClaim | None):
+        """Load one rebuild under a row lock, optionally proving the claim."""
+
         with self.publications._session_scope(None) as session:
-            rebuild = session.scalar(
-                select(PublicationRebuild)
-                .where(PublicationRebuild.rebuild_id == rebuild_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            if rebuild is None or rebuild.family != self.family:
-                raise ControlPlaneError("rebuild_not_found")
-            if owner is not None and not self._owns(rebuild, owner):
-                raise ControlPlaneError("rebuild_lease_held")
+            rebuild = self._locked(session, rebuild_id, claim=claim)
             yield session, rebuild
-            rebuild.updated_at = now
+            rebuild.updated_at = self.clock()
             session.flush()
 
-    @staticmethod
-    def _owns(rebuild: PublicationRebuild, owner: str) -> bool:
-        return (
-            rebuild.lease_owner == owner
-            and rebuild.claimed_generation is not None
-            and int(rebuild.claimed_generation) == int(rebuild.generation or 1)
-        )
+    def claim(
+        self, rebuild_id: str, *, owner: str, state: str = "composing"
+    ) -> RebuildClaim:
+        """Take one rebuild for this worker, advancing its lease generation."""
 
-    def _claim(self, rebuild_id: str, *, owner: str, state: str) -> PublicationRebuild:
+        _rebuild, claim = self._claim(rebuild_id, owner=owner, state=state)
+        if claim is None:
+            raise ControlPlaneError("rebuild_not_claimable")
+        return claim
+
+    def _claim(
+        self, rebuild_id: str, *, owner: str, state: str
+    ) -> tuple[PublicationRebuild, RebuildClaim | None]:
         now = self.clock()
-        with self._fenced(rebuild_id, owner=None) as (_session, rebuild):
+        with self._fenced(rebuild_id, claim=None) as (_session, rebuild):
             if rebuild.state in TERMINAL_REBUILD_STATES:
-                return rebuild
+                return rebuild, None
             held_by_other = (
                 rebuild.lease_owner
-                and rebuild.lease_owner != owner
                 and rebuild.lease_expires_at is not None
                 and _aware(rebuild.lease_expires_at) > now
+                and rebuild.lease_owner != owner
             )
             if held_by_other:
                 raise ControlPlaneError("rebuild_lease_held")
+            # Advancing on every claim is what retires the previous holder,
+            # including a previous invocation of this same worker command.
+            generation = int(rebuild.generation or 1) + 1
+            rebuild.generation = generation
+            rebuild.claimed_generation = generation
             rebuild.lease_owner = str(owner)[:128]
             rebuild.lease_expires_at = now + timedelta(seconds=self.lease_seconds)
-            rebuild.claimed_generation = int(rebuild.generation or 1)
             rebuild.attempts = int(rebuild.attempts or 0) + 1
             rebuild.state = state
-        return rebuild
+            claim = RebuildClaim(
+                rebuild_id=rebuild_id, owner=str(owner)[:128], generation=generation
+            )
+        return rebuild, claim
 
     def _transition(
-        self, rebuild_id, *, owner: str, state, values=None
+        self, rebuild_id, *, claim: RebuildClaim, state, values=None
     ) -> PublicationRebuild:
-        with self._fenced(rebuild_id, owner=owner) as (_session, rebuild):
+        with self._fenced(rebuild_id, claim=claim) as (_session, rebuild):
             if rebuild.state in TERMINAL_REBUILD_STATES:
                 # Someone already finished this rebuild; a later phase write
-                # from this worker would be a regression, not progress.
+                # would be a regression, not progress.
                 return rebuild
             for key, value in dict(values or {}).items():
                 setattr(rebuild, key, value)
             rebuild.state = state
         return rebuild
 
-    def _fail(self, rebuild_id, *, owner: str, code: str) -> PublicationRebuild:
+    def _fail(self, rebuild_id, *, claim: RebuildClaim, code: str) -> PublicationRebuild:
         now = self.clock()
-        with self._fenced(rebuild_id, owner=owner) as (_session, rebuild):
+        with self._fenced(rebuild_id, claim=claim) as (_session, rebuild):
             if rebuild.state in TERMINAL_REBUILD_STATES:
                 return rebuild
             rebuild.state = "failed"
@@ -810,37 +905,16 @@ class TraditionalOpponentRebuildService:
             rebuild.completed_at = now
         return rebuild
 
-    def _succeed(self, rebuild_id, *, owner: str, promoted) -> PublicationRebuild:
-        now = self.clock()
-        with self._fenced(rebuild_id, owner=owner) as (_session, rebuild):
-            if rebuild.state in TERMINAL_REBUILD_STATES:
-                return rebuild
-            rebuild.promoted_season_publication_id = promoted[
-                SEASON_STREAM
-            ].publication_id
-            rebuild.promoted_season_checksum = promoted[SEASON_STREAM].checksum
-            rebuild.promoted_l15_publication_id = promoted[L15_STREAM].publication_id
-            rebuild.promoted_l15_checksum = promoted[L15_STREAM].checksum
-            rebuild.state = "succeeded"
-            rebuild.error_code = None
-            rebuild.lease_owner = None
-            rebuild.lease_expires_at = None
-            rebuild.claimed_generation = None
-            rebuild.completed_at = now
-        return rebuild
-
-    def _supersede_staged(self, rebuild_id) -> None:
+    def _supersede_staged(self, rebuild_id, *, claim: RebuildClaim) -> None:
         """Retain a valid but stale candidate as audit evidence only.
 
         It stays readable as the thing this rebuild proposed, and its
         ``superseded`` status makes it permanently ineligible for a later
-        accidental activation.
+        accidental activation.  It is fenced like every other write: a worker
+        that lost the rebuild must not retire its successor's candidates.
         """
 
-        with self.publications._session_scope(None) as session:
-            rebuild = session.get(PublicationRebuild, rebuild_id)
-            if rebuild is None:
-                return
+        with self._fenced(rebuild_id, claim=claim) as (session, rebuild):
             for publication_id in (
                 rebuild.staged_season_publication_id,
                 rebuild.staged_l15_publication_id,
@@ -850,7 +924,6 @@ class TraditionalOpponentRebuildService:
                 candidate = session.get(PublicationVersion, publication_id)
                 if candidate is not None and candidate.status == "candidate":
                     candidate.status = "superseded"
-            session.flush()
 
     def _assert_staged_still_valid(self, session, rebuild) -> None:
         """Prove the staged pair is still exactly what this rebuild staged.
@@ -880,7 +953,7 @@ class TraditionalOpponentRebuildService:
             if staged_provenance != expected_provenance:
                 raise ControlPlaneError("stale_publication_family")
 
-    def _assert_coherent_family(self, targets) -> None:
+    def _assert_coherent_family(self, session, targets) -> None:
         """Prove a set of publications is one coherent family generation.
 
         Promotion and rollback both move the family as a unit, so the pair
@@ -896,22 +969,33 @@ class TraditionalOpponentRebuildService:
             formats.add(self._payload_format(stream_key, version.payload))
             seasons.add(version.season)
             cutoffs.add(_aware(version.cutoff))
-            authorities.add((
-                version.manifest_id,
-                version.event_catalog_publication_id,
-                version.event_catalog_checksum,
-            ))
+            authorities.add(self._authority_of(session, stream_key, version))
         if len(formats) != 1:
             raise ControlPlaneError("publication_family_mixed_format")
         if len(seasons) != 1 or len(cutoffs) != 1 or len(authorities) != 1:
             raise ControlPlaneError("publication_family_authority_mismatch")
 
-    @staticmethod
-    def _staged_checksum(rebuild, stream_key: str) -> str:
+    def _authority_of(self, session, stream_key: str, version):
+        """The authority one publication actually rests on.
+
+        A ledger-composed version records nothing on the row: its manifest and
+        Event Catalog come from the accepted observations behind it.  Reading
+        the null row fields would make every such publication look identical,
+        so two targets from different manifests would compare equal and pass a
+        coherence check that exists to catch exactly that.
+        """
+
+        if version.manifest_id is not None:
+            return (
+                version.manifest_id,
+                version.event_catalog_publication_id,
+                version.event_catalog_checksum,
+            )
+        manifest = self._shared_manifest(session, {stream_key: version})
         return (
-            rebuild.staged_season_checksum
-            if stream_key == SEASON_STREAM
-            else rebuild.staged_l15_checksum
+            manifest.manifest_id,
+            manifest.event_catalog_publication_id,
+            manifest.event_catalog_checksum,
         )
 
     def _payload_format(self, stream_key: str, payload: str):
@@ -968,29 +1052,48 @@ class TraditionalOpponentRebuildService:
             return "stale_publication_family"
         return error.reason
 
-    @staticmethod
-    def _expected_id(rebuild, stream_key: str) -> str:
-        return (
-            rebuild.expected_season_publication_id
-            if stream_key == SEASON_STREAM
-            else rebuild.expected_l15_publication_id
-        )
+    #: Which pair of columns each window of the family occupies.  Keeping the
+    #: mapping in one place is what stops four accessors from drifting apart.
+    _WINDOW_COLUMNS = {
+        SEASON_STREAM: {
+            "expected_id": "expected_season_publication_id",
+            "expected_fence": "expected_season_fence",
+            "staged_id": "staged_season_publication_id",
+            "staged_checksum": "staged_season_checksum",
+        },
+        L15_STREAM: {
+            "expected_id": "expected_l15_publication_id",
+            "expected_fence": "expected_l15_fence",
+            "staged_id": "staged_l15_publication_id",
+            "staged_checksum": "staged_l15_checksum",
+        },
+    }
 
-    @staticmethod
-    def _expected_fence(rebuild, stream_key: str) -> int:
-        return int(
-            rebuild.expected_season_fence
-            if stream_key == SEASON_STREAM
-            else rebuild.expected_l15_fence
-        )
+    @classmethod
+    def _column(cls, rebuild, stream_key: str, role: str):
+        try:
+            return getattr(rebuild, cls._WINDOW_COLUMNS[stream_key][role])
+        except KeyError:
+            raise TraditionalOpponentFormatError(
+                "publication_family_mismatch",
+                f"{stream_key} is not a traditional-opponent window",
+            ) from None
 
-    @staticmethod
-    def _staged_id(rebuild, stream_key: str) -> str:
-        return (
-            rebuild.staged_season_publication_id
-            if stream_key == SEASON_STREAM
-            else rebuild.staged_l15_publication_id
-        )
+    @classmethod
+    def _expected_id(cls, rebuild, stream_key: str) -> str:
+        return cls._column(rebuild, stream_key, "expected_id")
+
+    @classmethod
+    def _expected_fence(cls, rebuild, stream_key: str) -> int:
+        return int(cls._column(rebuild, stream_key, "expected_fence"))
+
+    @classmethod
+    def _staged_id(cls, rebuild, stream_key: str) -> str:
+        return cls._column(rebuild, stream_key, "staged_id")
+
+    @classmethod
+    def _staged_checksum(cls, rebuild, stream_key: str) -> str:
+        return cls._column(rebuild, stream_key, "staged_checksum")
 
     @staticmethod
     def _population(version) -> tuple[int, int]:

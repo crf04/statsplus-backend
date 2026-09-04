@@ -2530,6 +2530,31 @@ lease and generation, staged and promoted IDs and checksums, and one bounded
 failure code. A partial unique index makes "one in-flight rebuild per family"
 a database guarantee rather than a read-then-write race.
 
+Starting a rebuild only *records* it. Execution is a separate worker pass --
+`run_pending`, driven by `scripts/publication_rebuild.py` -- exactly as
+accepting an observation enqueues a composition job that
+`LedgerRuntime.compose_queued` later executes. That separation is what makes
+the operation restart-safe: the row is the operation, so a worker that dies
+mid-phase leaves a lease that expires, and the next pass reclaims the row and
+resumes from the phase it records rather than from the beginning.
+
+Claiming a rebuild *advances* its lease generation and hands the worker the
+number it advanced to. That number is a capability: every later write presents
+it, and a write whose number is no longer the row's current generation is
+refused. This is what makes the fence work between two invocations of the same
+command, which necessarily share an owner name -- an owner-only check would let
+an abandoned pass keep writing over the pass that replaced it. A revived worker
+therefore cannot overwrite its successor, and in particular cannot revert a
+`succeeded` rebuild to an active phase.
+
+The pointer moves and the rebuild's own success write commit in one
+transaction. Splitting them would leave a window in which a crash stranded
+promoted pointers behind a rebuild still recorded as in-flight, and the resumed
+attempt would then fail against pointer expectations its own earlier attempt
+had already satisfied. As a further resume path, an attempt that finds every
+pointer already holding exactly the candidates *this* rebuild staged records
+success rather than a stale precondition.
+
 Phases are `queued`, `composing`, `validating`, `promoting`, `succeeded`, and
 `failed`. Composition and validation run **without holding pointer locks**, so
 a rebuild may take as long as it takes while current reads continue on the old
@@ -2538,7 +2563,9 @@ revalidates the expected IDs and fences, the shared authority, the ledger
 source checksum, the staged candidates' recorded checksums, the exact accepted
 source-observation bindings behind each candidate, and both candidate payloads
 -- and only then moves anything. It also proves the pair being promoted is one
-coherent generation: one format, one season, one cutoff, one authority. Season
+coherent generation: one format, one season, one cutoff, one authority --
+resolving that authority from the accepted observations behind a
+ledger-composed publication, which records none on the row. Season
 and Last 15 promote together or neither moves.
 
 Idempotency is decided from the request alone, before any live state is read:

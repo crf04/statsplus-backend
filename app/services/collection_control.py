@@ -4528,7 +4528,7 @@ class PublicationService(_SessionService):
         actor: str,
         reason: str,
         validate_payload: Callable[[str, str], None] | None = None,
-        validate_family: Callable[[Sequence[tuple[str, PublicationVersion]]], None] | None = None,
+        validate_family: Callable[[Session, Sequence[tuple[str, PublicationVersion]]], None] | None = None,
         session: Session | None = None,
     ) -> tuple[PublicationVersion, ...]:
         """Move several coupled pointers to staged candidates, or move none.
@@ -4615,7 +4615,7 @@ class PublicationService(_SessionService):
                 # The family proves the candidates are one coherent generation
                 # before any pointer moves.  Per-window checks alone would
                 # accept two windows that never existed together.
-                validate_family(tuple(
+                validate_family(session, tuple(
                     (item.stream_key, candidates[item.stream_key])
                     for item in ordered
                 ))
@@ -4651,7 +4651,7 @@ class PublicationService(_SessionService):
         reason: str,
         expected_fences: Mapping[str, int] | None = None,
         validate_payload: Callable[[str, str], None] | None = None,
-        validate_family: Callable[[Sequence[tuple[str, PublicationVersion]]], None] | None = None,
+        validate_family: Callable[[Session, Sequence[tuple[str, PublicationVersion]]], None] | None = None,
         session: Session | None = None,
     ) -> tuple[PublicationVersion, ...]:
         """Roll a coupled family back together, or roll none of it back.
@@ -4703,7 +4703,7 @@ class PublicationService(_SessionService):
                 # The target pair has to be a pair that could have existed
                 # together, or recovery would create the very mixed-format
                 # family that atomic promotion exists to prevent.
-                validate_family(tuple(
+                validate_family(session, tuple(
                     (stream_key, prior) for stream_key, _p, prior, _c in plans
                 ))
             for stream_key, pointer, prior, current in plans:
