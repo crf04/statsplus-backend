@@ -291,7 +291,10 @@ def build_dependencies(
     event_mapping_repository = None
     event_resolver = None
     player_diet_service = None
-    player_profile_reader = None
+    # The demo fixture intentionally carries no durable catalog/Diet schema.
+    # Compose the same narrow request seam in an explicit unavailable mode so
+    # absence cannot reactivate the retired legacy profile reads.
+    player_profile_reader = PlayerProfileReader.unavailable()
     team_matchup_query_service = None
     if not demo_database:
         athlete_catalog_service = AthleteCatalogService(

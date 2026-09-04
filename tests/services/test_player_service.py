@@ -135,14 +135,14 @@ class _DurableProfileReader:
         return self.result
 
 
-def _catalog_row(player_id, display_name, team="BOS"):
+def _catalog_row(player_id, display_name, team="BOS", *, active=True):
     return {
         "season": "2025-26",
         "player_id": player_id,
         "display_name": display_name,
-        "roster_status": "active",
-        "is_active": True,
-        "is_active_for_season": True,
+        "roster_status": "active" if active else "inactive",
+        "is_active": active,
+        "is_active_for_season": active,
         "team_id": 1610612738,
         "team_name": "Boston Celtics",
         "team_abbreviation": team,
@@ -250,6 +250,81 @@ def test_profile_read_does_not_touch_legacy_tables_or_provider(monkeypatch):
     assert service.get_all_players() == ["Jayson Tatum"]
     assert service.get_player_profile("Jayson Tatum", "Playtypes")["Transition%"] == 20.0
     assert service.get_player_profile("Jayson Tatum", "assists")[0]["Name"] == "Jayson Tatum"
+
+
+def test_player_list_includes_the_complete_current_season_fact_population():
+    player_count = 439
+    catalog = [
+        _catalog_row(
+            player_id,
+            f"Player {player_id}",
+            active=player_id != player_count,
+        )
+        for player_id in range(1, player_count + 1)
+    ]
+    result = PlayerDietResult(
+        season="2025-26",
+        players={
+            player_id: (_fact(player_id, "play_types", "Isolation", 0.1),)
+            for player_id in range(1, player_count + 1)
+        },
+        observations=(),
+    )
+    reader = _DurableProfileReader(catalog, result)
+    service = PlayerService(object(), settings=_settings(), profile_reader=reader)
+
+    players = service.get_all_players()
+
+    assert len(players) == player_count
+    assert players[-1] == "Player 439"
+    assert reader.catalog_calls == [("2025-26", False)]
+
+
+def test_player_list_does_not_hide_durable_reader_failures():
+    class FailingReader:
+        def get_catalog(self, season, *, active_only=False):
+            raise RuntimeError("player catalog schema is unavailable")
+
+        def get_for_players(self, season, player_ids):
+            raise AssertionError("facts must not be read after catalog failure")
+
+    service = PlayerService(
+        object(),
+        settings=_settings(),
+        profile_reader=FailingReader(),
+    )
+
+    with pytest.raises(RuntimeError, match="catalog schema is unavailable"):
+        service.get_all_players()
+
+
+def test_traded_player_profile_uses_combined_fact_and_current_catalog_team():
+    player_id = 201935
+    combined_share = 0.402376754416591
+    reader = _DurableProfileReader(
+        [_catalog_row(player_id, "James Harden", "LAC")],
+        PlayerDietResult(
+            season="2025-26",
+            players={
+                player_id: (
+                    _fact(
+                        player_id,
+                        "play_types",
+                        "Isolation",
+                        combined_share,
+                        volume=600,
+                    ),
+                )
+            },
+            observations=(),
+        ),
+    )
+    service = PlayerService(object(), settings=_settings(), profile_reader=reader)
+
+    profile = service.get_player_profile("James Harden", "Playtypes")
+
+    assert profile["TEAM_ABBREVIATION"] == "LAC"
+    assert profile["Isolation%"] == pytest.approx(40.2376754416591)
 
 
 @pytest.mark.parametrize(

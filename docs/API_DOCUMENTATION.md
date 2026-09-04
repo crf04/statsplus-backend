@@ -1269,7 +1269,9 @@ GET /api/players
 
 Returns a JSON array of canonical current-season Athlete Catalog display names
 that have durable Player Diet play-type facts. The request is database-only and
-does not call an upstream provider.
+does not call an upstream provider. The bundled read-only demo database carries
+no durable Athlete Catalog or Player Diet schema, so this route returns `[]`
+there instead of consulting its legacy `player_play_types` table.
 
 ### Get Player Profile
 
@@ -1290,7 +1292,9 @@ shares multiplied by 100; its player name and team are the current canonical
 catalog values. `assists` keeps its historical one-element array shape and
 derives two-point, three-point, and `+` values from durable assist-location
 facts and Player Diet league baselines. Missing play-type slices are returned
-as zero. Neither category calls an upstream provider at request time.
+as zero. Neither category calls an upstream provider at request time. On the
+bundled demo database these two durable-only categories report a missing player;
+they never fall back to `player_play_types` or `processed_player_assists`.
 
 Example:
 

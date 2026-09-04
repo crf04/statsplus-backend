@@ -1,5 +1,6 @@
 """Application and route smoke tests."""
 
+import pytest
 import requests
 
 
@@ -181,6 +182,89 @@ def test_player_routes_preserve_profile_response_shapes(client):
     assert playtypes.get_json()["Transition%"] == 20.0
     assert assists.status_code == 200
     assert assists.get_json()[0]["ThreePtAssists"] == 30.0
+
+
+def test_assist_profile_route_returns_derived_plus_fields(client):
+    from datetime import datetime, timezone
+
+    from app.services.player_diet import (
+        PlayerDietBaseline,
+        PlayerDietResult,
+        StoredPlayerDietFact,
+    )
+    from app.services.player_service import PlayerService
+
+    player_id = 111
+    slices = {
+        "Arc3Assists": 0.20,
+        "Corner3Assists": 0.10,
+        "AtRimAssists": 0.30,
+        "ShortMidRangeAssists": 0.15,
+        "LongMidRangeAssists": 0.05,
+    }
+
+    class Reader:
+        def get_catalog(self, season, *, active_only=False):
+            return [
+                {
+                    "player_id": player_id,
+                    "display_name": "Jayson Tatum",
+                    "team_abbreviation": "BOS",
+                    "is_active_for_season": True,
+                }
+            ]
+
+        def get_for_players(self, season, player_ids):
+            return PlayerDietResult(
+                season=season,
+                players={
+                    player_id: tuple(
+                        StoredPlayerDietFact(
+                            player_id=player_id,
+                            base="assist_locations",
+                            slice_key=slice_key,
+                            share=share,
+                            volume=100,
+                            games_played=20,
+                            volume_unit="assists",
+                            provider="pbp_stats",
+                            retrieved_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                        )
+                        for slice_key, share in slices.items()
+                    )
+                },
+                observations=(),
+                baselines={
+                    ("assist_locations", slice_key): PlayerDietBaseline(
+                        baseline, 0.1
+                    )
+                    for slice_key, baseline in {
+                        "Arc3Assists": 0.10,
+                        "Corner3Assists": 0.10,
+                        "AtRimAssists": 0.20,
+                        "ShortMidRangeAssists": 0.10,
+                        "LongMidRangeAssists": 0.05,
+                    }.items()
+                },
+            )
+
+    dependencies = client.application.extensions["dependencies"]
+    dependencies.player_service = PlayerService(
+        object(),
+        settings=dependencies.settings,
+        profile_reader=Reader(),
+    )
+
+    response = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
+    )
+
+    assert response.status_code == 200
+    profile = response.get_json()[0]
+    assert profile["TwoPtAssists"] == pytest.approx(50.0)
+    assert profile["TwoPtAssists+"] == pytest.approx(1.4285714285714286)
+    assert profile["ThreePtAssists"] == pytest.approx(30.0)
+    assert profile["ThreePtAssists+"] == pytest.approx(1.5)
 
 
 def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):
