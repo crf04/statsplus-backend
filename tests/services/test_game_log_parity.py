@@ -318,7 +318,7 @@ def test_game_service_reads_an_active_player_log_publication_once(
 
     source = StoredGameLogsSource(repository)
     service = _service(engine, source)
-    monkeypatch.setattr(service, "get_player_id", lambda _name: 101)
+    monkeypatch.setattr(service, "get_player_id", lambda _name, _season: 101)
 
     frame, next_team = service._get_game_logs("Player 101", SEASON)
 

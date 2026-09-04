@@ -868,6 +868,15 @@ GET /api/games/game_logs
   → serialized logs and averages
 ```
 
+`GameService.get_player_id` resolves the `player_name` query parameter against
+the injected Athlete Catalog (`AthleteCatalogService.get_catalog`) for the
+requested season first -- exact case-insensitive match, then fuzzy -- because
+that is the governed identity source durable game-log ingest already joins
+on. It falls back to the legacy `player_information` table (a nba_api static
+dump only the admin `fetch_players` job writes) when no catalog is injected
+or the season has no catalog rows, which keeps the read-only demo database and
+historical seasons working unchanged.
+
 The request-time player-game-log source is one injected database-only seam
 (`app.services.game_logs_source.StoredGameLogsSource`). It captures the active
 immutable `player_game_logs` publication generation and reads that generation's

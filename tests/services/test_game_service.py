@@ -115,12 +115,72 @@ def test_fetch_data_rejects_a_retired_legacy_team_filter_table(service):
 
 
 def test_get_player_id_resolves_a_close_name(service):
-    assert service.get_player_id("LeBron James") == 2544
+    assert service.get_player_id("LeBron James", "2025-26") == 2544
 
 
 def test_get_player_id_raises_for_an_unknown_player(service):
     with pytest.raises(ValueError, match="No matching player found"):
-        service.get_player_id("Nonexistent Person")
+        service.get_player_id("Nonexistent Person", "2025-26")
+
+
+class _StubAthleteCatalog:
+    """Season-scoped catalog stand-in: rows for one season, none for others."""
+
+    def __init__(self, season, rows):
+        self.season = season
+        self.rows = rows
+
+    def get_catalog(self, season, *, active_only=False):
+        return list(self.rows) if season == self.season else []
+
+
+@pytest.fixture
+def catalog_service(game_engine, monkeypatch):
+    """A GameService whose catalog knows a rookie absent from player_information."""
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2025-26",
+        [
+            {"player_id": 1642843, "display_name": "Cooper Flagg"},
+            {"player_id": 2544, "display_name": "LeBron James"},
+        ],
+    )
+    return game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+
+def test_get_player_id_resolves_from_the_season_catalog_even_when_absent_from_player_information(
+    catalog_service,
+):
+    assert catalog_service.get_player_id("Cooper Flagg", "2025-26") == 1642843
+
+
+def test_get_player_id_exact_match_is_case_and_whitespace_insensitive(catalog_service):
+    assert catalog_service.get_player_id("  cooper flagg  ", "2025-26") == 1642843
+
+
+def test_get_player_id_fuzzy_matches_a_near_miss_against_the_catalog(catalog_service):
+    assert catalog_service.get_player_id("Cooper Flag", "2025-26") == 1642843
+
+
+def test_get_player_id_raises_for_an_unknown_name_in_the_catalog(catalog_service):
+    with pytest.raises(ValueError, match="No matching player found"):
+        catalog_service.get_player_id("Nonexistent Person", "2025-26")
+
+
+def test_get_player_id_falls_back_to_player_information_when_the_catalog_has_no_rows_for_the_season(
+    catalog_service,
+):
+    assert catalog_service.get_player_id("LeBron James", "2024-25") == 2544
+
+
+def test_get_player_id_uses_the_legacy_path_when_no_catalog_is_injected(service):
+    assert service.get_player_id("LeBron James", "2025-26") == 2544
 
 
 def test_get_team_name_by_id_returns_none_for_an_unknown_id(service):

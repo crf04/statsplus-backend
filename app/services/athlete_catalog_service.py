@@ -88,6 +88,54 @@ def _iso(value: datetime | None) -> str | None:
     return normalized.isoformat() if normalized is not None else None
 
 
+def _read_catalog_rows(
+    engine: Engine,
+    season: str,
+    *,
+    active_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Read persisted canonical athletes for one explicit season."""
+
+    season = validate_canonical_season(season)
+    with engine.connect() as connection:
+        statement = (
+            select(AthleteCatalog.__table__)
+            .where(AthleteCatalog.season == season)
+            .order_by(AthleteCatalog.player_id)
+        )
+        if active_only:
+            statement = statement.where(AthleteCatalog.is_active_for_season.is_(True))
+        rows = connection.execute(statement).mappings().all()
+    return [
+        {column: row[column] for column in ROSTER_COLUMNS}
+        for row in rows
+    ]
+
+
+class AthleteCatalogReader:
+    """The one Athlete Catalog capability the game-log path needs.
+
+    ``AthleteCatalogService`` owns provider-backed refresh and holds the NBA
+    Stats adapter to do it, so injecting the service -- or a wrapper around
+    it -- would leave that adapter reachable from the read path.  This binds
+    the engine directly instead, so the adapter is unreachable rather than
+    merely unexposed.
+    """
+
+    __slots__ = ("_engine",)
+
+    def __init__(self, db_engine: Engine) -> None:
+        self._engine = db_engine
+
+    def get_catalog(
+        self,
+        season: str,
+        *,
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        return _read_catalog_rows(self._engine, season, active_only=active_only)
+
+
 class AthleteCatalogService:
     """Own canonical athlete catalog publication and freshness reads."""
 
@@ -186,23 +234,7 @@ class AthleteCatalogService:
     ) -> list[dict[str, Any]]:
         """Read persisted canonical athletes for one explicit season."""
 
-        season = validate_canonical_season(season)
-        with self.engine.connect() as connection:
-            statement = (
-                select(AthleteCatalog.__table__)
-                .where(AthleteCatalog.season == season)
-                .order_by(AthleteCatalog.player_id)
-            )
-            if active_only:
-                statement = statement.where(AthleteCatalog.is_active_for_season.is_(True))
-            rows = connection.execute(statement).mappings().all()
-        return [
-            {
-                column: row[column]
-                for column in ROSTER_COLUMNS
-            }
-            for row in rows
-        ]
+        return _read_catalog_rows(self.engine, season, active_only=active_only)
 
     def get_freshness(
         self,
@@ -346,6 +378,7 @@ class AthleteCatalogService:
 
 __all__ = [
     "AthleteCatalogService",
+    "AthleteCatalogReader",
     "AthleteCatalogBatchResult",
     "AthleteCatalogSeasonResult",
     "CATALOG_FAILURE_SUMMARY",

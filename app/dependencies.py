@@ -86,7 +86,10 @@ def build_dependencies(
     from app.providers.pbp_stats import PBPStatsAdapter
     from app.providers.rotowire import RotoWireInjuryProvider
     from app.providers.dfs import NBAMarketQuery
-    from app.services.athlete_catalog_service import AthleteCatalogService
+    from app.services.athlete_catalog_service import (
+        AthleteCatalogReader,
+        AthleteCatalogService,
+    )
     from app.services.comparison_board import ComparisonBoardService
     from app.services.data_service import DataService
     from app.services.stats_freshness_repository import StatsFreshnessRepository
@@ -577,6 +580,14 @@ def build_dependencies(
         team_matchups=team_matchup_query_service,
         team_filter_rankings=season_rankings,
         publication_reader=publication_reader,
+        # Read-only Catalog access bound to the engine directly: the full
+        # service owns a provider-backed refresh, so injecting it -- or a
+        # wrapper around it -- would leave that adapter reachable from here.
+        athlete_catalog=(
+            AthleteCatalogReader(engine)
+            if athlete_catalog_service is not None
+            else None
+        ),
     )
     matchup_player_pool_reader = projection_player_pool_reader
     selection_player_pool_reader = (
