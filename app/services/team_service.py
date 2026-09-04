@@ -10,6 +10,8 @@ date is accepted and ignored because the rankings are always whole-season.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
@@ -31,15 +33,6 @@ from app.services.team_matchup_query import (
     league_metric_column,
     publication_league_table,
 )
-
-#: The publication base each panel category is served from.
-CATEGORY_PUBLICATION_BASES: dict[str, str] = {
-    "Traditional": "traditional",
-    "Playtypes": "play_types",
-    "Assists": "assist_locations",
-    "Zone Shooting": "shot_zones",
-    "Shooting Type": "shot_types",
-}
 
 #: The opponent box columns the panel renders and the ledger metric each one
 #: reads.  ``OPP_OREB`` and ``OPP_DREB`` are absent because the ledger
@@ -77,15 +70,18 @@ _TRICODE_TO_TEAM_ID: dict[str, int] = {
     tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
 }
 
+#: A rate no team in the league has: every field it would place is omitted.
+_NO_RATE_COLUMN = LeagueMetricColumn(
+    values={}, ranks={}, average=0.0, sigma=0.0
+)
+
 
 class TeamService:
     def __init__(
         self,
-        db_engine,
         settings: RuntimeSettings | None = None,
         season_publications=None,
     ):
-        self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         # The publication read seam of #198: it owns a publication reader and
         # a governance resolver, so no provider client is reachable from here.
@@ -104,16 +100,16 @@ class TeamService:
         serves nothing rather than a partial league.
         """
 
-        if category not in CATEGORY_PUBLICATION_BASES:
+        if category not in _CATEGORIES:
             raise InvalidInputError(
                 f"Unsupported team stats category: {category}."
             )
-        empty = [] if category == "Shooting Type" else {}
+        base, profile, empty = _CATEGORIES[category]
         team_id = _resolve_team_id(team)
-        rows = self._season_rows(CATEGORY_PUBLICATION_BASES[category])
+        rows = self._season_rows(base)
         if team_id is None or rows is None:
-            return empty
-        return _CATEGORY_PROFILES[category](publication_league_table(rows), team_id)
+            return empty()
+        return profile(publication_league_table(rows), team_id)
 
     def _season_rows(self, base):
         """Read one publication base's canonical thirty Season rows."""
@@ -151,23 +147,31 @@ def _combined_column(table, terms) -> LeagueMetricColumn:
 
 
 def _rate_column(table, numerator_key, denominator_key) -> LeagueMetricColumn:
-    """Rank one published rate across the league.
+    """Rank one published rate over the teams that have a rate at all.
 
-    A team that faced none of something has no rate at all.  The panel renders
-    one row per team, so such a team scores 0.0 here rather than being dropped
-    from the category the way a Team Filter drops it from its ranking.
+    A team that faced no possessions of a play type has no points per
+    possession, which is not the same as allowing none: scoring it zero would
+    both rank it as the stingiest defense and pull the league average that
+    every other team's ratio is measured against.  It is excluded from the
+    column instead, exactly as a Team Filter excludes it from its ranking, and
+    the panel renders the missing fields as ``N/A``.
     """
 
     denominator = table[denominator_key].values
-    return league_metric_column({
-        team_id: (value / denominator[team_id] if denominator[team_id] else 0.0)
+    rates = {
+        team_id: value / denominator[team_id]
         for team_id, value in table[numerator_key].values.items()
-    })
+        if denominator[team_id]
+    }
+    # No team faced this at all: there is no league average to rank against.
+    return league_metric_column(rates) if rates else _NO_RATE_COLUMN
 
 
 def _place(stats, field, column, team_id) -> None:
     """Write one column's value, rank, and distance from the league average."""
 
+    if team_id not in column.values:
+        return
     stats[field] = column.values[team_id]
     stats[f"{field}_RANK"] = column.rank(team_id)
     stats[f"{field}_vs_avg_pct"] = column.percent_vs_league_average(team_id)
@@ -181,6 +185,8 @@ def _place_ratio(stats, field, column, team_id) -> None:
     published column, where a division can neither create nor break a tie.
     """
 
+    if team_id not in column.values:
+        return
     stats[field] = (
         column.values[team_id] / column.average if column.average else 0.0
     )
@@ -274,10 +280,13 @@ def _shot_type_profile(table, team_id) -> list:
     return profile
 
 
-_CATEGORY_PROFILES = {
-    "Traditional": _traditional_profile,
-    "Playtypes": _play_type_profile,
-    "Assists": _assist_profile,
-    "Zone Shooting": _shot_zone_profile,
-    "Shooting Type": _shot_type_profile,
+#: One row per panel category: the publication base it is served from, the
+#: projection that maps the league table into the panel's field names, and the
+#: shape an unpublished answer takes.
+_CATEGORIES: dict[str, tuple[str, Callable, Callable]] = {
+    "Traditional": ("traditional", _traditional_profile, dict),
+    "Playtypes": ("play_types", _play_type_profile, dict),
+    "Assists": ("assist_locations", _assist_profile, dict),
+    "Zone Shooting": ("shot_zones", _shot_zone_profile, dict),
+    "Shooting Type": ("shot_types", _shot_type_profile, list),
 }

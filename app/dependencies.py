@@ -269,7 +269,6 @@ def build_dependencies(
         else None
     )
     team_service = TeamService(
-        engine,
         settings=settings,
         season_publications=season_rankings,
     )

@@ -6,56 +6,24 @@ sends a date.  These tests drive the real service over seeded publications so
 the panel-visible shape is proven, not mocked.
 """
 
-from datetime import datetime, timezone
-
 import pytest
 
-from app.config.settings import RuntimeSettings
-from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
-from app.services.database_first_activation import (
-    PublicationRead,
-    PublicationTeamWindowRow,
-)
 from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
     TEAM_METRICS,
 )
-from app.services.team_filter_rankings import TeamFilterRankingService
-from app.services.team_service import TeamService
+from tests.support.publication_stubs import (
+    league,
+    read,
+    team_service as _team_service,
+)
 
-SEASON = "2025-26"
-RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
 LAKERS = "Los Angeles Lakers"
 
 
 def _read(stream_key, per48_for):
-    rows = tuple(
-        PublicationTeamWindowRow(
-            team_id=team_id,
-            team_tricode=tricode,
-            game_ids=("0022500001",),
-            game_count=1,
-            per48=per48_for(tricode),
-            league_average={},
-            population_sigma={},
-            competition_rank={},
-        )
-        for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-    )
-    return PublicationRead(
-        stream_key=stream_key,
-        publication_id="publication-1",
-        season=SEASON,
-        cutoff=RETRIEVED_AT.isoformat(),
-        version=1,
-        status="active",
-        freshness="fresh",
-        age_seconds=0,
-        payload={"rows": []},
-        retrieved_at=RETRIEVED_AT,
-        decoded=rows,
-    )
+    return read(stream_key, league(per48_for))
 
 
 def _seeded_reads():
@@ -98,50 +66,6 @@ def _seeded_reads():
             lambda tricode: scaled(shot_zones, factor_for(tricode)),
         ),
     }
-
-
-class _StubReader:
-    def __init__(self, reads):
-        self._reads = reads
-
-    def read_many(self, stream_keys, *, season=None):
-        return {
-            stream_key: self._reads.get(
-                stream_key,
-                PublicationRead(
-                    stream_key=stream_key,
-                    publication_id=None,
-                    season=season,
-                    cutoff=None,
-                    version=None,
-                    status="missing",
-                    freshness="missing",
-                    age_seconds=None,
-                    payload=None,
-                ),
-            )
-            for stream_key in tuple(stream_keys)
-        }
-
-
-class _StubGovernance:
-    def resolve_team_game_ids(self, season, cutoff, *, window, **kwargs):
-        return {
-            team_id: frozenset({"0022500001"})
-            for team_id in NBA_TEAM_ID_TO_TRICODE
-        }
-
-
-def _team_service(reads):
-    return TeamService(
-        None,
-        settings=RuntimeSettings(
-            environment="testing", nba={"current_season": SEASON}
-        ),
-        season_publications=TeamFilterRankingService(
-            _StubReader(reads), governance_resolver=_StubGovernance()
-        ),
-    )
 
 
 @pytest.fixture

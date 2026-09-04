@@ -1329,7 +1329,10 @@ published counts; `Assists` derives `AssistPoints` as
 `2 x TwoPtAssists + 3 x ThreePtAssists`; `Shooting Type` returns one object
 per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.  `OPP_OREB` and
 `OPP_DREB` are absent, because the publications carry no rebound split; the
-panel renders them as `N/A`.
+panel renders them as `N/A`.  A rate a team has no denominator for -- a play
+type it faced zero possessions of -- is absent the same way, for that team
+only: it is neither ranked as the stingiest defense nor counted in the league
+average the other teams are measured against.
 
 An unknown `category` is `400 invalid_input`.  A season with no published
 generation -- including every request against the read-only demo database,

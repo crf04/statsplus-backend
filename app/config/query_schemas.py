@@ -95,7 +95,10 @@ ENDPOINT_SCHEMAS = {
         "optional_params": {
             "date": {
                 "type": "str",
-                "description": "Date filter for team stats"
+                "description": (
+                    "Accepted and ignored: team stats are ranked over the "
+                    "whole season and a date never reshapes them"
+                )
             }
         }
     }

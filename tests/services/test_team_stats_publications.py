@@ -1,7 +1,5 @@
 """Opponent Team Profile categories, served from the Season publications."""
 
-from datetime import datetime, timezone
-
 import pytest
 
 from app.config.settings import RuntimeSettings
@@ -11,111 +9,19 @@ from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
 )
 from app.errors import InvalidInputError
-from app.services.database_first_activation import (
-    PublicationRead,
-    PublicationTeamWindowRow,
-)
 from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
     TEAM_METRICS,
 )
-from app.services.team_filter_rankings import TeamFilterRankingService
 from app.services.team_service import TeamService
+from tests.support.publication_stubs import (
+    SEASON,
+    league as _league,
+    read as _read,
+    team_service as _service,
+)
 
-SEASON = "2025-26"
-RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
 LAKERS = "Los Angeles Lakers"
-
-
-def _row(team_id, tricode, per48):
-    return PublicationTeamWindowRow(
-        team_id=team_id,
-        team_tricode=tricode,
-        game_ids=("0022500001",),
-        game_count=1,
-        per48=per48,
-        league_average={},
-        population_sigma={},
-        competition_rank={},
-    )
-
-
-def _league(per48_for):
-    """Build the canonical thirty rows from one per-team metric builder."""
-
-    return tuple(
-        _row(team_id, tricode, per48_for(tricode))
-        for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-    )
-
-
-def _read(stream_key, rows, *, freshness="fresh", status="active"):
-    return PublicationRead(
-        stream_key=stream_key,
-        publication_id="publication-1",
-        season=SEASON,
-        cutoff=RETRIEVED_AT.isoformat(),
-        version=1,
-        status=status,
-        freshness=freshness,
-        age_seconds=0,
-        payload={"rows": []},
-        retrieved_at=RETRIEVED_AT,
-        decoded=tuple(rows),
-    )
-
-
-class _StubReader:
-    """One publication generation, recorded so the read seam stays visible."""
-
-    def __init__(self, reads):
-        self._reads = reads
-        self.calls = []
-
-    def read_many(self, stream_keys, *, season=None):
-        keys = tuple(stream_keys)
-        self.calls.extend((stream_key, season) for stream_key in keys)
-        return {
-            stream_key: self._reads.get(
-                stream_key,
-                PublicationRead(
-                    stream_key=stream_key,
-                    publication_id=None,
-                    season=season,
-                    cutoff=None,
-                    version=None,
-                    status="missing",
-                    freshness="missing",
-                    age_seconds=None,
-                    payload=None,
-                ),
-            )
-            for stream_key in keys
-        }
-
-
-class _StubGovernance:
-    """The governed per-team game set an NBA publication must match."""
-
-    def resolve_team_game_ids(self, season, cutoff, *, window, **kwargs):
-        return {
-            team_id: frozenset({"0022500001"})
-            for team_id in NBA_TEAM_ID_TO_TRICODE
-        }
-
-
-def _service(reads):
-    """A Team Profile service that can reach nothing but the publications."""
-
-    return TeamService(
-        None,
-        settings=RuntimeSettings(
-            environment="testing", nba={"current_season": SEASON}
-        ),
-        season_publications=TeamFilterRankingService(
-            _StubReader(reads), governance_resolver=_StubGovernance()
-        ),
-    )
 
 
 # --- Traditional -----------------------------------------------------------
@@ -206,6 +112,33 @@ def test_traditional_compares_each_column_with_the_league_average():
     )
 
 
+def test_a_team_with_no_attempts_carries_no_shooting_percentage():
+    """A percentage with no attempts behind it is absent, not zero."""
+
+    def per48(tricode):
+        values = {metric: 2.0 for metric in TEAM_METRICS}
+        if tricode == "LAL":
+            values.update(field_goals_made=0.0, field_goals_attempted=0.0)
+        return values
+
+    reads = {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season", _league(per48)
+        )
+    }
+
+    stats = _service(reads).get_team_stats("Traditional", LAKERS)
+
+    assert stats["OPP_FGA"] == 0.0
+    assert "OPP_FG_PCT" not in stats
+    assert "OPP_FG_PCT_RANK" not in stats
+    assert "OPP_FG_PCT_vs_avg_pct" not in stats
+    # The twenty-nine teams that did face shots still rank against each other.
+    celtics = _service(reads).get_team_stats("Traditional", "Boston Celtics")
+    assert celtics["OPP_FG_PCT"] == 1.0
+    assert celtics["OPP_FG_PCT_RANK"] == 1
+
+
 def test_traditional_omits_the_rebound_split_the_publication_does_not_carry():
     stats = _service(_traditional_reads()).get_team_stats("Traditional", LAKERS)
 
@@ -282,6 +215,42 @@ def test_playtypes_carry_no_versus_average_percentage():
     stats = _service(_play_type_reads({})).get_team_stats("Playtypes", LAKERS)
 
     assert not [key for key in stats if key.endswith("_vs_avg_pct")]
+
+
+def test_a_team_that_never_faced_a_play_type_carries_no_rate_for_it():
+    """No points across no possessions is not the stingiest defense.
+
+    The team is left out of the column, so the panel renders `N/A` for it,
+    and the twenty-nine that have a rate rank among themselves against a
+    league average that its absent rate never moved.
+    """
+
+    reads = _play_type_reads({"LAL": (0.0, 0.0), "GSW": (30.0, 20.0)})
+
+    lakers = _service(reads).get_team_stats("Playtypes", LAKERS)
+    warriors = _service(reads).get_team_stats("Playtypes", "Golden State Warriors")
+    celtics = _service(reads).get_team_stats("Playtypes", "Boston Celtics")
+
+    assert "Transition" not in lakers
+    assert "Transition_RANK" not in lakers
+    # The other ten play types are unaffected for the same team.
+    assert lakers["Isolation"] == pytest.approx(1.0)
+    # GSW allows 1.5 per possession against twenty-eight teams at 0.5.
+    league_average = (1.5 + 28 * 0.5) / 29
+    assert warriors["Transition"] == pytest.approx(1.5 / league_average)
+    assert warriors["Transition_RANK"] == 29
+    assert celtics["Transition_RANK"] == 1
+
+
+def test_a_play_type_no_team_faced_carries_no_rate_at_all():
+    reads = _play_type_reads(
+        {tricode: (0.0, 0.0) for tricode in NBA_TEAM_ID_TO_TRICODE.values()}
+    )
+
+    stats = _service(reads).get_team_stats("Playtypes", LAKERS)
+
+    assert "Transition" not in stats
+    assert stats["Isolation_RANK"] == 1
 
 
 # --- Assists ---------------------------------------------------------------
@@ -481,7 +450,6 @@ def test_a_deployment_without_publications_serves_nothing():
     """The demo database carries no publication tables (the #198 precedent)."""
 
     demo = TeamService(
-        None,
         settings=RuntimeSettings(
             environment="testing", nba={"current_season": SEASON}
         ),

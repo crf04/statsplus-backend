@@ -1004,7 +1004,11 @@ publication serves its last-good values silently, and a season with no
 published generation -- including the demo database, which carries no
 publication tables -- serves nothing rather than a partial league.  Fields the
 publications do not carry (`OPP_OREB`, `OPP_DREB`) are omitted rather than
-synthesized.
+synthesized, and so is a rate one team has no denominator for: a team that
+faced zero possessions of a play type is left out of that column exactly as a
+Team Filter leaves it out of that ranking, so it neither ranks as the
+stingiest defense nor moves the league average the other teams' ratios are
+measured against.
 
 ### NBA Stats game-log adapter
 

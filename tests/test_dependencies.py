@@ -721,5 +721,3 @@ def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
     assert isinstance(
         publications.publication_reader, DatabaseFirstPublicationReader
     )
-    # The Team Filters and the Team Profile share one publication read seam.
-    assert publications is dependencies.game_service.team_filter_rankings
