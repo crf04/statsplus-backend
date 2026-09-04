@@ -169,10 +169,13 @@ def test_every_remaining_mention_of_a_retired_table_is_accounted_for():
     """
 
     found = {
-        str(path.relative_to(REPOSITORY_ROOT))
+        path.relative_to(REPOSITORY_ROOT).as_posix()
         for root in PRODUCTION_ROOTS
         for path in (REPOSITORY_ROOT / root).rglob("*.py")
-        if any(name in path.read_text() for name in RETIRED_LEGACY_RANKING_TABLES)
+        if any(
+            name in path.read_text(encoding="utf-8")
+            for name in RETIRED_LEGACY_RANKING_TABLES
+        )
     }
 
     assert found == set(ALLOWED_RETIRED_TABLE_MENTIONS)

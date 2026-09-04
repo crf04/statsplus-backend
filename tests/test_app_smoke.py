@@ -184,8 +184,11 @@ def test_player_routes_preserve_profile_response_shapes(client):
     assert assists.get_json()[0]["ThreePtAssists"] == 30.0
 
 
-def test_assist_profile_route_returns_derived_plus_fields(client):
+def test_tatum_profile_routes_use_the_real_durable_service(client):
     from datetime import datetime, timezone
+
+    import pandas as pd
+    from sqlalchemy import create_engine
 
     from app.services.player_diet import (
         PlayerDietBaseline,
@@ -195,7 +198,7 @@ def test_assist_profile_route_returns_derived_plus_fields(client):
     from app.services.player_service import PlayerService
 
     player_id = 111
-    slices = {
+    assist_slices = {
         "Arc3Assists": 0.20,
         "Corner3Assists": 0.10,
         "AtRimAssists": 0.30,
@@ -218,19 +221,34 @@ def test_assist_profile_route_returns_derived_plus_fields(client):
             return PlayerDietResult(
                 season=season,
                 players={
-                    player_id: tuple(
+                    player_id: (
                         StoredPlayerDietFact(
                             player_id=player_id,
-                            base="assist_locations",
-                            slice_key=slice_key,
-                            share=share,
+                            base="play_types",
+                            slice_key="Transition",
+                            share=0.2,
                             volume=100,
                             games_played=20,
-                            volume_unit="assists",
-                            provider="pbp_stats",
+                            volume_unit="possessions",
+                            provider="nba_synergy",
                             retrieved_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
-                        )
-                        for slice_key, share in slices.items()
+                        ),
+                        *(
+                            StoredPlayerDietFact(
+                                player_id=player_id,
+                                base="assist_locations",
+                                slice_key=slice_key,
+                                share=share,
+                                volume=100,
+                                games_played=20,
+                                volume_unit="assists",
+                                provider="pbp_stats",
+                                retrieved_at=datetime(
+                                    2026, 8, 23, tzinfo=timezone.utc
+                                ),
+                            )
+                            for slice_key, share in assist_slices.items()
+                        ),
                     )
                 },
                 observations=(),
@@ -249,18 +267,34 @@ def test_assist_profile_route_returns_derived_plus_fields(client):
             )
 
     dependencies = client.application.extensions["dependencies"]
+    legacy_engine = create_engine("sqlite:///:memory:")
+    pd.DataFrame(
+        [{"PLAYER_NAME": "Other Player", "Transition%": 10.0}]
+    ).to_sql("player_play_types", legacy_engine, index=False)
+    pd.DataFrame(
+        [{"Name": "Other Player", "ThreePtAssists": 20.0}]
+    ).to_sql("processed_player_assists", legacy_engine, index=False)
+
     dependencies.player_service = PlayerService(
-        object(),
+        legacy_engine,
+        Reader(),
         settings=dependencies.settings,
-        profile_reader=Reader(),
     )
 
-    response = client.get(
+    playtypes_response = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes"
+    )
+    assists_response = client.get(
         "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
     )
 
-    assert response.status_code == 200
-    profile = response.get_json()[0]
+    assert playtypes_response.status_code == 200
+    playtypes = playtypes_response.get_json()
+    assert playtypes["PLAYER_NAME"] == "Jayson Tatum"
+    assert playtypes["TEAM_ABBREVIATION"] == "BOS"
+    assert playtypes["Transition%"] == pytest.approx(20.0)
+    assert assists_response.status_code == 200
+    profile = assists_response.get_json()[0]
     assert profile["TwoPtAssists"] == pytest.approx(50.0)
     assert profile["TwoPtAssists+"] == pytest.approx(1.4285714285714286)
     assert profile["ThreePtAssists"] == pytest.approx(30.0)

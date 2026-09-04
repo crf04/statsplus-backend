@@ -14,7 +14,7 @@ from ..errors import (
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.models.catalogs import PLAY_TYPES
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
-from app.services.athlete_resolver import normalize_athlete_name
+from app.services.athlete_resolver import CanonicalAthlete, normalize_athlete_name
 from app.services.player_diet import PlayerDietResult
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import PublicationFence
@@ -90,20 +90,18 @@ class PlayerService:
     def __init__(
         self,
         db_engine,
+        profile_reader: PlayerProfileReader,
         settings: RuntimeSettings | None = None,
         nba_stats_provider: NBAStatsProvider | None = None,
         publication_reader=None,
-        profile_reader: PlayerProfileReader | None = None,
     ):
+        if profile_reader is None:
+            raise TypeError("player profile reader is required")
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self.publication_reader = publication_reader
-        self.profile_reader = (
-            profile_reader
-            if profile_reader is not None
-            else PlayerProfileReader.unavailable()
-        )
+        self.profile_reader = profile_reader
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -133,13 +131,13 @@ class PlayerService:
         if not player_name or not category:
             raise InvalidInputError("player_name and category are required.")
 
-        canonical = self._resolve_profile_player(player_name)
         if category in _DURABLE_PROFILE_CATEGORIES:
+            canonical = self._resolve_profile_player(player_name)
             if canonical is None:
                 raise ResourceNotFoundError("The requested player was not found.")
-            player_id, canonical_name, team_abbreviation = canonical
-        elif canonical is not None:
-            _, player_name, _ = canonical
+            player_id = canonical.player_id
+            canonical_name = canonical.display_name
+            team_abbreviation = canonical.team_abbreviation
         else:
             player_name = self._fuzzy_match_player_name(player_name)
             if player_name is None:
@@ -184,25 +182,18 @@ class PlayerService:
         if not target:
             return None
         matches = [
-            row
+            CanonicalAthlete.from_row(row)
             for row in rows
             if normalize_athlete_name(row.get("display_name")) == target
         ]
         if not matches:
             return None
-        row = min(
+        return min(
             matches,
-            key=lambda item: (
-                not bool(
-                    item.get("is_active_for_season", item.get("is_active", False))
-                ),
-                int(item["player_id"]),
+            key=lambda athlete: (
+                not athlete.is_active_for_season,
+                athlete.player_id,
             ),
-        )
-        return (
-            int(row["player_id"]),
-            str(row.get("display_name") or ""),
-            row.get("team_abbreviation"),
         )
 
     def _durable_profile_result(self, player_id):
@@ -247,9 +238,8 @@ class PlayerService:
 
         shares = {
             slice_key: float(facts_by_slice[slice_key].share)
-            if slice_key in facts_by_slice
-            else 0.0
             for slice_key in _ASSIST_LOCATION_SLICES
+            if slice_key in facts_by_slice
         }
         baselines = result.baselines
 
@@ -264,10 +254,15 @@ class PlayerService:
             total = sum(values)
             return total if total > 0 else None
 
-        derived = {
-            "TwoPtAssists": sum(shares[key] for key in _TWO_POINT_ASSIST_SLICES),
-            "ThreePtAssists": sum(shares[key] for key in _THREE_POINT_ASSIST_SLICES),
-        }
+        derived = {}
+        if all(key in shares for key in _TWO_POINT_ASSIST_SLICES):
+            derived["TwoPtAssists"] = sum(
+                shares[key] for key in _TWO_POINT_ASSIST_SLICES
+            )
+        if all(key in shares for key in _THREE_POINT_ASSIST_SLICES):
+            derived["ThreePtAssists"] = sum(
+                shares[key] for key in _THREE_POINT_ASSIST_SLICES
+            )
         all_shares = {**shares, **derived}
         all_baseline_slices = {
             **{
@@ -283,6 +278,8 @@ class PlayerService:
             "ThreePtAssists",
             *_ASSIST_LOCATION_SLICES,
         ):
+            if key not in all_shares:
+                continue
             value = all_shares[key] * 100
             output[key] = value
             baseline_key = all_baseline_slices[key]

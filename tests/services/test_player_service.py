@@ -12,7 +12,7 @@ from app.services.player_diet import (
     PlayerDietResult,
     StoredPlayerDietFact,
 )
-from app.services.player_service import PlayerService
+from app.services.player_service import PlayerProfileReader, PlayerService
 
 
 def _settings() -> RuntimeSettings:
@@ -99,7 +99,12 @@ def test_archetype_profile_uses_injected_nba_stats_provider(tmp_path, monkeypatc
             lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
         ),
     )
-    service = PlayerService(engine, settings=_settings(), nba_stats_provider=provider)
+    service = PlayerService(
+        engine,
+        PlayerProfileReader.unavailable(),
+        settings=_settings(),
+        nba_stats_provider=provider,
+    )
 
     result = service.get_player_profile(
         "LeBron James", "Archetype", "Boston Celtics"
@@ -229,6 +234,49 @@ def test_profiles_and_player_list_use_durable_catalog_and_diet_facts(monkeypatch
     assert reader.diet_calls
 
 
+def test_player_service_requires_an_explicit_profile_reader():
+    with pytest.raises(TypeError, match="profile_reader"):
+        PlayerService(object(), settings=_settings())
+
+
+@pytest.mark.parametrize(
+    ("category", "method_name", "expected"),
+    (
+        ("Archetype", "_get_archetype_gamelogs", [{"PLAYER_NAME": "Legacy Name"}]),
+        ("Shooting Type", "_get_shooting_type", [{"SHOT_TYPE": "C&S"}]),
+        ("Zone Shooting", "_get_player_zone_shooting", {"Restricted Area": 0.7}),
+    ),
+)
+def test_legacy_profile_categories_keep_their_historical_name_lookup(
+    monkeypatch, category, method_name, expected
+):
+    class RefusingProfileReader:
+        def get_catalog(self, season, *, active_only=False):
+            raise AssertionError("legacy profile category consulted Athlete Catalog")
+
+        def get_for_players(self, season, player_ids):
+            raise AssertionError("legacy profile category consulted Player Diet")
+
+    service = PlayerService(
+        object(),
+        RefusingProfileReader(),
+        settings=_settings(),
+    )
+
+    def fuzzy_match(player_name):
+        return "Legacy Name"
+
+    def handler(*args):
+        return expected
+
+    monkeypatch.setattr(service, "_fuzzy_match_player_name", fuzzy_match)
+    monkeypatch.setattr(service, method_name, handler)
+
+    assert service.get_player_profile(
+        "catalog spelling", category, "Boston Celtics"
+    ) == expected
+
+
 def test_profile_read_does_not_touch_legacy_tables_or_provider(monkeypatch):
     reader = _durable_profile_reader()
 
@@ -278,6 +326,44 @@ def test_player_list_includes_the_complete_current_season_fact_population():
     assert len(players) == player_count
     assert players[-1] == "Player 439"
     assert reader.catalog_calls == [("2025-26", False)]
+
+
+def test_sparse_assist_facts_remain_absent_from_profile_and_derived_totals():
+    player_id = 111
+    reader = _DurableProfileReader(
+        [_catalog_row(player_id, "Jayson Tatum")],
+        PlayerDietResult(
+            season="2025-26",
+            players={
+                player_id: (
+                    _fact(
+                        player_id,
+                        "assist_locations",
+                        "AtRimAssists",
+                        0.3,
+                    ),
+                )
+            },
+            observations=(),
+            baselines={
+                ("assist_locations", "AtRimAssists"): PlayerDietBaseline(
+                    0.2, 0.1
+                )
+            },
+        ),
+    )
+    service = PlayerService(object(), reader, settings=_settings())
+
+    profile = service.get_player_profile("Jayson Tatum", "assists")[0]
+
+    assert profile["AtRimAssists"] == pytest.approx(30.0)
+    assert profile["AtRimAssists+"] == pytest.approx(1.5)
+    assert "ShortMidRangeAssists" not in profile
+    assert "ShortMidRangeAssists+" not in profile
+    assert "TwoPtAssists" not in profile
+    assert "TwoPtAssists+" not in profile
+    assert "ThreePtAssists" not in profile
+    assert "ThreePtAssists+" not in profile
 
 
 def test_player_list_does_not_hide_durable_reader_failures():
