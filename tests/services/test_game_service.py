@@ -250,6 +250,54 @@ def test_fetch_athlete_catalog_rows_returns_three_tuples(catalog_service):
     assert (1642843, "Cooper Flagg", True) in rows
 
 
+class _DictCache:
+    """Minimal in-memory stand-in for the NBAGameCache methods GameService calls."""
+
+    def __init__(self):
+        self.enabled = True
+        self.store = {}
+
+    def _generate_key(self, prefix, include_date=False, function_name='', *args, **kwargs):
+        return f"{prefix}:{function_name}:{args}"
+
+    def _get_ttl(self, key):
+        return 3600
+
+    def get(self, cache_key):
+        return self.store.get(cache_key)
+
+    def set(self, cache_key, data, ttl):
+        self.store[cache_key] = data
+
+
+def test_get_player_id_does_not_cache_an_empty_catalog_read(game_engine, monkeypatch):
+    """An empty catalog read (season not yet published) must not be cached, so a
+    rookie season becomes resolvable as soon as the catalog is populated instead
+    of being masked behind a stale cached [] for the 24h player_info TTL.
+    """
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog("2025-26", [])
+    service = game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+    service.cache = _DictCache()
+    cache_key = service.cache._generate_key('table_data', False, 'athlete_catalog', "2025-26")
+
+    assert service.get_player_id("LeBron James", "2025-26") == 2544
+    assert cache_key not in service.cache.store
+
+    catalog.rows = [
+        {"player_id": 1642843, "display_name": "Cooper Flagg", "is_active_for_season": True},
+    ]
+
+    assert service.get_player_id("Cooper Flagg", "2025-26") == 1642843
+    assert service.cache.store[cache_key] == [(1642843, "Cooper Flagg", True)]
+
+
 def test_get_player_id_resolves_when_the_cache_returns_list_shaped_rows(
     catalog_service, monkeypatch
 ):

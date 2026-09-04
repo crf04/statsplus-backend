@@ -175,7 +175,7 @@ class GameService:
             for row in rows
         ]
 
-        if cache_key:
+        if cache_key and catalog_rows:
             ttl = self.cache._get_ttl('player_info')
             self.cache.set(cache_key, catalog_rows, ttl)
             logger.debug(f"Cached athlete catalog for {season}")
