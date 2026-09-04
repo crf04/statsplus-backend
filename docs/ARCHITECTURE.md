@@ -2420,6 +2420,80 @@ itself is bound to, and a resolver that cannot prove it leaves the refusal in
 place. The reason describes one read at one `as_of`, not the immutable
 publication row, so it is reported rather than stored and needs no migration.
 
+### Traditional-opponent publication formats (#50)
+
+`app.services.traditional_opponent_publications` is the deep module that owns
+the `traditional_opponent_season` and `traditional_opponent_l15` publication
+family. It exists because publications are immutable: the set of metrics a
+stored payload carries is a *format*, not a setting. Before this module one
+mutable tuple (`TEAM_METRICS`) defined both what new publications produce and
+what every historical publication had to contain, so widening it would have
+retroactively invalidated every active payload at its decode boundary.
+
+The module's interface is small. `TRADITIONAL_OPPONENT_V1` is the format every
+publication active before the rebound split; `TRADITIONAL_OPPONENT_V2` adds
+the player-credited `offensive_rebounds` and `defensive_rebounds` and carries
+the `rebound_split` capability. Each format has a stable in-code name and a
+deterministic `fingerprint` over its exact metric taxonomy, capabilities, and
+invariants, recorded in rebuild audit evidence — publications themselves gain
+no nominal schema field, because a stored format marker would be one more
+thing that can disagree with the payload.
+`recognize_traditional_opponent_format` accepts exactly the supported
+taxonomies and refuses arbitrary subsets and supersets;
+`validate_traditional_opponent_team` proves that every metric block of one
+published team row (`counts`, `per48`, `league_average`, `population_sigma`,
+`competition_rank`) carries that same taxonomy and that the format's own
+invariants hold. `normalize_traditional_opponent_window` returns one
+normalized window with explicit capabilities.
+
+`decode_team_window` delegates all traditional-opponent taxonomy and semantic
+checks to that module, so every read of this family — Team Profile, Team
+Filters, Matchups, activation candidate validation, snapshot rehearsal, and
+matchup parity — crosses one interface. Consumers branch on capabilities, not
+on which stored generation produced the payload. A valid v1 publication keeps
+serving every metric it ever served and reports the rebound split as
+unavailable; a v1 read never synthesizes zero or null rebound values, because
+a fabricated zero is indistinguishable from a defense that allowed none.
+
+Rejection is whole-publication. A payload whose rows disagree on a format, or
+that is not the canonical thirty-team population, or that in v2 violates
+`rebounds == offensive_rebounds + defensive_rebounds`, is refused entirely
+rather than served partially: a rank or a league average computed over a
+partial or internally inconsistent population is a wrong statistic, not an
+incomplete one. The identity is proved exactly on integer `counts` and within
+floating tolerance on `per48`, which is those same counts over one shared
+denominator. It is deliberately not asserted on `league_average`,
+`population_sigma`, or `competition_rank`: the mean of a sum equals the sum of
+means only up to rounding, and a rank is not additive at all.
+
+#### Publication-format evolution policy
+
+This is the permanent policy for any publication family whose rendered format
+must change, and the reason the module above is scoped to one family rather
+than generalized. A second family with the same need is the evidence that
+would justify generalizing it.
+
+1. **Formats are explicit.** Each supported format has a stable in-code
+   identity and a fingerprint over its taxonomy and invariants. Exactly the
+   enumerated formats are accepted; nothing is inferred from a mutable global.
+2. **Reads are normalized.** Consumers receive one read model with explicit
+   capabilities. A missing capability is an absent metric, never a fabricated
+   value.
+3. **Rebuilds are audited and format-only.** Regenerating active publications
+   because their rendered format changed is its own lifecycle operation,
+   distinct from failed-data repair, correction-driven composition, and
+   initial parity activation, so operational history says what actually
+   happened rather than pretending source data was corrected.
+4. **Related windows promote atomically.** Windows of one family move together
+   under expected-generation checks, so the product never observes a mixed
+   format.
+5. **Compatibility spans verification and rollback.** The dual-format release
+   is deployed first, production is rebuilt and verified against it, and it is
+   retained as the oldest supported application rollback target.
+6. **Compatibility removal is separately gated.** Dropping the old format is
+   its own deployment after production verification, never the same unverified
+   release that promotes the new one.
+
 ### Matchup materializer parity and legacy writer fencing (#117)
 
 `app.services.matchup_parity` owns the bounded dual-run that proves the legacy
