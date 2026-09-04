@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from math import isfinite
@@ -63,6 +63,76 @@ TEAM_MATCHUP_PUBLICATION_STREAM_KEYS = MappingProxyType({
     window: frozenset(stream_by_base.values())
     for window, stream_by_base in TEAM_MATCHUP_PUBLICATION_STREAMS.items()
 })
+
+
+@dataclass(frozen=True, slots=True)
+class LeagueMetricColumn:
+    """One metric's whole-league values and the comparisons they support.
+
+    The league table is the same computation the Defense Sheet has always
+    applied -- mean, population sigma, ascending competition rank, and percent
+    versus the league average over the published thirty -- held in one place so
+    the Team Profile serves the identical numbers.
+    """
+
+    values: Mapping[int, float]
+    ranks: Mapping[int, int]
+    average: float
+    sigma: float
+
+    @property
+    def team_count(self) -> int:
+        return len(self.values)
+
+    def rank(self, team_id: int) -> int:
+        return self.ranks[team_id]
+
+    def percent_vs_league_average(self, team_id: int) -> float | None:
+        value = self.values[team_id]
+        return (value / self.average - 1) * 100 if self.average else None
+
+    def sigma_deviation(self, team_id: int) -> float:
+        value = self.values[team_id]
+        return (value - self.average) / self.sigma if self.sigma else 0.0
+
+
+def league_metric_column(values_by_team_id: Mapping[int, float]) -> LeagueMetricColumn:
+    """Build one league table over per-team values.
+
+    Ranks are ascending -- rank 1 allows the fewest -- and tied teams share the
+    lower rank.  Callers pass either a published metric or a column they
+    derived from published metrics.
+    """
+
+    values = dict(values_by_team_id)
+    ordered = tuple(float(value) for value in values.values())
+    ranks: dict[float, int] = {}
+    for index, value in enumerate(sorted(ordered)):
+        ranks.setdefault(value, index + 1)
+    return LeagueMetricColumn(
+        values=MappingProxyType(values),
+        ranks=MappingProxyType({
+            team_id: ranks[float(value)] for team_id, value in values.items()
+        }),
+        average=fmean(ordered),
+        sigma=pstdev(ordered),
+    )
+
+
+def publication_league_table(rows) -> dict[str, LeagueMetricColumn]:
+    """Return a league table for every metric key one publication publishes.
+
+    The matchup response projects a curated subset of these columns; the Team
+    Profile needs all of them, so this returns the publication's own complete
+    taxonomy rather than either caller's projection.
+    """
+
+    return {
+        metric_key: league_metric_column({
+            row.team_id: row.per48[metric_key] for row in rows
+        })
+        for metric_key in rows[0].per48
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,54 +609,38 @@ class TeamMatchupQueryService:
                 (display_key, display_key, metric_key)
                 for display_key, metric_key in stat_names.items()
             )
-        values_by_key = {
-            metric_key: tuple(float(row.per48[metric_key]) for row in rows)
-            for _slice_key, _stat_key, metric_key in identities
-            if metric_key in rows[0].per48
-        }
-        statistics_by_key = {
-            metric_key: (fmean(values), pstdev(values))
-            for metric_key, values in values_by_key.items()
-        }
-        league_metrics = []
-        for slice_key, stat_key, metric_key in identities:
-            values = values_by_key.get(metric_key)
-            if values is None:
-                continue
-            average, sigma = statistics_by_key[metric_key]
-            league_metrics.append(LeagueMatchupMetric(
+        # The league table covers every published key; this surface projects
+        # the curated identities the matchup response contracts for.
+        table = publication_league_table(rows)
+        columns = tuple(
+            (slice_key, stat_key, table[metric_key])
+            for slice_key, stat_key, metric_key in identities
+            if metric_key in table
+        )
+        league_metrics = [
+            LeagueMatchupMetric(
                 base=base,
                 slice_key=slice_key,
                 stat_key=stat_key,
-                average_allowed_per_48=average,
-                sigma=sigma,
-                team_count=len(rows),
-            ))
+                average_allowed_per_48=column.average,
+                sigma=column.sigma,
+                team_count=column.team_count,
+            )
+            for slice_key, stat_key, column in columns
+        ]
         team_metrics = defaultdict(list)
-        ranks_by_key = {}
-        for metric_key, values in values_by_key.items():
-            ranks = {}
-            for index, value in enumerate(sorted(values)):
-                ranks.setdefault(value, index + 1)
-            ranks_by_key[metric_key] = ranks
         for row in rows:
-            for slice_key, stat_key, metric_key in identities:
-                if metric_key not in row.per48:
-                    continue
-                value = row.per48[metric_key]
-                average, sigma = statistics_by_key[metric_key]
+            for slice_key, stat_key, column in columns:
                 team_metrics[row.team_id].append(TeamMatchupMetric(
                     base=base,
                     slice_key=slice_key,
                     stat_key=stat_key,
-                    allowed_per_48=value,
-                    percent_vs_league_average=(
-                        (value / average - 1) * 100 if average else None
+                    allowed_per_48=column.values[row.team_id],
+                    percent_vs_league_average=column.percent_vs_league_average(
+                        row.team_id
                     ),
-                    sigma_deviation=(
-                        (value - average) / sigma if sigma else 0.0
-                    ),
-                    rank=ranks_by_key[metric_key][value],
+                    sigma_deviation=column.sigma_deviation(row.team_id),
+                    rank=column.rank(row.team_id),
                 ))
         scope = TeamMatchupSnapshotScope(
             season=season, as_of=cutoff, window_games=window_games

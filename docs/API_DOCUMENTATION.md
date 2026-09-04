@@ -1300,13 +1300,45 @@ Query parameters:
 
 - `team`: full team name, such as `Los Angeles Lakers`.
 - `category`: `Traditional`, `Playtypes`, `Assists`, `Zone Shooting`, or `Shooting Type`.
-- `date`: optional date filter for categories that can query live NBA data.
+- `date`: accepted and ignored.  Rankings are always whole-season.
 
 Example:
 
 ```bash
 curl "http://localhost:5000/api/teams/stats?team=Los%20Angeles%20Lakers&category=Traditional"
 ```
+
+Every category is served from the durable Season team matchup publications
+(`traditional_opponent_season`, `synergy_play_types_opponent_season`,
+`assist_locations_season`, `exact_shot_zones_opponent_season`, and
+`grouped_shot_types_opponent_season`).  There is no request-time NBA Stats
+call and no legacy ranking table read, so a picked date cannot reshape the
+answer: it is accepted for compatibility with the panel and ignored.
+
+Values are per-48 on nominal minutes, the same unit the Matchups Defense
+Sheet reports, so "opponent points allowed" is the same number on both
+surfaces.  Each column carries a `_RANK` computed over all thirty published
+rows -- ascending, so rank 1 allows the fewest, and tied teams share a rank --
+and, except for `Playtypes` and `Assists`, a `_vs_avg_pct` of
+`(value / league average - 1) * 100`.  `Playtypes` and `Assists` carry their
+values as a ratio to the league average instead, because the panel's charts
+are centred on `1.0`.
+
+`Traditional` derives `OPP_STL+BLK`, `OPP_FG_PCT`, and `OPP_FG3_PCT` from the
+published counts; `Assists` derives `AssistPoints` as
+`2 x TwoPtAssists + 3 x ThreePtAssists`; `Shooting Type` returns one object
+per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.  `OPP_OREB` and
+`OPP_DREB` are absent, because the publications carry no rebound split; the
+panel renders them as `N/A`.  A rate a team has no denominator for -- a play
+type it faced zero possessions of -- is absent the same way, for that team
+only: it is neither ranked as the stingiest defense nor counted in the league
+average the other teams are measured against.
+
+An unknown `category` is `400 invalid_input`.  A season with no published
+generation -- including every request against the read-only demo database,
+which carries no publication tables -- serves nothing, which the route
+reports as `404 resource_not_found`.  A stale publication still serves its
+last-good values.
 
 ## Data Management Endpoints
 
