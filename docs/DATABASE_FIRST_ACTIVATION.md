@@ -253,6 +253,47 @@ recomposition and a new parity run, not re-enabling the legacy writer.
 | `stale_composition` | 409 | `expected_fence` does not match; re-read and retry. |
 | `publication_checksum_mismatch` | 400 | Target publication payload does not match its checksum. |
 | `reason_required` | 400 | Empty reason. |
+| `publication_family_coupled` | 409 | This stream belongs to a coupled publication family; use the family route below. |
+
+### Coupled publication families
+
+`traditional_opponent_season` and `traditional_opponent_l15` are one product
+fact: the Opposing Team Profile, Team Filters, and the Matchups Defense Sheet
+would otherwise observe two rendered generations of the same surface at once.
+Both the per-stream rollback route above and `activate_stream` therefore
+refuse them with `publication_family_coupled` once the family is bound, and
+recovery goes through the family route, which moves both windows or neither:
+
+```
+POST /admin/collection/publication-rebuilds/<family>/rollback
+```
+
+The same coupling applies in the forward direction: after the initial ledger
+cutover binds each pointer, the only way to advance this family is a durable
+Publication Rebuild, never a per-stream activation.
+
+| Code | HTTP | What it means |
+| --- | --- | --- |
+| `publication_family_coupled` | 409 | A per-stream operation would split the family. |
+| `publication_family_mixed_format` | 400 | The target pair is not one coherent generation. |
+| `publication_format_unsupported` | 400 | This deployment can no longer read the target publication's format; restore the retained dual-format release first. |
+
+## Driving a publication rebuild
+
+Starting a rebuild records the approved intent and returns `202`; it does not
+execute it, exactly as accepting an observation enqueues a composition job
+without composing it. A worker pass drives the durable row through
+`composing`, `validating`, and `promoting`:
+
+```
+python scripts/publication_rebuild.py --database-url … --family traditional_opponent
+python scripts/publication_rebuild.py --database-url … --status <rebuild_id>
+```
+
+The pass is restart-safe. A worker that dies mid-phase leaves a row whose
+lease expires; the next pass reclaims it and resumes from the phase the row
+records, and every state write is fenced by the writer's claimed generation,
+so a revived worker can never overwrite the successor that took over.
 
 ## Evidence that must exist before production activation
 

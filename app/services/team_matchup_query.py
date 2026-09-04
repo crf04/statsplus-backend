@@ -29,6 +29,9 @@ from app.services.database_first_activation import (
     PublicationRead,
     decode_team_window,
 )
+from app.services.traditional_opponent_publications import (
+    normalize_traditional_opponent_window,
+)
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_BASES,
     NBA_PUBLICATION_STREAMS,
@@ -47,6 +50,10 @@ from app.services.team_matchup_publications import (
 
 
 EASTERN = ZoneInfo("America/New_York")
+
+#: The ledger-owned base whose publications are validated by their own family
+#: module rather than by the NBA-owned governed-window rules.
+TRADITIONAL_BASE = "traditional"
 
 TEAM_MATCHUP_PUBLICATION_STREAMS = MappingProxyType({
     window: MappingProxyType({
@@ -461,6 +468,14 @@ class TeamMatchupQueryService:
                         expected_game_ids_by_team=publication_game_ids,
                         window=window,
                     )
+                elif base == TRADITIONAL_BASE:
+                    # The traditional-opponent family proves its own league
+                    # completeness and population coherence; the NBA-owned
+                    # bases prove theirs above.  A twenty-nine-team defense
+                    # sheet is a wrong answer, not a smaller one.
+                    rows = normalize_traditional_opponent_window(
+                        rows, stream_key=stream_by_base[base]
+                    ).teams
             except PublicationPayloadError as error:
                 base_windows[base] = None
                 validation_failures[base] = (

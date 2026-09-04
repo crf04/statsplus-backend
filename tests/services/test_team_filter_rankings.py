@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -449,27 +450,64 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
     )
     points = {"GSW": 120.0, "LAL": 110.0, "BOS": 100.0}
 
-    def payload_row(team_id, tricode):
+    published = (
+        list(NBA_TEAM_ID_TO_TRICODE.items())
+        if tricodes is None
+        else [(TRICODE_TO_TEAM_ID[tricode], tricode) for tricode in tricodes]
+    )
+
+    def per48_for(tricode):
         metrics = {metric: 1.0 for metric in TEAM_METRICS}
         metrics["points"] = points.get(tricode, 50.0)
+        return metrics
+
+    # The derived blocks are functions of the published per-48 population, and
+    # the family module proves it, so the fixture computes them rather than
+    # asserting arbitrary values a real composer would never emit.
+    per48_by_team = {
+        team_id: per48_for(tricode) for team_id, tricode in published
+    }
+    average = {
+        metric: sum(v[metric] for v in per48_by_team.values()) / len(per48_by_team)
+        for metric in TEAM_METRICS
+    }
+    sigma = {
+        metric: math.sqrt(
+            sum((v[metric] - average[metric]) ** 2 for v in per48_by_team.values())
+            / len(per48_by_team)
+        )
+        for metric in TEAM_METRICS
+    }
+
+    def ranks_for(metric):
+        ordered = sorted(
+            per48_by_team.items(), key=lambda item: (item[1][metric], item[0])
+        )
+        assigned, previous, rank = {}, None, 1
+        for position, (team_id, values) in enumerate(ordered, start=1):
+            if previous is None or values[metric] != previous:
+                rank = position
+            assigned[team_id] = rank
+            previous = values[metric]
+        return assigned
+
+    rank_by_metric = {metric: ranks_for(metric) for metric in TEAM_METRICS}
+
+    def payload_row(team_id, tricode):
         return {
             "team_id": team_id,
             "team_tricode": tricode,
             "game_ids": ["0022500001"],
             "game_count": 1,
-            "per48": metrics,
+            "per48": per48_by_team[team_id],
             "counts": {metric: 1.0 for metric in TEAM_METRICS},
-            "league_average": metrics,
-            "population_sigma": {metric: 0.5 for metric in TEAM_METRICS},
-            "competition_rank": {metric: 1 for metric in TEAM_METRICS},
+            "league_average": dict(average),
+            "population_sigma": dict(sigma),
+            "competition_rank": {
+                metric: rank_by_metric[metric][team_id] for metric in TEAM_METRICS
+            },
             "team_minutes": 240.0,
         }
-
-    published = (
-        NBA_TEAM_ID_TO_TRICODE.items()
-        if tricodes is None
-        else [(TRICODE_TO_TEAM_ID[tricode], tricode) for tricode in tricodes]
-    )
     publications.compose(
         "traditional_opponent_season",
         season=SEASON,
@@ -576,20 +614,51 @@ def _publish_two_streams(tmp_path):
     assists = {"LAL": 30.0, "GSW": 25.0}
 
     def rows(metrics, overrides, key):
+        # The derived blocks describe the published population, because the
+        # traditional-opponent family proves that they do.
+        per48 = {
+            team_id: {
+                **{metric: 1.0 for metric in metrics},
+                key: overrides.get(tricode, 5.0),
+            }
+            for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+        }
+        average = {
+            metric: sum(v[metric] for v in per48.values()) / len(per48)
+            for metric in metrics
+        }
+        sigma = {
+            metric: math.sqrt(
+                sum((v[metric] - average[metric]) ** 2 for v in per48.values())
+                / len(per48)
+            )
+            for metric in metrics
+        }
+        rank_by_metric = {}
+        for metric in metrics:
+            ordered = sorted(
+                per48.items(), key=lambda item: (item[1][metric], item[0])
+            )
+            assigned, previous, rank = {}, None, 1
+            for position, (team_id, values) in enumerate(ordered, start=1):
+                if previous is None or values[metric] != previous:
+                    rank = position
+                assigned[team_id] = rank
+                previous = values[metric]
+            rank_by_metric[metric] = assigned
         return [
             {
                 "team_id": team_id,
                 "team_tricode": tricode,
                 "game_ids": ["0022500001"],
                 "game_count": 1,
-                "per48": {
-                    **{metric: 1.0 for metric in metrics},
-                    key: overrides.get(tricode, 5.0),
-                },
+                "per48": per48[team_id],
                 "counts": {metric: 1.0 for metric in metrics},
-                "league_average": {metric: 1.0 for metric in metrics},
-                "population_sigma": {metric: 0.5 for metric in metrics},
-                "competition_rank": {metric: 1 for metric in metrics},
+                "league_average": dict(average),
+                "population_sigma": dict(sigma),
+                "competition_rank": {
+                    metric: rank_by_metric[metric][team_id] for metric in metrics
+                },
                 "team_minutes": 240.0,
             }
             for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()

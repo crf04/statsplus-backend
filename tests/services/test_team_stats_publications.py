@@ -487,3 +487,107 @@ def test_each_category_reads_only_its_own_season_stream():
 
 def test_the_service_holds_no_provider_client():
     assert not hasattr(_service({}), "nba_stats")
+
+
+# --- Opponent rebound split (#50) ------------------------------------------
+
+
+def _split_reads(*, oreb=11.0, dreb=33.0):
+    """A v2 Season publication: the split is canonical, the total derived."""
+
+    from app.services.traditional_opponent_publications import (
+        TRADITIONAL_OPPONENT_V2,
+    )
+
+    def per48(tricode):
+        values = {metric: 2.0 for metric in TRADITIONAL_OPPONENT_V2.metrics}
+        values["offensive_rebounds"] = 1.0
+        values["defensive_rebounds"] = 3.0
+        values["rebounds"] = 4.0
+        if tricode == "LAL":
+            values["offensive_rebounds"] = oreb
+            values["defensive_rebounds"] = dreb
+            values["rebounds"] = oreb + dreb
+        return values
+
+    return {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season", _league(per48)
+        )
+    }
+
+
+def test_traditional_serves_the_published_opponent_rebound_split():
+    stats = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
+
+    assert stats["OPP_OREB"] == 11.0
+    assert stats["OPP_DREB"] == 33.0
+    assert stats["OPP_REB"] == 44.0
+
+
+def test_the_rebound_split_ranks_the_fewest_allowed_first():
+    stats = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
+    baseline = _service(_split_reads()).get_team_stats(
+        "Traditional", "Boston Celtics"
+    )
+
+    # LAL allows the most of both, so it ranks last on both.
+    assert stats["OPP_OREB_RANK"] == 30
+    assert stats["OPP_DREB_RANK"] == 30
+    assert baseline["OPP_OREB_RANK"] == 1
+    assert baseline["OPP_DREB_RANK"] == 1
+
+
+def test_tied_teams_share_a_competition_rank_on_the_rebound_split():
+    """Twenty-nine teams allow the same split, so they share rank 1."""
+
+    stats = _service(_split_reads()).get_team_stats(
+        "Traditional", "Boston Celtics"
+    )
+    other = _service(_split_reads()).get_team_stats(
+        "Traditional", "Chicago Bulls"
+    )
+
+    assert stats["OPP_OREB_RANK"] == other["OPP_OREB_RANK"] == 1
+    assert stats["OPP_DREB_RANK"] == other["OPP_DREB_RANK"] == 1
+
+
+def test_the_rebound_split_uses_the_existing_league_average_formula():
+    stats = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
+
+    oreb_average = (29 * 1.0 + 11.0) / 30
+    dreb_average = (29 * 3.0 + 33.0) / 30
+    assert stats["OPP_OREB_vs_avg_pct"] == pytest.approx(
+        (11.0 / oreb_average - 1) * 100
+    )
+    assert stats["OPP_DREB_vs_avg_pct"] == pytest.approx(
+        (33.0 / dreb_average - 1) * 100
+    )
+
+
+def test_the_split_adds_exactly_six_properties_and_changes_nothing_else():
+    without = _service(_traditional_reads()).get_team_stats(
+        "Traditional", LAKERS
+    )
+    with_split = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
+
+    assert set(with_split) - set(without) == {
+        "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
+        "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
+    }
+    assert set(without) - set(with_split) == set()
+
+
+def test_a_publication_without_the_split_reports_it_as_absent_not_zero():
+    """The compatibility window must never fabricate a rebound value."""
+
+    stats = _service(_traditional_reads()).get_team_stats("Traditional", LAKERS)
+
+    for field in (
+        "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
+        "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
+    ):
+        assert field not in stats
+    # Every existing metric still serves from the same publication.
+    assert stats["OPP_REB"] == 44.0
+    assert stats["OPP_PTS"] == 120.0

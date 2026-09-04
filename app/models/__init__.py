@@ -140,6 +140,7 @@ from .collection_control import (  # noqa: E402
     ValidationSummary,
     GovernedNotApplicable,
     OperatorJob,
+    PublicationRebuild,
     CredentialDelivery,
 )
 
@@ -172,6 +173,7 @@ __all__ = [
     'ClosingProjectionMembership',
     'ProjectionArchiveScopeLock',
     'ProviderPoll',
+    'PublicationRebuild',
     'ProjectionCollectionLease',
     'ProjectionCollectionProviderState',
     'ProjectionProviderSnapshot',

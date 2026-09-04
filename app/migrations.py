@@ -2086,6 +2086,18 @@ def _drop_legacy_ranking_tables(connection: Connection) -> None:
         connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
 
 
+def _create_publication_rebuilds_table(connection: Connection) -> None:
+    """Create durable publication-format rebuild operations (#50).
+
+    The table carries a partial unique index restricting one family to a
+    single in-flight rebuild.  Both SQLite and PostgreSQL support the partial
+    index, so no dialect branch is needed.
+    """
+    from app.models.collection_control import PublicationRebuild
+
+    PublicationRebuild.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2193,6 +2205,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         48,
         "048_drop_legacy_ranking_tables",
         _drop_legacy_ranking_tables,
+    ),
+    Migration(
+        49,
+        "049_create_publication_rebuilds",
+        _create_publication_rebuilds_table,
     ),
 )
 

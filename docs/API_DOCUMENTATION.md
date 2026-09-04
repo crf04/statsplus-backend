@@ -62,7 +62,7 @@ The public error categories and HTTP statuses are:
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
-| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
+| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh or publication rebuild for the same operation is already queued or running. |
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
@@ -1366,9 +1366,22 @@ are centred on `1.0`.
 `Traditional` derives `OPP_STL+BLK`, `OPP_FG_PCT`, and `OPP_FG3_PCT` from the
 published counts; `Assists` derives `AssistPoints` as
 `2 x TwoPtAssists + 3 x ThreePtAssists`; `Shooting Type` returns one object
-per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.  `OPP_OREB` and
-`OPP_DREB` are absent, because the publications carry no rebound split; the
-panel renders them as `N/A`.  A rate a team has no denominator for -- a play
+per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.
+
+`Traditional` also serves the opponent rebound split -- `OPP_OREB`,
+`OPP_OREB_RANK`, `OPP_OREB_vs_avg_pct`, `OPP_DREB`, `OPP_DREB_RANK`, and
+`OPP_DREB_vs_avg_pct` -- with the same ascending ranks, competition ties, and
+league-average formula as every other column.  The values are player-credited
+per-48 counts, and `OPP_OREB + OPP_DREB` always equals `OPP_REB` exactly.
+The six properties are additive: the route, query parameters, optional
+authentication, current-season selection, error contract, and every existing
+response field are unchanged.  A publication whose format predates the split
+omits all six rather than reporting zero, and the panel renders them as `N/A`;
+a fabricated zero would be indistinguishable from a defense that allowed none.
+Team Filters and the Matchups Defense Sheet keep their existing projection
+catalogs and do not expose the split.
+
+A rate a team has no denominator for -- a play
 type it faced zero possessions of -- is absent the same way, for that team
 only: it is neither ranked as the stingiest defense nor counted in the league
 average the other teams are measured against.
@@ -2048,7 +2061,41 @@ GET /api/admin/collection/credential-deliveries/<delivery_id>
 GET /api/admin/collection/reconciliation
 GET /api/admin/collection/diagnostics
 POST /api/admin/collection/reconciliation/<item_id>/resolve
+POST /api/admin/collection/publication-rebuilds
+GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>
+POST /api/admin/collection/publication-rebuilds/<family>/rollback
 ```
+
+`POST /api/admin/collection/publication-rebuilds` starts one durable
+publication-format rebuild. The body names the publication `family`, an
+operator `reason`, and the exact `expected` active pair and fences being
+approved (`{"season": {"publication_id", "fence"}, "l15": {...}}`); optional
+`season` and `cutoff` are assertions against that pair and are never accepted
+as replacement authority. The request never names a rendered format: the
+deployed code owns the target, so an operator cannot ask for one this
+deployment cannot produce or validate. The response is `202` with
+`job_id`, `rebuild_id`, `state`, and `target_format`.
+
+The `202` records the approved rebuild; it does not execute it. A worker pass
+(`scripts/publication_rebuild.py`) drives the durable row through its phases
+and is safe to re-run after a restart.
+
+`GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>` returns
+the bounded status: one of `queued`, `composing`, `validating`, `promoting`,
+`succeeded`, or `failed`, plus counts, expected/staged/promoted publication
+IDs and checksums, the target format fingerprint, an actor fingerprint,
+timestamps, and a safe `error_code`. It never returns game identifiers,
+provider payloads, credentials, actors, or stack traces.
+
+`POST /api/admin/collection/publication-rebuilds/<family>/rollback` moves every
+window of the family back one generation atomically. A per-stream rollback of
+a coupled family is refused, and a target this deployment can no longer read
+is refused as `publication_format_unsupported`.
+
+A conflicting active rebuild for the family is `409
+duplicate_active_operation`.  A stale expected pair, a held worker lease, and a
+per-stream request that would split the family are `409 operation_conflict`; an
+unknown rebuild is `404`.
 
 `POST /api/collector/observations` accepts one complete normalized envelope
 and payload as a gzip-compressed JSON document (`Content-Encoding: gzip`). The

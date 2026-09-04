@@ -35,8 +35,10 @@ from app.services.team_matchup_query import (
 )
 
 #: The opponent box columns the panel renders and the ledger metric each one
-#: reads.  ``OPP_OREB`` and ``OPP_DREB`` are absent because the ledger
-#: publishes no rebound split; they render as ``N/A``.
+#: reads.  ``OPP_OREB`` and ``OPP_DREB`` are served only by publications whose
+#: format carries the rebound split; a publication without it omits those two
+#: fields, which the panel renders as ``N/A``.  They are never sent as zero:
+#: a fabricated zero is indistinguishable from a defense that allowed none.
 _TRADITIONAL_FIELDS: dict[str, str] = {
     "OPP_PTS": "points",
     "OPP_FGM": "field_goals_made",
@@ -45,6 +47,8 @@ _TRADITIONAL_FIELDS: dict[str, str] = {
     "OPP_FG3A": "three_pointers_attempted",
     "OPP_FTA": "free_throws_attempted",
     "OPP_REB": "rebounds",
+    "OPP_OREB": "offensive_rebounds",
+    "OPP_DREB": "defensive_rebounds",
     "OPP_AST": "assists",
     "OPP_TOV": "turnovers",
     "OPP_STL": "steals",
@@ -196,7 +200,12 @@ def _place_ratio(stats, field, column, team_id) -> None:
 def _traditional_profile(table, team_id) -> dict:
     stats: dict = {}
     for field, metric_key in _TRADITIONAL_FIELDS.items():
-        _place(stats, field, table[metric_key], team_id)
+        column = table.get(metric_key)
+        if column is None:
+            # The active publication's format does not carry this metric.  An
+            # absent field is the honest answer; the panel renders it as N/A.
+            continue
+        _place(stats, field, column, team_id)
     _place(
         stats,
         "OPP_STL+BLK",

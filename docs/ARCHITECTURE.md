@@ -1040,8 +1040,10 @@ A requested `date` is accepted and ignored: the rankings are whole-season, the
 publication serves its last-good values silently, and a season with no
 published generation -- including the demo database, which carries no
 publication tables -- serves nothing rather than a partial league.  Fields the
-publications do not carry (`OPP_OREB`, `OPP_DREB`) are omitted rather than
-synthesized, and so is a rate one team has no denominator for: a team that
+publications do not carry are omitted rather than
+synthesized -- `OPP_OREB` and `OPP_DREB` serve from a publication whose format
+carries the rebound split and are absent from one that predates it, never zero
+-- and so is a rate one team has no denominator for: a team that
 faced zero possessions of a play type is left out of that column exactly as a
 Team Filter leaves it out of that ranking, so it neither ranks as the
 stingiest defense nor moves the league average the other teams' ratios are
@@ -2431,6 +2433,215 @@ and stays refused. Completeness is proved by the governance the publication
 itself is bound to, and a resolver that cannot prove it leaves the refusal in
 place. The reason describes one read at one `as_of`, not the immutable
 publication row, so it is reported rather than stored and needs no migration.
+
+### Traditional-opponent publication formats (#50)
+
+`app.services.traditional_opponent_publications` is the deep module that owns
+the `traditional_opponent_season` and `traditional_opponent_l15` publication
+family. It exists because publications are immutable: the set of metrics a
+stored payload carries is a *format*, not a setting. Before this module one
+mutable tuple (`TEAM_METRICS`) defined both what new publications produce and
+what every historical publication had to contain, so widening it would have
+retroactively invalidated every active payload at its decode boundary.
+
+The module's interface is small. `TRADITIONAL_OPPONENT_V1` is the format every
+publication active before the rebound split; `TRADITIONAL_OPPONENT_V2` adds
+the player-credited `offensive_rebounds` and `defensive_rebounds` and carries
+the `rebound_split` capability. Each format has a stable in-code name and a
+deterministic `fingerprint` over its exact metric taxonomy, capabilities, and
+invariants, recorded in rebuild audit evidence — publications themselves gain
+no nominal schema field, because a stored format marker would be one more
+thing that can disagree with the payload.
+`recognize_traditional_opponent_format` accepts exactly the supported
+taxonomies and refuses arbitrary subsets and supersets;
+`validate_traditional_opponent_team` proves that every metric block of one
+published team row (`counts`, `per48`, `league_average`, `population_sigma`,
+`competition_rank`) carries that same taxonomy and that the format's own
+invariants hold. `normalize_traditional_opponent_window` returns one
+normalized window with explicit capabilities.
+
+`decode_team_window` delegates all traditional-opponent taxonomy and semantic
+checks to that module, so every read of this family — Team Profile, Team
+Filters, Matchups, activation candidate validation, snapshot rehearsal, and
+matchup parity — crosses one interface. Consumers branch on capabilities, not
+on which stored generation produced the payload. A valid v1 publication keeps
+serving every metric it ever served and reports the rebound split as
+unavailable; a v1 read never synthesizes zero or null rebound values, because
+a fabricated zero is indistinguishable from a defense that allowed none.
+
+Rejection is whole-publication. A payload whose rows disagree on a format, or
+that is not the canonical thirty-team population, or that in v2 violates
+`rebounds == offensive_rebounds + defensive_rebounds`, is refused entirely
+rather than served partially: a rank or a league average computed over a
+partial or internally inconsistent population is a wrong statistic, not an
+incomplete one. The identity is proved exactly on integer `counts` and within
+floating tolerance on `per48`, which is those same counts over one shared
+denominator. It is deliberately not asserted on `league_average`,
+`population_sigma`, or `competition_rank`: the mean of a sum equals the sum of
+means only up to rounding, and a rank is not additive at all.
+
+#### The v2 rebound split
+
+`materialize_team_window` composes `TEAM_WINDOW_METRICS`, which is the v1
+taxonomy plus `offensive_rebounds` and `defensive_rebounds`. Both are
+player-credited sums over the opposing team's player rows, excluding team-only
+rebounds — exactly the rule `OPP_REB` has always followed, because
+`LeagueDashTeamStats` excludes them too.
+
+The total is *derived*, not observed beside the split. The integer count is
+`offensive_rebounds + defensive_rebounds`, and the per-48 value is the sum of
+the two per-48 values rather than the total over the same denominator. Both
+orderings are arithmetically equal, but deriving in this order makes the
+published identity exact rather than exact-to-within-rounding, which is what
+lets the decode boundary assert it as a hard invariant instead of a tolerance.
+The denominator is the same nominal game length every other metric uses, so
+overtime is carried identically across the split, the total, and points.
+
+`TEAM_METRICS` is left frozen as the v1 tuple. It is the exact taxonomy of
+every publication composed before the split, so it is pinned as history rather
+than edited; only composition moves to the current taxonomy.
+
+`app.services.team_service` maps `OPP_OREB` and `OPP_DREB` onto those two
+metrics and looks every traditional column up in the league table by
+`get`, so a publication whose format does not carry a metric simply omits its
+three fields. Team Filters and the Matchups Defense Sheet keep their existing
+explicit projection catalogs and gain nothing, even though the underlying
+publication gained canonical metrics.
+
+#### Publication Rebuild
+
+`app.services.traditional_opponent_rebuild` is the stateful half of the same
+family. It is a separate module only because it reaches the control plane,
+which in turn reaches the pure format core; keeping them in one file would
+close that import cycle.
+
+A **Publication Rebuild** regenerates every window of one family from
+Canonical Game Ledger facts that did not change, because the rendered format
+changed. It is deliberately distinct from the three lifecycle operations it
+resembles:
+
+- It is **not a composition job**. Composition jobs are created by new or
+  corrected observations, and the job for the active cutoff may already be
+  permanently successful — scoped repair would return that existing job and
+  retry would refuse successful work.
+- It is **not failed-data repair**. Nothing failed and no stored fact is
+  wrong.
+- It is **not initial parity activation**. That gate compared a candidate
+  against a legacy diagnostic that #199 retired. A format rebuild must not
+  fabricate new legacy parity evidence for a cutover that already happened,
+  and must not rerun a gate whose diagnostic source no longer exists.
+
+Overloading any of them would make operational history describe an event that
+never occurred, which is the specific debt this operation pays off.
+
+The `publication_rebuilds` row *is* the operation. It records the family, the
+deployed target format and its fingerprint, the actor and reason, the expected
+Season and Last 15 publication IDs and fences, the shared authority reused
+from the active pair, a fingerprint of the accepted ledger source, a worker
+lease and generation, staged and promoted IDs and checksums, and one bounded
+failure code. A partial unique index makes "one in-flight rebuild per family"
+a database guarantee rather than a read-then-write race.
+
+Starting a rebuild only *records* it. Execution is a separate worker pass --
+`run_pending`, driven by `scripts/publication_rebuild.py` -- exactly as
+accepting an observation enqueues a composition job that
+`LedgerRuntime.compose_queued` later executes. That separation is what makes
+the operation restart-safe: the row is the operation, so a worker that dies
+mid-phase leaves a lease that expires, and the next pass reclaims the row and
+resumes from the phase it records rather than from the beginning.
+
+Claiming a rebuild *advances* its lease generation and hands the worker the
+number it advanced to. That number is a capability: every later write presents
+it, and a write whose number is no longer the row's current generation is
+refused. This is what makes the fence work between two invocations of the same
+command, which necessarily share an owner name -- an owner-only check would let
+an abandoned pass keep writing over the pass that replaced it. A revived worker
+therefore cannot overwrite its successor, and in particular cannot revert a
+`succeeded` rebuild to an active phase.
+
+The fence covers staging as well as promotion. Minting a candidate and
+superseding the one it replaces are durable mutations of the publication
+family, so the claim is proved and the rebuild row locked in the *same*
+transaction that writes those candidates. A superseded pass is refused before
+it writes anything, rather than leaving candidate rows behind that no live
+rebuild accounts for.
+
+The pointer moves and the rebuild's own success write commit in one
+transaction. Splitting them would leave a window in which a crash stranded
+promoted pointers behind a rebuild still recorded as in-flight, and the resumed
+attempt would then fail against pointer expectations its own earlier attempt
+had already satisfied. As a further resume path, an attempt that finds every
+pointer already holding exactly the candidates *this* rebuild staged records
+success rather than a stale precondition.
+
+Phases are `queued`, `composing`, `validating`, `promoting`, `succeeded`, and
+`failed`. Composition and validation run **without holding pointer locks**, so
+a rebuild may take as long as it takes while current reads continue on the old
+pair. Only promotion opens a short transaction: it locks both pointers and
+revalidates the expected IDs and fences, the shared authority, the ledger
+source checksum, the staged candidates' recorded checksums, the exact accepted
+source-observation bindings behind each candidate, and both candidate payloads
+-- and only then moves anything. It also proves the pair being promoted is one
+coherent generation: one format, one season, one cutoff, one authority --
+resolving that authority from the accepted observations behind a
+ledger-composed publication, which records none on the row. Season
+and Last 15 promote together or neither moves.
+
+Idempotency is decided from the request alone, before any live state is read:
+an identical active request is the same rebuild, a conflicting active request
+for the family is `duplicate_active_operation`, and an identical completed
+request returns its receipt rather than failing against generations it already
+moved. Supplied season and cutoff are assertions against the active pair, never
+replacement authority.
+
+An accepted ledger correction always wins the race. It changes the source
+checksum or a pointer, the rebuild terminates as `stale_publication_family`,
+and a new operator request is required. Validation failures, unsupported
+formats, and mixed starting state are terminal; only transient worker and
+database failures retry under the same leased generation. A staged candidate
+that was valid but lost its race is retained as `superseded` audit evidence —
+readable as what the rebuild proposed, permanently ineligible for a later
+accidental activation.
+
+Rollback is atomic across the family, and both per-stream rollback and
+per-stream activation of a coupled family are refused with
+`publication_family_coupled` so an administrative action cannot create a mixed
+generation. Initial activation stays available: binding a pointer for the
+first time is the ledger cutover, and there is no sibling generation to
+disagree with yet. The rollback target is held to the same pair-coherence
+proof as a promotion, so recovery cannot land on two windows that never
+existed together. Under strict code, a rollback target in an
+unsupported format is refused with `publication_format_unsupported`: safe
+recovery restores the retained dual-format application release first, then
+moves the family.
+
+#### Publication-format evolution policy
+
+This is the permanent policy for any publication family whose rendered format
+must change, and the reason the module above is scoped to one family rather
+than generalized. A second family with the same need is the evidence that
+would justify generalizing it.
+
+1. **Formats are explicit.** Each supported format has a stable in-code
+   identity and a fingerprint over its taxonomy and invariants. Exactly the
+   enumerated formats are accepted; nothing is inferred from a mutable global.
+2. **Reads are normalized.** Consumers receive one read model with explicit
+   capabilities. A missing capability is an absent metric, never a fabricated
+   value.
+3. **Rebuilds are audited and format-only.** Regenerating active publications
+   because their rendered format changed is its own lifecycle operation,
+   distinct from failed-data repair, correction-driven composition, and
+   initial parity activation, so operational history says what actually
+   happened rather than pretending source data was corrected.
+4. **Related windows promote atomically.** Windows of one family move together
+   under expected-generation checks, so the product never observes a mixed
+   format.
+5. **Compatibility spans verification and rollback.** The dual-format release
+   is deployed first, production is rebuilt and verified against it, and it is
+   retained as the oldest supported application rollback target.
+6. **Compatibility removal is separately gated.** Dropping the old format is
+   its own deployment after production verification, never the same unverified
+   release that promotes the new one.
 
 ### Matchup materializer parity and legacy writer fencing (#117)
 

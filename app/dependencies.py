@@ -187,6 +187,13 @@ def build_dependencies(
 
         publication_reader = DatabaseFirstPublicationReader(engine)
         write_fence = LegacyWriteFence(engine)
+        from app.services.traditional_opponent_publications import (
+            TRADITIONAL_OPPONENT_FAMILY,
+        )
+        from app.services.traditional_opponent_rebuild import (
+            TraditionalOpponentRebuildService,
+        )
+
         collection_operations = CollectionOperationsService(
             engine,
             publication_service=publication_service,
@@ -194,6 +201,11 @@ def build_dependencies(
             collector_tokens=collector_tokens,
             alert_adapter=EmailAlertAdapter(),
             l15_expectation_resolver=l15_expectation_resolver,
+            publication_rebuilds={
+                TRADITIONAL_OPPONENT_FAMILY: TraditionalOpponentRebuildService(
+                    engine, publication_service=publication_service
+                ),
+            },
         )
         publication_write_capability = (
             publication_service.governed_publication_write_capability()
