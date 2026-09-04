@@ -212,6 +212,16 @@ class TeamFilterRankingService:
 
         return self.rank_all((team_filter,), season)[team_filter]
 
+    def season_rows(self, base: str, season: str):
+        """Return one publication base's canonical thirty Season rows.
+
+        ``None`` means the publication cannot be trusted for this season, and
+        every caller treats that the same way a Team Filter does: it serves
+        nothing rather than a partial league.
+        """
+
+        return self._rows_by_base((base,), season)[base]
+
     def rank_all(
         self, team_filters, season: str, *, publication_snapshot=None
     ) -> dict[str, list[str]]:

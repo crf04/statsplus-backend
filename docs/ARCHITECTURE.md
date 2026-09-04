@@ -970,6 +970,42 @@ evidence.  Because the durable path therefore covers every public primitive,
 an ingestion-complete, valid publication is database-first with no separate
 cutover gate.
 
+### Team Profile categories
+
+`GET /api/teams/stats` (`app.services.team_service.TeamService`) serves the
+Log Workspace opponent and player panels.  Every category is one projection of
+the same Season publications the Team Filters read: `Traditional` from
+`traditional_opponent_season`, `Playtypes` from
+`synergy_play_types_opponent_season`, `Assists` from `assist_locations_season`,
+`Zone Shooting` from `exact_shot_zones_opponent_season`, and `Shooting Type`
+from `grouped_shot_types_opponent_season`.  The service holds the same
+publication read seam the game service injects, so no provider client is
+reachable from it by construction and the legacy `general_opponent_stats`,
+`team_play_types`, `processed_team_assists`, `opp_shooting_zone`,
+`catch_and_shoot`, `pullups`, and `less_than_10_ft` reads are gone with their
+dated `fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branches.
+
+Ranks and percentages come from `publication_league_table` in
+`app.services.team_matchup_query`, the same league computation the Matchups
+Defense Sheet applies -- mean, population sigma, ascending competition rank
+with shared ties, and percent versus the league average over the published
+thirty.  The Defense Sheet projects a curated subset of that table; the panel
+projects the rest, and the panel derives `OPP_STL+BLK`, the two shooting
+percentages, `AssistPoints`, and each shot type's `PTS` as further columns
+ranked the same way.  Values are per-48 on nominal minutes, so opponent points
+allowed is one number across both surfaces.  `Playtypes` and `Assists` carry a
+ratio to the league average because those panel charts are centred on `1.0`;
+their ranks stay on the published column, where a division can neither create
+nor break a tie.
+
+A requested `date` is accepted and ignored: the rankings are whole-season, the
+#39 decision applied here.  An unknown category is a `400`, a stale
+publication serves its last-good values silently, and a season with no
+published generation -- including the demo database, which carries no
+publication tables -- serves nothing rather than a partial league.  Fields the
+publications do not carry (`OPP_OREB`, `OPP_DREB`) are omitted rather than
+synthesized.
+
 ### NBA Stats game-log adapter
 
 `app.providers.nba_stats.NBAStatsProvider` is the injectable interface for

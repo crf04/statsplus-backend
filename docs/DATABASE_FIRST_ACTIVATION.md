@@ -110,12 +110,12 @@ fenced table whose reader is *not* cut over is frozen, not superseded.
 
 | Legacy table | Stream | Activated in production | Nightly refresh | Reader cut over | Reader(s) |
 | --- | --- | --- | --- | --- | --- |
-| `general_opponent_stats` | `traditional_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Traditional (`GET /api/teams/stats`); legacy parity snapshot |
+| `general_opponent_stats` | `traditional_opponent_season` | yes | fenced | yes — superseded | legacy parity snapshot only |
 | `player_per36_stats` | `player_per36` | yes | fenced | yes — superseded | `PlayerService._per36_frame`, only when the publication does not serve |
-| `team_play_types` | `synergy_play_types_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Playtypes |
-| `catch_and_shoot`, `pullups`, `less_than_10_ft` | `grouped_shot_types_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Shooting Type |
-| `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Zone Shooting |
-| `processed_team_assists` | `assist_locations_season` | yes | fenced | **no — frozen** | `TeamService.get_team_stats` Assists |
+| `team_play_types` | `synergy_play_types_opponent_season` | yes | fenced | yes — superseded | none |
+| `catch_and_shoot`, `pullups`, `less_than_10_ft` | `grouped_shot_types_opponent_season` | yes | fenced | yes — superseded | none |
+| `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | fenced | yes — superseded | none |
+| `processed_team_assists` | `assist_locations_season` | yes | fenced | yes — superseded | none |
 | `pbp_opponent_stats` | `assist_locations_season` | yes | fenced | n/a (refresh input) | `DataService.process_assist_data` input |
 | `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | `PlayerService.get_all_players`, player play-type profile, NL parser player names |
 | `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | n/a | player zone-shooting profile |
@@ -123,23 +123,22 @@ fenced table whose reader is *not* cut over is frozen, not superseded.
 | `pbp_player_stats` | `player_assist_locations` | no | still refreshed | n/a | `DataService.process_assist_data` input |
 | `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables, `database_utils` |
 
-Every **frozen** row above is a live gap, not a completed cutover: the stream
-is activated so the nightly refresh refuses the table, but `GET
-/api/teams/stats` still reads the legacy table, so its Traditional,
-Playtypes, Shooting Type, Zone Shooting, and Assists categories stay at their
-2026-08-23 values until the Team Profile read cutover
-(crf04/statsplus#45) lands. `stats_freshness` advancing after a nightly
-refresh does **not** cover those tables — it records only the tables that were
-actually published, which excludes every fenced row.
+No **frozen** row remains: the Team Profile read cutover (crf04/statsplus#45)
+moved `GET /api/teams/stats` onto the Season publications, so its Traditional,
+Playtypes, Shooting Type, Zone Shooting, and Assists categories now serve the
+same values the Matchups Defense Sheet does. `stats_freshness` advancing after
+a nightly refresh still does **not** cover the fenced tables — it records only
+the tables that were actually published, which excludes every fenced row.
 
 The fenced rows stay in the refresh code and in this table on purpose: they
 are refused per night rather than deleted, so a rollback that disables a
 stream restores that table's refresh with no code change. Removing a legacy
 writer is the separately approved cleanup below.
 
-Team Filter rankings read the shot-type, play-type, and assist-location
-**publications**, not these tables; the legacy tables above are read only by
-the surfaces named in the last column.
+Team Filter rankings and the Team Profile categories read the traditional,
+shot-type, shot-zone, play-type, and assist-location **publications**, not
+these tables; the legacy tables above are read only by the surfaces named in
+the last column.
 
 ## Activating one stream
 
