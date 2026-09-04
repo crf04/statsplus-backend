@@ -149,7 +149,7 @@ class TraditionalOpponentRebuildService:
         self.publications = publication_service or PublicationService(
             engine, clock=clock
         )
-        self.compose = compose or compose_from_ledger
+        self.compose = compose or ledger_composer(engine)
         self.clock = clock
         self.lease_seconds = int(lease_seconds)
 
@@ -864,15 +864,92 @@ class TraditionalOpponentRebuildService:
         return len(games), len(rows)
 
 
-def compose_from_ledger(sources: RebuildSources) -> Mapping[str, Any]:
-    """The production composer seam.
+class LedgerFactReader:
+    """Load the exact governed games a rebuild is allowed to compose from."""
 
-    Wired in the packet that makes the target format producible; a deployment
-    whose materializer cannot yet emit the target refuses here rather than
-    staging a candidate the validator would reject anyway.
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def __call__(self, sources: RebuildSources):
+        from app.services.canonical_game_ledger import (
+            CanonicalGameLedgerRepository,
+        )
+
+        repository = CanonicalGameLedgerRepository(self.engine)
+        games = []
+        for game_id in sources.governed_game_ids:
+            game = repository.get_game(game_id)
+            if game is None:
+                raise ControlPlaneError("stale_publication_family")
+            games.append(game)
+        return tuple(games)
+
+
+def compose_from_ledger(
+    sources: RebuildSources, *, games=None
+) -> Mapping[str, Any]:
+    """Re-materialize both windows from the same unchanged ledger facts.
+
+    Nothing about the source selection is re-derived from today's calendar:
+    the governed game set, the per-team Last 15 selection, the league roster,
+    the season, and the cutoff all come from the pair being replaced.  Only
+    the rendering changes, which is exactly what a format rebuild means.
     """
 
-    raise ControlPlaneError("rebuild_composer_unavailable")
+    from app.services.ledger_derivations import materialize_team_window
+
+    if games is None:
+        raise ControlPlaneError("rebuild_composer_unavailable")
+    supplied = tuple(games)
+    expected_game_ids = frozenset(sources.governed_game_ids)
+    payloads: dict[str, Any] = {}
+    for stream_key in sources.stream_keys:
+        window = traditional_opponent_window_kind(stream_key)
+        materialization = materialize_team_window(
+            supplied,
+            season=sources.season,
+            as_of=sources.as_of,
+            window_games=(15 if window == "l15" else None),
+            expected_game_ids=expected_game_ids,
+            expected_team_game_ids=(
+                sources.team_game_ids[stream_key] if window == "l15" else None
+            ),
+            team_ids=sources.team_ids,
+        )
+        if not materialization.complete:
+            raise ControlPlaneError("stale_publication_family")
+        payloads[stream_key] = [
+            _team_row(team) for team in materialization.teams
+        ]
+    return payloads
+
+
+def _team_row(team) -> dict[str, Any]:
+    """One published team row, in the exact stored envelope."""
+
+    return {
+        "team_id": int(team.team_id),
+        "team_tricode": team.team_tricode,
+        "game_ids": list(team.game_ids),
+        "game_count": int(team.game_count),
+        "counts": dict(team.counts),
+        "team_minutes": float(team.team_minutes),
+        "per48": dict(team.per48),
+        "league_average": dict(team.league_average),
+        "population_sigma": dict(team.population_sigma),
+        "competition_rank": dict(team.competition_rank),
+    }
+
+
+def ledger_composer(engine: Engine) -> Callable[[RebuildSources], Mapping[str, Any]]:
+    """The production composer: read the governed games, then materialize."""
+
+    read_facts = LedgerFactReader(engine)
+
+    def compose(sources: RebuildSources) -> Mapping[str, Any]:
+        return compose_from_ledger(sources, games=read_facts(sources))
+
+    return compose
 
 
 def _payload_game_ids(payload: str) -> tuple[str, ...]:
@@ -900,5 +977,7 @@ __all__ = [
     "FamilyExpectation",
     "RebuildSources",
     "TraditionalOpponentRebuildService",
+    "LedgerFactReader",
     "compose_from_ledger",
+    "ledger_composer",
 ]

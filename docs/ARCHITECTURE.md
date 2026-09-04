@@ -1040,8 +1040,10 @@ A requested `date` is accepted and ignored: the rankings are whole-season, the
 publication serves its last-good values silently, and a season with no
 published generation -- including the demo database, which carries no
 publication tables -- serves nothing rather than a partial league.  Fields the
-publications do not carry (`OPP_OREB`, `OPP_DREB`) are omitted rather than
-synthesized, and so is a rate one team has no denominator for: a team that
+publications do not carry are omitted rather than
+synthesized -- `OPP_OREB` and `OPP_DREB` serve from a publication whose format
+carries the rebound split and are absent from one that predates it, never zero
+-- and so is a rate one team has no denominator for: a team that
 faced zero possessions of a play type is left out of that column exactly as a
 Team Filter leaves it out of that ranking, so it neither ranks as the
 stingiest defense nor moves the league average the other teams' ratios are
@@ -2465,6 +2467,34 @@ floating tolerance on `per48`, which is those same counts over one shared
 denominator. It is deliberately not asserted on `league_average`,
 `population_sigma`, or `competition_rank`: the mean of a sum equals the sum of
 means only up to rounding, and a rank is not additive at all.
+
+#### The v2 rebound split
+
+`materialize_team_window` composes `TEAM_WINDOW_METRICS`, which is the v1
+taxonomy plus `offensive_rebounds` and `defensive_rebounds`. Both are
+player-credited sums over the opposing team's player rows, excluding team-only
+rebounds — exactly the rule `OPP_REB` has always followed, because
+`LeagueDashTeamStats` excludes them too.
+
+The total is *derived*, not observed beside the split. The integer count is
+`offensive_rebounds + defensive_rebounds`, and the per-48 value is the sum of
+the two per-48 values rather than the total over the same denominator. Both
+orderings are arithmetically equal, but deriving in this order makes the
+published identity exact rather than exact-to-within-rounding, which is what
+lets the decode boundary assert it as a hard invariant instead of a tolerance.
+The denominator is the same nominal game length every other metric uses, so
+overtime is carried identically across the split, the total, and points.
+
+`TEAM_METRICS` is left frozen as the v1 tuple. It is the exact taxonomy of
+every publication composed before the split, so it is pinned as history rather
+than edited; only composition moves to the current taxonomy.
+
+`app.services.team_service` maps `OPP_OREB` and `OPP_DREB` onto those two
+metrics and looks every traditional column up in the league table by
+`get`, so a publication whose format does not carry a metric simply omits its
+three fields. Team Filters and the Matchups Defense Sheet keep their existing
+explicit projection catalogs and gain nothing, even though the underlying
+publication gained canonical metrics.
 
 #### Publication Rebuild
 

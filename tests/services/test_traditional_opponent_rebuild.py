@@ -6,7 +6,7 @@ asserts that a particular private helper was called, so the tests survive a
 restructuring of composition or persistence.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -18,7 +18,9 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.database_first_activation import decode_team_window
 from app.services.traditional_opponent_publications import (
+    normalize_traditional_opponent_window,
     TRADITIONAL_OPPONENT_FAMILY,
     TRADITIONAL_OPPONENT_TARGET_FORMAT,
     TRADITIONAL_OPPONENT_V1,
@@ -733,3 +735,75 @@ def test_a_datetime_is_reported_as_an_isoformat_string(family):
 
     assert isinstance(status["created_at"], str)
     assert datetime.fromisoformat(status["created_at"]).tzinfo is not None
+
+
+# --- The production composer (#236) ----------------------------------------
+
+
+def _ledger_sources(games):
+    """Everything the composer is allowed to use, taken from the active pair."""
+
+    from app.services.traditional_opponent_rebuild import RebuildSources
+
+    game_ids = tuple(sorted(game.game_id for game in games))
+    per_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    return RebuildSources(
+        season="2025-26",
+        cutoff=CUTOFF,
+        as_of=date(2025, 10, 20),
+        target_format=TRADITIONAL_OPPONENT_TARGET_FORMAT,
+        stream_keys=(SEASON_STREAM, L15_STREAM),
+        governed_game_ids=game_ids,
+        team_game_ids={SEASON_STREAM: per_team, L15_STREAM: per_team},
+        team_ids=frozenset(range(1, 31)),
+        source_checksum="0" * 64,
+    )
+
+
+def test_the_production_composer_emits_the_target_format_for_both_windows():
+    from tests.services.test_ledger_derivations import _league_games
+    from app.services.traditional_opponent_rebuild import compose_from_ledger
+
+    games = _league_games()
+
+    payloads = compose_from_ledger(_ledger_sources(games), games=games)
+
+    assert set(payloads) == {SEASON_STREAM, L15_STREAM}
+    for stream_key, payload_rows in payloads.items():
+        window = normalize_traditional_opponent_window(
+            decode_team_window(payload_rows, stream_key=stream_key),
+            stream_key=stream_key,
+        )
+        assert window.format is TRADITIONAL_OPPONENT_V2
+        assert len(window.teams) == 30
+        for team in window.teams:
+            assert team.per48["rebounds"] == (
+                team.per48["offensive_rebounds"]
+                + team.per48["defensive_rebounds"]
+            )
+
+
+def test_the_composer_refuses_to_widen_its_own_governed_game_set():
+    """Dropping a governed game makes the window incomplete, not smaller."""
+
+    from tests.services.test_ledger_derivations import _league_games
+    from app.services.traditional_opponent_rebuild import compose_from_ledger
+
+    games = _league_games()
+
+    with pytest.raises(ControlPlaneError, match="stale_publication_family"):
+        compose_from_ledger(_ledger_sources(games), games=games[:-1])
+
+
+def test_the_composer_without_facts_refuses_rather_than_staging_nothing():
+    from tests.services.test_ledger_derivations import _league_games
+    from app.services.traditional_opponent_rebuild import compose_from_ledger
+
+    with pytest.raises(ControlPlaneError, match="rebuild_composer_unavailable"):
+        compose_from_ledger(_ledger_sources(_league_games()))

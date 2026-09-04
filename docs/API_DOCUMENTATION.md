@@ -1346,9 +1346,22 @@ are centred on `1.0`.
 `Traditional` derives `OPP_STL+BLK`, `OPP_FG_PCT`, and `OPP_FG3_PCT` from the
 published counts; `Assists` derives `AssistPoints` as
 `2 x TwoPtAssists + 3 x ThreePtAssists`; `Shooting Type` returns one object
-per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.  `OPP_OREB` and
-`OPP_DREB` are absent, because the publications carry no rebound split; the
-panel renders them as `N/A`.  A rate a team has no denominator for -- a play
+per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.
+
+`Traditional` also serves the opponent rebound split -- `OPP_OREB`,
+`OPP_OREB_RANK`, `OPP_OREB_vs_avg_pct`, `OPP_DREB`, `OPP_DREB_RANK`, and
+`OPP_DREB_vs_avg_pct` -- with the same ascending ranks, competition ties, and
+league-average formula as every other column.  The values are player-credited
+per-48 counts, and `OPP_OREB + OPP_DREB` always equals `OPP_REB` exactly.
+The six properties are additive: the route, query parameters, optional
+authentication, current-season selection, error contract, and every existing
+response field are unchanged.  A publication whose format predates the split
+omits all six rather than reporting zero, and the panel renders them as `N/A`;
+a fabricated zero would be indistinguishable from a defense that allowed none.
+Team Filters and the Matchups Defense Sheet keep their existing projection
+catalogs and do not expose the split.
+
+A rate a team has no denominator for -- a play
 type it faced zero possessions of -- is absent the same way, for that team
 only: it is neither ranked as the stingiest defense nor counted in the league
 average the other teams are measured against.
