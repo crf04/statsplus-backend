@@ -123,8 +123,15 @@ class RecordedPool:
 
 
 class RecordedLogs:
+    def __init__(self):
+        self.summary_calls = []
+
     def get_player_summaries(self, season, player_ids):
         assert season == SEASON
+        # No `exclude_game_id` parameter: a call that still passes one -- a
+        # reintroduced second, focal-excluding read -- raises `TypeError`
+        # here rather than silently matching this current-mode double.
+        self.summary_calls.append(tuple(player_ids))
         if tuple(player_ids) == ():
             return {}
         assert tuple(player_ids) == (2544,)
@@ -263,11 +270,16 @@ def _window(
     shot_zone_metrics=None,
     shot_type_metrics=None,
     traditional_metrics=None,
+    assist_location_metrics=None,
 ):
     metrics = [
         ("play_types", "Transition", "PTS", 16.0),
-        ("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),
     ]
+    metrics.extend(
+        assist_location_metrics
+        if assist_location_metrics is not None
+        else (("assist_locations", "AtRimAssists", "AtRimAssists", 8.0),)
+    )
     metrics.extend(
         traditional_metrics
         if traditional_metrics is not None
@@ -356,6 +368,7 @@ def _service(
     stats_at=RETRIEVED_AT,
     injuries=None,
     diets=None,
+    player_logs=None,
 ):
     if pool is None:
         pool = PlayerPool(
@@ -387,7 +400,7 @@ def _service(
             else events if events is not None else RecordedEvents()
         ),
         player_pool=RecordedPool(pool) if pool is not False else None,
-        player_logs=RecordedLogs(),
+        player_logs=player_logs if player_logs is not None else RecordedLogs(),
         player_diets=diets if diets is not None else RecordedDiets(),
         team_matchups=RecordedTeamWindows(
             season_window if season_window is not None else _window(),
@@ -1570,6 +1583,7 @@ class RecordedGameLogs:
         sync_status="complete",
         season_rate=True,
         focal_points=0.0,
+        extra_per_game=None,
     ):
         self.rows = _historical_rows() if rows is None else rows
         self.sync_status = sync_status
@@ -1577,6 +1591,9 @@ class RecordedGameLogs:
         # What the focal game itself contributes to the completed-season rate.
         # A read that excludes the focal game must not see it.
         self.focal_points = focal_points
+        # Additional per-game rate keys beyond PTS/REB/AST -- e.g. STL/BLK,
+        # which STKS weights -- merged into the base per-game dict below.
+        self.extra_per_game = extra_per_game or {}
         self.summary_calls = []
         self.game_row_calls = []
 
@@ -1618,6 +1635,7 @@ class RecordedGameLogs:
                             "PTS": 21.0 + focal,
                             "REB": 5.0,
                             "AST": 4.0,
+                            **self.extra_per_game,
                         },
                         per_minute={"PTS": 0.03, "REB": 0.007, "AST": 0.006},
                     )
@@ -1683,10 +1701,11 @@ class RecordedPartialDiets:
 
 
 class RecordedCompleteDiets:
-    """Stored Diet covering every PTS-scoring Base as a whole partition.
+    """Stored Diet covering every Diet-backed Base as a whole partition.
 
-    play_types, shot_zones, and shot_types must each be present to compute a
-    complete PTS Blend; shot_zones and shot_types also need every slice
+    play_types, shot_zones, shot_types, and assist_locations must each be
+    present to compute a complete Blend for a Diet-backed category;
+    shot_zones, shot_types, and assist_locations also need every slice
     `_window` governs, since only play_types is complete from a subset.
     """
 
@@ -1733,6 +1752,26 @@ class RecordedCompleteDiets:
                     StoredPlayerDietFact(
                         player_id, "shot_types", "Less Than 10 ft", 0.25, 8.0,
                         20, "field_goal_attempts", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "Arc3Assists", 0.20, 6.0,
+                        20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "Corner3Assists", 0.20,
+                        6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "AtRimAssists", 0.20,
+                        6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "ShortMidRangeAssists",
+                        0.20, 6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
+                    ),
+                    StoredPlayerDietFact(
+                        player_id, "assist_locations", "LongMidRangeAssists",
+                        0.20, 6.0, 20, "assists", "nba_stats", RETRIEVED_AT,
                     ),
                 )
                 for player_id in player_ids
@@ -2272,19 +2311,54 @@ def test_a_current_matchup_keeps_its_partial_blend_unchanged():
     }
 
 
-def test_a_historical_pts_blend_equals_current_mode_for_the_same_evidence():
-    # #47's contract: a historical participant whose completed-season
-    # evidence is complete gets the same Blend a current-mode pool player
-    # would get from that same evidence. PTS consumes no player Season rate
-    # (only `_SEASON_RATE_MARKETS`/combos do), so only the team window and
-    # the player's own Diet need to match between the two modes here. Both
-    # the historical participant (AWAY_PARTICIPANT) and the current-mode pool
-    # player default to LAL against BOS, so the opponent side matches too.
+def test_a_current_matchup_reads_each_shared_dependency_exactly_once():
+    # #47 collapsed the historical-only second summary read and the
+    # historical-only strict team-window read into the one shared read each
+    # mode already made. This pins the current-mode call sequence so a
+    # reintroduced redundant read (an extra `get_player_summaries` call, or
+    # an extra/strict `get_latest_window` call) fails here even though it
+    # cannot change a payload two identical reads already agree on.
+    service = _service()
+
+    service.get_matchup(game_id=GAME_ID)
+
+    # Exactly one summary read, and its double has no `exclude_game_id`
+    # parameter at all -- a reintroduced second, focal-excluding read raises
+    # `TypeError` there rather than passing silently.
+    assert service.player_logs.summary_calls == [(2544,)]
+    # Exactly two team-window reads -- season and Last-15 -- and both
+    # non-strict (`get_latest_window`, not `get_focal_safe_window`).
+    assert service.team_matchups.calls == [
+        (SEASON, None, None, False),
+        (SEASON, 15, None, False),
+    ]
+    # `get_focal_safe_window` raises if called at all (see
+    # `RecordedTeamWindows`); reaching this line without an `AssertionError`
+    # from that seam already proves it was never called.
+
+
+#: Every governed historical Stat Category (`MatchupService._historical_
+#: categories`), asserted against the actual response below so a shrunk
+#: catalog fails loudly instead of silently narrowing this test's coverage.
+_PARITY_MARKETS = (
+    "3PM", "AST", "BLK", "FG2A", "FG3A", "FGA", "PA", "PR", "PRA", "PTS",
+    "RA", "REB", "STKS", "STL", "TOV",
+)
+
+
+def _parity_evidence():
+    """Complete Diet and Defense Sheet evidence for every governed category.
+
+    Every Diet-backed Base (play_types, shot_zones, shot_types,
+    assist_locations) is a whole partition, and the season Defense Sheet
+    carries every metric identity `_PRIMITIVE_SCORE_INPUTS` and the
+    defensive/rebounding columns require, so each of `_PARITY_MARKETS`
+    actually produces a component/blend rather than naming a gap.
+    """
+
     diets = RecordedCompleteDiets()
-    # PTS's shot_zones/shot_types crossings need FGM/FG2M/FG3M identities;
-    # `_window`'s own defaults are FGA-shaped for the FGA-market tests above.
     shot_zone_metrics = tuple(
-        ("shot_zones", slice_key, "FGM", 20.0)
+        ("shot_zones", slice_key, stat, 20.0)
         for slice_key in (
             "Restricted Area",
             "In The Paint (Non-RA)",
@@ -2292,33 +2366,99 @@ def test_a_historical_pts_blend_equals_current_mode_for_the_same_evidence():
             "Corner 3",
             "Above the Break 3",
         )
+        for stat in ("FGM", "FGA")
     )
     shot_type_metrics = tuple(
         ("shot_types", slice_key, stat, 7.0)
         for slice_key in ("catch_and_shoot", "pullups", "less_than_10_ft")
-        for stat in ("FG2M", "FG3M")
+        for stat in ("FG2M", "FG3M", "FG2A", "FG3A")
     )
-    scoring_window = _window(
-        shot_zone_metrics=shot_zone_metrics, shot_type_metrics=shot_type_metrics
+    traditional_metrics = (
+        ("traditional", "OPP_TOV", "OPP_TOV", 13.0),
+        ("traditional", "OPP_STL", "OPP_STL", 7.0),
+        ("traditional", "OPP_BLK", "OPP_BLK", 5.0),
+        ("traditional", "OPP_REB", "OPP_REB", 44.0),
+    )
+    assist_location_metrics = tuple(
+        ("assist_locations", slice_key, slice_key, 6.0)
+        for slice_key in (
+            "Arc3Assists",
+            "Corner3Assists",
+            "AtRimAssists",
+            "ShortMidRangeAssists",
+            "LongMidRangeAssists",
+        )
+    )
+    season_window = _window(
+        shot_zone_metrics=shot_zone_metrics,
+        shot_type_metrics=shot_type_metrics,
+        traditional_metrics=traditional_metrics,
+        assist_location_metrics=assist_location_metrics,
     )
     # Normalization compares the season and Last-15 metric identities, so
-    # current mode's real Last-15 window must share the same FGM/FG2M/FG3M
-    # shape or the mismatch degrades both windows as `legacy_surface_
-    # incomplete`. Historical has no Last-15 window by default, so it needs
-    # no matching override.
-    scoring_last_15 = _window(
+    # current mode's real Last-15 window must share this same shape or the
+    # mismatch degrades both windows as `legacy_surface_incomplete`.
+    # Historical has no Last-15 window by default, so it needs no match.
+    last_15_window = _window(
         last_15=True,
         shot_zone_metrics=shot_zone_metrics,
         shot_type_metrics=shot_type_metrics,
+        traditional_metrics=traditional_metrics,
+        assist_location_metrics=assist_location_metrics,
+    )
+    return diets, season_window, last_15_window
+
+
+def _parity_current_pool():
+    """The current-mode pool player, carrying every `_PARITY_MARKETS` entry
+    so its scores are directly comparable to the historical participant's."""
+
+    return PlayerPool(
+        players=(
+            PoolPlayer(
+                2544, "LeBron James", LAL, _PARITY_MARKETS,
+                {"prizepicks": _PARITY_MARKETS},
+            ),
+        ),
+        team_counts={LAL: 1},
+        freshness={
+            "status": "fresh",
+            "retrieved_at": RETRIEVED_AT.isoformat(),
+            "providers": {
+                "prizepicks": {
+                    "status": "fresh",
+                    "retrieved_at": RETRIEVED_AT.isoformat(),
+                }
+            },
+        },
     )
 
+
+@pytest.mark.parametrize("market", _PARITY_MARKETS)
+def test_a_historical_score_equals_current_mode_for_the_same_evidence(market):
+    # #47's contract, over every governed historical Stat Category, not just
+    # PTS: a historical participant whose completed-season evidence is
+    # complete gets the same whole window (components, blend, missing_
+    # inputs) a current-mode pool player would get from that same evidence.
+    # A shared per-game rate -- covering every combo part (PTS/REB/AST) and
+    # STKS's STL/BLK weights -- gives both modes the identical Season rate
+    # those markets weight by. Both the historical participant
+    # (AWAY_PARTICIPANT) and the current-mode pool player are on LAL against
+    # BOS, so the opponent side matches too.
+    diets, season_window, last_15_window = _parity_evidence()
+    extra_per_game = {"STL": 3.0, "BLK": 2.0}
+
     historical = _historical_service(
-        diets=diets, season_window=scoring_window
+        diets=diets,
+        season_window=season_window,
+        player_logs=RecordedGameLogs(extra_per_game=extra_per_game),
     ).get_matchup(game_id=GAME_ID)
     current = _service(
         diets=diets,
-        season_window=scoring_window,
-        last_15_window=scoring_last_15,
+        season_window=season_window,
+        last_15_window=last_15_window,
+        player_logs=RecordedGameLogs(extra_per_game=extra_per_game),
+        pool=_parity_current_pool(),
     ).get_matchup(game_id=GAME_ID)
 
     away = next(
@@ -2326,14 +2466,14 @@ def test_a_historical_pts_blend_equals_current_mode_for_the_same_evidence():
         for row in historical["players"]
         if row["canonical_id"] == AWAY_PARTICIPANT
     )
+    assert set(away["scores"]) == set(_PARITY_MARKETS)
     lebron = next(
         row for row in current["players"] if row["canonical_id"] == 2544
     )
-    historical_pts = away["scores"]["PTS"]["season"]
-    current_pts = lebron["scores"]["PTS"]["season"]
-    assert historical_pts["missing_inputs"] == []
-    assert historical_pts["blend"] is not None
-    assert historical_pts == current_pts
+
+    historical_window = away["scores"][market]["season"]
+    assert historical_window["missing_inputs"] == []
+    assert historical_window == lebron["scores"][market]["season"]
 
 
 def test_participants_without_a_season_rate_stay_visible_and_name_the_gap():

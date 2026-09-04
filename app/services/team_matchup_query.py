@@ -127,9 +127,14 @@ class TeamMatchupQueryService:
     ) -> TeamMatchupWindow | None:
         """Read the newest stored window on or before an optional slate date.
 
-        This is the hindsight-display read. It honors the #41 completed-season
+        This is the completed-season read: it honors the #41 completed-season
         exemption, so a finished season's aggregate answers for any date inside
-        that season. Analytical callers must use ``get_focal_safe_window``.
+        that season. crf04/statsplus#47 makes this the read a Historical
+        Matchup Score intentionally consumes too, uniformly with display,
+        because that exemption is sound evidence for a finished season rather
+        than a contaminated one. A caller that instead needs evidence strictly
+        before a given date -- provably free of anything on or after it --
+        must use ``get_focal_safe_window``.
         """
 
         return self._window_on_or_before(
@@ -152,13 +157,16 @@ class TeamMatchupQueryService:
     ) -> TeamMatchupWindow | None:
         """Read a window that provably contains no game after ``as_of``.
 
-        The completed-season exemption serves a finished season's aggregate for
-        any date inside it. That is sound for hindsight display and unsound as
-        an analytical input about one of those dates, because the aggregate
-        contains that date's games. This read refuses it, so an evidence gap
-        surfaces as an unavailable surface rather than a contaminated number.
-        Analytical callers name this method instead of setting a flag, so a
-        read cannot silently fall back to the display rule.
+        The completed-season exemption in ``get_latest_window`` serves a
+        finished season's aggregate for any date inside it -- sound evidence
+        for a Historical Matchup Score since crf04/statsplus#47, but wrong for
+        a caller that needs proof an aggregate excludes a specific later date.
+        This read refuses the exemption instead, so an evidence gap surfaces
+        as an unavailable surface rather than a number that may include that
+        date. It is retained for consumers that explicitly require strictly
+        pre-focal evidence; a caller names this method instead of setting a
+        flag, so a read cannot silently fall back to the completed-season
+        rule.
         """
 
         return self._window_on_or_before(

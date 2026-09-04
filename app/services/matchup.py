@@ -451,12 +451,12 @@ class MatchupService:
             )
             participants_section = self._pool_participants_section(pool_players)
         player_ids = tuple(player.canonical_player_id for player in players)
-        # The completed-season summary is what the rail displays under its
-        # declared hindsight label, and #47 makes it the Matchup Score input
-        # too: a Historical Matchup scores uniformly from completed-season
-        # evidence, focal game included, with hindsight disclosed by label
-        # rather than by withholding an input.
-        display_summaries = call_with_read_scope(
+        # One season-summary read feeds both the rail's display fields and
+        # the Matchup Score inputs, in every mode. It is season-to-date
+        # evidence in current mode; #47 made it the completed-season evidence
+        # a Historical Matchup scores from too, focal game included, with
+        # hindsight disclosed by label rather than by withholding an input.
+        summaries = call_with_read_scope(
             self.player_logs.get_player_summaries,
             season,
             player_ids,
@@ -548,7 +548,7 @@ class MatchupService:
             "teams": teams,
             "players": self._players(
                 players,
-                display_summaries,
+                summaries,
                 diets,
                 event,
                 windows,
@@ -933,7 +933,11 @@ class MatchupService:
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> TeamMatchupWindow | None:
-        """Read one Defense Sheet window for display."""
+        """Read one Defense Sheet window.
+
+        This is the shared window: `league` and `teams` display it, and #47
+        made it the Matchup Score input too, in every mode.
+        """
 
         if self.team_matchups is None:
             return None
@@ -1071,8 +1075,10 @@ class MatchupService:
     ) -> list[dict[str, Any]]:
         rows = []
         for player in players:
-            # #47: the same completed-season summary feeds both the rail's
-            # display fields and the Matchup Score inputs, in every mode.
+            # One shared season-summary read feeds both the rail's display
+            # fields and the Matchup Score inputs, in every mode; #47 made it
+            # completed-season evidence -- focal game included -- in
+            # historical mode specifically.
             summary = summaries.get(player.canonical_player_id)
             scoring = (
                 None

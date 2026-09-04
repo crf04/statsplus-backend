@@ -1784,13 +1784,16 @@ crf04/statsplus#47 supersedes #42's focal-free scoring rule: a Historical
 Matchup now scores uniformly from the completed-season evidence the page
 already displays, focal game included, with hindsight disclosed by label
 rather than by withholding an input.
-`MatchupService` reads the participant's completed-season summary once, in
-both modes, and that one read feeds `season_scoring`, `last_10_minutes`, and
-the Matchup Score inputs alike; there is no second, focal-row-excluding read.
-A historical Matchup Score consumes the same completed-season season Defense
-Sheet window `TeamMatchupQueryService.get_latest_window` returns for display —
-honoring the #41 completed-season exemption — and the same stored Player Diet
-facts the Diet Shares display reads. `MatchupService._focal_safe_team_window`,
+`MatchupService` reads one shared player season-summary once, in both modes,
+and that one read feeds `season_scoring`, `last_10_minutes`, and the Matchup
+Score inputs alike; there is no second, focal-row-excluding read. That summary
+is season-to-date evidence in current mode and completed-season evidence,
+focal game included, in historical mode specifically. A historical Matchup
+Score consumes the same season Defense Sheet window
+`TeamMatchupQueryService.get_latest_window` returns for both modes — the
+completed-season read that honors the #41 completed-season exemption — and the
+same stored Player Diet facts the Diet Shares display reads.
+`MatchupService._focal_safe_team_window`,
 which called the strict, pre-focal `get_focal_safe_window` read, is retired
 along with the `score_windows`/`score_diets` split it fed; `windows`,
 `metric_indexes`, and `availability` now drive both display and scoring in
