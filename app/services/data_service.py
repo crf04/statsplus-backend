@@ -26,7 +26,6 @@ from app.models.catalogs import (
     PBPDataKind,
     PBP_DATA_KINDS,
     PLAY_TYPES,
-    SHOOTING_TYPES,
 )
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
 from app.providers.pbp_stats import PBPStatsAdapter, PBPStatsProvider
@@ -50,25 +49,18 @@ logger = logging.getLogger(__name__)
 #: the exact stream whose activation supersedes it.  One map keeps the refusal
 #: partition, the publication fence, and the single-table compatibility writers
 #: describing the same table/stream pairs.  A table absent from this map has no
-#: database-first replacement and always refreshes.  The retired ranking tables
-#: stay listed here for their stream pairing, but
-#: :data:`RETIRED_LEGACY_RANKING_TABLES` refuses them first and unconditionally.
+#: database-first replacement and always refreshes.  The tables in
+#: :data:`RETIRED_LEGACY_RANKING_TABLES` are absent too, for the opposite
+#: reason: both consumers refuse them by name before reading a pairing, so an
+#: entry here would never be consulted.
 _ACTIVATION_FENCED_TABLE_STREAMS: dict[str, str] = {
-    "general_opponent_stats": "traditional_opponent_season",
     "player_per36_stats": "player_per36",
-    "team_play_types": publication_stream("play_types", "season"),
     "player_play_types": "synergy_play_types",
     "opp_shooting_zone": publication_stream("shot_zones", "season"),
     "player_shooting_zones": "exact_shot_zones",
-    "processed_team_assists": "assist_locations_season",
     "processed_player_assists": "player_assist_locations",
     "pbp_opponent_stats": "assist_locations_season",
     "pbp_player_stats": "player_assist_locations",
-    **{
-        shooting_type.replace(" ", "_").lower():
-        publication_stream("shot_types", "season")
-        for shooting_type in SHOOTING_TYPES
-    },
 }
 
 

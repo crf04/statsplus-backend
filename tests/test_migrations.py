@@ -2570,6 +2570,9 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
 
 #: The six nightly ranking tables #199 retires.  ``opp_shooting_zone`` is
 #: deliberately absent: its stream is activated but the table is not retired.
+#: Spelled out rather than imported from ``RETIRED_LEGACY_RANKING_TABLES`` on
+#: purpose: this pins what migration 048 actually dropped, so widening the
+#: runtime constant later cannot silently rewrite what this test checks.
 _DROPPED_LEGACY_RANKING_TABLES = (
     "general_opponent_stats",
     "catch_and_shoot",

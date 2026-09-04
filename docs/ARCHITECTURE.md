@@ -916,6 +916,8 @@ Redis key are gone along with the legacy `general_opponent_stats`,
 `processed_team_assists` reads.  Every Team Filter in one request is answered
 from a single publication snapshot, so two filters can never intersect two
 generations that never coexisted, and two filters sharing a base cost one read.
+The read is not cached in Redis: an activation, a rollback, or a season
+rollover must never be shadowed by a previous generation.
 
 Those six nightly ranking tables are now **retired and dropped**.
 `RETIRED_LEGACY_RANKING_TABLES` in `app.services.table_publisher` refuses them
@@ -935,8 +937,6 @@ deliberately not part of that drop -- it is fenced, not retired.
 `tests/services/test_legacy_ranking_tables.py` pins the fence, and its
 allow-list is the repository-wide search proving no reader survives: every
 remaining mention is the fence, the migration, or shared vocabulary.
-The read is not cached in Redis: an activation, a rollback, or a season
-rollover must never be shadowed by a previous generation.
 
 The rankings are read for the request's own `season_filter`.  A publication
 stream carries one pointer, so only the published season can rank: a request
@@ -1693,9 +1693,10 @@ Composition jobs finish independently: incomplete assist evidence leaves its
 jobs retryable while unrelated candidates advance. Traditional parity has no
 legacy diagnostic left to read -- #199 dropped `general_opponent_stats` -- so
 both `traditional_opponent` windows record unavailable evidence, never a
-fabricated empty comparison; the same rule governs any missing diagnostic. Runtime refresh resolves the active unexpired manifest and
-its exact authorized Event Catalog snapshot before entering the
-provider-capable backfill boundary.
+fabricated empty comparison; the same rule governs any missing diagnostic.
+Runtime refresh resolves the active unexpired manifest and its exact
+authorized Event Catalog snapshot before entering the provider-capable
+backfill boundary.
 Collection authorization and composition governance are intentionally
 separate. Provider I/O and new acceptance require an active Season plus an
 active manifest before `collect_before`; already accepted observations may be

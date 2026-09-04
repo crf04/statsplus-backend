@@ -25,6 +25,7 @@ from app.services.database_first_drills import (
     same_database_identity,
 )
 from app.services.database_first_rehearsal import HistoricalRehearsalRunner
+from app.services.table_publisher import RETIRED_LEGACY_RANKING_TABLES
 
 
 UTC = timezone.utc
@@ -309,14 +310,9 @@ _INACTIVE_IN_PRODUCTION = (
 )
 #: Legacy tables refused because #199 retired their storage.  The refresh skips
 #: them for that reason alone, ahead of and independently of any activation.
-_RETIRED_TABLES = (
-    "general_opponent_stats",
-    "team_play_types",
-    "catch_and_shoot",
-    "pullups",
-    "less_than_10_ft",
-    "processed_team_assists",
-)
+#: Taken from the runtime constant rather than respelled, so this file cannot
+#: drift from the set the fence actually refuses.
+_RETIRED_TABLES = tuple(sorted(RETIRED_LEGACY_RANKING_TABLES))
 #: Legacy tables that still exist but whose stream is activated in production.
 _ACTIVATION_FENCED_TABLES = (
     "player_per36_stats",

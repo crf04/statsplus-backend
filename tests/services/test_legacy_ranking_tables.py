@@ -39,33 +39,32 @@ PRODUCTION_ROOTS = ("app", "scripts")
 #: Every production file that may still name a retired ranking table, with the
 #: reason it is allowed to.  No entry is a reader: the cutover is complete and
 #: the storage is dropped.  What is left is the fence, the migration that
-#: performs the drop, and domain vocabulary -- publication slice keys, provider
-#: operation names, display labels -- that merely shares the retired tables'
-#: spelling and must not be renamed with them.
+#: performs the drop, comments recording the retirement, and domain vocabulary
+#: -- publication slice keys, provider operation names -- that merely shares
+#: the retired tables' spelling and must not be renamed with them.
 ALLOWED_RETIRED_TABLE_MENTIONS: dict[str, str] = {
     # --- the fence and the drop ---
     "app/services/table_publisher.py": "the retired-table fence itself",
     "app/migrations.py": (
         "048_drop_legacy_ranking_tables names the six tables it drops"
     ),
+    # --- comments and docstrings recording the retirement ---
     "app/services/data_service.py": (
-        "the retired names in the activation-fence map, whose retirement "
-        "refusal fires ahead of the activation check"
+        "a docstring naming the table the removed opponent collector produced"
     ),
-    # --- vocabulary that shares the spelling ---
     "app/services/ledger_parity.py": (
         "a docstring recording that the traditional_opponent diagnostic read "
         "is retired; LegacyParityDiagnosticReader.TABLES no longer names it"
     ),
     "app/services/ledger_materialization.py": (
-        "the reason string on the unavailable traditional_opponent_season "
-        "parity report"
+        "a comment explaining why neither traditional_opponent window has a "
+        "legacy diagnostic left to compare against"
     ),
+    # --- vocabulary that shares the spelling ---
     "app/domain/team_matchup_taxonomy.py": "shot-type slice keys in publications",
     "app/services/team_filter_rankings.py": "published shot-type metric keys",
     "app/services/nba_stats_adapter.py": "the synergy_team_play_types operation name",
     "app/utils/telemetry.py": "the synergy_team_play_types operation name",
-    "app/utils/tables.py": "legacy display-name normalization",
     "scripts/generate_benchmark_fixture.py": "the catch_and_shoot publication slice key",
 }
 
