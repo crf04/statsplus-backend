@@ -2547,6 +2547,13 @@ an abandoned pass keep writing over the pass that replaced it. A revived worker
 therefore cannot overwrite its successor, and in particular cannot revert a
 `succeeded` rebuild to an active phase.
 
+The fence covers staging as well as promotion. Minting a candidate and
+superseding the one it replaces are durable mutations of the publication
+family, so the claim is proved and the rebuild row locked in the *same*
+transaction that writes those candidates. A superseded pass is refused before
+it writes anything, rather than leaving candidate rows behind that no live
+rebuild accounts for.
+
 The pointer moves and the rebuild's own success write commit in one
 transaction. Splitting them would leave a window in which a crash stranded
 promoted pointers behind a rebuild still recorded as in-flight, and the resumed

@@ -744,34 +744,42 @@ class TraditionalOpponentRebuildService:
     def _stage_candidates(
         self, rebuild, payloads, *, claim: RebuildClaim
     ) -> PublicationRebuild:
-        """Persist both candidates, reusing the active pair's provenance."""
+        """Persist both candidates, reusing the active pair's provenance.
+
+        Minting a candidate and superseding the one it replaces are durable
+        mutations of the publication family, so they are fenced exactly like
+        a pointer move: the claim is proved and the rebuild row locked in the
+        *same* transaction that writes the candidates.  A pass that has
+        already been superseded is therefore refused before it writes
+        anything, rather than leaving candidate rows behind that no live
+        rebuild accounts for.
+        """
 
         staged: dict[str, PublicationVersion] = {}
-        with self.publications._session_scope(None) as session:
+        with self._fenced(rebuild.rebuild_id, claim=claim) as (session, locked):
+            if locked.state in TERMINAL_REBUILD_STATES:
+                return locked
             for stream_key in self.stream_keys:
                 provenance = self._provenance(
-                    session, self._expected_id(rebuild, stream_key)
+                    session, self._expected_id(locked, stream_key)
                 )
                 staged[stream_key] = self.publications.compose_inactive_ledger(
                     stream_key,
-                    season=rebuild.season,
-                    cutoff=_aware(rebuild.cutoff),
+                    season=locked.season,
+                    cutoff=_aware(locked.cutoff),
                     payload=payloads[stream_key],
                     provenance=provenance,
-                    reason=f"publication format rebuild to {rebuild.target_format}",
+                    reason=f"publication format rebuild to {locked.target_format}",
                     session=session,
                 )
-        return self._transition(
-            rebuild.rebuild_id,
-            claim=claim,
-            state="validating",
-            values={
-                "staged_season_publication_id": staged[SEASON_STREAM].publication_id,
-                "staged_season_checksum": staged[SEASON_STREAM].checksum,
-                "staged_l15_publication_id": staged[L15_STREAM].publication_id,
-                "staged_l15_checksum": staged[L15_STREAM].checksum,
-            },
-        )
+            locked.staged_season_publication_id = staged[
+                SEASON_STREAM
+            ].publication_id
+            locked.staged_season_checksum = staged[SEASON_STREAM].checksum
+            locked.staged_l15_publication_id = staged[L15_STREAM].publication_id
+            locked.staged_l15_checksum = staged[L15_STREAM].checksum
+            locked.state = "validating"
+        return locked
 
     @staticmethod
     def _provenance(session, publication_id: str) -> dict[str, str]:

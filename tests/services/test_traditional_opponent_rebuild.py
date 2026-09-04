@@ -1372,3 +1372,85 @@ def _add_game_under_second_manifest(engine):
                 observation_id="pbp:game-15", game_id="game-15", created_at=NOW,
             )
         )
+
+
+def _candidate_rows(publications):
+    """Every candidate/superseded version of the family, by identity."""
+
+    with publications.session() as session:
+        return {
+            (row.publication_id, row.status)
+            for row in session.scalars(
+                select(PublicationVersion).where(
+                    PublicationVersion.stream_key.in_(
+                        (SEASON_STREAM, L15_STREAM)
+                    )
+                )
+            ).all()
+        }
+
+
+def test_a_stale_same_owner_pass_cannot_stage_candidates(family):
+    """Staging is a publication write, so it is fenced like every other one.
+
+    A superseded pass can no longer move pointers or overwrite terminal
+    states, but minting or superseding candidate rows is still a durable
+    mutation of the publication family and must be refused on the same
+    generation token.
+    """
+
+    engine, publications = family
+    clock = [NOW]
+    service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    stale = service.claim(rebuild.rebuild_id, owner=WORKER)
+    clock[0] = NOW + timedelta(minutes=5)
+    # A second invocation of the same command supersedes the first.
+    service.claim(rebuild.rebuild_id, owner=WORKER)
+    before = _candidate_rows(publications)
+
+    with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
+        service._stage_candidates(
+            rebuild,
+            {stream_key: v2_payload() for stream_key in service.stream_keys},
+            claim=stale,
+        )
+
+    # Nothing was minted, and nothing the family already held was superseded.
+    assert _candidate_rows(publications) == before
+    status = service.status(rebuild.rebuild_id)
+    assert not status["staged"]["season"]["publication_id"]
+    assert not status["staged"]["l15"]["publication_id"]
+
+
+def test_a_stale_same_owner_pass_cannot_stage_through_the_public_seam(family):
+    """The same refusal reaches the caller through ``stage``."""
+
+    engine, publications = family
+    clock = [NOW]
+    stale_service = _service(engine, clock=lambda: clock[0], lease_seconds=60)
+    rebuild = stale_service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    composed = []
+
+    def slow_compose(sources):
+        # While this pass composes, its lease expires and a second invocation
+        # of the same command claims the rebuild.
+        clock[0] = NOW + timedelta(minutes=5)
+        stale_service.claim(rebuild.rebuild_id, owner=WORKER)
+        composed.append(1)
+        return {stream_key: v2_payload() for stream_key in sources.stream_keys}
+
+    racing = _service(
+        engine, compose=slow_compose, clock=lambda: clock[0], lease_seconds=60
+    )
+    before = _candidate_rows(publications)
+
+    with pytest.raises(ControlPlaneError, match="rebuild_lease_held"):
+        racing.stage(rebuild.rebuild_id, owner=WORKER)
+
+    assert composed, "the racing pass never reached composition"
+    assert _candidate_rows(publications) == before
