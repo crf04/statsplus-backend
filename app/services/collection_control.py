@@ -4629,7 +4629,11 @@ class PublicationService(_SessionService):
                     discarded.append({
                         "stream_key": member.stream_key,
                         "publication_id": displaced.publication_id,
-                        "fence": int(member.expected_fence),
+                        # The version's own fence, not the declared guard.
+                        # The two agree here -- the guard just matched -- but
+                        # the audit should name what it discarded, not what it
+                        # was compared against.
+                        "fence": int(displaced.fence),
                         "cutoff": _iso(displaced.cutoff),
                     })
                 published.append({
@@ -4638,9 +4642,13 @@ class PublicationService(_SessionService):
                     "fence": int(publication.fence),
                 })
 
-            # The held composition jobs are settled by the promotion that
-            # replaced them; leaving them queued would re-offer work that no
-            # longer exists.
+            # Settling the held jobs is load-bearing, not tidying.  Stamping
+            # ``promoted_at`` below releases the group, so a member left
+            # ``queued`` would be claimed by the very next worker pass and
+            # composed again -- and that ordinary advance would set
+            # ``previous_publication_id`` to the publication this repair just
+            # made active, handing back the rollback target the repair exists
+            # to destroy.
             session.execute(update(CompositionJob).where(
                 CompositionJob.manifest_id == manifest_id,
                 CompositionJob.stream_key.in_(

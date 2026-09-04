@@ -254,7 +254,7 @@ group's `promoted_at`, and the operator audit all roll back together:
 | `repair_group_not_found` | The manifest declares no group (`404`). |
 | `repair_group_already_promoted` | The declaration was already consumed (`409`). |
 | `repair_group_guard_stale` | A member's active publication or fence moved after the declaration (`409`). |
-| `repair_group_manifest_inactive` | The declaring manifest was superseded or expired, so its catalog binding no longer governs (`409`). |
+| `repair_group_manifest_inactive` | The declaring manifest was superseded by a later one, so its catalog binding no longer governs (`409`). Passing `collect_before` is *not* this state -- a promotion happens after collection closes, so an active manifest past its collection deadline still promotes. |
 | `incomplete_publication`, `base_incomplete` | A member has no, or partial, evidence for this season and cutoff. |
 | `publication_candidate_invalid` | A member's replacement failed validation. |
 | any composition or infrastructure failure | Including a failure between two members' pointer updates. |

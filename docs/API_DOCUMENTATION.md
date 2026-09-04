@@ -2066,8 +2066,12 @@ identities and pointer fences are operator control-plane state and are never
 returned to a collector; `repair_group` is `null` when the caller
 authorizes none of its members. `GET /api/collector/manifest/<manifest_id>`
 renders the identical object. A composition that belongs to a declared group
-is held for grouped execution and refuses the independent publication path
-with `409 operation_conflict` and detail `grouped_repair_pending`.
+is held for grouped execution and refuses the scheduled publication path
+with `409 operation_conflict` and detail `grouped_repair_pending`. That hold
+covers the composition worker and `compose_from_observations`, not the pointer
+itself: `POST /api/admin/collection/streams/<stream_key>/activate` still
+promotes a candidate directly, which leaves the group `guard_stale` rather
+than half-repaired.
 `GET /api/admin/collection/manifests/<manifest_id>/repair-group` is the
 operator read: unlike the collector object it returns every member's declared
 and live publication identity and fence, `guard_satisfied`, `stale_members`,

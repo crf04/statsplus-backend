@@ -243,7 +243,10 @@ def build_repair_environment(engine, monkeypatch):
             )
 
     # The defect: both windows published from the broken provider mode, at an
-    # earlier cutoff, each leaving the other as its rollback target.
+    # earlier cutoff.  These are each stream's first publication, so neither
+    # has a rollback target yet -- which is exactly what the repair has to
+    # keep true.  An ordinary advance would make the broken version the
+    # rollback target; the grouped promotion must not.
     publish_catalogs(BROKEN_CUTOFF)
     broken_manifest = control.create_manifest(
         SEASON, cutoff=BROKEN_CUTOFF, scopes=scopes,

@@ -2500,6 +2500,29 @@ def test_a_stale_guard_prevents_the_group_from_becoming_promotable(repair_group_
     assert state["state"] == "guard_stale"
     assert state["stale_members"] == [L15_ZONES]
 
+    # A different active identity at the *same* fence is equally stale: the
+    # pointer now names a publication the operator never agreed to discard.
+    with env["engine"].begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="pub-unexpected-replacement",
+            stream_key=SEASON_ZONES, season="2025-26", cutoff=env["cutoff"],
+            version=2, status="active", checksum="b" * 64,
+            payload=json.dumps({"rows": []}), created_at=env["cutoff"],
+            fence=1,
+        ))
+        connection.execute(PublicationPointer.__table__.update().where(
+            PublicationPointer.stream_key == SEASON_ZONES
+        ).values(active_publication_id="pub-unexpected-replacement"))
+
+    state = env["control"].repair_group_state(manifest.manifest_id)
+    assert state["stale_members"] == [L15_ZONES, SEASON_ZONES]
+    season_member = next(
+        member for member in state["members"]
+        if member["stream_key"] == SEASON_ZONES
+    )
+    assert season_member["fence"] == season_member["expected_fence"]
+    assert season_member["guard_satisfied"] is False
+
 
 def test_repair_group_state_is_absent_for_ordinary_manifests(repair_group_env):
     env = repair_group_env
