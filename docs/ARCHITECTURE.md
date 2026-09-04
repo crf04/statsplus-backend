@@ -2189,6 +2189,18 @@ from stats. Bulk reads return even very small raw shares; display thresholds
 are deliberately outside this module, and absent requested players or slices
 never receive synthetic zero facts.
 
+Player HTTP list and Playtypes/assists profile reads receive a mandatory
+`PlayerProfileReader` composed from the read-only Athlete Catalog and Player
+Diet repository. `GET /api/players` joins play-type fact holders to the whole
+current-season catalog (`active_only=False`), because a player who became
+inactive after recording a current-season fact remains part of that season's
+population. Profile lookup uses the same whole catalog while preferring the
+active row when normalized display names collide. The read-only demo database
+composes an explicitly unavailable `PlayerProfileReader`, so these surfaces
+return an empty list or missing profile without consulting
+`player_play_types` or `processed_player_assists`; a missing dependency is
+never a legacy-read signal.
+
 ### Window-aware team matchup facts
 
 `TeamMatchupRefreshService` is the Nightly Refresh's sixth ordered step, after
