@@ -119,10 +119,10 @@ over is frozen, not superseded.
 | `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | fenced | yes — superseded | none |
 | `processed_team_assists` | `assist_locations_season` | yes | dropped (#199) | yes — superseded | none |
 | `pbp_opponent_stats` | `assist_locations_season` | yes | fenced | n/a (refresh input) | `DataService.process_assist_data` input |
-| `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | `PlayerService.get_all_players`, player play-type profile, NL parser player names |
+| `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | NL parser player names; player HTTP reads use Athlete Catalog + Player Diet (#231) |
 | `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | n/a | player zone-shooting profile |
-| `processed_player_assists` | `player_assist_locations` | no | still refreshed | n/a | player assist-location profile |
-| `pbp_player_stats` | `player_assist_locations` | no | still refreshed | n/a | `DataService.process_assist_data` input |
+| `processed_player_assists` | `player_assist_locations` | no | not collected by `update_database` (#231) | yes — superseded | none |
+| `pbp_player_stats` | `player_assist_locations` | no | not collected by `update_database` (#231) | n/a (retired refresh input) | none |
 | `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables, `database_utils` |
 
 No **frozen** row remains: the Team Profile read cutover (crf04/statsplus#45)

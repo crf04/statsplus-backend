@@ -102,7 +102,7 @@ def build_dependencies(
     from app.services.game_service import GameService
     from app.services.job_service import build_data_refresh_job_service
     from app.services.nl_service import NLService
-    from app.services.player_service import PlayerService
+    from app.services.player_service import PlayerProfileReader, PlayerService
     from app.services.player_diet import PlayerDietService
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
@@ -255,12 +255,6 @@ def build_dependencies(
         )
 
     game_service = None
-    player_service = PlayerService(
-        engine,
-        settings=settings,
-        nba_stats_provider=nba_stats_provider,
-        publication_reader=publication_reader,
-    )
     # One Season publication read seam serves both the game-log Team Filters
     # and the Team Profile categories, so neither can reach a provider client.
     season_rankings = (
@@ -290,12 +284,6 @@ def build_dependencies(
         nba_stats=nba_stats_provider,
         pbp_stats=pbp_stats_provider,
     )
-    data_refresh_jobs_service = build_data_refresh_job_service(
-        engine,
-        settings,
-        data_service=data_service,
-        player_service=player_service,
-    )
     athlete_catalog_service = None
     athlete_mapping_repository = None
     athlete_resolver = None
@@ -303,6 +291,7 @@ def build_dependencies(
     event_mapping_repository = None
     event_resolver = None
     player_diet_service = None
+    player_profile_reader = None
     team_matchup_query_service = None
     if not demo_database:
         athlete_catalog_service = AthleteCatalogService(
@@ -345,6 +334,9 @@ def build_dependencies(
             write_fence=write_fence,
             publication_reader=publication_reader,
             baseline_settings=settings.player_diet_baseline,
+        )
+        player_profile_reader = PlayerProfileReader(
+            AthleteCatalogReader(engine), player_diet_service.repository
         )
         team_matchup_repository = TeamMatchupRepository(
             engine,
@@ -423,6 +415,20 @@ def build_dependencies(
                 repository=canonical_game_ledger_repository,
                 max_concurrency=1,
             )
+
+    player_service = PlayerService(
+        engine,
+        settings=settings,
+        nba_stats_provider=nba_stats_provider,
+        publication_reader=publication_reader,
+        profile_reader=player_profile_reader,
+    )
+    data_refresh_jobs_service = build_data_refresh_job_service(
+        engine,
+        settings,
+        data_service=data_service,
+        player_service=player_service,
+    )
 
     dfs_board_service = DFSBoardService(
         provider_registry=cached_dfs_providers,

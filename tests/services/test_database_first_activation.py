@@ -326,8 +326,6 @@ _STILL_REFRESHED_TABLES = (
     "player_information",
     "player_play_types",
     "player_shooting_zones",
-    "pbp_player_stats",
-    "processed_player_assists",
 )
 
 

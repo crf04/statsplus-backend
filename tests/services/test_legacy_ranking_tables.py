@@ -102,16 +102,24 @@ def test_the_nightly_refresh_collects_no_retired_ranking_table(service, monkeypa
         "_collect_player_zone",
     ):
         monkeypatch.setattr(service, helper, lambda *a, **k: frame.copy())
-    monkeypatch.setattr(service, "_collect_pbp_frame", lambda *a, **k: frame.copy())
+    pbp_calls = []
+    monkeypatch.setattr(
+        service,
+        "_collect_pbp_frame",
+        lambda data_type: pbp_calls.append(data_type) or frame.copy(),
+    )
     monkeypatch.setattr(
         service,
         "_collect_assist_frames",
-        lambda *a, **k: {"processed_player_assists": frame.copy()},
+        lambda *a, **k: pytest.fail("retired player assist frame was collected"),
     )
 
     collected = set(service._collect_all_frames())
 
     assert collected & RETIRED_LEGACY_RANKING_TABLES == set()
+    assert "processed_player_assists" not in collected
+    assert "pbp_player_stats" not in collected
+    assert pbp_calls == ["opponent"]
 
 
 @pytest.mark.parametrize("table_name", sorted(RETIRED_LEGACY_RANKING_TABLES))

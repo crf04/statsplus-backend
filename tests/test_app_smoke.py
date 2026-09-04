@@ -151,6 +151,38 @@ def test_players_endpoint_smoke(client):
     assert isinstance(response.get_json(), list)
 
 
+def test_player_routes_preserve_profile_response_shapes(client):
+    service = client.application.extensions["dependencies"].player_service
+    service.get_all_players.return_value = ["Jayson Tatum"]
+
+    def profile(player_name, category, opp_team=None):
+        assert player_name == "Jayson Tatum"
+        if category == "Playtypes":
+            return {
+                "PLAYER_NAME": "Jayson Tatum",
+                "TEAM_ABBREVIATION": "BOS",
+                "Transition%": 20.0,
+            }
+        return [{"Name": "Jayson Tatum", "ThreePtAssists": 30.0}]
+
+    service.get_player_profile.side_effect = profile
+
+    players = client.get("/api/players")
+    playtypes = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes"
+    )
+    assists = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
+    )
+
+    assert players.status_code == 200
+    assert players.get_json() == ["Jayson Tatum"]
+    assert playtypes.status_code == 200
+    assert playtypes.get_json()["Transition%"] == 20.0
+    assert assists.status_code == 200
+    assert assists.get_json()[0]["ThreePtAssists"] == 30.0
+
+
 def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):
     import app.utils.auth as auth
     from app.models.game_logs import GameLogQuery

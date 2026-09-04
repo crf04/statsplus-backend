@@ -1267,7 +1267,9 @@ curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minut
 GET /api/players
 ```
 
-Returns a JSON array of player names from the local player play-type table.
+Returns a JSON array of canonical current-season Athlete Catalog display names
+that have durable Player Diet play-type facts. The request is database-only and
+does not call an upstream provider.
 
 ### Get Player Profile
 
@@ -1280,6 +1282,15 @@ Query parameters:
 - `player_name` is required.
 - `category` is required by the service. Supported values include `Playtypes`, `assists`, `Archetype`, `Shooting Type`, and `Zone Shooting`.
 - `opp_team` is used by `Archetype`.
+
+Player names are matched against the current-season Athlete Catalog without
+regard to case, punctuation, or diacritics. `Playtypes` keeps the historical
+object shape while its `<PlayType>%` values are durable Synergy possession
+shares multiplied by 100; its player name and team are the current canonical
+catalog values. `assists` keeps its historical one-element array shape and
+derives two-point, three-point, and `+` values from durable assist-location
+facts and Player Diet league baselines. Missing play-type slices are returned
+as zero. Neither category calls an upstream provider at request time.
 
 Example:
 

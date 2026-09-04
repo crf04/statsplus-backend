@@ -12,11 +12,55 @@ from ..errors import (
     ResourceNotFoundError,
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.models.catalogs import PLAY_TYPES
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
+from app.services.athlete_resolver import normalize_athlete_name
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
+
+
+class PlayerProfileReader:
+    """Read-only catalog and Player Diet capability for player profiles.
+
+    ``PlayerDietService`` owns the provider-backed refresh adapters, so the
+    request service receives its repository directly through this narrow
+    wrapper.  The catalog reader follows the same engine-only pattern.  This
+    keeps the profile/list read path unable to reach NBA Stats or PBP Stats.
+    """
+
+    __slots__ = ("_catalog", "_diets")
+
+    def __init__(self, catalog_reader, diet_reader) -> None:
+        if not callable(getattr(catalog_reader, "get_catalog", None)):
+            raise TypeError("player profile catalog reader must expose get_catalog")
+        if not callable(getattr(diet_reader, "get_for_players", None)):
+            raise TypeError("player profile diet reader must expose get_for_players")
+        self._catalog = catalog_reader
+        self._diets = diet_reader
+
+    def get_catalog(self, season: str, *, active_only: bool = False):
+        return self._catalog.get_catalog(season, active_only=active_only)
+
+    def get_for_players(self, season: str, player_ids):
+        return self._diets.get_for_players(season, player_ids)
+
+
+_ASSIST_LOCATION_SLICES = (
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+_TWO_POINT_ASSIST_SLICES = (
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+_THREE_POINT_ASSIST_SLICES = ("Arc3Assists", "Corner3Assists")
+
 
 class PlayerService:
     def __init__(
@@ -25,14 +69,42 @@ class PlayerService:
         settings: RuntimeSettings | None = None,
         nba_stats_provider: NBAStatsProvider | None = None,
         publication_reader=None,
+        profile_reader: PlayerProfileReader | None = None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self.publication_reader = publication_reader
+        self.profile_reader = profile_reader
 
     def get_all_players(self):
         """Fetch list of all players from database"""
+        if self.profile_reader is not None:
+            try:
+                season = self.settings.nba.current_season
+                catalog = self.profile_reader.get_catalog(season, active_only=True)
+                catalog_by_id = {
+                    int(row["player_id"]): row
+                    for row in catalog
+                    if bool(row.get("is_active_for_season", row.get("is_active", False)))
+                }
+                if not catalog_by_id:
+                    return []
+                result = self.profile_reader.get_for_players(
+                    season, tuple(sorted(catalog_by_id))
+                )
+                play_type_ids = {
+                    player_id
+                    for player_id, facts in result.players.items()
+                    if any(fact.base == "play_types" for fact in facts)
+                }
+                return [
+                    catalog_by_id[player_id]["display_name"]
+                    for player_id in sorted(play_type_ids)
+                ]
+            except Exception as error:
+                logger.error("Error fetching durable players: %s", error)
+                return []
         try:
             df = self._fetch_data_from_table('player_play_types')
             return df['PLAYER_NAME'].values.tolist()
@@ -49,10 +121,26 @@ class PlayerService:
         if not player_name or not category:
             raise InvalidInputError("player_name and category are required.")
 
-        # Fuzzy match player name.
-        player_name = self._fuzzy_match_player_name(player_name)
-        if player_name is None:
-            raise ResourceNotFoundError("The requested player was not found.")
+        if self.profile_reader is not None:
+            canonical = self._resolve_profile_player(player_name)
+            if canonical is None:
+                raise ResourceNotFoundError("The requested player was not found.")
+            player_id, canonical_name, team_abbreviation = canonical
+            if category == "Playtypes":
+                return self._get_durable_player_playtypes(
+                    player_id, canonical_name, team_abbreviation
+                )
+            if category == "assists":
+                return self._get_durable_player_assists(player_id, canonical_name)
+            # The remaining profiles have no durable replacement in this
+            # change.  Continue using the historical display-name seams after
+            # resolving the name through the canonical catalog.
+            player_name = canonical_name
+        else:
+            # Fuzzy match player name.
+            player_name = self._fuzzy_match_player_name(player_name)
+            if player_name is None:
+                raise ResourceNotFoundError("The requested player was not found.")
 
         try:
             if category == 'Playtypes':
@@ -78,6 +166,122 @@ class PlayerService:
         except Exception:
             logger.exception("Error getting player profile")
             raise
+
+    def _resolve_profile_player(self, player_name):
+        """Resolve one input to the current-season canonical catalog row."""
+
+        season = self.settings.nba.current_season
+        rows = self.profile_reader.get_catalog(season, active_only=True)
+        target = normalize_athlete_name(player_name)
+        if not target:
+            return None
+        matches = [
+            row
+            for row in rows
+            if bool(row.get("is_active_for_season", row.get("is_active", False)))
+            and normalize_athlete_name(row.get("display_name")) == target
+        ]
+        if not matches:
+            return None
+        row = min(matches, key=lambda item: int(item["player_id"]))
+        return (
+            int(row["player_id"]),
+            str(row.get("display_name") or ""),
+            row.get("team_abbreviation"),
+        )
+
+    def _durable_profile_result(self, player_id):
+        result = self.profile_reader.get_for_players(
+            self.settings.nba.current_season, [player_id]
+        )
+        return result, tuple(result.players.get(player_id, ()))
+
+    def _get_durable_player_playtypes(
+        self, player_id: int, canonical_name: str, team_abbreviation: str | None
+    ):
+        _, facts = self._durable_profile_result(player_id)
+        facts_by_slice = {
+            fact.slice_key: fact
+            for fact in facts
+            if fact.base == "play_types"
+        }
+        if not facts_by_slice:
+            raise ResourceNotFoundError("The requested player profile was not found.")
+        return {
+            "PLAYER_NAME": canonical_name,
+            "TEAM_ABBREVIATION": team_abbreviation,
+            **{
+                f"{play_type}%": float(
+                    facts_by_slice[play_type].share * 100
+                )
+                if play_type in facts_by_slice
+                else 0
+                for play_type in PLAY_TYPES
+            },
+        }
+
+    def _get_durable_player_assists(self, player_id: int, canonical_name: str):
+        result, facts = self._durable_profile_result(player_id)
+        facts_by_slice = {
+            fact.slice_key: fact
+            for fact in facts
+            if fact.base == "assist_locations"
+        }
+        if not facts_by_slice:
+            return []
+
+        shares = {
+            slice_key: float(facts_by_slice[slice_key].share)
+            if slice_key in facts_by_slice
+            else 0.0
+            for slice_key in _ASSIST_LOCATION_SLICES
+        }
+        baselines = result.baselines
+
+        def baseline_share(slice_keys):
+            values = [
+                baselines.get(("assist_locations", slice_key)).league_average_share
+                for slice_key in slice_keys
+                if baselines.get(("assist_locations", slice_key)) is not None
+                and baselines.get(("assist_locations", slice_key)).league_average_share
+                is not None
+            ]
+            total = sum(values)
+            return total if total > 0 else None
+
+        derived = {
+            "TwoPtAssists": sum(shares[key] for key in _TWO_POINT_ASSIST_SLICES),
+            "ThreePtAssists": sum(shares[key] for key in _THREE_POINT_ASSIST_SLICES),
+        }
+        all_shares = {**shares, **derived}
+        all_baseline_slices = {
+            **{
+                key: ("assist_locations", key)
+                for key in _ASSIST_LOCATION_SLICES
+            },
+            "TwoPtAssists": ("assist_locations", _TWO_POINT_ASSIST_SLICES),
+            "ThreePtAssists": ("assist_locations", _THREE_POINT_ASSIST_SLICES),
+        }
+        output = {"Name": canonical_name}
+        for key in (
+            "TwoPtAssists",
+            "ThreePtAssists",
+            *_ASSIST_LOCATION_SLICES,
+        ):
+            value = all_shares[key] * 100
+            output[key] = value
+            baseline_key = all_baseline_slices[key]
+            if isinstance(baseline_key[1], tuple):
+                denominator = baseline_share(baseline_key[1])
+            else:
+                baseline = baselines.get(baseline_key)
+                denominator = (
+                    None
+                    if baseline is None
+                    else baseline.league_average_share
+                )
+            output[f"{key}+"] = value / (denominator * 100) if denominator else 0
+        return [output]
         
     def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
         """
