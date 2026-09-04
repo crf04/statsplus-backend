@@ -58,7 +58,16 @@ UTC = timezone.utc
 
 
 class PublicationPayloadError(ValueError):
-    """An immutable publication payload is not safe to serve as facts."""
+    """An immutable publication payload is not safe to serve as facts.
+
+    ``reason`` carries the owning module's stable refusal code when there is
+    one, so a caller can distinguish "this deployment no longer reads that
+    format" from "these bytes are malformed" without parsing a message.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 def _reject_duplicate_json_keys(pairs):
@@ -506,7 +515,8 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
                     row_format = validate_traditional_opponent_team(blocks)
                 except TraditionalOpponentFormatError as error:
                     raise PublicationPayloadError(
-                        f"{stream_key} publication {error.reason}"
+                        f"{stream_key} publication {error.reason}",
+                        reason=error.reason,
                     ) from error
                 if traditional_format is None:
                     traditional_format = row_format
@@ -1173,11 +1183,17 @@ class DatabaseFirstPublicationReader:
                 season=publication.season,
                 retrieved_at=retrieved_at,
             )
-        except PublicationPayloadError:
+        except PublicationPayloadError as error:
             return self._missing(
                 stream_key,
                 "unavailable",
-                reason="publication_payload_invalid",
+                # A refusal the owning module gave a stable code keeps that
+                # code here.  "This deployment no longer reads that format" is
+                # a different operational fact from "these bytes are
+                # malformed", and every consumer reports what it was told.
+                reason=(
+                    getattr(error, "reason", None) or "publication_payload_invalid"
+                ),
                 fence=pointer.fence,
                 publication_id=publication.publication_id,
                 season=publication.season,

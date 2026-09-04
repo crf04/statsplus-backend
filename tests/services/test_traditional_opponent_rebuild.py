@@ -45,6 +45,7 @@ from tests.support.traditional_opponent_family import (
     active_expectation,
     payload,
     seed_family,
+    v1_payload,
     v2_payload,
 )
 
@@ -181,25 +182,21 @@ def test_a_short_reason_and_a_missing_actor_are_refused(family):
 
 
 def test_a_mixed_starting_family_is_terminal_rather_than_rebuildable(tmp_path):
-    """One window already in v2 while its sibling is in v1 is not a start state."""
+    """A pair this deployment cannot read is not a rebuildable start state."""
 
     engine = seed_family(tmp_path)
     publications = PublicationService(engine, clock=lambda: NOW)
     publications.recompose_ledger(
-        L15_STREAM, season=SEASON, cutoff=CUTOFF, payload=v2_payload(),
+        L15_STREAM, season=SEASON, cutoff=CUTOFF, payload=v1_payload(),
         provenance={f"pbp:game-{index}": f"game-{index}" for index in range(15)},
         reason="drifted window",
     )
 
-    with pytest.raises(ControlPlaneError, match="publication_family_mixed_format"):
+    with pytest.raises(ControlPlaneError, match="publication_format_unsupported"):
         _service(engine).start(
             actor=ACTOR, reason=REASON,
             expected=active_expectation(publications),
         )
-
-
-# --- Idempotency and conflict ----------------------------------------------
-
 
 def test_an_identical_active_request_is_the_same_rebuild(family):
     engine, publications = family
@@ -314,10 +311,7 @@ def test_a_composed_candidate_that_is_not_the_target_format_is_terminal(family):
     engine, publications = family
 
     def compose_v1(sources):
-        return {
-            stream_key: payload(TRADITIONAL_OPPONENT_V1)
-            for stream_key in sources.stream_keys
-        }
+        return {stream_key: v1_payload() for stream_key in sources.stream_keys}
 
     service = _service(engine, compose=compose_v1)
     rebuild = service.start(
@@ -330,7 +324,6 @@ def test_a_composed_candidate_that_is_not_the_target_format_is_terminal(family):
     assert failed.state == "failed"
     assert failed.error_code == "publication_format_unsupported"
     assert _pointers(engine) == before
-
 
 def test_a_semantically_invalid_candidate_fails_the_whole_rebuild(family):
     engine, publications = family
@@ -588,27 +581,65 @@ def test_family_rollback_moves_both_windows_together(family):
         assert after[stream_key][1] == promoted[stream_key][1] + 1
 
 
-def test_rollback_refuses_a_target_this_deployment_cannot_read(family, monkeypatch):
-    """Strict code must not knowingly activate an unreadable publication."""
+def test_rollback_refuses_a_target_this_deployment_cannot_read(tmp_path):
+    """Production's exact shape: v2 active, v1 retained as previous.
 
-    engine, publications = family
+    Strict code must not activate a pair it cannot read.  Recovery is a code
+    rollback to the retained dual-format release first, then a family
+    rollback under that release.
+    """
+
+    engine = _v1_previous_v2_active(tmp_path)
+    publications = PublicationService(engine, clock=lambda: NOW)
     service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
-    service.run(rebuild.rebuild_id, owner="worker-1")
     before = _pointers(engine)
-    # Simulate the later strict-v2 deployment: v1 is no longer supported.
-    monkeypatch.setattr(
-        "app.services.traditional_opponent_rebuild"
-        ".SUPPORTED_TRADITIONAL_OPPONENT_FORMATS",
-        (TRADITIONAL_OPPONENT_V2,),
-    )
+    retained_before = _retained_v1(publications)
 
     with pytest.raises(ControlPlaneError, match="publication_format_unsupported"):
         service.rollback(actor=ACTOR, reason="restore the previous format")
-    assert _pointers(engine) == before
 
+    assert _pointers(engine) == before
+    # The immutable v1 payloads and their status are byte-identical after the
+    # refusal: a contraction reads nothing it cannot serve and rewrites
+    # nothing it refused.
+    assert _retained_v1(publications) == retained_before
+    assert len(retained_before) == 2
+
+
+def _retained_v1(publications):
+    """The exact retained v1 pair: identity, status, checksum, and bytes."""
+
+    with publications.session() as session:
+        retained = {}
+        for stream_key in (SEASON_STREAM, L15_STREAM):
+            prior = session.get(
+                PublicationVersion,
+                session.get(PublicationPointer, stream_key).previous_publication_id,
+            )
+            assert prior is not None
+            retained[stream_key] = (
+                prior.publication_id,
+                prior.status,
+                prior.checksum,
+                prior.payload,
+            )
+        return retained
+
+
+def _v1_previous_v2_active(tmp_path):
+    """Seed the family as v1, then advance it to v2 as production did."""
+
+    engine = seed_family(tmp_path, publication_format=TRADITIONAL_OPPONENT_V1)
+    publications = PublicationService(engine, clock=lambda: NOW)
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        publications.recompose_ledger(
+            stream_key, season=SEASON, cutoff=CUTOFF, payload=v2_payload(),
+            provenance={
+                f"pbp:game-{index}": f"game-{index}" for index in range(15)
+            },
+            reason="publication format rebuild",
+        )
+    return engine
 
 def test_rollback_of_only_one_window_cannot_split_the_family(family):
     engine, publications = family
@@ -916,35 +947,31 @@ def test_an_unbound_family_stream_is_not_refused_as_coupled(tmp_path):
 # --- Family rollback pair coherence (review finding 4) ---------------------
 
 
-def test_family_rollback_refuses_a_target_pair_that_is_not_one_generation(
-    family,
-):
-    """Both windows must fall back to one coherent format and authority."""
+def test_family_rollback_refuses_a_mixed_format_target_pair(tmp_path):
+    """Only one window's rollback target is readable, so neither moves."""
 
-    engine, publications = family
-    service = _service(engine)
-    rebuild = service.start(
-        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
-    )
-    service.run(rebuild.rebuild_id, owner="worker-1")
-    # A correction advances only the Last 15 window, so its rollback target
-    # becomes v2 while the Season rollback target is still v1: a mixed pair
-    # that never existed together.
+    engine = seed_family(tmp_path, publication_format=TRADITIONAL_OPPONENT_V1)
+    publications = PublicationService(engine, clock=lambda: NOW)
+    provenance = {f"pbp:game-{index}": f"game-{index}" for index in range(15)}
+    # Season passes through a readable v2 generation before its current one,
+    # so only the Last 15 rollback target is still in the retired format.
     publications.recompose_ledger(
-        L15_STREAM, season=SEASON, cutoff=CUTOFF,
-        payload=v2_payload(mutate=_bump_points),
-        provenance={f"pbp:game-{index}": f"game-{index}" for index in range(15)},
-        reason="ledger correction",
+        SEASON_STREAM, season=SEASON, cutoff=CUTOFF, payload=v2_payload(),
+        provenance=provenance, reason="publication format rebuild",
     )
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        publications.recompose_ledger(
+            stream_key, season=SEASON, cutoff=CUTOFF,
+            payload=v2_payload(mutate=_bump_points),
+            provenance=provenance, reason="ledger correction",
+        )
+    service = _service(engine)
     before = _pointers(engine)
 
-    with pytest.raises(ControlPlaneError, match="publication_family_mixed_format"):
+    with pytest.raises(ControlPlaneError, match="publication_format_unsupported"):
         service.rollback(actor=ACTOR, reason="restore the previous format")
+
     assert _pointers(engine) == before
-
-
-# --- Promotion revalidation depth (review finding 5) -----------------------
-
 
 def test_a_staged_candidate_whose_bytes_changed_cannot_promote(family):
     engine, publications = family

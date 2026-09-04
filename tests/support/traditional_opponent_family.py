@@ -64,7 +64,7 @@ def game_id_for_team(team_id: int) -> str:
     return f"game-{TEAM_IDS.index(team_id) // 2}"
 
 
-def payload(publication_format=TRADITIONAL_OPPONENT_V1, *, mutate=None):
+def payload(publication_format=TRADITIONAL_OPPONENT_V2, *, mutate=None):
     """The canonical thirty rows in one exact publication format."""
 
     rows = []
@@ -95,11 +95,17 @@ def v2_payload(**kwargs):
     return payload(TRADITIONAL_OPPONENT_V2, **kwargs)
 
 
+def v1_payload(**kwargs):
+    """A payload in the retired format, for proving it is now refused."""
+
+    return payload(TRADITIONAL_OPPONENT_V1, **kwargs)
+
+
 def provenance():
     return {f"pbp:game-{index}": f"game-{index}" for index in range(GAME_COUNT)}
 
 
-def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT_V1):
+def seed_family(tmp_path, *, clock=None, publication_format=TRADITIONAL_OPPONENT_V2):
     """Return an engine whose family is active in ``publication_format``."""
 
     engine = create_engine(f"sqlite:///{tmp_path / 'family.sqlite3'}")

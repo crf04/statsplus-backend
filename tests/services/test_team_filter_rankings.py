@@ -32,10 +32,26 @@ from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
     TEAM_METRICS,
 )
+from tests.support.publication_stubs import (
+    TRADITIONAL_METRICS,
+    traditional_per48,
+)
+
 from app.services.team_filter_rankings import (
     TEAM_FILTER_RANKINGS,
     TeamFilterRankingService,
 )
+
+def _counts_for(per48):
+    """Integer counts that satisfy the same rebound identity as the per-48."""
+
+    counts = {metric: 1.0 for metric in per48}
+    if "offensive_rebounds" in counts:
+        counts["rebounds"] = (
+            counts["offensive_rebounds"] + counts["defensive_rebounds"]
+        )
+    return counts
+
 
 SEASON = "2025-26"
 RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
@@ -154,9 +170,9 @@ def _traditional_reads():
 
     def per48(tricode):
         points, blocks, steals = ranked.get(tricode, (1.0, 0.5, 0.5))
-        values = {metric: 1.0 for metric in TEAM_METRICS}
-        values.update(points=points, blocks=blocks, steals=steals)
-        return values
+        return traditional_per48(
+            points=points, blocks=blocks, steals=steals
+        )
 
     return {
         "traditional_opponent_season": _read(
@@ -457,9 +473,7 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
     )
 
     def per48_for(tricode):
-        metrics = {metric: 1.0 for metric in TEAM_METRICS}
-        metrics["points"] = points.get(tricode, 50.0)
-        return metrics
+        return traditional_per48(points=points.get(tricode, 50.0))
 
     # The derived blocks are functions of the published per-48 population, and
     # the family module proves it, so the fixture computes them rather than
@@ -469,14 +483,14 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
     }
     average = {
         metric: sum(v[metric] for v in per48_by_team.values()) / len(per48_by_team)
-        for metric in TEAM_METRICS
+        for metric in TRADITIONAL_METRICS
     }
     sigma = {
         metric: math.sqrt(
             sum((v[metric] - average[metric]) ** 2 for v in per48_by_team.values())
             / len(per48_by_team)
         )
-        for metric in TEAM_METRICS
+        for metric in TRADITIONAL_METRICS
     }
 
     def ranks_for(metric):
@@ -491,7 +505,7 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
             previous = values[metric]
         return assigned
 
-    rank_by_metric = {metric: ranks_for(metric) for metric in TEAM_METRICS}
+    rank_by_metric = {metric: ranks_for(metric) for metric in TRADITIONAL_METRICS}
 
     def payload_row(team_id, tricode):
         return {
@@ -500,11 +514,12 @@ def _publish_traditional(tmp_path, *, now, tricodes=None):
             "game_ids": ["0022500001"],
             "game_count": 1,
             "per48": per48_by_team[team_id],
-            "counts": {metric: 1.0 for metric in TEAM_METRICS},
+            "counts": _counts_for(per48_by_team[team_id]),
             "league_average": dict(average),
             "population_sigma": dict(sigma),
             "competition_rank": {
-                metric: rank_by_metric[metric][team_id] for metric in TEAM_METRICS
+                metric: rank_by_metric[metric][team_id]
+                for metric in TRADITIONAL_METRICS
             },
             "team_minutes": 240.0,
         }
@@ -616,11 +631,17 @@ def _publish_two_streams(tmp_path):
     def rows(metrics, overrides, key):
         # The derived blocks describe the published population, because the
         # traditional-opponent family proves that they do.
+        def block(tricode):
+            values = {metric: 1.0 for metric in metrics}
+            values[key] = overrides.get(tricode, 5.0)
+            if "offensive_rebounds" in values:
+                values["rebounds"] = (
+                    values["offensive_rebounds"] + values["defensive_rebounds"]
+                )
+            return values
+
         per48 = {
-            team_id: {
-                **{metric: 1.0 for metric in metrics},
-                key: overrides.get(tricode, 5.0),
-            }
+            team_id: block(tricode)
             for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
         }
         average = {
@@ -653,7 +674,7 @@ def _publish_two_streams(tmp_path):
                 "game_ids": ["0022500001"],
                 "game_count": 1,
                 "per48": per48[team_id],
-                "counts": {metric: 1.0 for metric in metrics},
+                "counts": _counts_for(per48[team_id]),
                 "league_average": dict(average),
                 "population_sigma": dict(sigma),
                 "competition_rank": {
@@ -665,7 +686,7 @@ def _publish_two_streams(tmp_path):
         ]
 
     for stream_key, metrics, overrides, key in (
-        ("traditional_opponent_season", TEAM_METRICS, points, "points"),
+        ("traditional_opponent_season", TRADITIONAL_METRICS, points, "points"),
         (
             "assist_locations_season",
             ASSIST_DERIVED_METRICS,

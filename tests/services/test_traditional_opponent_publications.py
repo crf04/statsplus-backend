@@ -15,6 +15,7 @@ from app.services.database_first_activation import (
 )
 from app.services.ledger_derivations import TEAM_METRICS
 from app.services.traditional_opponent_publications import (
+    KNOWN_TRADITIONAL_OPPONENT_FORMATS,
     REBOUND_SPLIT,
     REBOUND_SPLIT_METRICS,
     SUPPORTED_TRADITIONAL_OPPONENT_FORMATS,
@@ -94,13 +95,19 @@ def _payload(publication_format, *, mutate=None):
 # --- Format identities -----------------------------------------------------
 
 
-def test_the_two_supported_formats_are_exactly_v1_and_v2():
-    assert SUPPORTED_TRADITIONAL_OPPONENT_FORMATS == (
+def test_only_v2_is_supported_while_v1_stays_known():
+    """The compatibility window is closed, but v1 stays describable.
+
+    Immutable v1 publications and their audit evidence are retained forever,
+    so this code must still be able to name that format when it refuses it.
+    """
+
+    assert SUPPORTED_TRADITIONAL_OPPONENT_FORMATS == (TRADITIONAL_OPPONENT_V2,)
+    assert KNOWN_TRADITIONAL_OPPONENT_FORMATS == (
         TRADITIONAL_OPPONENT_V1,
         TRADITIONAL_OPPONENT_V2,
     )
     assert TRADITIONAL_OPPONENT_TARGET_FORMAT is TRADITIONAL_OPPONENT_V2
-
 
 def test_v1_is_the_current_metric_set_and_v2_adds_only_the_rebound_split():
     assert TRADITIONAL_OPPONENT_V1.metrics == tuple(TEAM_METRICS)
@@ -142,10 +149,7 @@ def test_the_family_owns_exactly_the_two_window_streams():
 # --- Format recognition ----------------------------------------------------
 
 
-def test_recognition_accepts_the_two_exact_taxonomies():
-    assert recognize_traditional_opponent_format(
-        _metrics(TRADITIONAL_OPPONENT_V1)
-    ) is TRADITIONAL_OPPONENT_V1
+def test_recognition_accepts_v2_and_refuses_the_retired_v1_taxonomy():
     assert recognize_traditional_opponent_format(
         _metrics(TRADITIONAL_OPPONENT_V2)
     ) is TRADITIONAL_OPPONENT_V2
@@ -154,28 +158,12 @@ def test_recognition_accepts_the_two_exact_taxonomies():
         reversed(_metrics(TRADITIONAL_OPPONENT_V2))
     ) is TRADITIONAL_OPPONENT_V2
 
+    with pytest.raises(TraditionalOpponentFormatError) as refusal:
+        recognize_traditional_opponent_format(_metrics(TRADITIONAL_OPPONENT_V1))
 
-@pytest.mark.parametrize(
-    "metrics",
-    [
-        pytest.param((), id="empty"),
-        pytest.param(TEAM_METRICS[:-1], id="subset"),
-        pytest.param(TEAM_METRICS + ("pace",), id="superset"),
-        pytest.param(
-            TEAM_METRICS + ("offensive_rebounds",), id="half-the-rebound-split"
-        ),
-        pytest.param(
-            TEAM_METRICS + REBOUND_SPLIT_METRICS + ("pace",), id="beyond-v2"
-        ),
-    ],
-)
-def test_recognition_refuses_arbitrary_subsets_and_supersets(metrics):
-    with pytest.raises(TraditionalOpponentFormatError):
-        recognize_traditional_opponent_format(metrics)
-
-
-# --- Normalized reads ------------------------------------------------------
-
+    assert refusal.value.reason == "publication_format_unsupported"
+    # The refusal names the format it recognized, which is why v1 stays known.
+    assert TRADITIONAL_OPPONENT_V1.name in str(refusal.value)
 
 def _normalize(publication_format, *, stream_key=SEASON_STREAM, mutate=None):
     return normalize_traditional_opponent_window(
@@ -185,22 +173,15 @@ def _normalize(publication_format, *, stream_key=SEASON_STREAM, mutate=None):
     )
 
 
-def test_an_exact_v1_publication_serves_its_metrics_and_no_rebound_split():
-    window = _normalize(TRADITIONAL_OPPONENT_V1)
+def test_an_exact_v1_publication_now_fails_closed():
+    """Strict code serves no part of a v1 publication."""
 
-    assert window.format is TRADITIONAL_OPPONENT_V1
-    assert window.capabilities == frozenset()
-    assert not window.supports(REBOUND_SPLIT)
-    assert window.metrics == tuple(TEAM_METRICS)
-    assert len(window.teams) == 30
-    # Every existing metric still serves.
-    for metric in TEAM_METRICS:
-        assert window.metric_values(metric).keys() == set(NBA_TEAM_ID_TO_TRICODE)
-    # The split is absent, never fabricated as zero or null.
-    for metric in REBOUND_SPLIT_METRICS:
-        assert window.metric_values(metric) is None
-        assert all(metric not in team.per48 for team in window.teams)
+    with pytest.raises(PublicationPayloadError) as refusal:
+        decode_team_window(
+            _payload(TRADITIONAL_OPPONENT_V1), stream_key=SEASON_STREAM
+        )
 
+    assert refusal.value.reason == "publication_format_unsupported"
 
 def test_an_exact_v2_publication_serves_the_rebound_split():
     window = _normalize(TRADITIONAL_OPPONENT_V2)
@@ -240,7 +221,7 @@ def test_a_mixed_format_publication_fails_closed():
 
 def test_a_non_family_stream_cannot_be_normalized_as_traditional_opponent():
     rows = decode_team_window(
-        _payload(TRADITIONAL_OPPONENT_V1), stream_key=SEASON_STREAM
+        _payload(TRADITIONAL_OPPONENT_V2), stream_key=SEASON_STREAM
     )
     with pytest.raises(TraditionalOpponentFormatError):
         normalize_traditional_opponent_window(
@@ -258,6 +239,10 @@ def test_the_decoder_accepts_exactly_the_two_supported_formats(stream_key):
             _payload(publication_format), stream_key=stream_key
         )
         assert len(rows) == 30
+    with pytest.raises(PublicationPayloadError):
+        decode_team_window(
+            _payload(TRADITIONAL_OPPONENT_V1), stream_key=stream_key
+        )
 
 
 def _corrupt_taxonomy(block):
@@ -303,17 +288,21 @@ def test_a_v2_publication_whose_per48_breaks_the_rebound_identity_is_rejected():
         )
 
 
-def test_a_v1_publication_carries_no_rebound_identity_obligation():
-    """v1 never published a split, so it can neither satisfy nor violate it."""
+def test_the_v1_format_identity_and_fingerprint_survive_for_audit():
+    """A retired format still has to be describable in recorded evidence."""
 
-    window = _normalize(TRADITIONAL_OPPONENT_V1)
+    assert TRADITIONAL_OPPONENT_V1.name == "traditional_opponent.v1"
+    assert len(TRADITIONAL_OPPONENT_V1.fingerprint) == 64
+    assert TRADITIONAL_OPPONENT_V1.fingerprint != TRADITIONAL_OPPONENT_V2.fingerprint
+    assert TRADITIONAL_OPPONENT_V1.invariants == ()
+    assert TRADITIONAL_OPPONENT_V1 not in SUPPORTED_TRADITIONAL_OPPONENT_FORMATS
 
-    assert window.format.invariants == ()
-    assert window.teams[0].per48["rebounds"] == 44.0
 
+def test_resolving_the_retired_format_by_name_is_refused():
+    with pytest.raises(TraditionalOpponentFormatError) as refusal:
+        traditional_opponent_format_by_name("traditional_opponent.v1")
 
-# --- Whole-population semantic consistency ---------------------------------
-
+    assert refusal.value.reason == "publication_format_unsupported"
 
 def _league_payload(publication_format, *, distinct=None):
     """Thirty rows whose derived blocks agree with the per-48 population."""
@@ -381,14 +370,10 @@ def _normalize_league(rows, *, stream_key=SEASON_STREAM):
     )
 
 
-@pytest.mark.parametrize(
-    "publication_format",
-    [TRADITIONAL_OPPONENT_V1, TRADITIONAL_OPPONENT_V2],
-)
-def test_a_coherent_league_population_normalizes(publication_format):
-    window = _normalize_league(_league_payload(publication_format))
+def test_a_coherent_league_population_normalizes():
+    window = _normalize_league(_league_payload(TRADITIONAL_OPPONENT_V2))
 
-    assert window.format is publication_format
+    assert window.format is TRADITIONAL_OPPONENT_V2
     assert len(window.teams) == 30
 
 
@@ -472,3 +457,43 @@ def test_derived_blocks_are_only_proven_when_the_publication_carries_them():
     )
 
     assert window.format is TRADITIONAL_OPPONENT_V2
+
+
+# --- Retained rollback artifact (#237) -------------------------------------
+
+#: The dual-format release that must be restored before any v1 family
+#: rollback.  Pinned here so pruning it, or losing its identity from the
+#: operator documentation, fails the suite rather than a recovery.
+DUAL_FORMAT_RELEASE = "88945eb1f2238744ce768424f2eb9710b95e9ce5"
+DUAL_FORMAT_DEPLOYMENT = "fd8d71b3-58cf-418c-8af2-4e28299d4820"
+
+
+@pytest.mark.parametrize(
+    "document",
+    ["docs/ARCHITECTURE.md", "docs/DATABASE_FIRST_ACTIVATION.md"],
+)
+def test_the_retained_rollback_artifact_and_recovery_order_are_documented(document):
+    """Recovery is code-first, so the code artifact and its order are recorded."""
+
+    import pathlib
+    import re
+
+    text = pathlib.Path(document).read_text(encoding="utf-8")
+
+    assert DUAL_FORMAT_RELEASE in text, f"{document} omits the retained release"
+    assert DUAL_FORMAT_DEPLOYMENT in text, (
+        f"{document} omits the retained Railway deployment"
+    )
+    # The recovery instruction has to read "restore the release, then roll the
+    # family back".  Find the family-rollback route and require the release to
+    # be named before it.
+    rollback = re.search(
+        r"publication-rebuilds/[^\s]*rollback", text
+    )
+    assert rollback is not None, (
+        f"{document} does not name the family rollback route"
+    )
+    assert text.index(DUAL_FORMAT_RELEASE) < rollback.start(), (
+        f"{document} describes the family rollback before the release restore;"
+        " the documented recovery order must be code first, data second"
+    )

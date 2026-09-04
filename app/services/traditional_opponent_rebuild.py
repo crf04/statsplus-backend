@@ -564,7 +564,10 @@ class TraditionalOpponentRebuildService:
                 validate_family=self._assert_coherent_family,
                 session=session,
             )
-        except TraditionalOpponentFormatError as error:
+        except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
+            # A target this deployment cannot read is refused with the stable
+            # code, and nothing moved: the refusal happens while every prior
+            # is still only being validated.
             raise ControlPlaneError(self._failure_code(error)) from error
 
     # --- Internals --------------------------------------------------------
@@ -641,12 +644,16 @@ class TraditionalOpponentRebuildService:
             raise ControlPlaneError("stale_publication_family")
         if cutoff is not None and _aware(cutoff) != active_cutoff:
             raise ControlPlaneError("stale_publication_family")
-        formats = {
-            self._payload_format(stream_key, version.payload)
-            for stream_key, version in versions.items()
-        }
-        if len(formats) != 1:
-            raise ControlPlaneError("publication_family_mixed_format")
+        try:
+            # With one supported format, proving each window is readable is
+            # the whole check: a pair that decodes is by construction a pair
+            # in the same format.  Strict code cannot rebuild from a pair it
+            # cannot read, and recovery is a code rollback to the retained
+            # dual-format release first.
+            for stream_key, version in versions.items():
+                self._payload_format(stream_key, version.payload)
+        except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
+            raise ControlPlaneError(self._failure_code(error)) from error
         game_ids = _payload_game_ids(versions[SEASON_STREAM].payload)
         return {
             "season": active_season,
@@ -966,20 +973,22 @@ class TraditionalOpponentRebuildService:
 
         Promotion and rollback both move the family as a unit, so the pair
         being moved *to* has to be a pair that could have existed together:
-        one format, one season, one cutoff, one authority.  Validating each
-        window on its own would accept a Season from one generation beside a
-        Last 15 from another, which is the mixed state the coupling exists to
-        prevent.
+        one season, one cutoff, one authority.  Validating each window on its
+        own would accept a Season from one generation beside a Last 15 from
+        another, which is the mixed state the coupling exists to prevent.
+
+        Format agreement is not checked here.  Each target was already proven
+        readable by the caller's per-window check, and this deployment reads
+        exactly one format, so any pair that gets this far agrees on it.  A
+        future compatibility window -- two supported formats at once -- is what
+        would make an explicit agreement check meaningful again.
         """
 
-        formats, seasons, cutoffs, authorities = set(), set(), set(), set()
+        seasons, cutoffs, authorities = set(), set(), set()
         for stream_key, version in targets:
-            formats.add(self._payload_format(stream_key, version.payload))
             seasons.add(version.season)
             cutoffs.add(_aware(version.cutoff))
             authorities.add(self._authority_of(session, stream_key, version))
-        if len(formats) != 1:
-            raise ControlPlaneError("publication_family_mixed_format")
         if len(seasons) != 1 or len(cutoffs) != 1 or len(authorities) != 1:
             raise ControlPlaneError("publication_family_authority_mismatch")
 

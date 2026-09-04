@@ -19,6 +19,7 @@ from tests.support.publication_stubs import (
     league as _league,
     read as _read,
     team_service as _service,
+    traditional_per48 as _traditional_per48,
 )
 
 LAKERS = "Los Angeles Lakers"
@@ -37,7 +38,8 @@ def _traditional_reads(values=None):
         "three_pointers_made": 15.0,
         "three_pointers_attempted": 40.0,
         "free_throws_attempted": 20.0,
-        "rebounds": 44.0,
+        "offensive_rebounds": 11.0,
+        "defensive_rebounds": 33.0,
         "assists": 26.0,
         "turnovers": 14.0,
         "steals": 9.0,
@@ -45,8 +47,9 @@ def _traditional_reads(values=None):
     }
 
     def per48(tricode):
-        baseline = {metric: 2.0 for metric in TEAM_METRICS}
-        return {**baseline, **distinct} if tricode == "LAL" else baseline
+        if tricode != "LAL":
+            return _traditional_per48()
+        return _traditional_per48(**distinct)
 
     return {
         "traditional_opponent_season": _read(
@@ -116,10 +119,11 @@ def test_a_team_with_no_attempts_carries_no_shooting_percentage():
     """A percentage with no attempts behind it is absent, not zero."""
 
     def per48(tricode):
-        values = {metric: 2.0 for metric in TEAM_METRICS}
-        if tricode == "LAL":
-            values.update(field_goals_made=0.0, field_goals_attempted=0.0)
-        return values
+        if tricode != "LAL":
+            return _traditional_per48()
+        return _traditional_per48(
+            field_goals_made=0.0, field_goals_attempted=0.0
+        )
 
     reads = {
         "traditional_opponent_season": _read(
@@ -139,18 +143,20 @@ def test_a_team_with_no_attempts_carries_no_shooting_percentage():
     assert celtics["OPP_FG_PCT_RANK"] == 1
 
 
-def test_traditional_omits_the_rebound_split_the_publication_does_not_carry():
+def test_traditional_serves_the_rebound_split_every_publication_now_carries():
     stats = _service(_traditional_reads()).get_team_stats("Traditional", LAKERS)
 
-    assert "OPP_OREB" not in stats
-    assert "OPP_DREB" not in stats
-
+    assert stats["OPP_OREB"] == 11.0
+    assert stats["OPP_DREB"] == 33.0
+    assert stats["OPP_REB"] == 44.0
 
 def test_the_clippers_display_name_the_panel_sends_resolves_to_its_publication():
     def per48(tricode):
-        return {
-            metric: (99.0 if tricode == "LAC" else 2.0) for metric in TEAM_METRICS
-        }
+        if tricode != "LAC":
+            return _traditional_per48()
+        return _traditional_per48(
+            offensive_rebounds=33.0, defensive_rebounds=66.0, points=99.0
+        )
 
     reads = {
         "traditional_opponent_season": _read(
@@ -493,22 +499,14 @@ def test_the_service_holds_no_provider_client():
 
 
 def _split_reads(*, oreb=11.0, dreb=33.0):
-    """A v2 Season publication: the split is canonical, the total derived."""
-
-    from app.services.traditional_opponent_publications import (
-        TRADITIONAL_OPPONENT_V2,
-    )
+    """A Season publication whose rebound split distinguishes one team."""
 
     def per48(tricode):
-        values = {metric: 2.0 for metric in TRADITIONAL_OPPONENT_V2.metrics}
-        values["offensive_rebounds"] = 1.0
-        values["defensive_rebounds"] = 3.0
-        values["rebounds"] = 4.0
-        if tricode == "LAL":
-            values["offensive_rebounds"] = oreb
-            values["defensive_rebounds"] = dreb
-            values["rebounds"] = oreb + dreb
-        return values
+        if tricode != "LAL":
+            return _traditional_per48()
+        return _traditional_per48(
+            offensive_rebounds=oreb, defensive_rebounds=dreb
+        )
 
     return {
         "traditional_opponent_season": _read(
@@ -565,29 +563,28 @@ def test_the_rebound_split_uses_the_existing_league_average_formula():
     )
 
 
-def test_the_split_adds_exactly_six_properties_and_changes_nothing_else():
-    without = _service(_traditional_reads()).get_team_stats(
-        "Traditional", LAKERS
-    )
-    with_split = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
+def test_the_traditional_response_carries_its_complete_field_set():
+    stats = _service(_split_reads()).get_team_stats("Traditional", LAKERS)
 
-    assert set(with_split) - set(without) == {
+    assert {
         "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
         "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
+        "OPP_REB", "OPP_PTS", "OPP_AST", "OPP_STL+BLK", "OPP_FG_PCT",
+    } <= set(stats)
+
+def test_a_retired_format_publication_serves_nothing_rather_than_partly():
+    """Strict code refuses a v1 publication instead of serving its subset."""
+
+    def per48(tricode):
+        return {metric: 2.0 for metric in TEAM_METRICS}
+
+    reads = {
+        "traditional_opponent_season": _read(
+            "traditional_opponent_season", _league(per48)
+        )
     }
-    assert set(without) - set(with_split) == set()
 
+    stats = _service(reads).get_team_stats("Traditional", LAKERS)
 
-def test_a_publication_without_the_split_reports_it_as_absent_not_zero():
-    """The compatibility window must never fabricate a rebound value."""
-
-    stats = _service(_traditional_reads()).get_team_stats("Traditional", LAKERS)
-
-    for field in (
-        "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
-        "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
-    ):
-        assert field not in stats
-    # Every existing metric still serves from the same publication.
-    assert stats["OPP_REB"] == 44.0
-    assert stats["OPP_PTS"] == 120.0
+    # Not a partial answer: no field of the retired format is served.
+    assert stats == {}

@@ -262,7 +262,15 @@ fact: the Opposing Team Profile, Team Filters, and the Matchups Defense Sheet
 would otherwise observe two rendered generations of the same surface at once.
 Both the per-stream rollback route above and `activate_stream` therefore
 refuse them with `publication_family_coupled` once the family is bound, and
-recovery goes through the family route, which moves both windows or neither:
+recovery goes through the family route, which moves both windows or neither.
+
+**Do not invoke that route for `traditional_opponent` before reading
+"Recovering the traditional-opponent family to v1" below.** This release reads
+only v2, so rolling the family back to v1 requires restoring the retained
+dual-format release — master merge commit
+`88945eb1f2238744ce768424f2eb9710b95e9ce5` (PR #239), Railway deployment
+`fd8d71b3-58cf-418c-8af2-4e28299d4820` — *first*. Invoked under this release
+the route refuses with `publication_format_unsupported` and moves nothing.
 
 ```
 POST /admin/collection/publication-rebuilds/<family>/rollback
@@ -272,11 +280,32 @@ The same coupling applies in the forward direction: after the initial ledger
 cutover binds each pointer, the only way to advance this family is a durable
 Publication Rebuild, never a per-stream activation.
 
+### Recovering the traditional-opponent family to v1
+
+The deployed code reads **only** the v2 traditional-opponent format. Recovery
+to v1 is therefore code first, data second, and must be done in this order:
+
+| Step | Action |
+| --- | --- |
+| 1 | Restore the retained dual-format application release: master merge commit `88945eb1f2238744ce768424f2eb9710b95e9ce5` (PR #239), Railway deployment `fd8d71b3-58cf-418c-8af2-4e28299d4820`. That release reads both v1 and v2. |
+| 2 | Under that release, roll the family back atomically: `POST /admin/collection/publication-rebuilds/traditional_opponent/rollback`. |
+
+Attempting step 2 first is refused, not half-completed. Under the strict
+release the family rollback fails with `publication_format_unsupported` before
+either pointer moves, because activating a pair the running code cannot read
+would take the Opposing Team Profile, Team Filters, and the Matchups Defense
+Sheet down rather than restore them.
+
+The retained dual-format release must not be pruned while any v1 publication
+is still a possible rollback destination. The v1 pair remains the
+`previous_publication_id` of both pointers; this contraction modifies and
+deletes nothing — neither the immutable v1 payloads nor their audit evidence.
+
 | Code | HTTP | What it means |
 | --- | --- | --- |
+| `publication_format_unsupported` | 400 | The target pair is in a format this release does not read. Restore the retained dual-format release first. |
 | `publication_family_coupled` | 409 | A per-stream operation would split the family. |
-| `publication_family_mixed_format` | 400 | The target pair is not one coherent generation. |
-| `publication_format_unsupported` | 400 | This deployment can no longer read the target publication's format; restore the retained dual-format release first. |
+| `publication_family_authority_mismatch` | 400 | The target pair does not rest on one season, cutoff, and authority. |
 
 ## Driving a publication rebuild
 

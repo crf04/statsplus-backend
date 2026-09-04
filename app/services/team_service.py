@@ -202,8 +202,11 @@ def _traditional_profile(table, team_id) -> dict:
     for field, metric_key in _TRADITIONAL_FIELDS.items():
         column = table.get(metric_key)
         if column is None:
-            # The active publication's format does not carry this metric.  An
-            # absent field is the honest answer; the panel renders it as N/A.
+            # Unreachable while one format is supported: the read boundary
+            # proves the publication carries the full taxonomy before these
+            # rows arrive.  Kept so that opening the next compatibility window
+            # omits a field rather than failing the whole panel, which is the
+            # same choice `_place` makes for a team with no value.
             continue
         _place(stats, field, column, team_id)
     _place(

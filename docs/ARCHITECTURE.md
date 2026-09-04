@@ -2464,10 +2464,18 @@ normalized window with explicit capabilities.
 checks to that module, so every read of this family — Team Profile, Team
 Filters, Matchups, activation candidate validation, snapshot rehearsal, and
 matchup parity — crosses one interface. Consumers branch on capabilities, not
-on which stored generation produced the payload. A valid v1 publication keeps
-serving every metric it ever served and reports the rebound split as
-unavailable; a v1 read never synthesizes zero or null rebound values, because
-a fabricated zero is indistinguishable from a defense that allowed none.
+on which stored generation produced the payload.
+
+**The compatibility window is closed.** Production is on v2 and this release
+reads nothing else: `SUPPORTED_TRADITIONAL_OPPONENT_FORMATS` is `(v2,)`. v1
+remains in `KNOWN_TRADITIONAL_OPPONENT_FORMATS`, because recognizing a stored
+payload *as* v1 is what lets a refusal name the format it refused, and because
+immutable v1 publications and their audit evidence are retained forever and
+must stay describable. Being known is not being servable: a v1 read is refused
+with the stable `publication_format_unsupported`, whole-publication, with no
+partial data — the Team Profile serves an empty answer rather than the subset
+of fields v1 happened to carry, and Team Filters and the Matchups Defense
+Sheet refuse to rank rather than rank a format they cannot prove.
 
 Rejection is whole-publication. A payload whose rows disagree on a format, or
 that is not the canonical thirty-team population, or that in v2 violates
@@ -2610,10 +2618,31 @@ generation. Initial activation stays available: binding a pointer for the
 first time is the ledger cutover, and there is no sibling generation to
 disagree with yet. The rollback target is held to the same pair-coherence
 proof as a promotion, so recovery cannot land on two windows that never
-existed together. Under strict code, a rollback target in an
-unsupported format is refused with `publication_format_unsupported`: safe
-recovery restores the retained dual-format application release first, then
-moves the family.
+existed together. A rollback target in an unsupported format is refused with
+`publication_format_unsupported`, and neither pointer moves.
+
+#### Retained rollback artifact and the code-first recovery order
+
+Because this release reads only v2, it cannot be the release that serves a v1
+family. Recovery to v1 is therefore **code first, data second**:
+
+1. **Restore the retained dual-format application release.** That artifact is
+   master merge commit `88945eb1f2238744ce768424f2eb9710b95e9ce5` (PR #239),
+   deployed to Railway as `fd8d71b3-58cf-418c-8af2-4e28299d4820`. It is the
+   oldest supported application rollback target and must not be pruned while
+   any v1 publication remains a possible rollback destination.
+2. **Then roll the family back atomically**, under that release, through
+   `POST /admin/collection/publication-rebuilds/<family>/rollback`.
+
+Doing it in the other order does not work and is refused rather than
+half-completed: under this release the family rollback fails closed with
+`publication_format_unsupported` before either pointer moves, because
+activating a pair the running code cannot read would take the surface down
+rather than restore it. The refusal is the safety property, not an obstacle.
+
+The v1 pair remains the retained `previous_publication_id` of both pointers,
+and neither its payloads nor its audit evidence is modified or deleted by this
+contraction.
 
 #### Publication-format evolution policy
 
@@ -2642,6 +2671,10 @@ would justify generalizing it.
 6. **Compatibility removal is separately gated.** Dropping the old format is
    its own deployment after production verification, never the same unverified
    release that promotes the new one.
+7. **Retired formats stay known, not servable.** The old format keeps its
+   identity and fingerprint so refusals can name it and retained audit
+   evidence stays describable, and recovery to it is code-first: restore the
+   retained dual-format release, then move the data.
 
 ### Matchup materializer parity and legacy writer fencing (#117)
 
