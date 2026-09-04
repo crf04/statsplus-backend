@@ -22,6 +22,7 @@ from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
     SHOT_ZONE_SLICES,
 )
+from app.domain.slate_time import slate_date_for_instant
 from app.migrations import run_migrations
 from app.models.athlete_catalog import AthleteCatalog
 from app.models.collection_control import (
@@ -657,3 +658,129 @@ def test_a_superseded_manifest_can_no_longer_promote_its_group(repair):
 
     assert read_pointers(engine) == before
     assert read_statuses(engine) == statuses
+
+
+def _boston_scale_zone_records(team_id, *, restricted_fga):
+    """Boston-scale opponent Totals for one team, as accepted evidence."""
+
+    zones = {
+        "Restricted Area": {"FGM": 902, "FGA": restricted_fga},
+        "In The Paint (Non-RA)": {"FGM": 380, "FGA": 905},
+        "Mid-Range": {"FGM": 322, "FGA": 780},
+        "Corner 3": {"FGM": 260, "FGA": 668},
+        "Above the Break 3": {"FGM": 742, "FGA": 2075},
+    }
+    return [
+        {
+            "team_id": team_id, "base": "shot_zones",
+            "category": zone, "slice_key": zone,
+            "games_played": 82, "minutes": BOSTON_MINUTES, **values,
+        }
+        for zone, values in zones.items()
+    ]
+
+
+BOSTON_TEAM_ID = 1610612738
+BOSTON_MINUTES = 3946
+BOSTON_RESTRICTED_FGA = 1504
+
+
+def test_boston_restricted_area_publishes_about_18_3_not_137_1(tmp_path, monkeypatch):
+    """The defect in crf04/statsplus#51, proven through a real publication.
+
+    This composes an actual publication and reads the published cell, so it
+    fails if the publication path stops deriving the rate.  Asserting the
+    arithmetic in the test itself would prove only that 1504 * 48 / 3946 is
+    18.3, which was never in doubt.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'boston.sqlite3'}")
+    run_migrations(engine)
+    _seed_governed_evidence(engine)
+    control = CollectionControlService(engine, clock=lambda: NOW)
+    # An 82-game governed season, so Boston's real minutes and attempts are a
+    # coherent window rather than fifteen games of impossible workload.
+    expected = {
+        int(team_id): frozenset(f"season-{team_id}-{index}" for index in range(82))
+        for team_id in sorted(NBA_TEAM_IDS)
+    }
+    publications = PublicationService(
+        engine, clock=lambda: NOW,
+        l15_expectation_resolver=_GovernanceStub(expected),
+    )
+    publications.register_stream(
+        SEASON_ZONES, provider="nba", owner="residential_collector",
+        required_observations=["shot_zones_opponent"],
+        publication_strategy="snapshot_replace", supported_windows=["season"],
+        completeness_rule="base_complete", enabled=True,
+    )
+    control.activate_season(SEASON, actor="operator")
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request(SEASON, kind, cutoff=REPAIR_CUTOFF)
+        control.publish_catalog(
+            request.request_id, _catalog_document(kind), version=f"{kind}-boston",
+        )
+    manifest = control.create_manifest(
+        SEASON, cutoff=REPAIR_CUTOFF, scopes=[SEASON_ZONES, "canonical_game_ledger"],
+        collect_before=NOW + timedelta(hours=1),
+    )
+
+    rows = []
+    for team_id in sorted(NBA_TEAM_IDS):
+        records = _boston_scale_zone_records(
+            int(team_id), restricted_fga=BOSTON_RESTRICTED_FGA,
+        )
+        payload = json.dumps({
+            "base": "shot_zones",
+            "records": records,
+            "reconciliation": {
+                "opponent_totals": {"FGM": 2608, "FGA": 5965},
+                "Backcourt": {"FGM": 2, "FGA": 33},
+                "Left Corner 3": {"FGM": 129, "FGA": 331},
+                "Right Corner 3": {"FGM": 131, "FGA": 337},
+            },
+        }, separators=(",", ":"))
+        rows.append({
+            "observation_id": f"boston-{team_id}",
+            "client_observation_id": f"boston-client-{team_id}",
+            "collector_id": "collector", "manifest_id": manifest.manifest_id,
+            "environment": "testing", "provider": "nba",
+            "observation_type": "shot_zones_opponent",
+            "scope": json.dumps({
+                "window": "season", "subject": "opponent",
+                "team_id": int(team_id), "phase": "Regular Season",
+                "value_mode": "totals_with_minutes", "season": SEASON,
+                "season_type": "Regular Season",
+                "endpoint_window": {
+                    "last_n_games": 0, "date_from": None,
+                    "date_to": slate_date_for_instant(
+                        REPAIR_CUTOFF
+                    ).strftime("%m/%d/%Y"),
+                },
+            }),
+            "season": SEASON, "cutoff": REPAIR_CUTOFF, "schema_version": 2,
+            "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+            "payload": payload, "payload_bytes": len(payload),
+            "retrieved_at": REPAIR_CUTOFF, "accepted_at": REPAIR_CUTOFF,
+        })
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert(), rows)
+
+    published = publications.compose_from_observations(
+        SEASON_ZONES, season=SEASON, cutoff=REPAIR_CUTOFF,
+        manifest_id=manifest.manifest_id,
+    )
+    payload = json.loads(published.payload)
+    boston = next(
+        row for row in payload["rows"] if row["team_id"] == BOSTON_TEAM_ID
+    )
+
+    # The number the product shows.  1,504 attempts over 3,946 team minutes.
+    assert boston["per48"]["Restricted Area_FGA"] == pytest.approx(18.3, abs=0.05)
+    # The broken Per48 mode published this same cell as 137.1.
+    assert boston["per48"]["Restricted Area_FGA"] < 20
+    # Only the five canonical zones are user-visible.
+    assert {key.rsplit("_", 1)[0] for key in boston["per48"]} == {
+        "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+        "Corner 3", "Above the Break 3",
+    }

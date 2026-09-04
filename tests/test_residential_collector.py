@@ -2230,3 +2230,52 @@ def test_a_transient_zone_mismatch_refetches_the_pair_once():
     assert failure.value.reason == "value_invariant_failed"
     assert failure.value.diagnostics["team_id"] == 1610612738
     assert failure.value.diagnostics["residual"] == 1.0
+
+
+def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_path: Path):
+    """The diagnostics have to reach the status an operator actually reads.
+
+    Constructing them on the exception proves nothing on its own: the runner
+    collapses a contract error to its bare reason code, so without the status
+    record the equation and residual would be built and thrown away.
+    """
+
+    team_id = int(sorted(NBA_TEAM_IDS)[0])
+    # A real manifest freezes the stream key beside the observation type it
+    # authorizes; the runner matches descriptors against the latter.
+    manifest_scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
+    descriptors = _collector_scope_descriptors(manifest_scopes, NOW)
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": "manifest-zone", "season": "2025-26",
+        "cutoff": NOW.isoformat(),
+        "collect_before": (NOW + timedelta(hours=1)).isoformat(),
+        "accepted_versions": [2], "scopes": sorted(manifest_scopes),
+        "scope_descriptors": descriptors,
+    }]}
+
+    class IncoherentProvider(FakeProvider):
+        """Zones that never add up, however many times they are refetched."""
+
+        def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
+            return _boston_zone_row(
+                **{"TEAM_ID": kwargs["team_id"], "Backcourt_OPP_FGA": 34}
+            )
+
+    collector, _, outbox = _collector(
+        tmp_path, discovery=discovery, provider=IncoherentProvider(),
+    )
+    try:
+        collector.run()
+        events = collector.status.snapshot(version="test")["recent"]
+    finally:
+        outbox.close()
+
+    detailed = [event for event in events if event.get("detail")]
+    assert detailed, events
+    detail = detailed[-1]["detail"]
+    assert detailed[-1]["code"] == "value_invariant_failed"
+    assert "equation=zones_plus_backcourt_equals_opponent_fga" in detail
+    assert "residual=1.0" in detail
+    assert f"team_id={team_id}" in detail or "team_id=" in detail
+    # Bounded: an operator diagnostic never becomes a payload channel.
+    assert len(detail) <= 160

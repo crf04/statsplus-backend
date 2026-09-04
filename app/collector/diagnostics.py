@@ -40,7 +40,8 @@ class SafeStatus:
         self.events: deque[dict[str, Any]] = deque(maxlen=max(1, int(max_events)))
         self.counts: dict[str, int] = {}
 
-    def record(self, code: str, *, scope: str | None = None, status: str | None = None) -> None:
+    def record(self, code: str, *, scope: str | None = None, status: str | None = None,
+               detail: str | None = None) -> None:
         code = safe_code(code)
         self.counts[code] = self.counts.get(code, 0) + 1
         event: dict[str, Any] = {"code": code}
@@ -48,6 +49,11 @@ class SafeStatus:
             event["scope"] = str(scope)[:80]
         if status:
             event["status"] = str(status)[:40]
+        if detail:
+            # Bounded operator diagnostics only.  Callers pass derived facts
+            # such as a failing equation and its residual, never a provider
+            # payload.
+            event["detail"] = str(detail)[:160]
         self.events.append(event)
 
     def snapshot(self, *, version: str, release_checksum: str | None = None) -> dict[str, Any]:

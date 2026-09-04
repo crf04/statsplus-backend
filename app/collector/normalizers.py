@@ -623,6 +623,12 @@ def _zone_response(
         and str(scope.get("value_mode", "")) == "totals_with_minutes"
     )
     reconciliation: dict[str, Any] = {}
+    if totals_mode and len(rows) != 1:
+        # The opponent request is scoped to one team, so its Totals response is
+        # one row.  More than one would make the single reconciliation block
+        # below describe only the last of them while the backend applied it to
+        # every record.
+        raise ProviderContractError("provider_schema_changed")
     for row in rows:
         corner_split: dict[str, dict[str, float]] = {}
         identity_values: dict[str, Any] = {}

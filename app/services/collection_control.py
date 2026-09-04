@@ -499,20 +499,25 @@ def _assert_zone_reconciliation(document: Mapping[str, Any]) -> None:
             raise ValueError("publication zone reconciliation invalid") from error
         if not math.isfinite(observed) or observed != expected:
             raise ValueError("publication zone reconciliation mismatch")
+    # The collector requires the Corner 3 split, so central validation must
+    # require it too.  Making it conditional here would let an observation
+    # that simply omits the sides skip the identity centrally -- exactly the
+    # tampering this boundary exists to catch.
     sides = ("Left Corner 3", "Right Corner 3")
-    if all(isinstance(reconciliation.get(side), Mapping) for side in sides):
-        for stat_key in ("FGM", "FGA"):
-            try:
-                split = sum(
-                    float(reconciliation[side][stat_key]) for side in sides
-                )
-                combined = float(zone_values["Corner 3"][stat_key])
-            except (KeyError, TypeError, ValueError, OverflowError) as error:
-                raise ValueError(
-                    "publication zone reconciliation invalid"
-                ) from error
-            if split != combined:
-                raise ValueError("publication zone reconciliation mismatch")
+    if not all(isinstance(reconciliation.get(side), Mapping) for side in sides):
+        raise ValueError("publication zone reconciliation missing")
+    for stat_key in ("FGM", "FGA"):
+        try:
+            split = sum(
+                float(reconciliation[side][stat_key]) for side in sides
+            )
+            combined = float(zone_values["Corner 3"][stat_key])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "publication zone reconciliation invalid"
+            ) from error
+        if split != combined:
+            raise ValueError("publication zone reconciliation mismatch")
 
 
 def _compose_nba_observation_payload(

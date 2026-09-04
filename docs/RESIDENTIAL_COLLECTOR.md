@@ -168,9 +168,11 @@ the endpoint's `Per48` the combined value sits near their mean.
 The shot-location and TeamStats reads are two separate requests, so a mismatch
 can simply mean the provider updated between them. The first mismatch refetches
 the **complete pair** once. A coherent second result is accepted. A second
-mismatch is rejected rather than stored as acceptable evidence, and reports
-bounded diagnostics -- team, window, failing equation, expected, observed and
-residual -- so remediation is actionable without echoing the whole response.
+mismatch is rejected rather than stored as acceptable evidence, and is
+recorded in the collector's bounded status as `value_invariant_failed` with a
+`detail` naming the team, window, failing equation, expected, observed and
+residual. That status is what the operator reads, and it is capped at 160
+characters, so a diagnostic can never become a channel for provider payload.
 
 ### Validated at two boundaries
 
