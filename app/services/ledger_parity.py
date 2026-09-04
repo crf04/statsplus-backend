@@ -1617,11 +1617,18 @@ class LedgerParityArtifactRepository:
 
 
 class LegacyParityDiagnosticReader:
-    """Read existing NBA diagnostic tables through an injected DB boundary."""
+    """Read existing NBA diagnostic tables through an injected DB boundary.
+
+    ``traditional_opponent`` is deliberately absent.  Its diagnostic table,
+    ``general_opponent_stats``, was dropped by #199 once the Season Rankings
+    cutover took its last reader, so there is nothing left to compare a
+    candidate against; the materialization records an unavailable parity
+    report for that stream instead, the same way it already does for the L15
+    window the legacy diagnostics never had.
+    """
 
     TABLES = {
         "player_game_logs": "player_game_logs",
-        "traditional_opponent": "general_opponent_stats",
         "player_per36": "player_per36_stats",
     }
 

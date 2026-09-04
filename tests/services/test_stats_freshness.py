@@ -55,7 +55,7 @@ def test_successful_atomic_stats_publication_records_completion(tmp_path, monkey
     monkeypatch.setattr(
         service,
         "_collect_all_frames",
-        lambda: {"general_opponent_stats": pd.DataFrame([{"TEAM_ID": 1}])},
+        lambda: {"player_information": pd.DataFrame([{"TEAM_ID": 1}])},
     )
 
     assert service.update_all_data() is True
@@ -88,8 +88,8 @@ def test_freshness_write_failure_rolls_back_stats_swap(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'stats.sqlite3'}")
     run_migrations(engine)
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE general_opponent_stats (value TEXT)"))
-        connection.execute(text("INSERT INTO general_opponent_stats VALUES ('old')"))
+        connection.execute(text("CREATE TABLE player_information (value TEXT)"))
+        connection.execute(text("INSERT INTO player_information VALUES ('old')"))
     class FailingFreshness:
         def record_success(self, *_args, **_kwargs):
             raise RuntimeError("write failed")
@@ -102,13 +102,13 @@ def test_freshness_write_failure_rolls_back_stats_swap(tmp_path, monkeypatch):
     monkeypatch.setattr(
         service,
         "_collect_all_frames",
-        lambda: {"general_opponent_stats": pd.DataFrame([{"value": "new"}])},
+        lambda: {"player_information": pd.DataFrame([{"value": "new"}])},
     )
     assert service.update_all_data() is False
     with engine.connect() as connection:
         assert (
             connection.execute(
-                text("SELECT value FROM general_opponent_stats")
+                text("SELECT value FROM player_information")
             ).scalar_one()
             == "old"
         )

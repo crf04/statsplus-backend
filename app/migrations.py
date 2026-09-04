@@ -2058,6 +2058,34 @@ def _create_saved_filter_sets_table(connection: Connection) -> None:
     SavedFilterSet.__table__.create(connection, checkfirst=True)
 
 
+#: The nightly ranking tables retired by #199, in the order they are dropped.
+#: ``opp_shooting_zone`` is deliberately absent: its stream is activated, but
+#: the table itself is not retired.
+_RETIRED_LEGACY_RANKING_TABLES: Final[tuple[str, ...]] = (
+    "general_opponent_stats",
+    "catch_and_shoot",
+    "pullups",
+    "less_than_10_ft",
+    "team_play_types",
+    "processed_team_assists",
+)
+
+
+def _drop_legacy_ranking_tables(connection: Connection) -> None:
+    """Drop the six retired nightly ranking tables (#199).
+
+    The Season Rankings cutover (#198/#225) moved every reader onto the durable
+    Matchup publications and the refresh path refuses to write these names, so
+    the storage has no reader and no writer left.  ``DROP TABLE IF EXISTS`` is
+    understood by both SQLite and PostgreSQL and makes the step idempotent: a
+    database that never carried the tables, or one already upgraded, is a
+    no-op.  Nothing recreates them, so no data is copied forward.
+    """
+
+    for table in _RETIRED_LEGACY_RANKING_TABLES:
+        connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2160,6 +2188,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         47,
         "047_create_saved_filter_sets",
         _create_saved_filter_sets_table,
+    ),
+    Migration(
+        48,
+        "048_drop_legacy_ranking_tables",
+        _drop_legacy_ranking_tables,
     ),
 )
 

@@ -11,14 +11,8 @@ from typing import Dict
 
 
 LEGACY_TO_NORMALIZED: Dict[str, str] = {
-    # Opponent/traditional
-    "General Opponent Stats": "general_opponent_stats",
-
-    # Shooting type tables
-    "Catch and Shoot": "catch_and_shoot",
-    "Pullups": "pullups",
-    "Less Than 10 ft": "less_than_10_ft",
-    "Less Than 10 Ft": "less_than_10_ft",
+    # The opponent and shooting-type display names are gone with the tables
+    # they normalized to, which #199 dropped.  No caller passed them here.
 
     # PBP totals
     "pbp_Opponent_stats": "pbp_opponent_stats",

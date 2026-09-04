@@ -104,18 +104,20 @@ plane) is not a refusal: it fails the whole refresh closed, as before.
 
 Production state is the 2026-08-24 activation cycle recorded on backend #87.
 
-"Fenced" means the nightly refresh refuses the table. "Reader cut over" says
-whether the surface that reads it now serves the publication instead — a
-fenced table whose reader is *not* cut over is frozen, not superseded.
+"Fenced" means the nightly refresh refuses the table. "Dropped" means migration
+`048_drop_legacy_ranking_tables` removed the storage, so there is no row left to
+read or roll back to. "Reader cut over" says whether the surface that reads it
+now serves the publication instead — a fenced table whose reader is *not* cut
+over is frozen, not superseded.
 
 | Legacy table | Stream | Activated in production | Nightly refresh | Reader cut over | Reader(s) |
 | --- | --- | --- | --- | --- | --- |
-| `general_opponent_stats` | `traditional_opponent_season` | yes | fenced | yes — superseded | legacy parity snapshot only |
+| `general_opponent_stats` | `traditional_opponent_season` | yes | dropped (#199) | yes — superseded | none |
 | `player_per36_stats` | `player_per36` | yes | fenced | yes — superseded | `PlayerService._per36_frame`, only when the publication does not serve |
-| `team_play_types` | `synergy_play_types_opponent_season` | yes | fenced | yes — superseded | none |
-| `catch_and_shoot`, `pullups`, `less_than_10_ft` | `grouped_shot_types_opponent_season` | yes | fenced | yes — superseded | none |
+| `team_play_types` | `synergy_play_types_opponent_season` | yes | dropped (#199) | yes — superseded | none |
+| `catch_and_shoot`, `pullups`, `less_than_10_ft` | `grouped_shot_types_opponent_season` | yes | dropped (#199) | yes — superseded | none |
 | `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | fenced | yes — superseded | none |
-| `processed_team_assists` | `assist_locations_season` | yes | fenced | yes — superseded | none |
+| `processed_team_assists` | `assist_locations_season` | yes | dropped (#199) | yes — superseded | none |
 | `pbp_opponent_stats` | `assist_locations_season` | yes | fenced | n/a (refresh input) | `DataService.process_assist_data` input |
 | `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | `PlayerService.get_all_players`, player play-type profile, NL parser player names |
 | `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | n/a | player zone-shooting profile |
@@ -132,8 +134,10 @@ the tables that were actually published, which excludes every fenced row.
 
 The fenced rows stay in the refresh code and in this table on purpose: they
 are refused per night rather than deleted, so a rollback that disables a
-stream restores that table's refresh with no code change. Removing a legacy
-writer is the separately approved cleanup below.
+stream restores that table's refresh with no code change. The **dropped** rows
+are the exception and are one-way: their collectors are deleted and their
+storage is gone, so disabling a stream does not bring them back. Removing a
+legacy writer is the separately approved cleanup below.
 
 Team Filter rankings and the Team Profile categories read the traditional,
 shot-type, shot-zone, play-type, and assist-location **publications**, not
@@ -277,10 +281,27 @@ inert for writes rather than absent.
 
 Do not, in this activation:
 
-- drop or truncate `general_opponent_stats`, `player_per36_stats`,
-  `processed_team_assists`, or `pbp_opponent_stats`;
+- drop or truncate `player_per36_stats`, `opp_shooting_zone`, or
+  `pbp_opponent_stats`;
 - remove the legacy writer code paths that are now fenced;
 - enable any Playoff or Play-In behavior.
+
+The six nightly ranking tables are the one completed exception, and they are
+now gone. Under #199 `general_opponent_stats`, `catch_and_shoot`, `pullups`,
+`less_than_10_ft`, `team_play_types`, and `processed_team_assists` are refused
+at the publication boundary unconditionally, their collectors are deleted, and
+migration `048_drop_legacy_ranking_tables` drops the storage — the activation
+fence no longer decides their fate. The refresh refuses them with the reason
+`retired_table`, ahead of and independently of any activation check, so a
+revived collector never reaches the publisher. `opp_shooting_zone` is **not**
+part of that drop: it is fenced, not retired.
+
+One consequence for operators: `LegacyParityDiagnosticReader` no longer offers
+a `traditional_opponent` read at all. With `general_opponent_stats` dropped
+there is nothing to compare a candidate against, so the materialization records
+an unavailable parity report for `traditional_opponent_season` — the same
+treatment `traditional_opponent_l15` already had — rather than raising on a
+missing table. `player_game_logs` and `player_per36` parity are unaffected.
 
 Removal happens only under a separately approved cleanup issue, after the
 activated streams have served a full cycle and rollback is no longer expected

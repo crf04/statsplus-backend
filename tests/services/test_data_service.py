@@ -13,8 +13,6 @@ PLAY_TYPES = [
     "Spotup", "Cut", "Handoff", "OffScreen", "Misc", "Postup",
 ]
 
-TEAM_NAMES = ["Los Angeles Lakers", "Golden State Warriors"]
-
 
 @pytest.fixture
 def engine(tmp_path):
@@ -34,110 +32,6 @@ def service(engine):
 def read_table(engine, name):
     with engine.connect() as connection:
         return pd.read_sql(f"SELECT * FROM {name}", connection)
-
-
-# --- opponent scoring ------------------------------------------------------
-
-
-def test_opponent_scoring_is_stored(service, engine, monkeypatch):
-    frame = pd.DataFrame([{"TEAM_NAME": "Los Angeles Lakers", "OPP_PTS": 110.5}])
-    monkeypatch.setattr(service, "_fetch_opponent_data", lambda *a, **k: frame)
-
-    service.process_opponent_scoring()
-
-    assert read_table(engine, "general_opponent_stats")["OPP_PTS"].tolist() == [110.5]
-
-
-# --- opponent shooting -----------------------------------------------------
-
-
-def _shooting_frame():
-    return pd.DataFrame(
-        [
-            {"TEAM_ABBREVIATION": "LAL", "FG3M": 10, "FG2M": 20, "FG2A": 40, "FG3A": 30},
-            {"TEAM_ABBREVIATION": "GSW", "FG3M": 14, "FG2M": 18, "FG2A": 36, "FG3A": 35},
-        ]
-    )
-
-
-def test_opponent_shooting_writes_each_normalized_table(service, engine, monkeypatch):
-    monkeypatch.setattr(
-        service, "_fetch_opp_shooting_data", lambda type, date_filter=None: _shooting_frame()
-    )
-
-    service.process_opp_shooting()
-
-    for table in ("catch_and_shoot", "pullups", "less_than_10_ft"):
-        df = read_table(engine, table)
-        assert len(df) == 2
-        # Ranks are ascending, so the lower FG3M ranks first.
-        assert df.loc[df["TEAM_ABBREVIATION"] == "LAL", "FG3M_RANK"].item() == 1
-        assert df.loc[df["TEAM_ABBREVIATION"] == "GSW", "FG3M_RANK"].item() == 2
-
-
-def test_opponent_shooting_continues_when_one_type_fails(service, engine, monkeypatch):
-    def fetch(type, date_filter=None):
-        if type == "Pullups":
-            raise RuntimeError("provider exploded")
-        return _shooting_frame()
-
-    monkeypatch.setattr(service, "_fetch_opp_shooting_data", fetch)
-
-    service.process_opp_shooting()
-
-    assert len(read_table(engine, "catch_and_shoot")) == 2
-    assert len(read_table(engine, "less_than_10_ft")) == 2
-    with pytest.raises(Exception):
-        read_table(engine, "pullups")
-
-
-# --- team play types -------------------------------------------------------
-
-
-def _team_play_type_frame(play_type):
-    return pd.DataFrame(
-        [
-            {"TEAM_NAME": name, "PLAY_TYPE": play_type, "PTS": 100 + index * 20, "GP": 10}
-            for index, name in enumerate(TEAM_NAMES)
-        ]
-    )
-
-
-def test_team_play_types_are_pivoted_and_normalized(service, engine, monkeypatch):
-    monkeypatch.setattr(service, "_fetch_team_play_type_data", _team_play_type_frame)
-
-    service.process_and_store_team_data()
-
-    df = read_table(engine, "team_play_types")
-
-    assert list(df.columns) == [
-        "TEAM_NAME", "Cut", "Isolation", "PRRollMan", "PRBallHandler",
-        "OffRebound", "Spotup", "Handoff", "OffScreen", "Misc",
-        "Postup", "Transition", "Team_ID", "team",
-    ]
-    assert set(df["team"]) == {"LAL", "GSW"}
-    # PTS/G+ is each team's rate over the league mean, so the two teams'
-    # normalized values must average to 1.0 for every play type.
-    assert df["Transition"].mean() == pytest.approx(1.0)
-
-
-def test_team_play_types_skip_a_failing_play_type(service, engine, monkeypatch):
-    def fetch(play_type):
-        if play_type == "Postup":
-            raise RuntimeError("provider exploded")
-        return _team_play_type_frame(play_type)
-
-    monkeypatch.setattr(service, "_fetch_team_play_type_data", fetch)
-
-    with pytest.raises(KeyError):
-        # The fixed column order requires every play type, so a dropped one
-        # surfaces rather than silently writing a narrower table.
-        service.process_and_store_team_data()
-
-
-def test_unknown_team_names_map_to_unknown(service):
-    assert service._nba_team_to_abbreviation("Los Angeles Lakers") == "LAL"
-    assert service._nba_team_to_abbreviation("Springfield Isotopes") == "Unknown"
 
 
 # --- player play types -----------------------------------------------------
