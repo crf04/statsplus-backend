@@ -115,12 +115,208 @@ def test_fetch_data_rejects_a_retired_legacy_team_filter_table(service):
 
 
 def test_get_player_id_resolves_a_close_name(service):
-    assert service.get_player_id("LeBron James") == 2544
+    assert service.get_player_id("LeBron James", "2025-26") == 2544
 
 
 def test_get_player_id_raises_for_an_unknown_player(service):
     with pytest.raises(ValueError, match="No matching player found"):
-        service.get_player_id("Nonexistent Person")
+        service.get_player_id("Nonexistent Person", "2025-26")
+
+
+class _StubAthleteCatalog:
+    """Season-scoped catalog stand-in: rows for one season, none for others."""
+
+    def __init__(self, season, rows):
+        self.season = season
+        self.rows = rows
+
+    def get_catalog(self, season, *, active_only=False):
+        return list(self.rows) if season == self.season else []
+
+
+@pytest.fixture
+def catalog_service(game_engine, monkeypatch):
+    """A GameService whose catalog knows a rookie absent from player_information."""
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2025-26",
+        [
+            {"player_id": 1642843, "display_name": "Cooper Flagg", "is_active_for_season": True},
+            {"player_id": 2544, "display_name": "LeBron James", "is_active_for_season": True},
+        ],
+    )
+    return game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+
+def test_get_player_id_resolves_from_the_season_catalog_even_when_absent_from_player_information(
+    catalog_service,
+):
+    assert catalog_service.get_player_id("Cooper Flagg", "2025-26") == 1642843
+
+
+def test_get_player_id_exact_match_is_case_and_whitespace_insensitive(catalog_service):
+    assert catalog_service.get_player_id("  cooper flagg  ", "2025-26") == 1642843
+
+
+def test_get_player_id_fuzzy_matches_a_near_miss_against_the_catalog(catalog_service):
+    assert catalog_service.get_player_id("Cooper Flag", "2025-26") == 1642843
+
+
+def test_get_player_id_raises_for_an_unknown_name_in_the_catalog(catalog_service):
+    with pytest.raises(ValueError, match="No matching player found"):
+        catalog_service.get_player_id("Nonexistent Person", "2025-26")
+
+
+def test_get_player_id_falls_back_to_player_information_when_the_catalog_has_no_rows_for_the_season(
+    catalog_service,
+):
+    assert catalog_service.get_player_id("LeBron James", "2024-25") == 2544
+
+
+def test_get_player_id_uses_the_legacy_path_when_no_catalog_is_injected(service):
+    assert service.get_player_id("LeBron James", "2025-26") == 2544
+
+
+# --- namesake tie-break (#regression: Nate Williams, historical + active) --
+
+
+@pytest.fixture
+def namesake_service(game_engine, monkeypatch):
+    """A catalog with a historical/active namesake collision.
+
+    Production athlete_catalog carries CommonAllPlayers history, so
+    ``display_name`` repeats across eras. ``Nate Williams`` collides between
+    a retired player (78561) and an active 2025-26 Warrior (1631466); an
+    id-order resolution used to silently return the retired namesake.
+    """
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2025-26",
+        [
+            {"player_id": 78561, "display_name": "Nate Williams", "is_active_for_season": False},
+            {"player_id": 1631466, "display_name": "Nate Williams", "is_active_for_season": True},
+        ],
+    )
+    return game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+
+def test_get_player_id_prefers_the_active_namesake_on_an_exact_match(namesake_service):
+    assert namesake_service.get_player_id("Nate Williams", "2025-26") == 1631466
+
+
+def test_get_player_id_prefers_the_active_namesake_on_a_fuzzy_match(namesake_service):
+    assert namesake_service.get_player_id("Nate Wiliams", "2025-26") == 1631466
+
+
+def test_get_player_id_breaks_a_namesake_tie_by_lowest_id_when_none_are_active(
+    game_engine, monkeypatch
+):
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog(
+        "2025-26",
+        [
+            {"player_id": 999999, "display_name": "Retired Twin", "is_active_for_season": False},
+            {"player_id": 111111, "display_name": "Retired Twin", "is_active_for_season": False},
+        ],
+    )
+    service = game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+
+    assert service.get_player_id("Retired Twin", "2025-26") == 111111
+
+
+def test_fetch_athlete_catalog_rows_returns_three_tuples(catalog_service):
+    rows = catalog_service._fetch_athlete_catalog_rows("2025-26")
+
+    assert rows
+    assert all(isinstance(row, tuple) and len(row) == 3 for row in rows)
+    assert (1642843, "Cooper Flagg", True) in rows
+
+
+class _DictCache:
+    """Minimal in-memory stand-in for the NBAGameCache methods GameService calls."""
+
+    def __init__(self):
+        self.enabled = True
+        self.store = {}
+
+    def _generate_key(self, prefix, include_date=False, function_name='', *args, **kwargs):
+        return f"{prefix}:{function_name}:{args}"
+
+    def _get_ttl(self, key):
+        return 3600
+
+    def get(self, cache_key):
+        return self.store.get(cache_key)
+
+    def set(self, cache_key, data, ttl):
+        self.store[cache_key] = data
+
+
+def test_get_player_id_does_not_cache_an_empty_catalog_read(game_engine, monkeypatch):
+    """An empty catalog read (season not yet published) must not be cached, so a
+    rookie season becomes resolvable as soon as the catalog is populated instead
+    of being masked behind a stale cached [] for the 24h player_info TTL.
+    """
+    from app.services import game_service as game_service_module
+
+    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *args, **kwargs: None)
+    catalog = _StubAthleteCatalog("2025-26", [])
+    service = game_service_module.GameService(
+        game_engine,
+        team_filter_rankings=_StubRankings(["GSW", "LAL", "BOS"]),
+        athlete_catalog=catalog,
+    )
+    service.cache = _DictCache()
+    cache_key = service.cache._generate_key('table_data', False, 'athlete_catalog', "2025-26")
+
+    assert service.get_player_id("LeBron James", "2025-26") == 2544
+    assert cache_key not in service.cache.store
+
+    catalog.rows = [
+        {"player_id": 1642843, "display_name": "Cooper Flagg", "is_active_for_season": True},
+    ]
+
+    assert service.get_player_id("Cooper Flagg", "2025-26") == 1642843
+    assert service.cache.store[cache_key] == [(1642843, "Cooper Flagg", True)]
+
+
+def test_get_player_id_resolves_when_the_cache_returns_list_shaped_rows(
+    catalog_service, monkeypatch
+):
+    """Redis JSON round-trips a cached tuple as a list; resolution must still work."""
+    catalog_service.cache.enabled = True
+    cached_rows = [
+        [78561, "Nate Williams", False],
+        [1631466, "Nate Williams", True],
+    ]
+    monkeypatch.setattr(catalog_service.cache, "get", lambda key: cached_rows)
+    monkeypatch.setattr(
+        catalog_service.cache,
+        "set",
+        lambda key, data, ttl: (_ for _ in ()).throw(
+            AssertionError("a cache hit must not re-fetch and re-cache")
+        ),
+    )
+
+    assert catalog_service.get_player_id("Nate Williams", "2025-26") == 1631466
 
 
 def test_get_team_name_by_id_returns_none_for_an_unknown_id(service):

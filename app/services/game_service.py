@@ -76,6 +76,7 @@ class GameService:
         team_matchups=None,
         team_filter_rankings=None,
         publication_reader=None,
+        athlete_catalog=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -84,6 +85,11 @@ class GameService:
         # Request-time game-log source. Production injects the durable source;
         # there is no provider fallback to reach from here.
         self.game_logs_source = game_logs_source
+
+        # Governed season-scoped identity source for name resolution. Absent
+        # against the read-only demo database, which falls back to
+        # ``player_information`` (see ``get_player_id``).
+        self.athlete_catalog = athlete_catalog
 
         # Season Rankings for every ``teams_against`` filter.  Absent against
         # the read-only demo database, which ranks nothing rather than calling
@@ -103,7 +109,16 @@ class GameService:
 
         logger.info(f"GameService initialized with cache {'enabled' if self.cache and self.cache.enabled else 'disabled'}")
 
-    def get_player_id(self, player_name):
+    def get_player_id(self, player_name, season):
+        # The Athlete Catalog is the governed identity source game-log
+        # ingest already joins on: any player with durable logs is
+        # guaranteed to be in it, unlike ``player_information`` (a dump of
+        # the nba_api static player list that nightly refresh never writes).
+        if self.athlete_catalog is not None:
+            catalog_rows = self._fetch_athlete_catalog_rows(season)
+            if catalog_rows:
+                return self._resolve_from_catalog(player_name, catalog_rows)
+
         player_dict = self._fetch_data_from_table('player_information')
 
         player_names = player_dict['full_name'].tolist()
@@ -113,6 +128,59 @@ class GameService:
             return player['id'].values[0]
         else:
             raise ValueError(f"No matching player found for {player_name}.")
+
+    @staticmethod
+    def _resolve_from_catalog(player_name, catalog_rows):
+        """Resolve a name against ``(player_id, display_name, is_active_for_season)``
+        catalog rows.
+
+        The catalog carries every season a player appears in NBA history, so
+        a display name can repeat across eras (for example two different
+        "Nate Williams"). A tie is broken by preferring the row active for
+        the requested season, then by the lowest ``player_id`` so the choice
+        is deterministic.
+        """
+        def pick(rows):
+            return int(min(rows, key=lambda row: (not row[2], row[0]))[0])
+
+        normalized_target = player_name.strip().casefold()
+        exact_matches = [
+            row for row in catalog_rows
+            if row[1].strip().casefold() == normalized_target
+        ]
+        if exact_matches:
+            return pick(exact_matches)
+
+        unique_display_names = list(dict.fromkeys(row[1] for row in catalog_rows))
+        closest_match = get_close_matches(player_name, unique_display_names, n=1, cutoff=0.8)
+        if closest_match:
+            candidates = [row for row in catalog_rows if row[1] == closest_match[0]]
+            return pick(candidates)
+
+        raise ValueError(f"No matching player found for {player_name}.")
+
+    def _fetch_athlete_catalog_rows(self, season):
+        """Read cached ``(player_id, display_name, is_active_for_season)`` triples."""
+        cache_key = None
+        if self.cache and self.cache.enabled:
+            cache_key = self.cache._generate_key('table_data', False, 'athlete_catalog', season)
+            cached_result = self.cache.get(cache_key)
+            if cached_result is not None:
+                logger.debug(f"Cache hit for athlete catalog: {season}")
+                return cached_result
+
+        rows = self.athlete_catalog.get_catalog(season, active_only=False)
+        catalog_rows = [
+            (row['player_id'], row['display_name'], bool(row['is_active_for_season']))
+            for row in rows
+        ]
+
+        if cache_key and catalog_rows:
+            ttl = self.cache._get_ttl('player_info')
+            self.cache.set(cache_key, catalog_rows, ttl)
+            logger.debug(f"Cached athlete catalog for {season}")
+
+        return catalog_rows
 
     def _get_game_logs(
         self, player_name, season=None, *, publication_snapshot=None
@@ -124,7 +192,7 @@ class GameService:
                 "GameService needs an injected game-log source; there is no "
                 "request-time provider fallback"
             )
-        player_id = int(self.get_player_id(player_name))
+        player_id = int(self.get_player_id(player_name, season))
 
         # The pre-issues-9 contract deliberately leaves next_game unset.  Keep
         # that behavior until a separately specified provider seam exists.
@@ -331,7 +399,7 @@ class GameService:
         if self.player_diets is None or self.team_matchups is None:
             return {}
 
-        player_id = int(self.get_player_id(player_name))
+        player_id = int(self.get_player_id(player_name, season))
         diets = call_with_read_scope(
             self.player_diets.get_for_players,
             season,

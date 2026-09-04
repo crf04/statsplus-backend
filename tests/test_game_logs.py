@@ -334,6 +334,48 @@ def test_game_service_returns_plain_arrays_for_filtered_logs(
     GameLogResponse.model_validate(result)
 
 
+def test_get_filtered_logs_resolves_a_player_only_present_in_the_athlete_catalog(
+    mock_db_engine, mock_redis_client
+):
+    """A 2025 draft-class rookie has no player_information row (that table is
+    never refreshed in production) but is durable in the season Athlete
+    Catalog and has logs; the request must not 404 (see the Cooper Flagg
+    production case)."""
+
+    class _CatalogOnlyRookie:
+        def get_catalog(self, season, *, active_only=False):
+            if season != "2025-26":
+                return []
+            return [{"player_id": 1642843, "display_name": "Cooper Flagg", "is_active_for_season": True}]
+
+    class _RookieLogsSource:
+        def get_player_logs(self, player_id, season):
+            assert player_id == 1642843
+            assert season == "2025-26"
+            frame = _game_logs_frame().copy()
+            frame["PLAYER_NAME"] = "Cooper Flagg"
+            return frame
+
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+        game_logs_source=_RookieLogsSource(),
+        team_filter_rankings=_StubRankings(["LAL"]),
+        athlete_catalog=_CatalogOnlyRookie(),
+    )
+    query = GameLogQuery(season_filter="2025-26")
+
+    result = service.get_filtered_logs("Cooper Flagg", query)
+
+    assert len(result["game_logs"]) == 3
+    assert {row["PTS"] for row in result["game_logs"]} == {25, 15, 30}
+    GameLogResponse.model_validate(result)
+
+
 def test_service_returns_empty_arrays_when_no_games_match(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
@@ -519,7 +561,7 @@ def test_route_returns_empty_when_player_log_publication_is_unavailable(
     _stub_route_settings(monkeypatch)
     with client.application.app_context():
         service = game_routes.game_service._resolve()
-        monkeypatch.setattr(service, "get_player_id", lambda name: 1)
+        monkeypatch.setattr(service, "get_player_id", lambda name, season: 1)
         monkeypatch.setattr(
             game_routes.game_service,
             "get_filtered_logs",
@@ -569,7 +611,7 @@ def test_game_service_never_caches_player_logs_in_redis(
         ),
         game_logs_source=source,
     )
-    monkeypatch.setattr(service, "get_player_id", lambda _name: 1)
+    monkeypatch.setattr(service, "get_player_id", lambda _name, _season: 1)
 
     first, _ = service._get_game_logs("LeBron James", "2024-25")
     second, _ = service._get_game_logs("LeBron James", "2024-25")
