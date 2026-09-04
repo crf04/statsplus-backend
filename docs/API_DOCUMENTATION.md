@@ -62,7 +62,7 @@ The public error categories and HTTP statuses are:
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
-| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
+| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh or publication rebuild for the same operation is already queued or running. |
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
@@ -2072,8 +2072,10 @@ window of the family back one generation atomically. A per-stream rollback of
 a coupled family is refused, and a target this deployment can no longer read
 is refused as `publication_format_unsupported`.
 
-A conflicting active rebuild for the family, a stale expected pair, and a held
-worker lease are `409 operation_conflict`; an unknown rebuild is `404`.
+A conflicting active rebuild for the family is `409
+duplicate_active_operation`.  A stale expected pair, a held worker lease, and a
+per-stream request that would split the family are `409 operation_conflict`; an
+unknown rebuild is `404`.
 
 `POST /api/collector/observations` accepts one complete normalized envelope
 and payload as a gzip-compressed JSON document (`Content-Encoding: gzip`). The

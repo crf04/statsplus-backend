@@ -13,6 +13,7 @@ from app.errors import (
     AuthenticationRequiredError,
     AuthorizationError,
     ConflictError,
+    DuplicateOperationError,
     InvalidInputError,
     InvalidTokenError,
     RateLimitedError,
@@ -86,13 +87,22 @@ def _control_error(error: Exception) -> AppError:
         "credential_delivery_unavailable",
     }:
         return ResourceNotFoundError("The collection resource was not found.", detail=reason)
+    if reason == "duplicate_active_operation":
+        # The API contract already publishes this exact meaning as its own
+        # 409 code, so a caller learns "one is already in flight" from the
+        # code rather than from a detail field it is not promised.
+        return DuplicateOperationError(
+            "A rebuild for this publication family is already in progress.",
+            detail=reason,
+        )
     if reason in {
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
-        # A rebuild conflicts with concurrent state rather than being malformed.
-        "duplicate_active_operation", "stale_publication_family",
-        "rebuild_lease_held", "publication_family_coupled",
+        # A rebuild that lost a race with durable state, or a per-stream
+        # request that would split a coupled family.
+        "stale_publication_family", "rebuild_lease_held",
+        "publication_family_coupled",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)

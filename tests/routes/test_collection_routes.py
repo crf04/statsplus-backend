@@ -661,7 +661,8 @@ def test_a_conflicting_rebuild_request_is_a_stable_409(client, app):
     )
 
     assert response.status_code == 409
-    assert response.json["error"]["code"] == "operation_conflict"
+    # The published code for this exact meaning, not a generic conflict.
+    assert response.json["error"]["code"] == "duplicate_active_operation"
 
 
 def test_an_unknown_rebuild_is_a_stable_404(client, app):
