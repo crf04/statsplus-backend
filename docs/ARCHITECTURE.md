@@ -970,6 +970,46 @@ evidence.  Because the durable path therefore covers every public primitive,
 an ingestion-complete, valid publication is database-first with no separate
 cutover gate.
 
+### Team Profile categories
+
+`GET /api/teams/stats` (`app.services.team_service.TeamService`) serves the
+Log Workspace opponent and player panels.  Every category is one projection of
+the same Season publications the Team Filters read: `Traditional` from
+`traditional_opponent_season`, `Playtypes` from
+`synergy_play_types_opponent_season`, `Assists` from `assist_locations_season`,
+`Zone Shooting` from `exact_shot_zones_opponent_season`, and `Shooting Type`
+from `grouped_shot_types_opponent_season`.  The service holds the same
+publication read seam the game service injects, so no provider client is
+reachable from it by construction and the legacy `general_opponent_stats`,
+`team_play_types`, `processed_team_assists`, `opp_shooting_zone`,
+`catch_and_shoot`, `pullups`, and `less_than_10_ft` reads are gone with their
+dated `fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branches.
+
+Ranks and percentages come from `publication_league_table` in
+`app.services.team_matchup_query`, the same league computation the Matchups
+Defense Sheet applies -- mean, population sigma, ascending competition rank
+with shared ties, and percent versus the league average over the published
+thirty.  The Defense Sheet projects a curated subset of that table; the panel
+projects the rest, and the panel derives `OPP_STL+BLK`, the two shooting
+percentages, `AssistPoints`, and each shot type's `PTS` as further columns
+ranked the same way.  Values are per-48 on nominal minutes, so opponent points
+allowed is one number across both surfaces.  `Playtypes` and `Assists` carry a
+ratio to the league average because those panel charts are centred on `1.0`;
+their ranks stay on the published column, where a division can neither create
+nor break a tie.
+
+A requested `date` is accepted and ignored: the rankings are whole-season, the
+#39 decision applied here.  An unknown category is a `400`, a stale
+publication serves its last-good values silently, and a season with no
+published generation -- including the demo database, which carries no
+publication tables -- serves nothing rather than a partial league.  Fields the
+publications do not carry (`OPP_OREB`, `OPP_DREB`) are omitted rather than
+synthesized, and so is a rate one team has no denominator for: a team that
+faced zero possessions of a play type is left out of that column exactly as a
+Team Filter leaves it out of that ranking, so it neither ranks as the
+stingiest defense nor moves the league average the other teams' ratios are
+measured against.
+
 ### NBA Stats game-log adapter
 
 `app.providers.nba_stats.NBAStatsProvider` is the injectable interface for
@@ -2030,6 +2070,21 @@ set to `AtomicTablePublisher`, which stages each `DataFrame` under a unique
 name and swaps every name inside one `engine.begin()` transaction. Readers
 never observe a mixed old/new set, and a failed swap rolls back to the
 previous tables.
+
+`update_all_data` publishes the still-refreshed subset, not everything it
+collected. Before publishing it partitions the collected frames against the
+injected `LegacyWriteFence`: a table whose database-first stream is activated
+is refused with a logged `legacy_write_fenced` refusal and skipped, and the
+remaining tables are published as one atomic set with the stats-freshness
+completion. An activated stream therefore fences only its own table instead of
+aborting the publication of tables that have no database-first replacement,
+and the refresh succeeds. The authoritative fence check remains inside the
+publication transaction, so a stream activated between the partition and the
+swap still fails that publication closed. A fence that cannot be read still
+fails the whole refresh closed. When every collected table is fenced the
+refresh publishes nothing and succeeds without advancing stats freshness; the
+per-table inventory is in
+[DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md).
 
 ### Durable Season player Diet facts
 

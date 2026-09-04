@@ -551,6 +551,45 @@ def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, t
     constructor.assert_not_called()
 
 
+def _reachable_members(node):
+    """Every attribute of one node, including those held behind ``__slots__``.
+
+    A shallow attribute check misses an adapter nested inside an injected
+    collaborator, and a ``__dict__``-only walk misses one behind ``__slots__``.
+    Walk both, defensively: some collaborators expose lazy attributes that
+    raise on access.
+    """
+
+    found = {}
+    try:
+        found.update(vars(node))
+    except TypeError:
+        pass
+    for klass in type(node).__mro__:
+        for name in getattr(klass, "__slots__", ()) or ():
+            try:
+                found[name] = getattr(node, name)
+            except Exception:  # noqa: BLE001 - lazy attributes may raise
+                pass
+    return found
+
+
+def _provider_paths(root, targets, label, depth=8):
+    """Every attribute path from ``root`` that reaches a provider client."""
+
+    paths, seen, frontier = [], set(), [(root, label, 0)]
+    while frontier:
+        node, path, level = frontier.pop()
+        if level > depth or id(node) in seen:
+            continue
+        seen.add(id(node))
+        for name, value in _reachable_members(node).items():
+            if id(value) in targets:
+                paths.append(f"{path}.{name}")
+            frontier.append((value, f"{path}.{name}", level + 1))
+    return sorted(paths)
+
+
 def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     """The Team Filter read path can only reach Season publications (#198)."""
 
@@ -579,37 +618,6 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     )
     game_service = dependencies.game_service
 
-    # A shallow attribute check misses an adapter nested inside an injected
-    # collaborator, and a `__dict__`-only walk misses one behind `__slots__`.
-    # Walk both, defensively: some collaborators expose lazy attributes that
-    # raise on access.
-    def members(node):
-        found = {}
-        try:
-            found.update(vars(node))
-        except TypeError:
-            pass
-        for klass in type(node).__mro__:
-            for name in getattr(klass, "__slots__", ()) or ():
-                try:
-                    found[name] = getattr(node, name)
-                except Exception:  # noqa: BLE001 - lazy attributes may raise
-                    pass
-        return found
-
-    def provider_paths(root, targets, label, depth=8):
-        paths, seen, frontier = [], set(), [(root, label, 0)]
-        while frontier:
-            node, path, level = frontier.pop()
-            if level > depth or id(node) in seen:
-                continue
-            seen.add(id(node))
-            for name, value in members(node).items():
-                if id(value) in targets:
-                    paths.append(f"{path}.{name}")
-                frontier.append((value, f"{path}.{name}", level + 1))
-        return sorted(paths)
-
     providers = {
         id(dependencies.nba_stats_provider),
         id(dependencies.pbp_stats_provider),
@@ -622,13 +630,13 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
 
     # Positive control: the walker must find an intentionally reachable
     # provider, or the empty production result below would be vacuous.
-    assert provider_paths(
+    assert _provider_paths(
         ProviderHolder(dependencies.pbp_game_logs_provider),
         providers,
         "positive_control",
     ) == ["positive_control.provider"]
 
-    paths = provider_paths(game_service, providers, "game_service")
+    paths = _provider_paths(game_service, providers, "game_service")
 
     assert not hasattr(game_service, "nba_stats")
     # The Log Workspace is database-only: no provider adapter is reachable
@@ -655,3 +663,61 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     # Diet facts arrive through a read-only reader bound to the repository,
     # not the refresh-capable service that owns the adapters.
     assert not any("player_diets" in path for path in paths)
+
+
+def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
+    """`GET /api/teams/stats` can only reach Season publications (#223)."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+    )
+    from app.services.team_filter_rankings import TeamFilterRankingService
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///:memory:"},
+        )
+    )
+    team_service = dependencies.team_service
+
+    providers = {
+        id(dependencies.nba_stats_provider),
+        id(dependencies.pbp_stats_provider),
+        id(dependencies.pbp_game_logs_provider),
+    }
+
+    class ProviderHolder:
+        def __init__(self, provider):
+            self.provider = provider
+
+    # Positive control: the walker must find an intentionally reachable
+    # provider, or the empty production result below would be vacuous.
+    assert _provider_paths(
+        ProviderHolder(dependencies.nba_stats_provider),
+        providers,
+        "positive_control",
+    ) == ["positive_control.provider"]
+
+    # The Team Profile panels are database-only: a request-time provider call
+    # is impossible by construction, not merely unused.
+    assert not hasattr(team_service, "nba_stats")
+    assert _provider_paths(team_service, providers, "team_service") == []
+
+    publications = team_service.publications
+    assert isinstance(publications, TeamFilterRankingService)
+    assert isinstance(
+        publications.publication_reader, DatabaseFirstPublicationReader
+    )

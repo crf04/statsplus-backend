@@ -19,24 +19,22 @@ DEFAULT_DATABASE_PATH: Final[Path] = REPOSITORY_ROOT / "nba_play_types.db"
 # validator deliberately checks a contract rather than copying the complete
 # provider-generated table definitions, whose metric columns change over
 # time.
+#
+# The opponent team tables the Team Profile categories once read are not
+# required: those categories are served from the Season publications, which
+# the demo database does not carry, so they return empty here (the #198
+# precedent for the game-log Team Filters).
 REQUIRED_DEMO_COLUMNS: Final[dict[str, frozenset[str]]] = {
-    "Catch and Shoot": frozenset({"TEAM_ID", "TEAM_NAME", "FGM", "FGA"}),
-    "General Opponent Stats": frozenset({"TEAM_ID", "TEAM_NAME", "OPP_PTS"}),
-    "Less Than 10 ft": frozenset({"TEAM_ID", "TEAM_NAME", "FGM", "FGA"}),
     "Player_Information": frozenset({"id", "full_name", "is_active"}),
     "Player_Per36_Stats": frozenset({"PLAYER_ID", "PLAYER_NAME", "PTS"}),
     "Player_Team_Table": frozenset({"Player", "Current Team", "Team_ID"}),
-    "Pullups": frozenset({"TEAM_ID", "TEAM_NAME", "FGM", "FGA"}),
     "Team_Info": frozenset({"id", "full_name", "abbreviation"}),
-    "opp_shooting_zone": frozenset({"TEAM_ID", "TEAM_NAME"}),
     "pbp_opponent_stats": frozenset({"EntityId", "TeamId", "Name"}),
     "pbp_player_stats": frozenset({"EntityId", "TeamId", "Name"}),
     "player_clusters": frozenset({"PlayerName", "ClusterID", "PlayerID"}),
     "player_play_types": frozenset({"PLAYER_NAME", "TEAM_ABBREVIATION"}),
     "player_shooting_zones": frozenset({"PLAYER_NAME", "Restricted Area_FGM"}),
     "processed_player_assists": frozenset({"Name", "TwoPtAssists"}),
-    "processed_team_assists": frozenset({"Name", "Assists"}),
-    "team_play_types": frozenset({"TEAM_NAME", "Team_ID", "team"}),
     "users": frozenset({"firebase_uid", "email", "is_active"}),
 }
 

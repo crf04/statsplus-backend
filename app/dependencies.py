@@ -118,6 +118,7 @@ def build_dependencies(
     from app.services.provider_health_service import ProviderHealthService
     from app.services.slate_service import SlateService
     from app.services.statistic_catalog import StatisticCatalog
+    from app.services.team_filter_rankings import TeamFilterRankingService
     from app.services.team_service import TeamService
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
@@ -257,10 +258,19 @@ def build_dependencies(
         nba_stats_provider=nba_stats_provider,
         publication_reader=publication_reader,
     )
+    # One Season publication read seam serves both the game-log Team Filters
+    # and the Team Profile categories, so neither can reach a provider client.
+    season_rankings = (
+        TeamFilterRankingService(
+            publication_reader,
+            governance_resolver=l15_expectation_resolver,
+        )
+        if publication_reader is not None
+        else None
+    )
     team_service = TeamService(
-        engine,
         settings=settings,
-        nba_stats_provider=nba_stats_provider,
+        season_publications=season_rankings,
     )
     stats_freshness_repository = StatsFreshnessRepository(engine)
     data_service = DataService(
@@ -549,10 +559,7 @@ def build_dependencies(
     game_logs_source = StoredGameLogsSource(
         player_game_log_repository,
     )
-    from app.services.team_filter_rankings import (
-        PlayerDietReader,
-        TeamFilterRankingService,
-    )
+    from app.services.team_filter_rankings import PlayerDietReader
 
     game_service = GameService(
         engine,
@@ -568,14 +575,7 @@ def build_dependencies(
             else None
         ),
         team_matchups=team_matchup_query_service,
-        team_filter_rankings=(
-            TeamFilterRankingService(
-                publication_reader,
-                governance_resolver=l15_expectation_resolver,
-            )
-            if publication_reader is not None
-            else None
-        ),
+        team_filter_rankings=season_rankings,
         publication_reader=publication_reader,
     )
     matchup_player_pool_reader = projection_player_pool_reader
