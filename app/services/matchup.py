@@ -273,15 +273,6 @@ class TeamMatchupReader(Protocol):
         publication_snapshot: Any | None = None,
     ) -> TeamMatchupWindow | None: ...
 
-    def get_focal_safe_window(
-        self,
-        season: str,
-        *,
-        as_of: date,
-        window_games: int | None = None,
-        publication_snapshot: Any | None = None,
-    ) -> TeamMatchupWindow | None: ...
-
 
 class StatsFreshnessReader(Protocol):
     def get(self) -> StatsFreshness: ...
@@ -461,28 +452,16 @@ class MatchupService:
             participants_section = self._pool_participants_section(pool_players)
         player_ids = tuple(player.canonical_player_id for player in players)
         # The completed-season summary is what the rail displays under its
-        # declared hindsight label.
+        # declared hindsight label, and #47 makes it the Matchup Score input
+        # too: a Historical Matchup scores uniformly from completed-season
+        # evidence, focal game included, with hindsight disclosed by label
+        # rather than by withholding an input.
         display_summaries = call_with_read_scope(
             self.player_logs.get_player_summaries,
             season,
             player_ids,
             publication_snapshot=publication_snapshot,
             connection=connection,
-        )
-        # Analysis reads its own summary with the focal row dropped, so the
-        # focal result never feeds a participant's own baseline or Matchup
-        # Score inputs. In current mode the two reads are the same question.
-        analysis_summaries = (
-            call_with_read_scope(
-                self.player_logs.get_player_summaries,
-                season,
-                player_ids,
-                publication_snapshot=publication_snapshot,
-                connection=connection,
-                exclude_game_id=game_id,
-            )
-            if historical
-            else display_summaries
         )
         log_freshness = call_with_read_scope(
             self.player_logs.get_read_freshness,
@@ -522,33 +501,11 @@ class MatchupService:
         availability = self._surface_availability(
             windows, metric_indexes, team_ids
         )
-        # A Historical Matchup scores from evidence stored strictly before the
-        # focal game. A snapshot scope carries a date, so nothing dated on the
-        # game's own date can be proven pre-tip; only an earlier scope can.
-        # The display windows above are unchanged, so the completed-season
-        # Defense Sheet still renders as the hindsight context #41 defines.
-        if historical:
-            score_windows = {
-                name: self._focal_safe_team_window(
-                    season,
-                    window_games=None if name == "season" else 15,
-                    as_of=slate_date - timedelta(days=1),
-                    publication_snapshot=publication_snapshot,
-                    connection=connection,
-                )
-                for name in windows
-            }
-            score_metric_indexes = {
-                name: None if not window else _WindowMetricIndex.build(window)
-                for name, window in score_windows.items()
-            }
-            score_availability = self._surface_availability(
-                score_windows, score_metric_indexes, team_ids
-            )
-        else:
-            score_windows = windows
-            score_metric_indexes = metric_indexes
-            score_availability = availability
+        # #47 supersedes the earlier focal-safe scoring rule: a Historical
+        # Matchup scores from the same completed-season windows the Defense
+        # Sheet displays, focal game included. Last-15 still has no
+        # point-in-time snapshot, so it reports its own `team_defense:<base>`
+        # gap in `missing_inputs` exactly as it always has.
         league = self._league(windows, metric_indexes, availability)
         teams = [
             self._team(
@@ -591,15 +548,13 @@ class MatchupService:
             "teams": teams,
             "players": self._players(
                 players,
-                analysis_summaries,
                 display_summaries,
                 diets,
                 event,
-                score_windows,
-                score_metric_indexes,
-                score_availability,
+                windows,
+                metric_indexes,
+                availability,
                 {} if historical else injury_result.badge_refs,
-                score_diets=not historical,
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -991,39 +946,6 @@ class MatchupService:
             connection=connection,
         )
 
-    def _focal_safe_team_window(
-        self,
-        season: str,
-        *,
-        window_games: int | None,
-        as_of: date,
-        publication_snapshot=None,
-        connection: Connection | None = None,
-    ) -> TeamMatchupWindow | None:
-        """Read one window that provably predates the focal game."""
-
-        if self.team_matchups is None:
-            return None
-        reader = getattr(self.team_matchups, "get_focal_safe_window", None)
-        if reader is None:
-            # An injected legacy seam predates the completed-season exemption,
-            # so its ordinary read is already free of anything after `as_of`.
-            return self._team_window(
-                season,
-                window_games=window_games,
-                as_of=as_of,
-                publication_snapshot=publication_snapshot,
-                connection=connection,
-            )
-        return call_with_read_scope(
-            reader,
-            season,
-            window_games=window_games,
-            as_of=as_of,
-            publication_snapshot=publication_snapshot,
-            connection=connection,
-        )
-
     def _diets(
         self,
         season: str,
@@ -1139,28 +1061,23 @@ class MatchupService:
     def _players(
         self,
         players: Sequence[_Participant],
-        analysis_summaries: Mapping[int, PlayerSeasonLogSummary],
-        display_summaries: Mapping[int, PlayerSeasonLogSummary],
+        summaries: Mapping[int, PlayerSeasonLogSummary],
         diets: PlayerDietResult,
         event: Mapping[str, Any],
         windows: Mapping[str, TeamMatchupWindow | None],
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
-        *,
-        score_diets: bool = True,
     ) -> list[dict[str, Any]]:
         rows = []
         for player in players:
-            summary = analysis_summaries.get(player.canonical_player_id)
-            # The rail's scoring context and minutes series are display, so
-            # they carry the completed-season summary; only the analytical
-            # summary above drops the focal row.
-            display = display_summaries.get(player.canonical_player_id)
+            # #47: the same completed-season summary feeds both the rail's
+            # display fields and the Matchup Score inputs, in every mode.
+            summary = summaries.get(player.canonical_player_id)
             scoring = (
                 None
-                if display is None or display.season_rate is None
-                else display.season_rate.per_game.get("PTS")
+                if summary is None or summary.season_rate is None
+                else summary.season_rate.per_game.get("PTS")
             )
             diet_by_base = {base: [] for base in PLAYER_DIET_BASES}
             for fact in diets.players.get(player.canonical_player_id, ()):
@@ -1178,13 +1095,7 @@ class MatchupService:
             scores = self._scores(
                 player,
                 summary,
-                # A completed-season Diet aggregate carries no game dimension,
-                # so its focal contribution cannot be subtracted and it is not
-                # a usable historical score input. The raw shares above stay
-                # displayed as their own independent evidence.
-                diets.players.get(player.canonical_player_id, ())
-                if score_diets
-                else (),
+                diets.players.get(player.canonical_player_id, ()),
                 event,
                 windows,
                 metric_indexes,
@@ -1212,8 +1123,8 @@ class MatchupService:
                     ),
                     "last_10_minutes": (
                         []
-                        if display is None
-                        else [self._number(value) for value in display.last_ten_minutes]
+                        if summary is None
+                        else [self._number(value) for value in summary.last_ten_minutes]
                     ),
                     "diet_shares": diet_by_base,
                     "scores": scores,

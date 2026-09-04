@@ -3730,17 +3730,25 @@ def test_authenticated_production_pattern_game_serves_its_participants(
                 assert isinstance(window["missing_inputs"], list)
                 if window["missing_inputs"]:
                     assert window.get("blend") is None
-    # The production limitation, stated at the boundary: this deployment
-    # stored only completed-season team-defense snapshots, so no score input
-    # can be proven free of the focal game. Every window names its unusable
-    # inputs instead of silently consuming a contaminated aggregate, while the
-    # Defense Sheet above still renders as completed-season hindsight.
-    assert all(
-        window["missing_inputs"] and window.get("blend") is None
-        for player in players
-        for windows in player["scores"].values()
-        for window in windows.values()
-    )
+    # #47: historical scoring now reads the same completed-season evidence
+    # the Defense Sheet displays. Last-15 still has no point-in-time
+    # snapshot, so it is unavailable everywhere. This fixture stores no
+    # Player Diet for these participants, so every Diet-backed category is
+    # still genuinely absent evidence, not a focal-safety refusal; the
+    # traditional-only categories need no Diet and score complete from the
+    # available completed-season Defense Sheet alone.
+    traditional_only_markets = {"REB", "TOV", "STL", "BLK", "STKS"}
+    for player in players:
+        for market, windows in player["scores"].items():
+            assert windows["last_15"]["missing_inputs"]
+            assert windows["last_15"].get("blend") is None
+            season = windows["season"]
+            if market in traditional_only_markets:
+                assert season["missing_inputs"] == []
+                assert season["components"]["traditional"]["value"] is not None
+            else:
+                assert season["missing_inputs"]
+                assert season.get("blend") is None
     assert payload["game"]["away_team"]["targetable_player_count"] == 0
     assert payload["game"]["home_team"]["targetable_player_count"] == 0
     # No archived closing projection memberships, and no provider was called.
