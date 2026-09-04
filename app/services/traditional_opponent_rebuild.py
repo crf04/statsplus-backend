@@ -564,7 +564,10 @@ class TraditionalOpponentRebuildService:
                 validate_family=self._assert_coherent_family,
                 session=session,
             )
-        except TraditionalOpponentFormatError as error:
+        except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
+            # A target this deployment cannot read is refused with the stable
+            # code, and nothing moved: the refusal happens while every prior
+            # is still only being validated.
             raise ControlPlaneError(self._failure_code(error)) from error
 
     # --- Internals --------------------------------------------------------
@@ -641,10 +644,15 @@ class TraditionalOpponentRebuildService:
             raise ControlPlaneError("stale_publication_family")
         if cutoff is not None and _aware(cutoff) != active_cutoff:
             raise ControlPlaneError("stale_publication_family")
-        formats = {
-            self._payload_format(stream_key, version.payload)
-            for stream_key, version in versions.items()
-        }
+        try:
+            formats = {
+                self._payload_format(stream_key, version.payload)
+                for stream_key, version in versions.items()
+            }
+        except (TraditionalOpponentFormatError, PublicationPayloadError) as error:
+            # Strict code cannot rebuild from a pair it cannot read.  Recovery
+            # is a code rollback to the retained dual-format release first.
+            raise ControlPlaneError(self._failure_code(error)) from error
         if len(formats) != 1:
             raise ControlPlaneError("publication_family_mixed_format")
         game_ids = _payload_game_ids(versions[SEASON_STREAM].payload)

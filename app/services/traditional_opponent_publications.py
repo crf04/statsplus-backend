@@ -160,11 +160,22 @@ TRADITIONAL_OPPONENT_V2 = TraditionalOpponentFormat(
     invariants=("rebounds == offensive_rebounds + defensive_rebounds",),
 )
 
-#: Exactly the formats this deployment accepts.  During the compatibility
-#: window both are readable; the contract deployment that removes v1 shortens
-#: this tuple and nothing else.
-SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (
+#: Every format this code can *name*.  v1 stays here after the compatibility
+#: window closed, because recognizing a stored payload as v1 is what lets the
+#: refusal say which format it refused, and because immutable v1 publications
+#: and their audit evidence are retained forever and must stay describable.
+#: Being known is not being servable.
+KNOWN_TRADITIONAL_OPPONENT_FORMATS = (
     TRADITIONAL_OPPONENT_V1,
+    TRADITIONAL_OPPONENT_V2,
+)
+
+#: Exactly the formats this deployment accepts.  The compatibility window is
+#: closed: production is on v2 and this release reads nothing else.  Recovery
+#: to v1 is a code rollback to the retained dual-format release *first*, then
+#: an atomic family rollback -- never a family rollback under this code, which
+#: would activate a pair it cannot read.
+SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (
     TRADITIONAL_OPPONENT_V2,
 )
 
@@ -173,14 +184,29 @@ SUPPORTED_TRADITIONAL_OPPONENT_FORMATS = (
 #: this code cannot produce or validate.
 TRADITIONAL_OPPONENT_TARGET_FORMAT = TRADITIONAL_OPPONENT_V2
 
+_SUPPORTED_FORMATS = frozenset(SUPPORTED_TRADITIONAL_OPPONENT_FORMATS)
 _FORMAT_BY_NAME = MappingProxyType({
     publication_format.name: publication_format
-    for publication_format in SUPPORTED_TRADITIONAL_OPPONENT_FORMATS
+    for publication_format in KNOWN_TRADITIONAL_OPPONENT_FORMATS
 })
 _FORMAT_BY_METRIC_SET = MappingProxyType({
     publication_format.metric_set: publication_format
-    for publication_format in SUPPORTED_TRADITIONAL_OPPONENT_FORMATS
+    for publication_format in KNOWN_TRADITIONAL_OPPONENT_FORMATS
 })
+
+
+def _require_supported(
+    publication_format: TraditionalOpponentFormat, *, described: str
+) -> TraditionalOpponentFormat:
+    """Refuse a format this deployment knows of but can no longer serve."""
+
+    if publication_format not in _SUPPORTED_FORMATS:
+        raise TraditionalOpponentFormatError(
+            "publication_format_unsupported",
+            f"{described} is {publication_format.name}, which this deployment"
+            " no longer reads",
+        )
+    return publication_format
 
 
 def is_traditional_opponent_stream(stream_key: str) -> bool:
@@ -205,12 +231,13 @@ def traditional_opponent_format_by_name(name: str) -> TraditionalOpponentFormat:
     """Resolve a recorded format name, refusing one this code cannot serve."""
 
     try:
-        return _FORMAT_BY_NAME[name]
+        recognized = _FORMAT_BY_NAME[name]
     except KeyError:
         raise TraditionalOpponentFormatError(
             "publication_format_unsupported",
-            f"{name} is not a supported traditional-opponent format",
+            f"{name} is not a known traditional-opponent format",
         ) from None
+    return _require_supported(recognized, described=f"format {name}")
 
 
 def recognize_traditional_opponent_format(
@@ -225,12 +252,15 @@ def recognize_traditional_opponent_format(
 
     observed = frozenset(str(metric) for metric in metrics)
     try:
-        return _FORMAT_BY_METRIC_SET[observed]
+        recognized = _FORMAT_BY_METRIC_SET[observed]
     except KeyError:
         raise TraditionalOpponentFormatError(
             "publication_format_unsupported",
-            "traditional-opponent metric taxonomy is not a supported format",
+            "traditional-opponent metric taxonomy is not a known format",
         ) from None
+    return _require_supported(
+        recognized, described="this traditional-opponent publication"
+    )
 
 
 def _numeric(value) -> float:
@@ -504,6 +534,7 @@ def normalize_traditional_opponent_window(
 
 
 __all__ = [
+    "KNOWN_TRADITIONAL_OPPONENT_FORMATS",
     "REBOUND_SPLIT",
     "REBOUND_SPLIT_METRICS",
     "SUPPORTED_TRADITIONAL_OPPONENT_FORMATS",

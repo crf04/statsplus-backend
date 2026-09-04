@@ -272,6 +272,31 @@ The same coupling applies in the forward direction: after the initial ledger
 cutover binds each pointer, the only way to advance this family is a durable
 Publication Rebuild, never a per-stream activation.
 
+### Recovering the traditional-opponent family to v1
+
+The deployed code reads **only** the v2 traditional-opponent format. Recovery
+to v1 is therefore code first, data second, and must be done in this order:
+
+| Step | Action |
+| --- | --- |
+| 1 | Restore the retained dual-format application release: master merge commit `88945eb1f2238744ce768424f2eb9710b95e9ce5` (PR #239), Railway deployment `fd8d71b3-58cf-418c-8af2-4e28299d4820`. That release reads both v1 and v2. |
+| 2 | Under that release, roll the family back atomically: `POST /admin/collection/publication-rebuilds/traditional_opponent/rollback`. |
+
+Attempting step 2 first is refused, not half-completed. Under the strict
+release the family rollback fails with `publication_format_unsupported` before
+either pointer moves, because activating a pair the running code cannot read
+would take the Opposing Team Profile, Team Filters, and the Matchups Defense
+Sheet down rather than restore them.
+
+The retained dual-format release must not be pruned while any v1 publication
+is still a possible rollback destination. The v1 pair remains the
+`previous_publication_id` of both pointers; this contraction modifies and
+deletes nothing — neither the immutable v1 payloads nor their audit evidence.
+
+| Code | HTTP | What it means |
+| --- | --- | --- |
+| `publication_format_unsupported` | 400 | The target pair is in a format this release does not read. Restore the dual-format release first. |
+
 | Code | HTTP | What it means |
 | --- | --- | --- |
 | `publication_family_coupled` | 409 | A per-stream operation would split the family. |

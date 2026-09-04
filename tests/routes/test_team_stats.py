@@ -9,14 +9,12 @@ the panel-visible shape is proven, not mocked.
 import pytest
 
 from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
-from app.services.ledger_derivations import (
-    ASSIST_DERIVED_METRICS,
-    TEAM_METRICS,
-)
+from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from tests.support.publication_stubs import (
     league,
     read,
     team_service as _team_service,
+    TRADITIONAL_METRICS,
 )
 
 LAKERS = "Los Angeles Lakers"
@@ -32,10 +30,14 @@ def _seeded_reads():
     def scaled(metrics, factor):
         return {key: value * factor for key, value in metrics.items()}
 
-    traditional = {metric: 4.0 for metric in TEAM_METRICS}
+    traditional = {metric: 4.0 for metric in TRADITIONAL_METRICS}
     traditional.update(
         points=112.0, field_goals_made=42.0, field_goals_attempted=88.0,
         three_pointers_made=13.0, three_pointers_attempted=36.0,
+        offensive_rebounds=10.0, defensive_rebounds=34.0,
+    )
+    traditional["rebounds"] = (
+        traditional["offensive_rebounds"] + traditional["defensive_rebounds"]
     )
     assists = {metric: 5.0 for metric in ASSIST_DERIVED_METRICS}
     play_types = {key: 3.0 for key in NBA_PUBLICATION_TAXONOMY["play_types"]}
@@ -102,8 +104,9 @@ def test_opposing_team_profile_traditional_request(panel_client):
     assert body["OPP_PTS_vs_avg_pct"] == pytest.approx(
         (168.0 / ((168.0 + 29 * 112.0) / 30) - 1) * 100
     )
-    assert "OPP_OREB" not in body
-    assert "OPP_DREB" not in body
+    # Every publication this deployment reads carries the rebound split.
+    assert body["OPP_OREB"] == 15.0
+    assert body["OPP_DREB"] == 51.0
 
 
 def test_player_profile_playtypes_request_sends_no_date(panel_client):
@@ -202,16 +205,10 @@ def split_client(dependencies, client):
     baseline = _seeded_reads()["traditional_opponent_season"].decoded
 
     def per48(tricode):
-        """The seeded v1 row, plus exactly the rebound split."""
+        """The seeded row, with the split scaled for one team."""
 
         row = next(team for team in baseline if team.team_tricode == tricode)
         values = {metric: row.per48[metric] for metric in row.per48}
-        factor = 1.5 if tricode == "LAL" else 1.0
-        values["offensive_rebounds"] = 10.0 * factor
-        values["defensive_rebounds"] = 34.0 * factor
-        values["rebounds"] = (
-            values["offensive_rebounds"] + values["defensive_rebounds"]
-        )
         assert set(values) == set(TRADITIONAL_OPPONENT_V2.metrics)
         return values
 
@@ -242,25 +239,22 @@ def test_traditional_response_serves_the_six_additive_rebound_properties(
     )
 
 
-def test_the_split_leaves_the_route_contract_and_prior_fields_unchanged(
-    dependencies, split_client
-):
-    """Same route, params, optional auth, and every existing field."""
+def test_the_split_does_not_change_the_route_contract(split_client):
+    """Same route, params, optional auth, error contract, and field names."""
 
-    with_split = _get(split_client, "Traditional", date="2026-01-10")
-    # The same route over a publication that predates the split.
-    dependencies.team_service = _team_service(_seeded_reads())
-    without = _get(split_client, "Traditional", date="2026-01-10")
+    dated = _get(split_client, "Traditional", date="2026-01-10")
+    undated = _get(split_client, "Traditional")
 
-    assert with_split.status_code == without.status_code == 200
-    before, after = without.get_json(), with_split.get_json()
-    assert set(before) <= set(after)
-    assert set(after) - set(before) == {
+    assert dated.status_code == undated.status_code == 200
+    # A requested date is still accepted and ignored.
+    assert dated.get_json() == undated.get_json()
+    body = dated.get_json()
+    assert {
         "OPP_OREB", "OPP_OREB_RANK", "OPP_OREB_vs_avg_pct",
         "OPP_DREB", "OPP_DREB_RANK", "OPP_DREB_vs_avg_pct",
-    }
-    assert after["OPP_PTS"] == before["OPP_PTS"]
-    assert after["OPP_PTS_RANK"] == before["OPP_PTS_RANK"]
+    } <= set(body)
+    assert body["OPP_PTS"] == 168.0
+    assert body["OPP_PTS_RANK"] == 30
 
 
 def test_an_unknown_category_is_still_a_400_with_the_split_published(
