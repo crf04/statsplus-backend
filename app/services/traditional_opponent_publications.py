@@ -361,6 +361,104 @@ class NormalizedTraditionalOpponentWindow:
         })
 
 
+#: Largest relative drift accepted between a stored league statistic and the
+#: one recomputed from the published population.  Both are the same arithmetic
+#: over the same thirty values, so they agree to floating-point rounding.
+_POPULATION_TOLERANCE = 1e-9
+
+
+def _competition_ranks(values: Mapping[int, float]) -> dict[int, int]:
+    """Ascending competition ranks: rank 1 allows the fewest, ties share."""
+
+    ordered = sorted(values.items(), key=lambda item: (item[1], item[0]))
+    ranks: dict[int, int] = {}
+    previous: float | None = None
+    rank = 1
+    for position, (team_id, value) in enumerate(ordered, start=1):
+        if previous is None or value != previous:
+            rank = position
+        ranks[team_id] = rank
+        previous = value
+    return ranks
+
+
+def _agrees(stored: float, computed: float) -> bool:
+    return math.isclose(
+        float(stored), float(computed),
+        rel_tol=_POPULATION_TOLERANCE, abs_tol=_POPULATION_TOLERANCE,
+    )
+
+
+def _assert_population_statistics(teams, recognized, *, stream_key: str) -> None:
+    """Prove the derived blocks actually describe the published population.
+
+    A league average, a population sigma, and a competition rank are not
+    independent facts that happen to travel beside the per-48 values: they are
+    functions of exactly those thirty values.  A payload whose rank says 999,
+    or whose average is not the mean of the rows it ships with, is internally
+    inconsistent evidence, and a consumer that ranked a team by it would
+    present a plausible but wrong answer.  Whichever side is wrong, the
+    publication as a whole is not serviceable.
+
+    The blocks are optional here on purpose.  A publication carries them and is
+    checked; a normalized read model assembled from per-48 values alone has
+    nothing to disagree with and stays serviceable.
+    """
+
+    values_by_metric = {
+        metric: {team.team_id: float(team.per48[metric]) for team in teams}
+        for metric in recognized.metrics
+    }
+    for block in ("league_average", "population_sigma"):
+        carried = [team for team in teams if getattr(team, block)]
+        if not carried:
+            continue
+        if len(carried) != len(teams):
+            raise TraditionalOpponentFormatError(
+                "publication_population_inconsistent",
+                f"{stream_key} publication carries {block} for only some teams",
+            )
+        for metric in recognized.metrics:
+            stored = {float(getattr(team, block)[metric]) for team in carried}
+            if len(stored) != 1:
+                # One league statistic cannot have thirty different values.
+                raise TraditionalOpponentFormatError(
+                    "publication_population_inconsistent",
+                    f"{stream_key} publication rows disagree about {block}",
+                )
+            population = values_by_metric[metric]
+            mean = sum(population.values()) / len(population)
+            computed = mean if block == "league_average" else math.sqrt(
+                sum((value - mean) ** 2 for value in population.values())
+                / len(population)
+            )
+            if not _agrees(next(iter(stored)), computed):
+                raise TraditionalOpponentFormatError(
+                    "publication_population_inconsistent",
+                    f"{stream_key} publication {block} does not describe its"
+                    f" own population for {metric}",
+                )
+    ranked = [team for team in teams if team.competition_rank]
+    if not ranked:
+        return
+    if len(ranked) != len(teams):
+        raise TraditionalOpponentFormatError(
+            "publication_population_inconsistent",
+            f"{stream_key} publication ranks only some teams",
+        )
+    for metric in recognized.metrics:
+        expected = _competition_ranks(values_by_metric[metric])
+        if any(
+            int(team.competition_rank[metric]) != expected[team.team_id]
+            for team in ranked
+        ):
+            raise TraditionalOpponentFormatError(
+                "publication_population_inconsistent",
+                f"{stream_key} publication {metric} ranks do not follow its"
+                " own per-48 ordering",
+            )
+
+
 def normalize_traditional_opponent_window(
     rows: Sequence,
     *,
@@ -411,6 +509,7 @@ def normalize_traditional_opponent_window(
             "publication_league_incomplete",
             f"{stream_key} publication is not a thirty-team population",
         )
+    _assert_population_statistics(teams, recognized, stream_key=stream_key)
     return NormalizedTraditionalOpponentWindow(
         stream_key=stream_key,
         window=window,

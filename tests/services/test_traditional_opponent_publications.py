@@ -71,7 +71,10 @@ def _row(team_id, tricode, publication_format, *, scale=1.0, rank=1):
         "team_minutes": 48.0,
         "per48": _block(publication_format, scale=scale),
         "league_average": _block(publication_format),
-        "population_sigma": {metric: 1.0 for metric in publication_format.metrics},
+        # Every team carries the same per-48 values, so the population has no
+        # spread and every team is tied at rank 1.  The derived blocks have to
+        # say so: the module proves they describe the rows they ship with.
+        "population_sigma": {metric: 0.0 for metric in publication_format.metrics},
         "competition_rank": {metric: rank for metric in publication_format.metrics},
     }
 
@@ -307,3 +310,165 @@ def test_a_v1_publication_carries_no_rebound_identity_obligation():
 
     assert window.format.invariants == ()
     assert window.teams[0].per48["rebounds"] == 44.0
+
+
+# --- Whole-population semantic consistency ---------------------------------
+
+
+def _league_payload(publication_format, *, distinct=None):
+    """Thirty rows whose derived blocks agree with the per-48 population."""
+
+    import math
+
+    per48_by_team = {}
+    for index, (team_id, tricode) in enumerate(
+        sorted(NBA_TEAM_ID_TO_TRICODE.items())
+    ):
+        block = {metric: _COUNTS[metric] for metric in publication_format.metrics}
+        if distinct is not None and index == 0:
+            block = {**block, **distinct}
+        per48_by_team[team_id] = block
+    averages = {
+        metric: sum(
+            values[metric] for values in per48_by_team.values()
+        ) / 30
+        for metric in publication_format.metrics
+    }
+    sigma = {
+        metric: math.sqrt(sum(
+            (values[metric] - averages[metric]) ** 2
+            for values in per48_by_team.values()
+        ) / 30)
+        for metric in publication_format.metrics
+    }
+    ranks = {}
+    for metric in publication_format.metrics:
+        ordered = sorted(
+            per48_by_team.items(), key=lambda item: (item[1][metric], item[0])
+        )
+        assigned, previous, rank = {}, None, 1
+        for position, (team_id, values) in enumerate(ordered, start=1):
+            if previous is None or values[metric] != previous:
+                rank = position
+            assigned[team_id] = rank
+            previous = values[metric]
+        ranks[metric] = assigned
+    return [
+        {
+            "team_id": int(team_id),
+            "team_tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
+            "game_ids": ["0022500001"],
+            "game_count": 1,
+            "counts": {
+                metric: _COUNTS[metric] for metric in publication_format.metrics
+            },
+            "team_minutes": 48.0,
+            "per48": dict(per48_by_team[team_id]),
+            "league_average": dict(averages),
+            "population_sigma": dict(sigma),
+            "competition_rank": {
+                metric: ranks[metric][team_id]
+                for metric in publication_format.metrics
+            },
+        }
+        for team_id in sorted(per48_by_team)
+    ]
+
+
+def _normalize_league(rows, *, stream_key=SEASON_STREAM):
+    return normalize_traditional_opponent_window(
+        decode_team_window(rows, stream_key=stream_key), stream_key=stream_key
+    )
+
+
+@pytest.mark.parametrize(
+    "publication_format",
+    [TRADITIONAL_OPPONENT_V1, TRADITIONAL_OPPONENT_V2],
+)
+def test_a_coherent_league_population_normalizes(publication_format):
+    window = _normalize_league(_league_payload(publication_format))
+
+    assert window.format is publication_format
+    assert len(window.teams) == 30
+
+
+def test_a_rank_that_no_per48_ordering_supports_fails_closed():
+    """Rank 999 is not a large rank; it is evidence the payload is wrong."""
+
+    rows = _league_payload(TRADITIONAL_OPPONENT_V2)
+    rows[3]["competition_rank"] = {**rows[3]["competition_rank"], "points": 999}
+
+    with pytest.raises(TraditionalOpponentFormatError):
+        _normalize_league(rows)
+
+
+def test_a_league_average_that_is_not_the_populations_mean_fails_closed():
+    rows = _league_payload(TRADITIONAL_OPPONENT_V2)
+    for row in rows:
+        row["league_average"] = {**row["league_average"], "rebounds": 1.0}
+
+    with pytest.raises(TraditionalOpponentFormatError):
+        _normalize_league(rows)
+
+
+def test_a_population_sigma_that_does_not_describe_the_league_fails_closed():
+    rows = _league_payload(TRADITIONAL_OPPONENT_V2)
+    for row in rows:
+        row["population_sigma"] = {**row["population_sigma"], "points": 5.0}
+
+    with pytest.raises(TraditionalOpponentFormatError):
+        _normalize_league(rows)
+
+
+def test_rows_that_disagree_about_the_league_average_fail_closed():
+    """A league statistic is one value; thirty rows cannot each have their own."""
+
+    rows = _league_payload(TRADITIONAL_OPPONENT_V2)
+    rows[7]["league_average"] = {**rows[7]["league_average"], "points": 999.0}
+
+    with pytest.raises(TraditionalOpponentFormatError):
+        _normalize_league(rows)
+
+
+def test_ties_keep_competition_rank_semantics_across_the_population():
+    """Twenty-nine tied teams share rank 1 and the outlier ranks last."""
+
+    rows = _league_payload(
+        TRADITIONAL_OPPONENT_V2, distinct={"points": 200.0}
+    )
+
+    window = _normalize_league(rows)
+
+    ranks = {
+        team.team_id: team.competition_rank["points"] for team in window.teams
+    }
+    assert sorted(ranks.values()) == [1] * 29 + [30]
+
+
+def test_derived_blocks_are_only_proven_when_the_publication_carries_them():
+    """A read model built from per-48 alone stays serviceable."""
+
+    from app.services.database_first_activation import PublicationTeamWindowRow
+
+    rows = tuple(
+        PublicationTeamWindowRow(
+            team_id=team_id,
+            team_tricode=tricode,
+            game_ids=("0022500001",),
+            game_count=1,
+            per48={
+                metric: _COUNTS[metric]
+                for metric in TRADITIONAL_OPPONENT_V2.metrics
+            },
+            league_average={},
+            population_sigma={},
+            competition_rank={},
+        )
+        for team_id, tricode in sorted(NBA_TEAM_ID_TO_TRICODE.items())
+    )
+
+    window = normalize_traditional_opponent_window(
+        rows, stream_key=SEASON_STREAM
+    )
+
+    assert window.format is TRADITIONAL_OPPONENT_V2
