@@ -1719,3 +1719,147 @@ def test_postgres_refuses_to_drop_a_publication_a_repair_group_guards(
             select(PublicationRepairGroupMember.__table__)
         ).all() == []
 
+
+@pytest.fixture
+def promotion(postgres_url, monkeypatch):
+    """The grouped-repair scenario, built against a real Postgres database."""
+    from tests.services.test_publication_repair_promotion import (
+        build_repair_environment,
+    )
+
+    engine = _repair_group_engine(postgres_url)
+    yield build_repair_environment(engine, monkeypatch)
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _promotion_state(engine):
+    from app.models.collection_control import PublicationPointer, PublicationVersion
+
+    with engine.connect() as connection:
+        pointers = {
+            row.stream_key: (row.active_publication_id,
+                             row.previous_publication_id, int(row.fence))
+            for row in connection.execute(select(PublicationPointer))
+        }
+        statuses = {
+            row.publication_id: row.status
+            for row in connection.execute(select(PublicationVersion))
+        }
+    return pointers, statuses
+
+
+def test_grouped_promotion_commits_as_one_transaction_on_postgres(promotion):
+    from app.models.collection_control import AuditEvent, PublicationRepairGroup
+    from tests.services.test_publication_repair_promotion import (
+        L15_ZONES,
+        SEASON_ZONES,
+    )
+
+    engine = promotion["engine"]
+    before, _ = _promotion_state(engine)
+
+    promotion["operations"].promote_repair_group(
+        promotion["manifest"].manifest_id,
+        actor="operator@example.com",
+        reason="replace the broken opponent zone pair",
+    )
+
+    after, statuses = _promotion_state(engine)
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        active, previous, fence = after[stream_key]
+        assert active != before[stream_key][0]
+        assert fence == before[stream_key][2] + 1
+        assert previous is None
+        displaced = promotion["displaced"][stream_key].publication_id
+        assert statuses[displaced] == "superseded"
+
+    with engine.connect() as connection:
+        audits = connection.execute(select(AuditEvent).where(
+            AuditEvent.action == "publication.repair_group.promote"
+        )).all()
+        group = connection.execute(select(PublicationRepairGroup)).one()
+    assert len(audits) == 1
+    assert group.promoted_at is not None
+
+
+def test_a_concurrent_advance_fences_the_group_on_postgres(promotion):
+    """Postgres row locks and the declared guard both fence a moved pointer."""
+    from app.services.collection_control import ControlPlaneError
+    from tests.services.test_publication_repair_promotion import (
+        L15_ZONES,
+        REPAIR_CUTOFF,
+        SEASON,
+    )
+
+    engine = promotion["engine"]
+    # A member advanced after the declaration: its rollback target is no
+    # longer the one the operator agreed to discard.
+    promotion["publications"].compose(
+        L15_ZONES, season=SEASON, cutoff=REPAIR_CUTOFF,
+        payload=None, expected_fence=promotion["displaced"][L15_ZONES].fence,
+        manifest_id=promotion["manifest"].manifest_id,
+    )
+    before, statuses = _promotion_state(engine)
+
+    with pytest.raises(ControlPlaneError, match="repair_group_guard_stale"):
+        promotion["operations"].promote_repair_group(
+            promotion["manifest"].manifest_id,
+            actor="operator", reason="repair the pair",
+        )
+
+    assert _promotion_state(engine) == (before, statuses)
+
+
+def test_a_failed_promotion_rolls_back_and_can_be_retried_on_postgres(
+    promotion, monkeypatch,
+):
+    from app.models.collection_control import AuditEvent, PublicationRepairGroup
+    from app.services.collection_control import ControlPlaneError
+    from tests.services.test_publication_repair_promotion import (
+        L15_ZONES,
+        SEASON_ZONES,
+    )
+
+    engine = promotion["engine"]
+    before, statuses = _promotion_state(engine)
+    publications = promotion["publications"]
+    advance = publications._compose_active_in_session
+    calls = {"count": 0}
+
+    def fail_after_the_first_pointer_moves(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise ControlPlaneError("injected_repair_failure")
+        return advance(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publications, "_compose_active_in_session",
+        fail_after_the_first_pointer_moves,
+    )
+    with pytest.raises(ControlPlaneError, match="injected_repair_failure"):
+        promotion["operations"].promote_repair_group(
+            promotion["manifest"].manifest_id,
+            actor="operator", reason="repair the pair",
+        )
+
+    # Postgres rolls the first member's advance back with everything else.
+    assert _promotion_state(engine) == (before, statuses)
+    with engine.connect() as connection:
+        assert connection.execute(select(AuditEvent).where(
+            AuditEvent.action == "publication.repair_group.promote"
+        )).all() == []
+        assert connection.execute(
+            select(PublicationRepairGroup)
+        ).one().promoted_at is None
+
+    # The declaration survives the failure, so the operator can retry it.
+    monkeypatch.setattr(publications, "_compose_active_in_session", advance)
+    promotion["operations"].promote_repair_group(
+        promotion["manifest"].manifest_id,
+        actor="operator", reason="repair the pair",
+    )
+    after, _ = _promotion_state(engine)
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        assert after[stream_key][0] != before[stream_key][0]
+        assert after[stream_key][1] is None

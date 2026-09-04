@@ -83,14 +83,15 @@ def _control_error(error: Exception) -> AppError:
         "manifest_not_found", "bootstrap_not_found", "cycle_not_found",
         "manifest_expired", "bootstrap_expired", "stream_not_found",
         "composition_not_found", "reconciliation_not_found",
-        "credential_delivery_unavailable",
+        "credential_delivery_unavailable", "repair_group_not_found",
     }:
         return ResourceNotFoundError("The collection resource was not found.", detail=reason)
     if reason in {
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
-        "grouped_repair_pending",
+        "grouped_repair_pending", "repair_group_guard_stale",
+        "repair_group_already_promoted",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)
@@ -601,6 +602,30 @@ def scoped_repair():
     except (KeyError, TypeError, ValueError) as error:
         raise _control_error(error) from error
     return jsonify({"job_id": result.job_id, "composition_job_id": job.job_id, "status": job.status}), 202
+
+
+@collection_bp.post("/admin/collection/manifests/<manifest_id>/repair-group/promote")
+@require_admin
+@route_error_boundary("Failed to promote the publication repair group.")
+def promote_repair_group(manifest_id: str):
+    body = _body()
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").promote_repair_group(
+            manifest_id, actor=actor, reason=reason,
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    promotion = result.resource
+    return jsonify({
+        "job_id": result.job_id,
+        "repair_group_id": promotion.group_id,
+        "manifest_id": promotion.manifest_id,
+        "discarded_publications": [dict(item) for item in promotion.discarded],
+        "published_publications": [dict(item) for item in promotion.published],
+    }), 202
 
 
 @collection_bp.post("/admin/collection/cycles/<cycle_id>/finish")

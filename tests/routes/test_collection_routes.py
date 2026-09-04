@@ -304,6 +304,8 @@ def test_admin_mutations_return_durable_jobs_and_invoke_their_services(client, a
          SimpleNamespace(cycle_id="cycle", status="collecting")),
         ("repair", "/api/admin/collection/repair", {"stream_key": "stream", "season": "2025-26", "cutoff": now.isoformat(), "reason": "repair"}, "scoped_repair",
          SimpleNamespace(job_id="composition", status="queued")),
+        ("promote_repair_group", "/api/admin/collection/manifests/manifest/repair-group/promote", {"reason": "repair the pair"}, "promote_repair_group",
+         SimpleNamespace(group_id="group", manifest_id="manifest", discarded=(), published=())),
         ("finish", "/api/admin/collection/cycles/cycle/finish", {"status": "complete", "reason": "finish"}, "finish_cycle",
          SimpleNamespace(cycle_id="cycle", status="complete")),
         ("not_applicable", "/api/admin/collection/cycles/cycle/not-applicable", {"stream_key": "stream", "reason": "not applicable"}, "govern_not_applicable",

@@ -2019,6 +2019,7 @@ POST /api/admin/collection/streams/<stream_key>/activate
 POST /api/admin/collection/compositions/<job_id>/retry
 POST /api/admin/collection/cycles/start
 POST /api/admin/collection/repair
+POST /api/admin/collection/manifests/<manifest_id>/repair-group/promote
 POST /api/admin/collection/cycles/<cycle_id>/finish
 POST /api/admin/collection/cycles/<cycle_id>/not-applicable
 POST /api/admin/collection/bootstrap
@@ -2063,7 +2064,16 @@ returned to a collector; the group is omitted entirely when the caller
 authorizes none of its members. `GET /api/collector/manifest/<manifest_id>`
 renders the identical object. A composition that belongs to a declared group
 is held for grouped execution and refuses the independent publication path
-with `409 operation_conflict` and detail `grouped_repair_pending`. See
+with `409 operation_conflict` and detail `grouped_repair_pending`.
+`POST /api/admin/collection/manifests/<manifest_id>/repair-group/promote`
+publishes the whole declared group as one transaction and returns the durable
+operator job beside the discarded and published publication identities. It is
+`404` when the manifest declares no group, and `409` when the declaration was
+already consumed (`repair_group_already_promoted`) or a member's active
+publication or fence moved after it was declared
+(`repair_group_guard_stale`). A stream repaired this way reports
+`rollback_unavailable` until a later ordinary publication establishes a
+trustworthy previous version. See
 [PUBLICATION_REPAIR_GROUPS.md](PUBLICATION_REPAIR_GROUPS.md).
 Bootstrap status is a bounded response containing request state, season,
 catalog type, cutoff, expiry, and version; it never returns catalog payload

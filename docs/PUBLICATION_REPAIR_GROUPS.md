@@ -165,3 +165,85 @@ It is then held rather than promoted:
 
 Manifests without a declared group, and unrelated composition jobs on the same
 cutoff, keep their existing independent behavior.
+
+## Promoting the group
+
+Once every member has complete evidence for the manifest's season and cutoff,
+an operator promotes the whole group as one change:
+
+```http
+POST /api/admin/collection/manifests/<manifest_id>/repair-group/promote
+{"reason": "replace the broken opponent zone pair"}
+```
+
+```json
+{
+  "job_id": "…",
+  "repair_group_id": "…",
+  "manifest_id": "…",
+  "discarded_publications": [
+    {"stream_key": "exact_shot_zones_opponent_season",
+     "publication_id": "…", "fence": 7, "cutoff": "2026-08-10T00:00:00+00:00"}
+  ],
+  "published_publications": [
+    {"stream_key": "exact_shot_zones_opponent_season",
+     "publication_id": "…", "fence": 8}
+  ]
+}
+```
+
+The whole operation is one database transaction, in two phases:
+
+1. **Prove.** Every member's pointer is locked (`SELECT … FOR UPDATE`, in
+   stream-key order so concurrent operators queue rather than deadlock) and
+   its declared active publication identity *and* fence are rechecked against
+   the live row. Then every replacement is composed from accepted evidence and
+   validated. Nothing has been written yet.
+2. **Publish.** Only after all members pass does any pointer move. Each member
+   advances its fence to its new active publication, the displaced version is
+   marked `superseded`, and the pointer's `previous_publication_id` is set to
+   `NULL`.
+
+The held composition jobs are marked `succeeded` and the group records
+`promoted_at`, which releases its members: later cutoffs publish
+independently again, and the group cannot be promoted twice
+(`repair_group_already_promoted`).
+
+### Why the rollback target is cleared
+
+An ordinary publication leaves the version it displaced as the stream's
+rollback target. A repair must not: the displaced version *is* the defect, and
+rolling back to it would silently restore the bug the repair just removed.
+
+So after a successful repair, `POST /api/admin/collection/streams/<stream_key>/rollback`
+returns `409 operation_conflict` with detail `rollback_unavailable`. That is
+the intended state, not a failure. Rollback becomes available again for a
+stream as soon as a later ordinary publication establishes a previous version
+that is actually trustworthy.
+
+### Exceptional behavior
+
+Every one of these leaves the complete prior publication state untouched --
+active pointers, previous pointers, version status, the composition jobs, the
+group's `promoted_at`, and the operator audit all roll back together:
+
+| Reason | Meaning |
+| --- | --- |
+| `repair_group_not_found` | The manifest declares no group (`404`). |
+| `repair_group_already_promoted` | The declaration was already consumed (`409`). |
+| `repair_group_guard_stale` | A member's active publication or fence moved after the declaration (`409`). |
+| `incomplete_publication`, `base_incomplete` | A member has no, or partial, evidence for this season and cutoff. |
+| `publication_candidate_invalid` | A member's replacement failed validation. |
+| any composition or infrastructure failure | Including a failure between two members' pointer updates. |
+
+A failed grouped repair is confined to its own transaction: unrelated
+publication work on the same cutoff still completes. The declaration survives
+a failure, so the operator can fix the cause and retry the same promotion.
+
+### The audit
+
+One `AuditEvent` records the whole repair, with
+`action = publication.repair_group.promote`, the operator's reason, and
+details naming the group, its declared reason, every discarded publication
+identity and fence, and every publication that replaced them. It commits with
+the pointer changes or not at all.

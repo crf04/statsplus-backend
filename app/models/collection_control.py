@@ -319,6 +319,10 @@ class PublicationRepairGroup(Base):
     reason = Column(String(255), nullable=False)
     checksum = Column(String(64), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
+    # Set once, by the grouped promotion that consumed the declaration.  A
+    # promoted group stops holding its members: they return to ordinary
+    # independent publication for later cutoffs.
+    promoted_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint("length(reason) > 0", name="ck_repair_group_reason"),
