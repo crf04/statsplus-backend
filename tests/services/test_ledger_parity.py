@@ -692,27 +692,23 @@ def test_parity_adjudication_decision_is_immutable(tmp_path, first, second):
     assert repository.latest("player_game_logs", game.season).decision == first
 
 
-def test_traditional_parity_reads_general_opponent_stats_semantics(tmp_path):
+def test_the_diagnostic_reader_no_longer_offers_a_traditional_opponent_read(tmp_path):
+    """#199 dropped ``general_opponent_stats``, so the read is retired.
+
+    A diagnostic that raises on a dropped table is a dead path, not a
+    safeguard: the materialization records an unavailable parity report for
+    ``traditional_opponent_season`` instead.  The two surviving diagnostics
+    keep their tables and are still read.
+    """
+
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.sqlite3'}")
-    game = _regulation_game()
-    with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE TABLE general_opponent_stats ("
-            "TEAM_ID INTEGER, OPP_PTS REAL, OPP_REB REAL, OPP_AST REAL)"
-        ))
-        for row in _traditional_season_rows(game):
-            connection.execute(text(
-                "INSERT INTO general_opponent_stats VALUES (:TEAM_ID, :OPP_PTS, :OPP_REB, :OPP_AST)"
-            ), row)
+    reader = LegacyParityDiagnosticReader(engine)
 
-    report = compare_ledger_to_legacy(
-        (game,), None, season=game.season,
-        legacy_traditional_rows=LegacyParityDiagnosticReader(engine).read(
-            "traditional_opponent"
-        ),
-    )
-
-    assert report.exact
+    assert "traditional_opponent" not in reader.TABLES
+    assert set(reader.TABLES) == {"player_game_logs", "player_per36"}
+    assert "general_opponent_stats" not in set(reader.TABLES.values())
+    with pytest.raises(KeyError):
+        reader.read("traditional_opponent")
 
 
 def test_traditional_season_parity_reports_missing_team_and_semantic_difference():

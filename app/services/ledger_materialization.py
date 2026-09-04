@@ -375,25 +375,36 @@ class LedgerMaterializationService:
                         session=session,
                     )
                 })
+            # A stream whose diagnostic key is ``None`` has no legacy table to
+            # compare against; the fourth element says why, so the recorded
+            # report states the real reason rather than a borrowed one.
             parity_specs = (
                 (
                     "player_game_logs",
                     "player_game_logs",
                     "legacy_rows",
+                    None,
                 ),
                 (
                     "traditional_opponent_season",
-                    "traditional_opponent",
-                    "legacy_traditional_rows",
+                    None,
+                    None,
+                    "legacy diagnostic table general_opponent_stats was dropped",
                 ),
                 (
                     "traditional_opponent_l15",
                     None,
                     None,
+                    "legacy diagnostic has no equivalent L15 window",
                 ),
-                ("player_per36", "player_per36", "legacy_per36_rows"),
+                ("player_per36", "player_per36", "legacy_per36_rows", None),
             )
-            for candidate_key, diagnostic_key, comparison_key in parity_specs:
+            for (
+                candidate_key,
+                diagnostic_key,
+                comparison_key,
+                unavailable_reason,
+            ) in parity_specs:
                 candidate = candidate_versions.get(candidate_key)
                 if candidate is None:
                     continue
@@ -402,7 +413,7 @@ class LedgerMaterializationService:
                         canonical_season,
                         len(eligible),
                         candidate_key,
-                        ValueError("legacy diagnostic has no equivalent L15 window"),
+                        ValueError(unavailable_reason),
                     )
                 else:
                     try:
