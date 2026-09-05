@@ -2684,6 +2684,62 @@ def test_legacy_ranking_drop_migration_is_idempotent_on_a_fresh_database(tmp_pat
         assert not inspector.has_table(table)
 
 
+def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
+    """The target tables and their indexes are additive and idempotent."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-049.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 49),
+        )
+        assert run_migrations(engine).current_version == 49
+    assert not inspect(engine).has_table("targets")
+    assert not inspect(engine).has_table("target_qualifiers")
+
+    upgraded = run_migrations(engine)
+    repeated = run_migrations(engine)
+
+    assert upgraded.applied == ("050_create_targets",)
+    assert repeated.applied == ()
+
+    inspector = inspect(engine)
+    assert {column["name"] for column in inspector.get_columns("targets")} == {
+        "id", "firebase_uid", "opponent", "note", "qualifier_signature",
+        "created_at", "updated_at",
+    }
+    assert {
+        column["name"] for column in inspector.get_columns("target_qualifiers")
+    } == {
+        "id", "target_id", "position", "base", "slice_key", "comparator",
+        "threshold",
+    }
+
+    target_indexes = {
+        index["name"]: index for index in inspector.get_indexes("targets")
+    }
+    assert "idx_targets_owner_created" in target_indexes
+    # The per-account duplicate rule is a database guarantee, not only the
+    # service's pre-check, and it reads the qualifiers as one signature.
+    duplicate_rule = target_indexes["uq_targets_owner_opponent_signature"]
+    assert duplicate_rule["unique"]
+    assert duplicate_rule["column_names"] == [
+        "firebase_uid", "opponent", "qualifier_signature",
+    ]
+    assert "idx_target_qualifiers_target" in {
+        index["name"] for index in inspector.get_indexes("target_qualifiers")
+    }
+
+    # Both cascades survive the upgrade, so deleting an account cannot strand
+    # its targets or their qualifiers.
+    assert inspector.get_foreign_keys("targets")[0]["options"]["ondelete"] == (
+        "CASCADE"
+    )
+    assert inspector.get_foreign_keys("target_qualifiers")[0]["options"][
+        "ondelete"
+    ] == "CASCADE"
+
+
 def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_path):
     """The durable rebuild table is additive and idempotent."""
 

@@ -24,12 +24,13 @@ from app.models.saved_filter_set import (
     SAVED_FILTER_SET_NAME_MAX_LENGTH,
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
 )
+from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.models.target import (
-    TARGET_COMPARATOR_SYMBOLS,
+    TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
+    target_qualifier_part,
     target_qualifier_signature,
 )
-from app.services.player_diet import PLAYER_DIET_QUALIFIER_SLICES
 from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
@@ -159,10 +160,7 @@ def _validated_target_qualifier(value: Any) -> Dict[str, Any]:
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
 
     comparator = value.get("comparator")
-    if (
-        not isinstance(comparator, str)
-        or comparator not in TARGET_COMPARATOR_SYMBOLS
-    ):
+    if not isinstance(comparator, str) or comparator not in TARGET_COMPARATORS:
         raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
 
     return {
@@ -185,15 +183,9 @@ def _validated_target_qualifiers(value: Any) -> List[Dict[str, Any]]:
         )
 
     qualifiers = [_validated_target_qualifier(item) for item in value]
-    identities = [
-        (
-            qualifier["base"],
-            qualifier["slice_key"],
-            qualifier["comparator"],
-            qualifier["threshold"],
-        )
-        for qualifier in qualifiers
-    ]
+    # Compared through the same part the stored signature is built from, so a
+    # repeat within one request means exactly what a duplicate across two does.
+    identities = [target_qualifier_part(qualifier) for qualifier in qualifiers]
     if len(set(identities)) != len(identities):
         raise InvalidInputError("A target cannot repeat the same qualifier.")
     return qualifiers

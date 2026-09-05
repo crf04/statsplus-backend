@@ -9,6 +9,8 @@ Per-account uniqueness reads the Qualifiers as a set rather than a sequence:
 Qualifiers, so reordering them does not buy a second copy of the same Target.
 """
 
+from types import MappingProxyType
+
 from sqlalchemy import (
     Column,
     DateTime,
@@ -21,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from . import Base
+from ..domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
 
 
 # The stored width and the accepted width are the same limit; the service
@@ -28,11 +31,16 @@ from . import Base
 TARGET_NOTE_MAX_LENGTH = 280
 TARGET_QUALIFIER_SIGNATURE_MAX_LENGTH = 2048
 
-#: The comparator vocabulary, and the symbol each one reads as in a title.
-TARGET_COMPARATOR_SYMBOLS = {
+#: How each comparator reads in a derived title.  Only title rendering touches
+#: this; validation names ``TARGET_COMPARATORS`` below, so adding a symbol is
+#: not by itself enough to widen what a Qualifier may say.
+TARGET_COMPARATOR_SYMBOLS = MappingProxyType({
     'at_or_above': '≥',
     'at_or_below': '≤',
-}
+})
+
+#: The comparator vocabulary a Qualifier may use.
+TARGET_COMPARATORS: tuple[str, ...] = tuple(TARGET_COMPARATOR_SYMBOLS)
 
 
 def _share_as_percentage(threshold: float) -> str:
@@ -49,14 +57,9 @@ def derive_target_title(opponent, qualifiers) -> str:
 
     Each Qualifier reads as its slice's display label rather than the stored
     provider key, so ``PRBallHandler`` renders as ``P&R ball handler``.  The
-    labels come from the diet catalogue, which is the one backend source the
+    labels come from the diet taxonomy, which is the one backend source the
     frontend shares, so the two cannot drift.
-
-    Imported inside the function: ``app.services.player_diet`` imports the
-    model package, so a module-level import here would close that cycle.
     """
-
-    from app.services.player_diet import PLAYER_DIET_SLICE_LABELS
 
     clauses = ', '.join(
         f"{PLAYER_DIET_SLICE_LABELS[qualifier['slice_key']]} "
@@ -67,18 +70,31 @@ def derive_target_title(opponent, qualifiers) -> str:
     return f"{opponent} vs {clauses}"
 
 
+def target_qualifier_part(qualifier) -> str:
+    """Return the canonical identity of one Qualifier.
+
+    This is the single definition of when two Qualifiers are the same one: it
+    is both a field of the stored signature and what the in-request repeat
+    check compares, so the duplicate rule cannot mean one thing within a
+    request and another across them.  The threshold is formatted to a fixed
+    width so ``0.4`` and ``0.40`` are one value.
+    """
+
+    return (
+        f"{qualifier['base']}:{qualifier['slice_key']}:"
+        f"{qualifier['comparator']}:{float(qualifier['threshold']):.6f}"
+    )
+
+
 def target_qualifier_signature(qualifiers) -> str:
     """Return the order-insensitive identity of a set of Qualifiers.
 
-    The threshold is formatted to a fixed width so ``0.4`` and ``0.40`` are one
-    value, and the parts are sorted so the caller's ordering cannot produce two
+    The parts are sorted so the caller's ordering cannot produce two
     signatures for the same set.
     """
 
     return '|'.join(sorted(
-        f"{qualifier['base']}:{qualifier['slice_key']}:"
-        f"{qualifier['comparator']}:{float(qualifier['threshold']):.6f}"
-        for qualifier in qualifiers
+        target_qualifier_part(qualifier) for qualifier in qualifiers
     ))
 
 
