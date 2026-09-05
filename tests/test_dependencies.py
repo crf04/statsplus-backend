@@ -746,3 +746,28 @@ def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
     assert isinstance(
         publications.publication_reader, DatabaseFirstPublicationReader
     )
+
+
+def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatch):
+    """Resolution adds no seam of its own, so it adds no provider load (#245)."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+        )
+    )
+
+    resolution = dependencies.target_resolution_service
+    assert resolution.targets is dependencies.user_service
+    assert resolution.slates is dependencies.slate_service
+    assert resolution.matchups is dependencies.matchup_service

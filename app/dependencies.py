@@ -70,6 +70,7 @@ class ApplicationDependencies:
     projection_recorder: Any | None = None
     projection_player_pool_reader: Any | None = None
     projection_collection_coordinator: Any | None = None
+    target_resolution_service: Any | None = None
 
 
 def build_dependencies(
@@ -125,6 +126,7 @@ def build_dependencies(
     from app.services.team_service import TeamService
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
+    from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
@@ -641,6 +643,16 @@ def build_dependencies(
         publication_reader=publication_reader,
         engine=engine,
     )
+    user_service = UserService(engine, settings=settings)
+    # Target resolution reads no provider: it composes the same Slate and
+    # Matchup documents the slate and matchup routes already serve, so the
+    # two surfaces cannot disagree about one game.
+    target_resolution_service = TargetResolutionService(
+        targets=user_service,
+        slates=slate_service,
+        matchups=matchup_service,
+        settings=settings,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -666,7 +678,7 @@ def build_dependencies(
         event_resolver=event_resolver,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
-        user_service=UserService(engine, settings=settings),
+        user_service=user_service,
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,
         comparison_board_service=comparison_board_service,
@@ -689,6 +701,7 @@ def build_dependencies(
         projection_recorder=projection_recorder,
         projection_player_pool_reader=projection_player_pool_reader,
         projection_collection_coordinator=projection_collection_coordinator,
+        target_resolution_service=target_resolution_service,
     )
 
 
