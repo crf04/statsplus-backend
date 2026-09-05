@@ -2,8 +2,8 @@
 
 A Target is an opponent plus the Qualifiers a player has to meet (#244).  This
 service answers the day-scoped question the Slate and Targets pages ask: for
-the viewed date, which Targets have a game, who in the opposing Player Pool
-meets every Qualifier, and what does the opponent's defense look like on those
+the viewed date, which Targets have a game, who on the opposing side meets
+every Qualifier, and what does the opponent's defense look like on those
 slices right now.
 
 Resolution reads no NBA or DFS provider.  It composes two governed reads that
@@ -12,9 +12,11 @@ opponent plays -- the Matchup document for that game.  Both are database-only
 compositions over the durable seams (slate events, Player Pool, Player Diet
 facts, team windows, injuries).  Composing from the Matchup rather than
 re-deriving from those seams is deliberate: a Target's per-slice shares, thin
-evidence, posted markets, injury badges, pool status, defense-sheet values and
-player ordering are then the Matchup's own values, so the two surfaces cannot
-disagree about the same game.  One Matchup is read at most once per request
+evidence, posted markets, injury badges, participant status, defense-sheet
+values and player ordering are then the Matchup's own values, so the two
+surfaces cannot disagree about the same game -- including which evidence named
+that game's players, since a completed game resolves against the same
+canonical game-log participants the Matchup page lists.  One Matchup is read at most once per request
 however many Targets name the teams in it, and a game no Target names is never
 read at all.
 """
@@ -28,11 +30,6 @@ from app.config.settings import RuntimeSettings
 from app.services.player_diet import PLAYER_DIET_SLICE_LABELS
 
 
-#: The Matchup's own name for a player who comes from the stored Player Pool.
-#: A Historical Matchup participant comes from canonical game logs instead and
-#: is never a Target fit: a completed game has no pool to filter.
-POOL_PLAYER_SOURCE = "player_pool"
-
 _WINDOW_NAMES = ("season", "last_15")
 
 _COMPARATORS = {
@@ -40,17 +37,13 @@ _COMPARATORS = {
     "at_or_below": lambda share, threshold: share <= threshold,
 }
 
-_IDLE_POOL = {
+#: An idle opponent has no game, so no evidence named participants for it and
+#: there is no source to report.
+_IDLE = {
     "status": "unavailable",
-    "source": "player_pool",
+    "source": None,
     "context": None,
     "unavailable_reason": "opponent_idle",
-}
-_NO_POOL = {
-    "status": "unavailable",
-    "source": "player_pool",
-    "context": None,
-    "unavailable_reason": "player_pool_unavailable",
 }
 
 
@@ -106,13 +99,13 @@ class TargetResolutionService:
             if scheduled is None:
                 idle.append(self._idle(target))
                 continue
-            game, opponent_side, pool_side = scheduled
+            game, opponent_side, filtered_side = scheduled
             game_id = game["game_id"]
             if game_id not in read_matchups:
                 read_matchups[game_id] = self.matchups.get_matchup(game_id=game_id)
             live.append(
                 self._live(
-                    target, game, opponent_side, pool_side, read_matchups[game_id]
+                    target, game, opponent_side, filtered_side, read_matchups[game_id]
                 )
             )
         return {"slate_date": slate["slate_date"], "targets": live + idle}
@@ -124,18 +117,18 @@ class TargetResolutionService:
         """Index the date's games by each side's tricode.
 
         The value names the game and which side of it a Target aimed at that
-        tricode is the opponent of, so the pool being filtered is always the
-        other side.
+        tricode is the opponent of, so the side being filtered is always the
+        other one.
         """
 
         indexed: dict[str, tuple[Mapping[str, Any], str, str]] = {}
         for game in games:
-            for opponent_side, pool_side in (
+            for opponent_side, filtered_side in (
                 ("away_team", "home_team"),
                 ("home_team", "away_team"),
             ):
                 tricode = game[opponent_side]["tricode"]
-                indexed.setdefault(tricode, (game, opponent_side, pool_side))
+                indexed.setdefault(tricode, (game, opponent_side, filtered_side))
         return indexed
 
     @staticmethod
@@ -143,7 +136,7 @@ class TargetResolutionService:
         """Shape a Target whose opponent does not play on the viewed date.
 
         Its Qualifiers and note still come back so the Targets page can manage
-        it, but there is no game, no pool to filter, and no game-scoped window
+        it, but there is no game, nobody to filter, and no game-scoped window
         to read a defense sheet from.
         """
 
@@ -151,7 +144,7 @@ class TargetResolutionService:
             "target": dict(target),
             "game": None,
             "context": [],
-            "availability": dict(_IDLE_POOL),
+            "availability": dict(_IDLE),
             "players": [],
         }
 
@@ -160,7 +153,7 @@ class TargetResolutionService:
         target: Mapping[str, Any],
         game: Mapping[str, Any],
         opponent_side: str,
-        pool_side: str,
+        filtered_side: str,
         matchup: Mapping[str, Any],
     ) -> dict[str, Any]:
         opponent_team_id = int(game[opponent_side]["team_id"])
@@ -170,7 +163,7 @@ class TargetResolutionService:
             if int(team["team_id"]) == opponent_team_id
         )
         league = matchup["league"]
-        availability = self._pool_availability(matchup)
+        availability = self._participant_availability(matchup)
         qualifiers = list(target["qualifiers"])
         return {
             "target": dict(target),
@@ -179,7 +172,7 @@ class TargetResolutionService:
                 "scheduled_at": game["scheduled_at"],
                 "status": dict(game["status"]),
                 "opponent": self._team(game[opponent_side]),
-                "opposing_team": self._team(game[pool_side]),
+                "opposing_team": self._team(game[filtered_side]),
             },
             "context": [
                 self._context(qualifier, opponent_sheet, league)
@@ -202,19 +195,21 @@ class TargetResolutionService:
         }
 
     @staticmethod
-    def _pool_availability(matchup: Mapping[str, Any]) -> dict[str, Any]:
-        """Report the opposing Player Pool's status for this game.
+    def _participant_availability(matchup: Mapping[str, Any]) -> dict[str, Any]:
+        """Report the status of whatever named the opposing side's players.
 
-        The Matchup's Participants section is that status when the pool is
-        what named the participants.  A Historical Matchup names game-log rows
-        instead, which is an available section about evidence a Target cannot
-        filter, so it is reported here as the absent pool it is.
+        This is the Matchup's own Participants section, so a Target and the
+        Matchup detail page always agree about the same game: a scheduled game
+        resolves against the stored Player Pool, and a completed one resolves
+        against the canonical game-log participants the Matchup page lists.
+        ``source`` is restated in the ``experience.player_source`` vocabulary
+        (``player_pool`` or ``game_logs``) so one word describes the evidence
+        both surfaces are showing.
         """
 
-        participants = matchup["experience"]["sections"]["participants"]
-        if participants.get("source") != POOL_PLAYER_SOURCE:
-            return dict(_NO_POOL)
-        return dict(participants)
+        experience = matchup["experience"]
+        participants = experience["sections"]["participants"]
+        return {**participants, "source": experience["player_source"]}
 
     @classmethod
     def _context(
@@ -277,15 +272,13 @@ class TargetResolutionService:
         players: Sequence[Mapping[str, Any]],
         opponent_team_id: int,
     ) -> list[dict[str, Any]]:
-        """Name the opposing pool members meeting every Qualifier.
+        """Name the opposing participants meeting every Qualifier.
 
         The Matchup already orders its players by Season scoring descending,
         so preserving its order is that ordering.  A thin diet is flagged, not
         excluded: the Target list never disagrees with the Matchup about who
-        is in the pool.
-
-        Only ever called for an available pool, so every player here is a pool
-        member; ``_pool_availability`` is what keeps game-log participants out.
+        is in the game.  A game-log participant carries no posted markets, as
+        on the Matchup page.
         """
 
         fits = []

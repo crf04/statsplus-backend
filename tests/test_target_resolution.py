@@ -292,12 +292,36 @@ def _availability():
     }
 
 
+def _historical_availability():
+    """A completed game: no Last-15 snapshot was ever captured for it."""
+
+    states = _availability()
+    for base in states:
+        states[base]["last_15"] = {
+            "status": "missing",
+            "unavailable_reason": "not_stored",
+        }
+    return states
+
+
+def _historical_sheet(offset):
+    """The same sheet with every Last-15 window nulled by its availability."""
+
+    sheet = _team_sheet(offset)
+    for rows in sheet.values():
+        for row in rows:
+            row["last_15"] = None
+    return sheet
+
+
 def _matchup(
     *,
     players=None,
     participants=None,
     game=None,
     surface_availability=None,
+    historical=False,
+    team_sheet=None,
 ):
     if players is None:
         players = [
@@ -305,19 +329,29 @@ def _matchup(
             _player(2, "Rim Runner", shot_zones=_zone_diet(0.1, 0.5), season_scoring=9.0),
         ]
     resolved_game = game or _game()
+    sheet = team_sheet or _team_sheet
     return {
         "game": resolved_game,
         "experience": {
-            "mode": "current",
-            "player_source": "player_pool",
+            "mode": "historical" if historical else "current",
+            "player_source": "game_logs" if historical else "player_pool",
             "sections": {
                 "participants": participants
-                or {
-                    "status": "available",
-                    "source": "player_pool",
-                    "context": "posted_markets",
-                    "unavailable_reason": None,
-                }
+                or (
+                    {
+                        "status": "available",
+                        "source": "player_game_logs",
+                        "context": "completed_season",
+                        "unavailable_reason": None,
+                    }
+                    if historical
+                    else {
+                        "status": "available",
+                        "source": "player_pool",
+                        "context": "posted_markets",
+                        "unavailable_reason": None,
+                    }
+                )
             },
         },
         "league": {
@@ -330,14 +364,14 @@ def _matchup(
                 "team_id": resolved_game["away_team"]["team_id"],
                 "tricode": resolved_game["away_team"]["tricode"],
                 "name": resolved_game["away_team"]["name"],
-                "defense_sheet": _team_sheet(1.0),
+                "defense_sheet": sheet(1.0),
                 "defensive_columns": {},
             },
             {
                 "team_id": resolved_game["home_team"]["team_id"],
                 "tricode": resolved_game["home_team"]["tricode"],
                 "name": resolved_game["home_team"]["name"],
-                "defense_sheet": _team_sheet(-1.0),
+                "defense_sheet": sheet(-1.0),
                 "defensive_columns": {},
             },
         ],
@@ -696,7 +730,7 @@ def test_an_idle_opponent_has_no_game_and_no_players(targets, resolve):
         "context": [],
         "availability": {
             "status": "unavailable",
-            "source": "player_pool",
+            "source": None,
             "context": None,
             "unavailable_reason": "opponent_idle",
         },
@@ -762,27 +796,106 @@ def test_an_available_pool_with_no_qualifying_player_is_not_an_unavailable_pool(
     assert resolved["players"] == []
 
 
-def test_a_completed_game_without_a_pool_never_lists_game_log_participants(
+def test_a_completed_game_resolves_against_its_game_log_participants(
+    targets, resolve
+):
+    """The Matchup page lists participants for a completed game, so this does.
+
+    A Target and the Matchup detail page must agree about the same game on the
+    same date, whichever evidence named that game's players.
+    """
+
+    _create(targets)
+    matchups = FakeMatchups(
+        {
+            GAME_ID: _matchup(
+                historical=True,
+                players=[
+                    _player(
+                        1,
+                        "Played that night",
+                        shot_zones=_zone_diet(0.42, 0.2),
+                        player_source="game_logs",
+                        posted_markets=(),
+                    ),
+                    _player(
+                        2,
+                        "Missed the cut",
+                        shot_zones=_zone_diet(0.1, 0.5),
+                        player_source="game_logs",
+                        posted_markets=(),
+                        season_scoring=8.0,
+                    ),
+                ],
+            )
+        }
+    )
+
+    resolved = resolve(matchups=matchups)["targets"][0]
+
+    assert resolved["availability"] == {
+        "status": "available",
+        "source": "game_logs",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert [player["name"] for player in resolved["players"]] == [
+        "Played that night"
+    ]
+    assert resolved["players"][0]["posted_markets"] == []
+    assert resolved["players"][0]["shares"] == [
+        {
+            "base": "shot_zones",
+            "slice_key": "Corner 3",
+            "share": 0.42,
+            "league_average_share": 0.2,
+        }
+    ]
+
+
+def test_a_completed_games_context_reads_its_own_defense_windows(targets, resolve):
+    """A completed game has no Last-15 snapshot; the Season window still reads."""
+
+    _create(targets)
+    matchups = FakeMatchups(
+        {
+            GAME_ID: _matchup(
+                historical=True,
+                surface_availability=_historical_availability(),
+                team_sheet=_historical_sheet,
+            )
+        }
+    )
+
+    corner = resolve(matchups=matchups)["targets"][0]["context"][0]
+
+    assert corner["availability"] == {
+        "season": {"status": "available", "unavailable_reason": None},
+        "last_15": {"status": "missing", "unavailable_reason": "not_stored"},
+    }
+    assert corner["metrics"][0]["opponent"]["season"] == {
+        "allowed_per_48": 19.0,
+        "percent_vs_league_average": -5.0,
+        "sigma_deviation": -0.5,
+        "rank": 4,
+    }
+    assert corner["metrics"][0]["opponent"]["last_15"] is None
+
+
+def test_incomplete_game_logs_leave_a_completed_game_without_participants(
     targets, resolve
 ):
     _create(targets)
     matchups = FakeMatchups(
         {
             GAME_ID: _matchup(
-                players=[
-                    _player(
-                        1,
-                        "Played that night",
-                        shot_zones=_zone_diet(0.4, 0.2),
-                        player_source="game_logs",
-                        posted_markets=(),
-                    )
-                ],
+                historical=True,
+                players=[],
                 participants={
-                    "status": "available",
+                    "status": "unavailable",
                     "source": "player_game_logs",
-                    "context": "completed_season",
-                    "unavailable_reason": None,
+                    "context": None,
+                    "unavailable_reason": "game_logs_incomplete",
                 },
             )
         }
@@ -793,9 +906,9 @@ def test_a_completed_game_without_a_pool_never_lists_game_log_participants(
     assert resolved["players"] == []
     assert resolved["availability"] == {
         "status": "unavailable",
-        "source": "player_pool",
+        "source": "game_logs",
         "context": None,
-        "unavailable_reason": "player_pool_unavailable",
+        "unavailable_reason": "game_logs_incomplete",
     }
 
 
@@ -890,7 +1003,7 @@ RESOLVED = {
             "context": [],
             "availability": {
                 "status": "unavailable",
-                "source": "player_pool",
+                "source": None,
                 "context": None,
                 "unavailable_reason": "opponent_idle",
             },

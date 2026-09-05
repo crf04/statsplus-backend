@@ -2507,9 +2507,10 @@ The request makes no NBA, PBP, or DFS call. It composes the Slate for the date
 and, for each game one of the caller's opponents plays, the same stored Matchup
 document [Get Matchup](#get-matchup) serves -- read once per game however many
 Targets name the teams in it, and never read at all for a game no Target names.
-Every per-slice share, thin flag, posted-markets list, injury badge, pool
-status, defense-sheet value, and player ordering below is therefore the
-Matchup's own value for that game.
+Every per-slice share, thin flag, posted-markets list, injury badge,
+participant status, defense-sheet value, and player ordering below is therefore
+the Matchup's own value for that game, including which evidence named that
+game's players.
 
 `targets` lists **live** Targets -- the opponent plays that date -- before
 **idle** ones, each group keeping the newest-first order of `GET
@@ -2636,7 +2637,7 @@ Matchup's own value for that game.
       "context": [],
       "availability": {
         "status": "unavailable",
-        "source": "player_pool",
+        "source": null,
         "context": null,
         "unavailable_reason": "opponent_idle"
       },
@@ -2662,21 +2663,27 @@ Base and slice, with the opponent's window values, the league's, and the
 `league.surface_availability[base][window]` state that governs them. When that
 state is not `available`, the window value is `null` exactly as it is on
 [Get Matchup](#get-matchup); exact Synergy play types therefore always report
-`unavailable/provider_window_unsupported` and a `null` `last_15`. Row `key`,
-`label`, and `markets` are the Matchup's.
+`unavailable/provider_window_unsupported` and a `null` `last_15`, and a
+completed game whose Last-15 window was never snapshotted reports its own
+state there while its Season window still reads. Row `key`, `label`, and
+`markets` are the Matchup's.
 
-`availability` is the opposing Player Pool's status, so an empty `players` is
-never mistaken for "nobody qualifies". It repeats the Matchup's Participants
-section when the pool is what named the participants, and is otherwise
-`unavailable` with `source: "player_pool"` and one of:
+`availability` is the status of whatever named the opposing side's players, so
+an empty `players` is never mistaken for "nobody qualifies". It repeats the
+Matchup's own Participants section, with `source` restated in the
+`experience.player_source` vocabulary that route uses:
 
-- `player_pool_unavailable` -- no stored pool player belongs to the game, or
-  the game is a Historical Matchup whose participants come from canonical game
-  logs. A completed game has no pool to filter, so a Target never lists
-  game-log participants.
-- `opponent_idle` -- the opponent does not play on the viewed date.
+- `player_pool` -- a scheduled game, resolved against the stored Player Pool.
+  `player_pool_unavailable` when no stored pool player belongs to the game.
+- `game_logs` -- a Historical Matchup, resolved against the canonical game-log
+  participants the Matchup detail page lists for that completed game, so the
+  two surfaces agree about the same game on the same date.
+  `game_logs_incomplete` or `no_game_log_rows` when that evidence is not
+  there.
+- `null` with `opponent_idle` -- the opponent does not play on the viewed
+  date, so no evidence named participants at all.
 
-`players` is the opposing pool members meeting **every** Qualifier, in the
+`players` is the opposing participants meeting **every** Qualifier, in the
 Matchup's own order (Season scoring descending, canonical id breaking ties).
 `players` is always empty when `availability.status` is not `available`.
 
@@ -2697,7 +2704,10 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
   removed, so this list never disagrees with the Matchup about who is in the
   pool.
 - `posted_markets`, `injury_badge_ref`, and `season_scoring` are the Matchup's
-  values for the same player, so the two surfaces agree.
+  values for the same player, so the two surfaces agree. A game-log
+  participant has no posted markets, so `posted_markets` is `[]` and
+  `injury_badge_ref` is `null` for a completed game, exactly as on
+  [Get Matchup](#get-matchup).
 
 `401 authentication_required` for an unauthenticated caller. An account with no
 Targets is `200` with an empty `targets` list, not an error.
