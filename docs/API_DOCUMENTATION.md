@@ -2571,6 +2571,16 @@ game's players.
           "team_id": 1610612747,
           "tricode": "LAL",
           "name": "Los Angeles Lakers"
+        },
+        "away": {
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "name": "Los Angeles Lakers"
+        },
+        "home": {
+          "team_id": 1610612760,
+          "tricode": "OKC",
+          "name": "Oklahoma City Thunder"
         }
       },
       "context": [
@@ -2675,6 +2685,13 @@ names the game, its tip time, its Slate status, the `opponent` the Target aims
 at, and the `opposing_team` whose Player Pool `players` is filtered from.
 `status` is the Slate card's own, so a postponed or final game is reported as
 such rather than folded into the idle group.
+
+The same two teams also appear as `away` and `home`, in the same
+`{team_id, tricode, name}` shape and taken from the same Slate event, so a
+client can print the Slate's `AWAY @ HOME` convention without knowing which
+side the Target aims at. Exactly one of `away`/`home` equals `opponent` and the
+other equals `opposing_team`; which way round depends on where the opponent is
+playing, so neither pair can be derived from the other.
 
 `context` is one entry per Qualifier, in the Target's own Qualifier order, and
 is empty for an idle Target -- a Defense Sheet window is read for a game, and
