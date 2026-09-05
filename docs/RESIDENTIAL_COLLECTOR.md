@@ -168,15 +168,17 @@ the endpoint's `Per48` the combined value sits near their mean.
 The shot-location and TeamStats reads are two separate requests, so a mismatch
 can simply mean the provider updated between them. The first mismatch refetches
 the **complete pair** once. A coherent second result is accepted. A second
-mismatch is rejected rather than stored as acceptable evidence, and reported
-as `value_invariant_failed` with a `detail` naming the team, window, failing
-equation, expected, observed and residual. That detail reaches an operator by
-two durable routes -- the rotating safe log, and a `diagnostics` array in the
-JSON the `run` command prints -- because the in-memory status deque exits with
-the process. It is capped at 160 characters and built only from those six
-typed fields, so a diagnostic can never become a channel for provider payload.
-Railway status reports are unchanged and still carry only release version,
-checksum, state and reason.
+mismatch is rejected rather than stored as acceptable evidence, and written to
+the rotating safe log as `value_invariant_failed` with a `detail` naming the
+team, window, failing equation, expected, observed and residual.
+
+The log is the route that matters: the scheduled task runs `statsplus_collector
+run` without redirecting stdout, and the in-memory status deque exits with the
+process, so neither survives an unattended run. The detail is capped at 160
+characters and built only from those six collector-derived fields, so a
+diagnostic can never become a channel for provider payload. Railway status
+reports are unchanged and still carry only release version, checksum, state
+and reason.
 
 ### Validated at two boundaries
 

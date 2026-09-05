@@ -30,6 +30,7 @@ from app.collector.normalizers import (
     normalize_synergy_response,
     normalize_zone_response,
 )
+from app.collector.diagnostics import build_safe_logger
 from app.collector.outbox import OutboxBusy, OutboxFull, OutboxRepository
 from app.collector.provider import _StandaloneNBAProvider
 from app.collector.runner import (
@@ -1683,7 +1684,8 @@ class FakeProvider:
         return _stats(args[0] if args else kwargs.get("play_type", "Transition"))
 
 
-def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW, release_checksum=None):
+def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW, release_checksum=None,
+               logger=None):
     fake_transport = transport or FakeTransport(discovery=discovery)
     client = RailwayClient("http://127.0.0.1", identity_id="collector", environment="testing", transport=fake_transport, allow_insecure_localhost=True)
     outbox = OutboxRepository(tmp_path / "outbox.sqlite3", clock=lambda: now)
@@ -1693,6 +1695,7 @@ def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW, r
         clock=lambda: now,
         instruction_cache=InstructionCache(tmp_path / "instructions.json", clock=lambda: now),
         release_checksum=release_checksum,
+        **({"logger": logger} if logger is not None else {}),
     ), fake_transport, outbox
 
 
@@ -2267,19 +2270,31 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
                 **{"TEAM_ID": kwargs["team_id"], "Backcourt_OPP_FGA": 34}
             )
 
+    log_path = tmp_path / "collector.log"
+    logger = build_safe_logger(log_path, name=f"statsplus.test.{tmp_path.name}")
     collector, _, outbox = _collector(
         tmp_path, discovery=discovery, provider=IncoherentProvider(),
+        logger=logger,
     )
     try:
         collector.run()
-        events = collector.status.snapshot(version="test")["recent"]
     finally:
         outbox.close()
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
 
-    detailed = [event for event in events if event.get("detail")]
-    assert detailed, events
-    detail = detailed[-1]["detail"]
-    assert detailed[-1]["code"] == "value_invariant_failed"
+    # The rotating log is the route that survives the process, so it is the
+    # one worth asserting.  Reading the in-memory status here would pass even
+    # if nothing were ever written anywhere an operator looks.
+    logged = [
+        json.loads(line.split(" ", 3)[-1])
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if "value_invariant_failed" in line
+    ]
+    assert logged, log_path.read_text(encoding="utf-8")
+    detail = logged[-1]["detail"]
+    assert logged[-1]["code"] == "value_invariant_failed"
     assert "equation=zones_plus_backcourt_equals_opponent_fga" in detail
     assert "residual=1.0" in detail
     reported_team = re.search(r"team_id=(\d+)", detail)
