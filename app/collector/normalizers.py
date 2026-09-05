@@ -13,7 +13,11 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from .contracts import NormalizedObservation, ProviderContractError
+from .contracts import (
+    NormalizedObservation,
+    ProviderContractError,
+    ZoneReconciliationError,
+)
 
 try:  # pandas is an application dependency, but keep the package seam loose.
     import pandas as pd
@@ -30,6 +34,11 @@ SHOT_ZONES = (
     "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3",
     "Above the Break 3",
 )
+# Backcourt is not a published zone, but the five canonical zones only add up
+# to the opponent's field-goal totals once it is included, so it is collected
+# as reconciliation evidence and dropped before publication.
+RECONCILED_ZONE = "Backcourt"
+CORNER_3_SIDES = ("Left Corner 3", "Right Corner 3")
 REGULAR_SEASON_TYPE = "Regular Season"
 _GAME_TYPE_BY_ID_PREFIX = {
     "001": "Preseason",
@@ -609,7 +618,19 @@ def _zone_response(
     rows = _records(response)
     output: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
+    totals_mode = (
+        observation_type == "shot_zones_opponent"
+        and str(scope.get("value_mode", "")) == "totals_with_minutes"
+    )
+    reconciliation: dict[str, Any] = {}
+    if totals_mode and len(rows) != 1:
+        # The opponent request is scoped to one team, so its Totals response is
+        # one row.  More than one would make the single reconciliation block
+        # below describe only the last of them while the backend applied it to
+        # every record.
+        raise ProviderContractError("provider_schema_changed")
     for row in rows:
+        corner_split: dict[str, dict[str, float]] = {}
         identity_values: dict[str, Any] = {}
         for field in identity:
             aliases = (field, field.upper())
@@ -639,13 +660,53 @@ def _zone_response(
                 side_values = (
                     left_makes, left_attempts, right_makes, right_attempts
                 )
+                if totals_mode:
+                    # Under Totals the sides are exact additive components of
+                    # the combined corner, so disagreement is a defect rather
+                    # than a per-mode artifact.  (Under the endpoint's Per48
+                    # the combined value sits near the sides' mean, which is
+                    # why the old rate-scale evidence could not be checked
+                    # this way at all.)
+                    if any(value is None for value in side_values):
+                        raise ProviderContractError("provider_schema_changed")
+                    side_makes = _number(left_makes) + _number(right_makes)
+                    side_attempts = (
+                        _number(left_attempts) + _number(right_attempts)
+                    )
+                    if makes is None and attempts is None:
+                        makes, attempts = side_makes, side_attempts
+                    elif _number(makes) != side_makes:
+                        raise ZoneReconciliationError(
+                            team_id=identity_values.get("team_id", 0),
+                            window=str(scope.get("window", "")),
+                            equation="corner_3_fgm_equals_left_plus_right",
+                            expected=side_makes, observed=_number(makes),
+                        )
+                    elif _number(attempts) != side_attempts:
+                        raise ZoneReconciliationError(
+                            team_id=identity_values.get("team_id", 0),
+                            window=str(scope.get("window", "")),
+                            equation="corner_3_fga_equals_left_plus_right",
+                            expected=side_attempts,
+                            observed=_number(attempts),
+                        )
+                    corner_split = {
+                        "Left Corner 3": {
+                            "FGM": _number(left_makes),
+                            "FGA": _number(left_attempts),
+                        },
+                        "Right Corner 3": {
+                            "FGM": _number(right_makes),
+                            "FGA": _number(right_attempts),
+                        },
+                    }
                 # The endpoint's combined corner is authoritative when it is
                 # present.  The side columns are not additive components of
                 # it under every per-mode (live Per48 reports a combined value
                 # near the sides' mean, not their sum), so they are consulted
                 # only when the combined columns are absent, and a lone
                 # partial split stays drift.
-                if makes is None and attempts is None:
+                elif makes is None and attempts is None:
                     if all(value is not None for value in side_values):
                         makes = _number(left_makes) + _number(right_makes)
                         attempts = _number(left_attempts) + _number(right_attempts)
@@ -656,6 +717,50 @@ def _zone_response(
             values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}
             if values[zone]["FGM"] > values[zone]["FGA"]:
                 raise ProviderContractError("value_invariant_failed")
+        if totals_mode:
+            backcourt_makes = _value(
+                row, f"{RECONCILED_ZONE}_OPP_FGM", f"{RECONCILED_ZONE}_FGM",
+            )
+            backcourt_attempts = _value(
+                row, f"{RECONCILED_ZONE}_OPP_FGA", f"{RECONCILED_ZONE}_FGA",
+            )
+            opponent_makes = _value(row, "OPP_TOTAL_FGM")
+            opponent_attempts = _value(row, "OPP_TOTAL_FGA")
+            if any(
+                value is None for value in (
+                    backcourt_makes, backcourt_attempts,
+                    opponent_makes, opponent_attempts,
+                )
+            ):
+                raise ProviderContractError("provider_schema_changed")
+            reconciliation = {
+                "opponent_totals": {
+                    "FGM": _number(opponent_makes),
+                    "FGA": _number(opponent_attempts),
+                },
+                RECONCILED_ZONE: {
+                    "FGM": _number(backcourt_makes),
+                    "FGA": _number(backcourt_attempts),
+                },
+                **corner_split,
+            }
+            # Integer-count identity, not a tolerance band: the five published
+            # zones plus Backcourt are the whole of the opponent's field goals.
+            for stat_key in ("FGM", "FGA"):
+                zone_total = sum(
+                    values[zone][stat_key] for zone in SHOT_ZONES
+                ) + reconciliation[RECONCILED_ZONE][stat_key]
+                expected = reconciliation["opponent_totals"][stat_key]
+                if zone_total != expected:
+                    raise ZoneReconciliationError(
+                        team_id=identity_values.get("team_id", 0),
+                        window=str(scope.get("window", "")),
+                        equation=(
+                            "zones_plus_backcourt_equals_opponent_"
+                            f"{stat_key.lower()}"
+                        ),
+                        expected=expected, observed=zone_total,
+                    )
         key = tuple(identity_values.values())
         if key in seen:
             raise ProviderContractError("duplicate_identity")
@@ -670,6 +775,9 @@ def _zone_response(
                 zone_record["games_played"] = _number(
                     games_played, integer=True
                 )
+            minutes = _value(row, "minutes", "MIN")
+            if minutes is not None:
+                zone_record["minutes"] = _number(minutes)
             zone_record.update({
                 "base": "shot_zones",
                 "category": zone,
@@ -683,6 +791,11 @@ def _zone_response(
         "records": output,
         "coverage": {"zones": list(SHOT_ZONES), "scope": dict(scope)},
     }
+    if reconciliation:
+        # Retained so the backend can repeat the check against the immutable
+        # record rather than trusting the collector's success.  Backcourt and
+        # the Corner 3 sides are evidence only; they never reach a publication.
+        payload["reconciliation"] = reconciliation
     return NormalizedObservation(
         observation_type=observation_type, scope=scope,
         season=_canonical_season(season), cutoff=_timestamp(cutoff), payload=payload,
@@ -703,7 +816,8 @@ def normalize_zone_response(
 
 def normalize_opponent_zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
-    team_id: int, window: str = "season", value_mode: str = "per48",
+    team_id: int, window: str = "season",
+    value_mode: str = "totals_with_minutes",
     endpoint_window: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
     team_id = _positive_id(team_id)
@@ -719,7 +833,8 @@ def normalize_opponent_zone_response(
         observation_type="shot_zones_opponent",
     )
     _require_opponent_contract(
-        observation, scoped_team_id=team_id, require_games_played=True
+        observation, scoped_team_id=team_id, require_games_played=True,
+        require_minutes=value_mode == "totals_with_minutes",
     )
     return observation
 
@@ -765,6 +880,7 @@ __all__ = [
     "normalize_opponent_zone_response", "normalize_roster_response",
     "normalize_schedule_response", "normalize_synergy_response",
     "normalize_opponent_synergy_response",
+    "ZoneReconciliationError",
     "normalize_zone_response", "normalize_schedule", "normalize_roster",
     "normalize_synergy", "normalize_shot_type_response", "normalize_shot_zone_response",
 ]

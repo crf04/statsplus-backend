@@ -306,7 +306,8 @@ def _collector_scope_descriptors(
                             if window == "l15" and l15_date_from_by_team is not None
                             else None
                         ), "date_to": date_to,
-                        "per_mode": "Per48", "value_mode": "per48"}
+                        "per_mode": "Totals",
+                        "value_mode": "totals_with_minutes"}
             if opponent_shots and window in shot_stream_windows:
                 descriptors.extend({"scope": opponent_shots, "parameters": {
                     **governed, "general_range": category,
@@ -463,6 +464,62 @@ class _ProviderWindowUnavailable(ValueError):
     """Expected provider limitation that must not authorize a publication."""
 
 
+def _assert_zone_reconciliation(document: Mapping[str, Any]) -> None:
+    """Repeat the opponent-zone reconciliation against the recorded evidence.
+
+    The collector already refused inconsistent evidence, but a collector's
+    success is a claim, not proof.  This is the central boundary: it reads the
+    immutable observation and re-derives the same integer identities, so an
+    obsolete or tampered-with collector cannot publish the broken rate scale.
+    """
+
+    reconciliation = document.get("reconciliation")
+    if not isinstance(reconciliation, Mapping):
+        raise ValueError("publication zone reconciliation missing")
+    totals = reconciliation.get("opponent_totals")
+    backcourt = reconciliation.get("Backcourt")
+    if not isinstance(totals, Mapping) or not isinstance(backcourt, Mapping):
+        raise ValueError("publication zone reconciliation missing")
+    zone_values: dict[str, dict[str, float]] = {}
+    for record in document.get("records") or ():
+        if not isinstance(record, Mapping):
+            raise ValueError("publication observation row malformed")
+        zone_values[str(record.get("slice_key", record.get("category", "")))] = {
+            key: record[key] for key in ("FGM", "FGA") if key in record
+        }
+    if set(zone_values) != set(SHOT_ZONE_SLICES):
+        raise ValueError("publication zone reconciliation incomplete")
+    for stat_key in ("FGM", "FGA"):
+        try:
+            observed = sum(
+                float(zone_values[zone][stat_key]) for zone in SHOT_ZONE_SLICES
+            ) + float(backcourt[stat_key])
+            expected = float(totals[stat_key])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("publication zone reconciliation invalid") from error
+        if not math.isfinite(observed) or observed != expected:
+            raise ValueError("publication zone reconciliation mismatch")
+    # The collector requires the Corner 3 split, so central validation must
+    # require it too.  Making it conditional here would let an observation
+    # that simply omits the sides skip the identity centrally -- exactly the
+    # tampering this boundary exists to catch.
+    sides = ("Left Corner 3", "Right Corner 3")
+    if not all(isinstance(reconciliation.get(side), Mapping) for side in sides):
+        raise ValueError("publication zone reconciliation missing")
+    for stat_key in ("FGM", "FGA"):
+        try:
+            split = sum(
+                float(reconciliation[side][stat_key]) for side in sides
+            )
+            combined = float(zone_values["Corner 3"][stat_key])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "publication zone reconciliation invalid"
+            ) from error
+        if split != combined:
+            raise ValueError("publication zone reconciliation mismatch")
+
+
 def _compose_nba_observation_payload(
     session: Session,
     *,
@@ -556,12 +613,10 @@ def _compose_nba_observation_payload(
                 scoped_team_id = int(scoped_team_id)
             except (TypeError, ValueError, OverflowError) as error:
                 raise ValueError("publication scope team invalid") from error
-        expected_value_mode = (
-            "totals_with_minutes"
-            if base in {"play_types", "shot_types"}
-            else "per48"
-        )
-        if scope.get("value_mode") != expected_value_mode:
+        # Every governed opponent base publishes a rate derived here from
+        # Totals and the window's authoritative minutes.  An observation still
+        # labelled with the provider's own rate scale cannot authorize one.
+        if scope.get("value_mode") != "totals_with_minutes":
             raise ValueError("publication value mode unverified")
         if base == "play_types":
             # Synergy's Season endpoint has no DateTo/as-of input.  Its totals
@@ -596,6 +651,8 @@ def _compose_nba_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
+        if base == "shot_zones":
+            _assert_zone_reconciliation(document)
         sources.append({
             "observation_id": observation.observation_id,
             "checksum": observation.checksum,
@@ -622,7 +679,7 @@ def _compose_nba_observation_payload(
                     or int(games_played) != len(expected_game_ids_by_team[team_id])
                 ):
                     raise ValueError("publication games played mismatch")
-            if base in {"play_types", "shot_types"}:
+            if base in {"play_types", "shot_types", "shot_zones"}:
                 minutes = record.get("minutes")
                 if isinstance(minutes, bool):
                     raise ValueError("publication minutes invalid")
@@ -668,8 +725,6 @@ def _compose_nba_observation_payload(
             "per48": {
                 metric: (
                     values[team_id][metric] * 48.0 / minutes_by_team[team_id]
-                    if base in {"play_types", "shot_types"}
-                    else values[team_id][metric]
                 )
                 for metric in sorted(expected_metrics)
             },
@@ -6022,11 +6077,7 @@ def _validate_opponent_window_scope(
     endpoint_window = scope.get("endpoint_window")
     expected_last_n = 15 if window == "l15" else 0 if window == "season" else None
     expected_date_to = slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
-    expected_value_mode = (
-        "totals_with_minutes"
-        if observation_type == "shot_types_opponent"
-        else "per48"
-    )
+    expected_value_mode = "totals_with_minutes"
     try:
         team_id = int(scope.get("team_id"))
     except (TypeError, ValueError, OverflowError):

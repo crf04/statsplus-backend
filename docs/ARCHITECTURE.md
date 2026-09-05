@@ -3504,7 +3504,16 @@ an idempotent receipt; a conflicting checksum is rejected. Publication
 advancement increments a per-stream database fence, preserving the prior
 active version for rollback and rejecting stale composition workers. Accepted
 observations enqueue a deduplicated composition job immediately, while
-`reconcile_pending` is the scheduled backstop. Composition derives its gate
+`reconcile_pending` is the scheduled backstop. Every governed opponent
+surface -- play types, shot types, and shot zones -- collects integer Totals
+beside the window's authoritative minutes and publishes
+`total * 48 / minutes` at full precision; no provider per-mode rate is
+published unchanged. Opponent shot zones additionally reconcile exactly
+against an independent opponent TeamStats read for the identical window (five
+canonical zones plus Backcourt equal the opponent total; the combined Corner 3
+equals its left and right sides), are refetched as a pair once on a first
+mismatch, and are re-validated centrally from the immutable observation before
+composition. See [RESIDENTIAL_COLLECTOR.md](RESIDENTIAL_COLLECTOR.md). Composition derives its gate
 from registered required observations plus league/Base completeness evidence;
 a caller-provided `complete` flag alone cannot advance a pointer. A manifest
 may additionally declare one immutable atomic repair group: the set of streams

@@ -26,6 +26,40 @@ class ProviderContractError(ValueError):
         super().__init__(message or self.reason)
 
 
+class ZoneReconciliationError(ProviderContractError):
+    """Opponent zone Totals did not add up to their independent check.
+
+    Carries the team, window, failing equation and residual so a persistent
+    mismatch is actionable without echoing the whole provider response.  The
+    first occurrence is retried as a pair; the second is reported.
+    """
+
+    def __init__(
+        self, *, team_id: int, window: str, equation: str,
+        expected: float, observed: float,
+    ) -> None:
+        self.team_id = int(team_id)
+        self.window = str(window)
+        self.equation = str(equation)
+        self.expected = float(expected)
+        self.observed = float(observed)
+        self.residual = float(observed) - float(expected)
+        super().__init__(
+            "value_invariant_failed",
+            f"team={self.team_id} window={self.window} "
+            f"equation={self.equation} expected={self.expected} "
+            f"observed={self.observed} residual={self.residual}",
+        )
+
+    @property
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "team_id": self.team_id, "window": self.window,
+            "equation": self.equation, "expected": self.expected,
+            "observed": self.observed, "residual": self.residual,
+        }
+
+
 def canonical_json(value: Any) -> bytes:
     """Encode JSON with the same canonical representation as Railway."""
 
