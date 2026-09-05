@@ -318,13 +318,13 @@ class GameLogQuery(BaseModel):
 
         This is a filter on the opponent recorded against each game log, not
         a ranking, so it is validated against the closed tricode catalog
-        rather than the rank-able Team Filters.
+        rather than the rank-able Team Filters. The catalog is the 30 canonical
+        tricodes, so provider dialects such as ``PHO`` and ``GS`` are refused
+        rather than translated.
         """
 
         if value is None:
             return None
-        if not isinstance(value, str):
-            raise ValueError("opponent_tricode must be an NBA team tricode")
         tricode = value.strip().upper()
         if tricode not in NBA_TEAM_TRICODES:
             raise ValueError(

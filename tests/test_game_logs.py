@@ -401,7 +401,7 @@ def test_service_returns_empty_arrays_when_no_games_match(
     assert len(result["season_averages"]) == 1
 
 
-def test_service_returns_no_logs_when_opponent_tricode_resolves_empty(
+def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)

@@ -1219,13 +1219,17 @@ averages no longer include a `PLUS_MINUS` cell, and response rows carry no
 contract so the durable PBP per-game path (whose upstream boxscore seam exposes
 no plus/minus) is database-first without fabricating evidence.
 
+One specific opponent (#243): `opponent_tricode` names a single opponent by NBA
+tricode, so a caller can read a player's games against one team without ranking
+opponents. Its value must be one of the 30 canonical NBA tricodes; anything else
+joins the malformed values of the #9 note and returns a `400` `invalid_input`.
+
 ### Contract and migration note (#9)
 
 - Filters are validated into one typed `GameLogQuery` before the service runs.
   Malformed values (non-numeric `minutes_filter`, an unparsable `date_filter`,
-  `game_filter` below 1, an `opponent_tricode` that is not an NBA team tricode,
-  or `rank_filter[]` not matching `teams_against[]` one per one) return a `400`
-  error with code `invalid_input` and message:
+  `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
+  per one) return a `400` error with code `invalid_input` and message:
   `One or more game log filters are invalid.`
 - `game_logs`, `averages`, and `season_averages` are ordinary JSON arrays.
   Earlier versions nested pandas JSON strings in these fields; callers that
