@@ -77,8 +77,9 @@ SHOT_ZONES = (
     "Corner 3",
     "Above the Break 3",
 )
-#: Every market a Corner 3 Qualifier's Defense Sheet rows map to.
-CORNER_THREE_COLUMNS = ["PTS", "3PM", "FGA", "FG3A"]
+#: Every market a Corner 3 Qualifier's Defense Sheet *outcome* row maps to.
+#: The FGA row's attempt markets are deliberately not columns.
+CORNER_THREE_COLUMNS = ["PTS", "3PM"]
 
 MARKET_PER_GAME = {
     "PTS": 25.0,
@@ -359,26 +360,21 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(
                     "league_average_share": 0.2,
                 }
             ],
-            "season_averages": {
-                "PTS": 25.0,
-                "3PM": 2.0,
-                "FGA": 20.0,
-                "FG3A": 6.0,
-            },
+            "season_averages": {"PTS": 25.0, "3PM": 2.0},
             "games": [
                 {
                     "game_id": "0022500584",
                     "game_date": "2026-01-16",
                     "matchup": "LAL vs. OKC",
                     "minutes": 34.0,
-                    "stats": {"PTS": 30.0, "3PM": 4.0, "FGA": 20.0, "FG3A": 8.0},
+                    "stats": {"PTS": 30.0, "3PM": 4.0},
                 },
                 {
                     "game_id": "0022500120",
                     "game_date": "2025-11-03",
                     "matchup": "LAL @ OKC",
                     "minutes": 34.0,
-                    "stats": {"PTS": 22.0, "3PM": 2.0, "FGA": 17.0, "FG3A": 5.0},
+                    "stats": {"PTS": 22.0, "3PM": 2.0},
                 },
             ],
         }
@@ -510,18 +506,46 @@ def test_stat_columns_union_every_qualifiers_slice_markets_in_order(
 
     payload = backtest(created["id"], logs=logs, diets=diets)
 
-    assert payload["stat_columns"] == [
-        "PTS",
-        "3PM",
-        "FGA",
-        "FG3A",
-        "PA",
-        "PR",
-        "PRA",
-    ]
+    assert payload["stat_columns"] == ["PTS", "3PM", "PA", "PR", "PRA"]
     player = payload["players"][0]
     assert list(player["season_averages"]) == payload["stat_columns"]
     assert list(player["games"][0]["stats"]) == payload["stat_columns"]
+
+
+@pytest.mark.parametrize(
+    ("base", "slice_key", "expected"),
+    [
+        # A shot zone reports made shots and attempts; only the made row is an
+        # outcome, and a two-point zone's makes are points alone.
+        ("shot_zones", "Corner 3", ["PTS", "3PM"]),
+        ("shot_zones", "Restricted Area", ["PTS"]),
+        # Synergy reports points and possessions; possessions are not an
+        # outcome, and the points row carries its combo markets.
+        ("play_types", "Transition", ["PTS", "PA", "PR", "PRA"]),
+        # Both of a shot type's made rows are outcomes; neither attempt row is.
+        ("shot_types", "Catch and Shoot", ["PTS", "3PM"]),
+        ("assist_locations", "Corner3Assists", ["AST", "PA", "RA", "PRA"]),
+    ],
+)
+def test_stat_columns_are_outcomes_never_attempts(
+    targets, backtest, base, slice_key, expected
+):
+    created = _create(
+        targets,
+        qualifiers=[
+            {
+                "base": base,
+                "slice_key": slice_key,
+                "comparator": "at_or_above",
+                "threshold": 0.1,
+            }
+        ],
+    )
+
+    payload = backtest(created["id"])
+
+    assert payload["stat_columns"] == expected
+    assert not {"FGA", "FG2A", "FG3A", "POSS"} & set(payload["stat_columns"])
 
 
 def test_nobody_having_faced_the_opponent_is_an_empty_player_list(

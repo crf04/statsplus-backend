@@ -17,9 +17,12 @@ than no claim.
 
 *Outcomes are proxies.*  No per-game shot-zone or play-type evidence exists,
 so a Qualifier's slice is measured through the box-score markets the Defense
-Sheet already maps that slice to (``qualifier_slice_markets``).  A Corner 3
-Qualifier reads as points and threes, never as corner threes made, and the
-response says so in ``proxy``.
+Sheet already maps that slice to (``qualifier_slice_outcome_markets``).  Only
+the slice's outcome rows are asked -- a shot zone's made shots, not its
+attempts -- because the question is what a player produced against this
+opponent, and an attempt is not production.  A Corner 3 Qualifier therefore
+reads as points and threes, never as corner threes made, and the response says
+so in ``proxy``.
 
 The player set is drawn from the whole league rather than one team, and it is
 drawn from the opponent's own game-log rows: a qualifying player who has never
@@ -39,7 +42,7 @@ from app.models.target import TARGET_COMPARATOR_TESTS
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
-    qualifier_slice_markets,
+    qualifier_slice_outcome_markets,
 )
 from app.services.player_diet import PlayerDietResult
 from app.services.player_game_log_repository import (
@@ -129,7 +132,7 @@ class TargetBacktestService:
     def _stat_columns(
         qualifiers: Sequence[Mapping[str, Any]],
     ) -> tuple[str, ...]:
-        """Union every Qualifier slice's mapped markets, in Qualifier order.
+        """Union every Qualifier slice's outcome markets, in Qualifier order.
 
         Two Qualifiers naming overlapping markets contribute one column each,
         the first time each is named, so the column order is the reader's own
@@ -138,7 +141,7 @@ class TargetBacktestService:
 
         columns: list[str] = []
         for qualifier in qualifiers:
-            for market in qualifier_slice_markets(
+            for market in qualifier_slice_outcome_markets(
                 qualifier["base"], qualifier["slice_key"]
             ):
                 if market not in columns:
@@ -164,6 +167,11 @@ class TargetBacktestService:
             return []
 
         player_ids = tuple(sorted(rows_by_player))
+        # A deployment with no Diet service stores no Diet, so no player has
+        # a share for any slice and nobody fits.  That is the same empty list
+        # a Target nobody meets returns, which is honest here: the demo
+        # database this arises on carries no Diet schema at all, so there is
+        # no evidence being withheld.
         diets = (
             PlayerDietResult(season, {}, ())
             if self.player_diets is None

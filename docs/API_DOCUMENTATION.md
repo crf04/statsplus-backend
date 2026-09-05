@@ -2795,7 +2795,7 @@ own. The request makes no NBA, PBP, or DFS call.
   },
   "season": "2025-26",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
-  "stat_columns": ["PTS", "3PM", "FGA", "FG3A"],
+  "stat_columns": ["PTS", "3PM"],
   "players": [
     {
       "canonical_id": 2544,
@@ -2811,26 +2811,21 @@ own. The request makes no NBA, PBP, or DFS call.
           "league_average_share": 0.2
         }
       ],
-      "season_averages": {
-        "PTS": 25.0,
-        "3PM": 2.0,
-        "FGA": 20.0,
-        "FG3A": 6.0
-      },
+      "season_averages": {"PTS": 25.0, "3PM": 2.0},
       "games": [
         {
           "game_id": "0022500584",
           "game_date": "2026-01-16",
           "matchup": "LAL vs. OKC",
           "minutes": 34.0,
-          "stats": {"PTS": 30.0, "3PM": 4.0, "FGA": 20.0, "FG3A": 8.0}
+          "stats": {"PTS": 30.0, "3PM": 4.0}
         },
         {
           "game_id": "0022500120",
           "game_date": "2025-11-03",
           "matchup": "LAL @ OKC",
           "minutes": 34.0,
-          "stats": {"PTS": 22.0, "3PM": 2.0, "FGA": 17.0, "FG3A": 5.0}
+          "stats": {"PTS": 22.0, "3PM": 2.0}
         }
       ]
     }
@@ -2846,15 +2841,24 @@ or play-type evidence exists, so a Qualifier's slice is measured through
 box-score markets. Read `"PTS": 30` as thirty points, never as thirty corner
 threes.
 
-`stat_columns` is the union of the markets each Qualifier's slice maps to,
-deduplicated and in the Target's own Qualifier order. The mapping is the
-Matchup's: it is exactly the `markets` its defense-sheet rows advertise for
-that slice, unioned over the rows that slice publishes. A shot zone publishes an
-FGM and an FGA row, so `Corner 3` contributes `PTS`, `3PM`, `FGA`, and `FG3A`;
-`Transition` contributes `PTS`, `PA`, `PR`, and `PRA`. `season_averages` and
-every game's `stats` carry exactly these columns, in this order. The row
-`markets` under [Get Matchup](#get-matchup) are the same mapping, so a backtest
-column can never disagree with the defense sheet about the same slice.
+`stat_columns` is the union of the **outcome** markets each Qualifier's slice
+maps to, deduplicated and in the Target's own Qualifier order.
+`season_averages` and every game's `stats` carry exactly these columns, in this
+order.
+
+The mapping is the Matchup's -- the same `markets` its defense-sheet rows
+advertise for that slice, so a backtest column can never disagree with
+[Get Matchup](#get-matchup) about the same slice -- but only the slice's
+outcome rows are asked. A backtest measures what a player produced, and an
+attempt is not production, so the attempt and possession rows a slice also
+publishes (`FGA`, `FG2A`, `FG3A`, `POSS`) never become columns:
+
+| Qualifier base | Rows asked | Example |
+| --- | --- | --- |
+| `shot_zones` | `FGM` | `Corner 3` -> `PTS`, `3PM`; `Restricted Area` -> `PTS` |
+| `play_types` | `PTS` | `Transition` -> `PTS`, `PA`, `PR`, `PRA` |
+| `shot_types` | `FG2M`, `FG3M` | `Catch and Shoot` -> `PTS`, `3PM` |
+| `assist_locations` | the slice itself | `Corner3Assists` -> `AST`, `PA`, `RA`, `PRA` |
 
 `players` holds the qualifying players in the Matchup's own order -- Season
 scoring descending, canonical id breaking ties.
@@ -2884,7 +2888,10 @@ scoring descending, canonical id breaking ties.
 
 `players` is `[]` when nobody qualifies and when nobody has faced the opponent
 yet; the two are not distinguished, because a player with no games has nothing
-to backtest.
+to backtest. It is also `[]` on a deployment carrying no stored Player Diet at
+all -- the demo database, which has no Diet schema -- since no player has a
+share for any slice there and so nobody fits. That is an accurate empty list
+rather than a suppressed one; no Diet evidence exists to be withheld.
 
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another

@@ -32,13 +32,10 @@ from app.domain.play_type_matchup import complete_play_type_shares, play_type_ma
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.team_matchup_taxonomy import (
-    PLAY_TYPE_STATS,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
-    SHOT_TYPE_STATS,
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
-    SHOT_ZONE_STATS,
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
 )
@@ -2166,30 +2163,36 @@ class MatchupService:
         return round(float(value), _WIRE_PRECISION)
 
 
-#: The stat keys each Diet Base publishes a Defense Sheet row for.  Assist
-#: locations name the slice as their own stat key, so they are read from the
-#: slice rather than listed here.
-_BASE_STAT_KEYS = {
-    "play_types": PLAY_TYPE_STATS,
-    "shot_types": SHOT_TYPE_STATS,
-    "shot_zones": SHOT_ZONE_STATS,
+#: The stat key each Diet Base states an *outcome* in.  A Base publishes a
+#: Defense Sheet row per stat key, but only some of those rows are things a
+#: player produced: a shot zone has an FGM row and an FGA row, and only FGM is
+#: production.  Attempt and possession rows (``FGA``, ``FG2A``, ``FG3A``,
+#: ``POSS``) are deliberately absent, so a backtest column is always something
+#: that happened rather than something that was tried.  Assist locations name
+#: the slice as their own stat key, so they are read from the slice rather
+#: than listed here.
+_BASE_OUTCOME_STAT_KEYS = {
+    "play_types": ("PTS",),
+    "shot_types": ("FG2M", "FG3M"),
+    "shot_zones": ("FGM",),
 }
 
 
-def qualifier_slice_markets(base: str, slice_key: str) -> tuple[str, ...]:
-    """Every Stat Category the Defense Sheet maps to one Diet slice.
+def qualifier_slice_outcome_markets(base: str, slice_key: str) -> tuple[str, ...]:
+    """The Stat Categories a Diet slice's outcome rows map to.
 
-    A slice publishes a row per stat key of its Base -- a shot zone has both
-    an FGM and an FGA row -- and each row already names the markets it bears
-    on.  This is the union of those, in row order, and it is the one mapping
-    from a Qualifier's slice to the box-score columns that stand in for it.
-    Because it is ``MatchupService._markets`` itself, a Target backtest column
-    can never disagree with the ``markets`` a Defense Sheet row advertises for
-    the same slice.
+    The one mapping from a Qualifier's slice to the box-score columns that
+    stand in for it, restricted to the rows that state an outcome: ``Corner
+    3`` is points and threes, ``Transition`` is points and the point combos,
+    and neither carries the attempts its own Defense Sheet row also reports.
+
+    The mapping itself is ``MatchupService._markets``, so a column here can
+    never disagree with the ``markets`` a Defense Sheet row advertises for the
+    same slice; what this narrows is which of that slice's rows are asked.
     """
 
     markets: list[str] = []
-    for stat_key in _BASE_STAT_KEYS.get(base, (slice_key,)):
+    for stat_key in _BASE_OUTCOME_STAT_KEYS.get(base, (slice_key,)):
         for market in MatchupService._markets(base, slice_key, stat_key):
             if market not in markets:
                 markets.append(market)
@@ -2204,5 +2207,5 @@ __all__ = [
     "MatchupService",
     "diet_evidence_thin",
     "observed_diet_share",
-    "qualifier_slice_markets",
+    "qualifier_slice_outcome_markets",
 ]

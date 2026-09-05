@@ -2046,10 +2046,17 @@ nothing.
 What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
 `observed_diet_share`, both now module-level in `matchup.py` for that reason,
 so the player the Matchup marks thin is the player the backtest drops. The
-stat columns are `qualifier_slice_markets`, which is `MatchupService._markets`
-unioned over the rows a slice publishes, so a backtest column cannot disagree
-with the `markets` a Defense Sheet row advertises for the same slice. The
-Qualifier conjunction is `TARGET_COMPARATOR_TESTS`, as in resolution.
+stat columns are `qualifier_slice_outcome_markets`, which is
+`MatchupService._markets` over the rows a slice states an *outcome* in -- a
+shot zone's FGM row, not its FGA row -- so a backtest column cannot disagree
+with the `markets` a Defense Sheet row advertises for the same slice, and never
+reports an attempt as production. The Qualifier conjunction is
+`TARGET_COMPARATOR_TESTS`, as in resolution.
+
+A deployment with no Diet service (the demo database, which carries no Diet
+schema) yields an empty `players`: no player has a share for any slice, so
+nobody fits. The absence is accurate rather than suppressed, so the read
+degrades the way an unmet Target does instead of refusing.
 
 The backtest is a separate route from resolution deliberately: the league-wide
 game-log scan runs only when a reader expands one Target, so the Slate's own
