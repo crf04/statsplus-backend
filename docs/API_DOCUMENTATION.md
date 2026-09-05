@@ -2365,6 +2365,130 @@ Validation and conflicts:
   case-insensitively) and for exceeding the cap of 100 saved items per
   account.
 
+### Targets
+
+A Target is an account-private record pairing one opponent with the Qualifiers
+a player has to meet, plus an optional note. It stores no defensive reading and
+has no season. Every route requires Firebase auth and operates only on the
+caller's own rows.
+
+```http
+GET    /api/user/targets
+POST   /api/user/targets
+PATCH  /api/user/targets/<id>
+DELETE /api/user/targets/<id>
+```
+
+`GET` returns the caller's items newest-first:
+
+```json
+{
+  "success": true,
+  "targets": [
+    {
+      "id": 7,
+      "opponent": "OKC",
+      "title": "OKC vs Corner 3 ≥ 40%, Transition ≥ 20%",
+      "note": "Leaks corner threes",
+      "qualifiers": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "comparator": "at_or_above",
+          "threshold": 0.4
+        },
+        {
+          "base": "play_types",
+          "slice_key": "Transition",
+          "comparator": "at_or_above",
+          "threshold": 0.2
+        }
+      ],
+      "created_at": "2026-09-05T12:00:00+00:00",
+      "updated_at": "2026-09-05T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+`POST {"opponent", "qualifiers", "note"}` returns `201` with
+`{"success": true, "target": {...}}`. `PATCH {"qualifiers", "note"}` edits one
+item with either key or both and returns `200` with the same single-item
+envelope. `DELETE` returns
+`{"success": true, "message": "Target deleted"}`.
+
+A Qualifier is `{"base", "slice_key", "comparator", "threshold"}`:
+
+- `base` is one of the player diet bases: `assist_locations`, `play_types`,
+  `shot_types`, `shot_zones`.
+- `slice_key` is a qualifiable slice of that base, for example `Corner 3` for
+  `shot_zones` or `Transition` for `play_types`. A real slice key borrowed from
+  another base is rejected. The accepted keys per base are exactly the rows of
+  the label table below; the `Misc` play type is collected and reported but is
+  a residual bucket rather than a shot profile, so it is not a Qualifier slice
+  and is rejected with `400 invalid_input` like any unknown slice.
+- `comparator` is `at_or_above` or `at_or_below`.
+- `threshold` is the share of that base, a number from 0 to 1 inclusive.
+
+Qualifiers within one Target are conjunctive; independent ideas are separate
+Targets.
+
+The `title` is always derived and is never submitted or stored: the opponent
+tricode, `vs`, then each Qualifier as its slice label, the comparator symbol
+(`≥` or `≤`), and the threshold as a percentage, comma-separated in the order
+the author entered them. Percentages drop a trailing `.0`, so `0.4` reads as
+`40%` and `0.405` reads as `40.5%`. Editing the Qualifiers changes the title;
+editing the note never does.
+
+`slice_key` is provider vocabulary and is what gets stored; the title renders
+its label instead. The backend holds one source for this mapping
+(`PLAYER_DIET_SLICE_LABELS`), and every qualifiable slice must appear in it, so
+this table is both the accepted `slice_key` vocabulary and how each key reads:
+
+| Base | `slice_key` | Label |
+| --- | --- | --- |
+| `shot_zones` | `Restricted Area` | Restricted area |
+| `shot_zones` | `In The Paint (Non-RA)` | Paint (non-RA) |
+| `shot_zones` | `Mid-Range` | Mid-range |
+| `shot_zones` | `Corner 3` | Corner 3 |
+| `shot_zones` | `Above the Break 3` | Above-break 3 |
+| `play_types` | `Transition` | Transition |
+| `play_types` | `Isolation` | Isolation |
+| `play_types` | `PRBallHandler` | P&R ball handler |
+| `play_types` | `PRRollMan` | P&R roll man |
+| `play_types` | `Spotup` | Spot up |
+| `play_types` | `Cut` | Cut |
+| `play_types` | `Handoff` | Handoff |
+| `play_types` | `OffScreen` | Off screen |
+| `play_types` | `Postup` | Post up |
+| `play_types` | `OffRebound` | Putback |
+| `shot_types` | `Catch and Shoot` | Catch & shoot |
+| `shot_types` | `Pullups` | Pull-up |
+| `shot_types` | `Less Than 10 ft` | Inside 10 ft |
+| `assist_locations` | `Arc3Assists` | Arc 3 assists |
+| `assist_locations` | `Corner3Assists` | Corner 3 assists |
+| `assist_locations` | `AtRimAssists` | At-rim assists |
+| `assist_locations` | `ShortMidRangeAssists` | Short mid assists |
+| `assist_locations` | `LongMidRangeAssists` | Long mid assists |
+
+Update semantics: an absent key means unchanged, and `"note": null` clears the
+note. `opponent` is fixed -- aiming the same Qualifiers at another team is a
+different Target -- and is ignored if submitted.
+
+Validation and conflicts:
+
+- `400 invalid_input` for an opponent that is not an NBA team, an empty or
+  missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
+  unknown base or slice, a comparator outside the two accepted values, a
+  threshold outside 0-1, a note over 280 characters, and a `PATCH` body that
+  changes neither the Qualifiers nor the note.
+- `404 resource_not_found` for an id that does not exist or belongs to another
+  account. Foreign ids are never reported as `403`.
+- `409 operation_conflict` when the account already aims the same Qualifier set
+  at the same opponent -- the set is compared order-insensitively, so
+  reordering does not create a second Target -- and when the account already
+  holds its cap of 50 Targets.
+
 
 ## Filtering Reference
 

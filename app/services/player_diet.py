@@ -56,6 +56,95 @@ _ASSIST_SLICES = (
     "ShortMidRangeAssists",
     "LongMidRangeAssists",
 )
+#: The slice vocabulary each diet base publishes, in publication order.
+#: Built from the collection tuples above rather than restated, so a base can
+#: never accept a slice its collector does not produce.
+PLAYER_DIET_BASE_SLICES = MappingProxyType({
+    "assist_locations": _ASSIST_SLICES,
+    "play_types": PLAY_TYPES,
+    "shot_types": SHOOTING_TYPES,
+    "shot_zones": _SHOT_ZONE_SLICES,
+})
+#: Published slices that cannot be used as a criterion.  ``Misc`` is Synergy's
+#: residual bucket rather than a shot profile, so it is collected and reported
+#: but never offered as something a player can be filtered on; the frontend
+#: matchup decoder excludes it for the same reason.
+_UNQUALIFIABLE_DIET_SLICES = frozenset({"Misc"})
+
+#: The slices a criterion may name, per base.  A subset of the published
+#: catalogue above, so a slice that is collected but not filterable stays out
+#: of every user-facing vocabulary without leaving the collection tuples.
+PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
+    base: tuple(
+        slice_key
+        for slice_key in slices
+        if slice_key not in _UNQUALIFIABLE_DIET_SLICES
+    )
+    for base, slices in PLAYER_DIET_BASE_SLICES.items()
+})
+
+#: The human-readable label each qualifiable diet slice reads as in
+#: user-facing text.  The collection keys above are provider vocabulary and are
+#: what gets stored; this is the single backend source for how they are shown,
+#: so the frontend and a derived Target title cannot drift apart.
+PLAYER_DIET_SLICE_LABELS = MappingProxyType({
+    # shot_zones
+    "Restricted Area": "Restricted area",
+    "In The Paint (Non-RA)": "Paint (non-RA)",
+    "Mid-Range": "Mid-range",
+    "Corner 3": "Corner 3",
+    "Above the Break 3": "Above-break 3",
+    # play_types
+    "Transition": "Transition",
+    "Isolation": "Isolation",
+    "PRBallHandler": "P&R ball handler",
+    "PRRollMan": "P&R roll man",
+    "Spotup": "Spot up",
+    "Cut": "Cut",
+    "Handoff": "Handoff",
+    "OffScreen": "Off screen",
+    "Postup": "Post up",
+    "OffRebound": "Putback",
+    # shot_types
+    "Catch and Shoot": "Catch & shoot",
+    "Pullups": "Pull-up",
+    "Less Than 10 ft": "Inside 10 ft",
+    # assist_locations
+    "Arc3Assists": "Arc 3 assists",
+    "Corner3Assists": "Corner 3 assists",
+    "AtRimAssists": "At-rim assists",
+    "ShortMidRangeAssists": "Short mid assists",
+    "LongMidRangeAssists": "Long mid assists",
+})
+
+# A qualifiable slice with no label would render as a raw provider key, or
+# fail the read that renders it, long after the collector added it.  Fail at
+# import instead.
+_UNLABELLED_DIET_SLICES = sorted(
+    slice_key
+    for slices in PLAYER_DIET_QUALIFIER_SLICES.values()
+    for slice_key in slices
+    if slice_key not in PLAYER_DIET_SLICE_LABELS
+)
+if _UNLABELLED_DIET_SLICES:
+    raise RuntimeError(
+        "PLAYER_DIET_SLICE_LABELS is missing a label for: "
+        + ", ".join(_UNLABELLED_DIET_SLICES)
+    )
+
+# An exclusion naming a slice the catalogue no longer publishes is a silent
+# no-op, so a renamed slice would quietly become qualifiable again.
+_STALE_SLICE_EXCLUSIONS = _UNQUALIFIABLE_DIET_SLICES.difference(
+    slice_key
+    for slices in PLAYER_DIET_BASE_SLICES.values()
+    for slice_key in slices
+)
+if _STALE_SLICE_EXCLUSIONS:
+    raise RuntimeError(
+        "_UNQUALIFIABLE_DIET_SLICES names slices no base publishes: "
+        + ", ".join(sorted(_STALE_SLICE_EXCLUSIONS))
+    )
+
 _VOLUME_UNITS = {
     "play_types": "possessions",
     "shot_types": "field_goal_attempts",
@@ -1125,6 +1214,9 @@ class PlayerDietService:
 
 __all__ = [
     "PLAYER_DIET_BASES",
+    "PLAYER_DIET_BASE_SLICES",
+    "PLAYER_DIET_QUALIFIER_SLICES",
+    "PLAYER_DIET_SLICE_LABELS",
     "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
     "PLAYER_DIET_PUBLICATION_STREAMS",
     "PlayerDietBaseline",

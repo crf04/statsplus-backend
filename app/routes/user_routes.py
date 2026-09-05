@@ -285,6 +285,109 @@ def delete_saved_filter_set(saved_filter_set_id):
         'message': 'Saved filter set deleted'
     })
 
+def _target_body():
+    """Return the submitted JSON object for a target write."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise InvalidInputError("No target data was provided.")
+    return data
+
+
+@user_bp.route('/targets', methods=['GET'])
+@require_auth
+@route_error_boundary("Failed to retrieve targets.")
+def list_targets():
+    """
+    List the caller's Targets, newest first, each with its derived title.
+
+    Returns:
+        JSON response with the caller's targets
+    """
+    return jsonify({
+        'success': True,
+        'targets': user_service.list_targets(_authenticated_uid())
+    })
+
+@user_bp.route('/targets', methods=['POST'])
+@require_auth
+@route_error_boundary("Failed to save the target.")
+def create_target():
+    """
+    Create a Target pairing one opponent with one or more Qualifiers.
+
+    Expected JSON body:
+        {
+            "opponent": "OKC",
+            "qualifiers": [
+                {
+                    "base": "shot_zones",
+                    "slice_key": "Corner 3",
+                    "comparator": "at_or_above",
+                    "threshold": 0.4
+                }
+            ],
+            "note": "Leaks corner threes"
+        }
+
+    The title is derived from the opponent and the qualifiers; it is never
+    submitted.
+
+    Returns:
+        JSON response with the created target
+    """
+    firebase_uid = _authenticated_uid()
+    data = _target_body()
+
+    created = user_service.create_target(
+        firebase_uid,
+        opponent=data.get('opponent'),
+        qualifiers=data.get('qualifiers'),
+        note=data.get('note')
+    )
+    return jsonify({'success': True, 'target': created}), 201
+
+@user_bp.route('/targets/<int:target_id>', methods=['PATCH'])
+@require_auth
+@route_error_boundary("Failed to update the target.")
+def update_target(target_id):
+    """
+    Edit the Qualifiers and/or the note of one of the caller's Targets.
+
+    Expected JSON body, with either key or both:
+        {
+            "qualifiers": [...],
+            "note": "Rim, not threes"
+        }
+
+    The submitted object is forwarded as-is, so an absent key means unchanged
+    and a ``null`` note clears it.  The opponent is fixed.
+
+    Returns:
+        JSON response with the updated target
+    """
+    firebase_uid = _authenticated_uid()
+    data = _target_body()
+
+    updated = user_service.update_target(firebase_uid, target_id, changes=data)
+    return jsonify({'success': True, 'target': updated})
+
+@user_bp.route('/targets/<int:target_id>', methods=['DELETE'])
+@require_auth
+@route_error_boundary("Failed to delete the target.")
+def delete_target(target_id):
+    """
+    Delete one of the caller's Targets and its Qualifiers.
+
+    Returns:
+        JSON response confirming the deletion
+    """
+    user_service.delete_target(_authenticated_uid(), target_id)
+
+    return jsonify({
+        'success': True,
+        'message': 'Target deleted'
+    })
+
 @user_bp.route('/admin/stats', methods=['GET'])
 @require_admin
 @route_error_boundary("Failed to retrieve admin statistics.")

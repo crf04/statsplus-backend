@@ -2098,6 +2098,21 @@ def _create_publication_rebuilds_table(connection: Connection) -> None:
     PublicationRebuild.__table__.create(connection, checkfirst=True)
 
 
+def _create_targets_tables(connection: Connection) -> None:
+    """Create account-private Targets and their Qualifiers (#244).
+
+    Two tables so a Target's Qualifiers stay first-class rows rather than an
+    opaque blob.  Both carry their own indexes: the newest-first listing index
+    and the per-account unique index on ``(opponent, qualifier_signature)`` on
+    the parent, and the ordered per-target read index on the child.  ``targets``
+    is created first because the child's foreign key references it.
+    """
+    from app.models.target import Target, TargetQualifier
+
+    Target.__table__.create(connection, checkfirst=True)
+    TargetQualifier.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2210,6 +2225,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         49,
         "049_create_publication_rebuilds",
         _create_publication_rebuilds_table,
+    ),
+    Migration(
+        50,
+        "050_create_targets",
+        _create_targets_tables,
     ),
 )
 
