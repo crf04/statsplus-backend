@@ -378,19 +378,19 @@ def test_empty_teams_against_filter_matches_no_games(service, game_logs):
     assert result.empty
 
 
-def test_a_specific_opponent_filter_keeps_only_games_against_that_team(
+def test_a_specific_opponent_tricode_keeps_only_games_against_that_team(
     service, game_logs
 ):
-    result = run(service.apply_filters(game_logs, make_query(opponent_filter="GSW")))
+    result = run(service.apply_filters(game_logs, make_query(opponent_tricode="GSW")))
 
     assert result["GAME_ID"].tolist() == ["0002", "0003"]
 
 
-def test_a_specific_opponent_filter_composes_with_the_other_filters(
+def test_a_specific_opponent_tricode_composes_with_the_other_filters(
     service, game_logs
 ):
     filter_params = make_query(
-        opponent_filter="GSW",
+        opponent_tricode="GSW",
         minutes_filter=[25, 48],
         location_filter="Away",
         game_filter=2,
@@ -402,12 +402,12 @@ def test_a_specific_opponent_filter_composes_with_the_other_filters(
     assert result["GAME_ID"].tolist() == ["0002"]
 
 
-def test_a_specific_opponent_filter_narrows_the_ranked_opponent_set(
+def test_a_specific_opponent_tricode_narrows_the_ranked_opponent_set(
     service, game_logs
 ):
     result = run(
         service.apply_filters(
-            game_logs, make_query(opponent_filter="BOS"), teams_against={"GSW"}
+            game_logs, make_query(opponent_tricode="BOS"), teams_against={"GSW"}
         )
     )
 

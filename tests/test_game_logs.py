@@ -54,13 +54,13 @@ def test_game_log_query_trims_and_validates_canonical_season():
 
 
 def test_game_log_query_normalizes_one_specific_opponent_tricode():
-    query = GameLogQuery(season_filter="2024-25", opponent_filter=" okc ")
+    query = GameLogQuery(season_filter="2024-25", opponent_tricode=" okc ")
 
-    assert query.opponent_filter == "OKC"
+    assert query.opponent_tricode == "OKC"
 
 
 def test_game_log_query_defaults_to_no_specific_opponent():
-    assert GameLogQuery(season_filter="2024-25").opponent_filter is None
+    assert GameLogQuery(season_filter="2024-25").opponent_tricode is None
 
 
 @pytest.mark.parametrize("season", ["", "potato", "2024-27"])
@@ -84,8 +84,8 @@ def test_game_log_query_rejects_nonfinite_playstyle_range(value):
         {"date_filter": "not-a-date"},
         {"teams_against": ["OPP_PTS"], "rank_filter": []},
         {"teams_against": ["OPP_PTS"], "rank_filter": ["3", "9"]},
-        {"opponent_filter": "XXX"},
-        {"opponent_filter": ""},
+        {"opponent_tricode": "XXX"},
+        {"opponent_tricode": ""},
         {"game_filter": 0},
         {"rank_filter": ["abc"]},
         {"self_filters": {"PTS": "25"}},
@@ -401,7 +401,7 @@ def test_service_returns_empty_arrays_when_no_games_match(
     assert len(result["season_averages"]) == 1
 
 
-def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
+def test_service_returns_no_logs_when_opponent_tricode_resolves_empty(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
@@ -424,7 +424,7 @@ def test_a_specific_opponent_keeps_only_games_against_that_team(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
     service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
-    query = GameLogQuery(season_filter="2024-25", opponent_filter="MIA")
+    query = GameLogQuery(season_filter="2024-25", opponent_tricode="MIA")
 
     result = service.get_filtered_logs("LeBron James", query)
 
@@ -445,7 +445,7 @@ def test_a_specific_opponent_narrows_the_rank_based_opponent_filter(
             season_filter="2024-25",
             teams_against=["OPP_PTS"],
             rank_filter=[1],
-            opponent_filter=opponent,
+            opponent_tricode=opponent,
         )
         return [
             row["MATCHUP"]
@@ -867,11 +867,11 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
         )
 
     response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&opponent_filter=okc"
+        "/api/games/game_logs?player_name=LeBron%20James&opponent_tricode=okc"
     )
 
     assert response.status_code == 200
-    assert captured["query"].opponent_filter == "OKC"
+    assert captured["query"].opponent_tricode == "OKC"
 
 
 @pytest.mark.parametrize(
@@ -880,8 +880,8 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
         "player_name=LeBron%20James&minutes_filter=not-a-range",
         "player_name=LeBron%20James&location_filter=home",
         "player_name=LeBron%20James&teams_against[]=OPP_PTS",
-        "player_name=LeBron%20James&opponent_filter=XXX",
-        "player_name=LeBron%20James&opponent_filter=",
+        "player_name=LeBron%20James&opponent_tricode=XXX",
+        "player_name=LeBron%20James&opponent_tricode=",
         "player_name=LeBron%20James&date_filter=not-a-date",
         "player_name=LeBron%20James&game_filter=0",
     ],

@@ -247,7 +247,7 @@ class GameLogQuery(BaseModel):
     date_filter: date | None = None
     teams_against: list[str] = Field(default_factory=list)
     rank_filter: list[int] = Field(default_factory=list)
-    opponent_filter: str | None = None
+    opponent_tricode: str | None = None
     location_filter: Location = "Both"
     game_filter: int | None = Field(default=None, ge=1)
     playstyle_range: tuple[float, float] = (0.0, 200.0)
@@ -311,9 +311,9 @@ class GameLogQuery(BaseModel):
                 ) from error
         return ranks
 
-    @field_validator("opponent_filter", mode="before")
+    @field_validator("opponent_tricode", mode="before")
     @classmethod
-    def normalize_opponent_filter(cls, value: Any) -> str | None:
+    def normalize_opponent_tricode(cls, value: Any) -> str | None:
         """Require one canonical NBA tricode naming a single opponent.
 
         This is a filter on the opponent recorded against each game log, not
@@ -324,11 +324,11 @@ class GameLogQuery(BaseModel):
         if value is None:
             return None
         if not isinstance(value, str):
-            raise ValueError("opponent_filter must be an NBA team tricode")
+            raise ValueError("opponent_tricode must be an NBA team tricode")
         tricode = value.strip().upper()
         if tricode not in NBA_TEAM_TRICODES:
             raise ValueError(
-                f"opponent_filter {value!r} is not an NBA team tricode"
+                f"opponent_tricode {value!r} is not an NBA team tricode"
             )
         return tricode
 
