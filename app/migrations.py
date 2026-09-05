@@ -2113,6 +2113,18 @@ def _create_targets_tables(connection: Connection) -> None:
     TargetQualifier.__table__.create(connection, checkfirst=True)
 
 
+def _create_publication_repair_groups(connection: Connection) -> None:
+    """Persist immutable atomic publication repair group declarations."""
+
+    from app.models.collection_control import (
+        PublicationRepairGroup,
+        PublicationRepairGroupMember,
+    )
+
+    PublicationRepairGroup.__table__.create(connection, checkfirst=True)
+    PublicationRepairGroupMember.__table__.create(connection, checkfirst=True)
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2230,6 +2242,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         50,
         "050_create_targets",
         _create_targets_tables,
+    ),
+    Migration(
+        51,
+        "051_publication_repair_groups",
+        _create_publication_repair_groups,
     ),
 )
 

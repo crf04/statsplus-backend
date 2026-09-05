@@ -3838,7 +3838,16 @@ active version for rollback and rejecting stale composition workers. Accepted
 observations enqueue a deduplicated composition job immediately, while
 `reconcile_pending` is the scheduled backstop. Composition derives its gate
 from registered required observations plus league/Base completeness evidence;
-a caller-provided `complete` flag alone cannot advance a pointer. Production
+a caller-provided `complete` flag alone cannot advance a pointer. A manifest
+may additionally declare one immutable atomic repair group: the set of streams
+whose replacement must land together because their existing rollback targets
+are the defect being repaired. The declaration is bound into the manifest
+checksum, is stored as normalized group/member rows, and holds its members'
+composition jobs `queued` instead of promoting them independently -- the
+worker skips them and `compose_from_observations` refuses them with
+`grouped_repair_pending`. Collector reads see the group filtered to the
+surfaces they already hold and never its pointer guards. See
+[PUBLICATION_REPAIR_GROUPS.md](PUBLICATION_REPAIR_GROUPS.md). Production
 requires `COLLECTOR_SIGNING_SECRET`; only non-production credential-free runs
 may use a process-local key.
 
