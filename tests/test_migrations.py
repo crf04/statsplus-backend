@@ -257,8 +257,9 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert upgraded.current_version == 49
+    assert upgraded.current_version == 50
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -528,6 +529,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -607,6 +609,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -614,6 +617,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
             "schema_migrations",
             "users",
             "saved_filter_sets",
+            "targets",
+            "target_qualifiers",
             "data_refresh_jobs",
             "athlete_catalog",
             "athlete_catalog_freshness",
@@ -814,6 +819,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     with engine.connect() as connection:
         rows = {
@@ -1056,6 +1062,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (47, "047_create_saved_filter_sets"),
             (48, "048_drop_legacy_ranking_tables"),
             (49, "049_create_publication_rebuilds"),
+            (50, "050_create_targets"),
         ]
 
 
@@ -1117,6 +1124,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1203,6 +1211,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1273,6 +1282,7 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1333,7 +1343,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 49
+    assert repaired.current_version == 50
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1382,8 +1392,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert upgraded.current_version == 49
+    assert upgraded.current_version == 50
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1465,8 +1476,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert upgraded.current_version == 49
+    assert upgraded.current_version == 50
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1549,6 +1561,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1613,8 +1626,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert upgraded.current_version == 49
+    assert upgraded.current_version == 50
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1716,6 +1730,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
 
 
@@ -1758,7 +1773,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 49
+    assert result.current_version == 50
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -1835,6 +1850,8 @@ def test_app_factory_migrates_configured_application_database(tmp_path, monkeypa
             "schema_migrations",
             "users",
             "saved_filter_sets",
+            "targets",
+            "target_qualifiers",
             "data_refresh_jobs",
             "athlete_catalog",
             "athlete_catalog_freshness",
@@ -2076,6 +2093,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -2146,10 +2164,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert upgraded.current_version == 49
+    assert upgraded.current_version == 50
     assert repeated.applied == ()
-    assert repeated.current_version == 49
+    assert repeated.current_version == 50
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2229,6 +2248,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -2302,8 +2322,9 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert upgraded.current_version == 49
+    assert upgraded.current_version == 50
 
     for table_name in (
         "team_matchup_facts",
@@ -2363,13 +2384,14 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-10:] == [
+    assert history[-11:] == [
         (40, "040_projection_archive"),
         (41, "041_projection_archive_transitions"),
         (42, "042_team_matchup_provider_provenance"),
@@ -2380,6 +2402,7 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (47, "047_create_saved_filter_sets"),
         (48, "048_drop_legacy_ranking_tables"),
         (49, "049_create_publication_rebuilds"),
+        (50, "050_create_targets"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2389,7 +2412,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 49
+    assert result.current_version == 50
     inspector = inspect(engine)
     columns = {
         column["name"]
@@ -2495,8 +2518,9 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
-    assert applied.current_version == 49
+    assert applied.current_version == 50
     assert repeated.applied == ()
     with engine.connect() as connection:
         row = connection.execute(
@@ -2546,6 +2570,7 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "047_create_saved_filter_sets",
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -2630,6 +2655,7 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
     assert upgraded.applied == (
         "048_drop_legacy_ranking_tables",
         "049_create_publication_rebuilds",
+        "050_create_targets",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -2658,6 +2684,62 @@ def test_legacy_ranking_drop_migration_is_idempotent_on_a_fresh_database(tmp_pat
         assert not inspector.has_table(table)
 
 
+def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
+    """The target tables and their indexes are additive and idempotent."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'at-049.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            "app.migrations.MIGRATIONS",
+            tuple(migration for migration in MIGRATIONS if migration.version <= 49),
+        )
+        assert run_migrations(engine).current_version == 49
+    assert not inspect(engine).has_table("targets")
+    assert not inspect(engine).has_table("target_qualifiers")
+
+    upgraded = run_migrations(engine)
+    repeated = run_migrations(engine)
+
+    assert upgraded.applied == ("050_create_targets",)
+    assert repeated.applied == ()
+
+    inspector = inspect(engine)
+    assert {column["name"] for column in inspector.get_columns("targets")} == {
+        "id", "firebase_uid", "opponent", "note", "qualifier_signature",
+        "created_at", "updated_at",
+    }
+    assert {
+        column["name"] for column in inspector.get_columns("target_qualifiers")
+    } == {
+        "id", "target_id", "position", "base", "slice_key", "comparator",
+        "threshold",
+    }
+
+    target_indexes = {
+        index["name"]: index for index in inspector.get_indexes("targets")
+    }
+    assert "idx_targets_owner_created" in target_indexes
+    # The per-account duplicate rule is a database guarantee, not only the
+    # service's pre-check, and it reads the qualifiers as one signature.
+    duplicate_rule = target_indexes["uq_targets_owner_opponent_signature"]
+    assert duplicate_rule["unique"]
+    assert duplicate_rule["column_names"] == [
+        "firebase_uid", "opponent", "qualifier_signature",
+    ]
+    assert "idx_target_qualifiers_target" in {
+        index["name"] for index in inspector.get_indexes("target_qualifiers")
+    }
+
+    # Both cascades survive the upgrade, so deleting an account cannot strand
+    # its targets or their qualifiers.
+    assert inspector.get_foreign_keys("targets")[0]["options"]["ondelete"] == (
+        "CASCADE"
+    )
+    assert inspector.get_foreign_keys("target_qualifiers")[0]["options"][
+        "ondelete"
+    ] == "CASCADE"
+
+
 def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_path):
     """The durable rebuild table is additive and idempotent."""
 
@@ -2673,7 +2755,10 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
     upgraded = run_migrations(engine)
     repeated = run_migrations(engine)
 
-    assert upgraded.applied == ("049_create_publication_rebuilds",)
+    assert upgraded.applied == (
+        "049_create_publication_rebuilds",
+        "050_create_targets",
+    )
     assert repeated.applied == ()
     inspector = inspect(engine)
     columns = {
