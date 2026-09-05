@@ -6,9 +6,9 @@
 # gate install the complete analysis toolchain.
 nba_api==1.11.4
 numpy==2.4.6
-pandas==2.2.2
+pandas==3.0.5
 scipy==1.17.1
-statsmodels==0.14.6
+statsmodels==0.15.0
 scikit-learn==1.9.0
 matplotlib==3.11.1
 seaborn==0.13.2
