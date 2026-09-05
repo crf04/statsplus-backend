@@ -119,10 +119,10 @@ over is frozen, not superseded.
 | `opp_shooting_zone` | `exact_shot_zones_opponent_season` | yes | fenced | yes — superseded | none |
 | `processed_team_assists` | `assist_locations_season` | yes | dropped (#199) | yes — superseded | none |
 | `pbp_opponent_stats` | `assist_locations_season` | yes | fenced | n/a (refresh input) | `DataService.process_assist_data` input |
-| `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | `PlayerService.get_all_players`, player play-type profile, NL parser player names |
+| `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | NL parser player names; player HTTP reads use Athlete Catalog + Player Diet (#231) |
 | `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | n/a | player zone-shooting profile |
-| `processed_player_assists` | `player_assist_locations` | no | still refreshed | n/a | player assist-location profile |
-| `pbp_player_stats` | `player_assist_locations` | no | still refreshed | n/a | `DataService.process_assist_data` input |
+| `processed_player_assists` | `player_assist_locations` | no | not collected by `update_database` (#231) | yes — superseded | none |
+| `pbp_player_stats` | `player_assist_locations` | no | not collected by `update_database` (#231) | n/a (retired refresh input) | none |
 | `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables, `database_utils` |
 
 No **frozen** row remains: the Team Profile read cutover (crf04/statsplus#45)
@@ -253,6 +253,76 @@ recomposition and a new parity run, not re-enabling the legacy writer.
 | `stale_composition` | 409 | `expected_fence` does not match; re-read and retry. |
 | `publication_checksum_mismatch` | 400 | Target publication payload does not match its checksum. |
 | `reason_required` | 400 | Empty reason. |
+| `publication_family_coupled` | 409 | This stream belongs to a coupled publication family; use the family route below. |
+
+### Coupled publication families
+
+`traditional_opponent_season` and `traditional_opponent_l15` are one product
+fact: the Opposing Team Profile, Team Filters, and the Matchups Defense Sheet
+would otherwise observe two rendered generations of the same surface at once.
+Both the per-stream rollback route above and `activate_stream` therefore
+refuse them with `publication_family_coupled` once the family is bound, and
+recovery goes through the family route, which moves both windows or neither.
+
+**Do not invoke that route for `traditional_opponent` before reading
+"Recovering the traditional-opponent family to v1" below.** This release reads
+only v2, so rolling the family back to v1 requires restoring the retained
+dual-format release — master merge commit
+`88945eb1f2238744ce768424f2eb9710b95e9ce5` (PR #239), Railway deployment
+`fd8d71b3-58cf-418c-8af2-4e28299d4820` — *first*. Invoked under this release
+the route refuses with `publication_format_unsupported` and moves nothing.
+
+```
+POST /admin/collection/publication-rebuilds/<family>/rollback
+```
+
+The same coupling applies in the forward direction: after the initial ledger
+cutover binds each pointer, the only way to advance this family is a durable
+Publication Rebuild, never a per-stream activation.
+
+### Recovering the traditional-opponent family to v1
+
+The deployed code reads **only** the v2 traditional-opponent format. Recovery
+to v1 is therefore code first, data second, and must be done in this order:
+
+| Step | Action |
+| --- | --- |
+| 1 | Restore the retained dual-format application release: master merge commit `88945eb1f2238744ce768424f2eb9710b95e9ce5` (PR #239), Railway deployment `fd8d71b3-58cf-418c-8af2-4e28299d4820`. That release reads both v1 and v2. |
+| 2 | Under that release, roll the family back atomically: `POST /admin/collection/publication-rebuilds/traditional_opponent/rollback`. |
+
+Attempting step 2 first is refused, not half-completed. Under the strict
+release the family rollback fails with `publication_format_unsupported` before
+either pointer moves, because activating a pair the running code cannot read
+would take the Opposing Team Profile, Team Filters, and the Matchups Defense
+Sheet down rather than restore them.
+
+The retained dual-format release must not be pruned while any v1 publication
+is still a possible rollback destination. The v1 pair remains the
+`previous_publication_id` of both pointers; this contraction modifies and
+deletes nothing — neither the immutable v1 payloads nor their audit evidence.
+
+| Code | HTTP | What it means |
+| --- | --- | --- |
+| `publication_format_unsupported` | 400 | The target pair is in a format this release does not read. Restore the retained dual-format release first. |
+| `publication_family_coupled` | 409 | A per-stream operation would split the family. |
+| `publication_family_authority_mismatch` | 400 | The target pair does not rest on one season, cutoff, and authority. |
+
+## Driving a publication rebuild
+
+Starting a rebuild records the approved intent and returns `202`; it does not
+execute it, exactly as accepting an observation enqueues a composition job
+without composing it. A worker pass drives the durable row through
+`composing`, `validating`, and `promoting`:
+
+```
+python scripts/publication_rebuild.py --database-url … --family traditional_opponent
+python scripts/publication_rebuild.py --database-url … --status <rebuild_id>
+```
+
+The pass is restart-safe. A worker that dies mid-phase leaves a row whose
+lease expires; the next pass reclaims it and resumes from the phase the row
+records, and every state write is fenced by the writer's claimed generation,
+so a revived worker can never overwrite the successor that took over.
 
 ## Evidence that must exist before production activation
 

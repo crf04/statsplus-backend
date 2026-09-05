@@ -13,6 +13,7 @@ from app.errors import (
     AuthenticationRequiredError,
     AuthorizationError,
     ConflictError,
+    DuplicateOperationError,
     InvalidInputError,
     InvalidTokenError,
     RateLimitedError,
@@ -86,11 +87,23 @@ def _control_error(error: Exception) -> AppError:
         "credential_delivery_unavailable",
     }:
         return ResourceNotFoundError("The collection resource was not found.", detail=reason)
+    if reason == "duplicate_active_operation":
+        # The API contract already publishes this exact meaning as its own
+        # 409 code, so a caller learns "one is already in flight" from the
+        # code rather than from a detail field it is not promised.
+        return DuplicateOperationError(
+            "A rebuild for this publication family is already in progress.",
+            detail=reason,
+        )
     if reason in {
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
         "grouped_repair_pending",
+        # A rebuild that lost a race with durable state, or a per-stream
+        # request that would split a coupled family.
+        "stale_publication_family", "rebuild_lease_held",
+        "publication_family_coupled",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)
@@ -601,6 +614,104 @@ def scoped_repair():
     except (KeyError, TypeError, ValueError) as error:
         raise _control_error(error) from error
     return jsonify({"job_id": result.job_id, "composition_job_id": job.job_id, "status": job.status}), 202
+
+
+def _family_expectation(body):
+    """Read the expected active pair and fences from an operator request.
+
+    The pair is required.  A rebuild that could run without one would be a
+    blind write: the operator would be approving whatever happened to be
+    active when the worker got to it.
+    """
+
+    from app.services.traditional_opponent_rebuild import FamilyExpectation
+
+    expected = body["expected"]
+    if not isinstance(expected, dict):
+        raise InvalidInputError("expected must be an object")
+    season, l15 = expected["season"], expected["l15"]
+    return FamilyExpectation(
+        season_publication_id=str(season["publication_id"]),
+        season_fence=int(season["fence"]),
+        l15_publication_id=str(l15["publication_id"]),
+        l15_fence=int(l15["fence"]),
+    )
+
+
+@collection_bp.post("/admin/collection/publication-rebuilds")
+@require_admin
+@route_error_boundary("Failed to start the publication rebuild.")
+def start_publication_rebuild():
+    body = _body()
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        cutoff = body.get("cutoff")
+        if cutoff is not None:
+            cutoff = datetime.fromisoformat(str(cutoff).replace("Z", "+00:00"))
+            if cutoff.tzinfo is None:
+                raise InvalidInputError("cutoff must include a timezone")
+        result = _service("collection_operations").start_publication_rebuild(
+            str(body["family"]),
+            actor=actor,
+            reason=reason,
+            expected=_family_expectation(body),
+            season=(
+                None if body.get("season") is None else str(body["season"])
+            ),
+            cutoff=cutoff,
+        )
+        rebuild = result.resource
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    except (KeyError, TypeError, ValueError) as error:
+        raise _control_error(error) from error
+    return jsonify({
+        "job_id": result.job_id,
+        "rebuild_id": rebuild.rebuild_id,
+        "state": rebuild.state,
+        "target_format": rebuild.target_format,
+    }), 202
+
+
+@collection_bp.get(
+    "/admin/collection/publication-rebuilds/<family>/<rebuild_id>"
+)
+@require_admin
+@route_error_boundary("Failed to retrieve the publication rebuild status.")
+def publication_rebuild_status(family: str, rebuild_id: str):
+    try:
+        return jsonify(
+            _service("collection_operations").publication_rebuild_status(
+                family, rebuild_id
+            )
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+
+
+@collection_bp.post("/admin/collection/publication-rebuilds/<family>/rollback")
+@require_admin
+@route_error_boundary("Failed to roll back the publication family.")
+def rollback_publication_family(family: str):
+    body = _body()
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").rollback_publication_family(
+            family, actor=actor, reason=reason
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    return jsonify({
+        "job_id": result.job_id,
+        "family": family,
+        "publication_ids": [
+            version.publication_id for version in result.resource
+        ],
+    }), 202
 
 
 @collection_bp.post("/admin/collection/cycles/<cycle_id>/finish")

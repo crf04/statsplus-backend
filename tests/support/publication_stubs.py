@@ -15,10 +15,33 @@ from app.services.database_first_activation import (
 )
 from app.services.team_filter_rankings import TeamFilterRankingService
 from app.services.team_service import TeamService
+from app.services.traditional_opponent_publications import (
+    TRADITIONAL_OPPONENT_V2,
+)
+
+#: The traditional-opponent taxonomy this deployment reads.  Consumer fixtures
+#: build from it rather than from the ledger's historical tuple, so they seed
+#: the format production actually serves.
+TRADITIONAL_METRICS = TRADITIONAL_OPPONENT_V2.metrics
 
 SEASON = "2025-26"
 RETRIEVED_AT = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
 GAME_ID = "0022500001"
+
+
+def traditional_per48(*, offensive_rebounds=1.0, defensive_rebounds=3.0, **overrides):
+    """One coherent v2 traditional block.
+
+    The rebound total is derived from the split exactly as composition derives
+    it, so the block satisfies the identity the decoder proves.
+    """
+
+    values = {metric: 2.0 for metric in TRADITIONAL_METRICS}
+    values.update(overrides)
+    values["offensive_rebounds"] = offensive_rebounds
+    values["defensive_rebounds"] = defensive_rebounds
+    values["rebounds"] = offensive_rebounds + defensive_rebounds
+    return values
 
 
 def row(team_id, tricode, per48):

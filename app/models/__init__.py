@@ -62,6 +62,7 @@ def create_all_tables():
 # Import all models here to ensure they're registered with Base.metadata
 from .user import User  # noqa: E402
 from .saved_filter_set import SavedFilterSet  # noqa: E402
+from .target import Target, TargetQualifier  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
 from .athlete_catalog import AthleteCatalog, AthleteCatalogFreshness  # noqa: E402
 from .event_catalog import EventCatalogEntry, EventCatalogRefresh  # noqa: E402
@@ -140,6 +141,7 @@ from .collection_control import (  # noqa: E402
     ValidationSummary,
     GovernedNotApplicable,
     OperatorJob,
+    PublicationRebuild,
     CredentialDelivery,
 )
 
@@ -149,6 +151,8 @@ __all__ = [
     'create_all_tables',
     'User',
     'SavedFilterSet',
+    'Target',
+    'TargetQualifier',
     'DataRefreshJob',
     'AthleteCatalog',
     'AthleteCatalogFreshness',
@@ -172,6 +176,7 @@ __all__ = [
     'ClosingProjectionMembership',
     'ProjectionArchiveScopeLock',
     'ProviderPoll',
+    'PublicationRebuild',
     'ProjectionCollectionLease',
     'ProjectionCollectionProviderState',
     'ProjectionProviderSnapshot',

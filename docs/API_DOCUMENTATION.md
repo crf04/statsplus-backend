@@ -62,7 +62,7 @@ The public error categories and HTTP statuses are:
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
-| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh for the same operation is already queued or running. |
+| Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh or publication rebuild for the same operation is already queued or running. |
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
@@ -651,6 +651,12 @@ Each stored pool player has this shape:
     "shot_types": [],
     "assist_locations": []
   },
+  "diet_thin": {
+    "play_types": false,
+    "shot_zones": true,
+    "shot_types": true,
+    "assist_locations": true
+  },
   "scores": {
     "PTS": {
       "season": {
@@ -697,6 +703,20 @@ exactly the key set of `scores`; in current mode it equals `posted_markets`,
 and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
+
+`diet_thin` carries one verdict per Diet Base: whether that Base's evidence for
+this player is too slight to lean on. It is the same rule a score component
+marks itself `thin` with, asked of the whole Base rather than of the slices one
+component consumed, and it is always present for all four Bases -- a component
+only exists where its market was posted and its window available, so `scores`
+cannot answer this on its own. A Base is thin when its stored Diet is not a
+usable partition of that Base (including a Base with no stored fact at all,
+which no score would consume), when exact Synergy play-type coverage falls
+below 0.85, when any stored fact in the Base has fewer than
+`MATCHUP_SCORE_MIN_GAMES` (default 5) games, when the player's total Base
+volume per game falls below `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME`, or when
+the player has no Season rate or fewer than `MATCHUP_SCORE_MIN_GAMES` Season
+games. It is additive; it filters nothing and changes no other field.
 
 Player Diet facts are unthresholded raw Season shares and volumes; `share` and
 `volume` are never filtered or floored. Each fact additionally carries
@@ -1219,6 +1239,11 @@ averages no longer include a `PLUS_MINUS` cell, and response rows carry no
 contract so the durable PBP per-game path (whose upstream boxscore seam exposes
 no plus/minus) is database-first without fabricating evidence.
 
+One specific opponent (#243): `opponent_tricode` names a single opponent by NBA
+tricode, so a caller can read a player's games against one team without ranking
+opponents. Its value must be one of the 30 canonical NBA tricodes; anything else
+joins the malformed values of the #9 note and returns a `400` `invalid_input`.
+
 ### Contract and migration note (#9)
 
 - Filters are validated into one typed `GameLogQuery` before the service runs.
@@ -1245,6 +1270,7 @@ Query parameters:
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings |
 | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
+| `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
@@ -1267,7 +1293,11 @@ curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minut
 GET /api/players
 ```
 
-Returns a JSON array of player names from the local player play-type table.
+Returns a JSON array of canonical current-season Athlete Catalog display names
+that have durable Player Diet play-type facts. The request is database-only and
+does not call an upstream provider. The bundled read-only demo database carries
+no durable Athlete Catalog or Player Diet schema, so this route returns `[]`
+there instead of consulting its legacy `player_play_types` table.
 
 ### Get Player Profile
 
@@ -1280,6 +1310,22 @@ Query parameters:
 - `player_name` is required.
 - `category` is required by the service. Supported values include `Playtypes`, `assists`, `Archetype`, `Shooting Type`, and `Zone Shooting`.
 - `opp_team` is used by `Archetype`.
+
+For `Playtypes` and `assists`, player names are matched against the
+current-season Athlete Catalog without regard to case, punctuation, or
+diacritics. The other categories retain their historical name lookup.
+`Playtypes` keeps the historical object shape while its `<PlayType>%` values
+are durable Synergy possession shares multiplied by 100; its player name and
+team are the current canonical catalog values. `assists` keeps its historical
+one-element array shape and derives two-point, three-point, and `+` values from
+durable assist-location facts and Player Diet league baselines. Missing
+play-type slices are returned as zero. The assist object retains its fixed key
+set, using JSON `null` for a missing location, a total requiring a missing
+location, or a `+` value whose complete league baseline is unavailable; those
+states are never represented by a synthetic zero. Neither durable category
+calls an upstream provider at request time. On the
+bundled demo database these two durable-only categories report a missing player;
+they never fall back to `player_play_types` or `processed_player_assists`.
 
 Example:
 
@@ -1346,9 +1392,22 @@ are centred on `1.0`.
 `Traditional` derives `OPP_STL+BLK`, `OPP_FG_PCT`, and `OPP_FG3_PCT` from the
 published counts; `Assists` derives `AssistPoints` as
 `2 x TwoPtAssists + 3 x ThreePtAssists`; `Shooting Type` returns one object
-per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.  `OPP_OREB` and
-`OPP_DREB` are absent, because the publications carry no rebound split; the
-panel renders them as `N/A`.  A rate a team has no denominator for -- a play
+per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.
+
+`Traditional` also serves the opponent rebound split -- `OPP_OREB`,
+`OPP_OREB_RANK`, `OPP_OREB_vs_avg_pct`, `OPP_DREB`, `OPP_DREB_RANK`, and
+`OPP_DREB_vs_avg_pct` -- with the same ascending ranks, competition ties, and
+league-average formula as every other column.  The values are player-credited
+per-48 counts, and `OPP_OREB + OPP_DREB` always equals `OPP_REB` exactly.
+The six properties are additive: the route, query parameters, optional
+authentication, current-season selection, error contract, and every existing
+response field are unchanged.  A publication whose format predates the split
+omits all six rather than reporting zero, and the panel renders them as `N/A`;
+a fabricated zero would be indistinguishable from a defense that allowed none.
+Team Filters and the Matchups Defense Sheet keep their existing projection
+catalogs and do not expose the split.
+
+A rate a team has no denominator for -- a play
 type it faced zero possessions of -- is absent the same way, for that team
 only: it is neither ranked as the stingiest defense nor counted in the league
 average the other teams are measured against.
@@ -2028,7 +2087,41 @@ GET /api/admin/collection/credential-deliveries/<delivery_id>
 GET /api/admin/collection/reconciliation
 GET /api/admin/collection/diagnostics
 POST /api/admin/collection/reconciliation/<item_id>/resolve
+POST /api/admin/collection/publication-rebuilds
+GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>
+POST /api/admin/collection/publication-rebuilds/<family>/rollback
 ```
+
+`POST /api/admin/collection/publication-rebuilds` starts one durable
+publication-format rebuild. The body names the publication `family`, an
+operator `reason`, and the exact `expected` active pair and fences being
+approved (`{"season": {"publication_id", "fence"}, "l15": {...}}`); optional
+`season` and `cutoff` are assertions against that pair and are never accepted
+as replacement authority. The request never names a rendered format: the
+deployed code owns the target, so an operator cannot ask for one this
+deployment cannot produce or validate. The response is `202` with
+`job_id`, `rebuild_id`, `state`, and `target_format`.
+
+The `202` records the approved rebuild; it does not execute it. A worker pass
+(`scripts/publication_rebuild.py`) drives the durable row through its phases
+and is safe to re-run after a restart.
+
+`GET /api/admin/collection/publication-rebuilds/<family>/<rebuild_id>` returns
+the bounded status: one of `queued`, `composing`, `validating`, `promoting`,
+`succeeded`, or `failed`, plus counts, expected/staged/promoted publication
+IDs and checksums, the target format fingerprint, an actor fingerprint,
+timestamps, and a safe `error_code`. It never returns game identifiers,
+provider payloads, credentials, actors, or stack traces.
+
+`POST /api/admin/collection/publication-rebuilds/<family>/rollback` moves every
+window of the family back one generation atomically. A per-stream rollback of
+a coupled family is refused, and a target this deployment can no longer read
+is refused as `publication_format_unsupported`.
+
+A conflicting active rebuild for the family is `409
+duplicate_active_operation`.  A stale expected pair, a held worker lease, and a
+per-stream request that would split the family are `409 operation_conflict`; an
+unknown rebuild is `404`.
 
 `POST /api/collector/observations` accepts one complete normalized envelope
 and payload as a gzip-compressed JSON document (`Content-Encoding: gzip`). The
@@ -2310,6 +2403,517 @@ Validation and conflicts:
   case-insensitively) and for exceeding the cap of 100 saved items per
   account.
 
+### Targets
+
+A Target is an account-private record pairing one opponent with the Qualifiers
+a player has to meet, plus an optional note. It stores no defensive reading and
+has no season. Every route requires Firebase auth and operates only on the
+caller's own rows.
+
+```http
+GET    /api/user/targets
+POST   /api/user/targets
+PATCH  /api/user/targets/<id>
+DELETE /api/user/targets/<id>
+GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
+GET    /api/user/targets/<id>/backtest
+```
+
+`GET` returns the caller's items newest-first:
+
+```json
+{
+  "success": true,
+  "targets": [
+    {
+      "id": 7,
+      "opponent": "OKC",
+      "title": "OKC vs Corner 3 ≥ 40%, Transition ≥ 20%",
+      "note": "Leaks corner threes",
+      "qualifiers": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "comparator": "at_or_above",
+          "threshold": 0.4
+        },
+        {
+          "base": "play_types",
+          "slice_key": "Transition",
+          "comparator": "at_or_above",
+          "threshold": 0.2
+        }
+      ],
+      "created_at": "2026-09-05T12:00:00+00:00",
+      "updated_at": "2026-09-05T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+`POST {"opponent", "qualifiers", "note"}` returns `201` with
+`{"success": true, "target": {...}}`. `PATCH {"qualifiers", "note"}` edits one
+item with either key or both and returns `200` with the same single-item
+envelope. `DELETE` returns
+`{"success": true, "message": "Target deleted"}`.
+
+A Qualifier is `{"base", "slice_key", "comparator", "threshold"}`:
+
+- `base` is one of the player diet bases: `assist_locations`, `play_types`,
+  `shot_types`, `shot_zones`.
+- `slice_key` is a qualifiable slice of that base, for example `Corner 3` for
+  `shot_zones` or `Transition` for `play_types`. A real slice key borrowed from
+  another base is rejected. The accepted keys per base are exactly the rows of
+  the label table below; the `Misc` play type is collected and reported but is
+  a residual bucket rather than a shot profile, so it is not a Qualifier slice
+  and is rejected with `400 invalid_input` like any unknown slice.
+- `comparator` is `at_or_above` or `at_or_below`.
+- `threshold` is the share of that base, a number from 0 to 1 inclusive.
+
+Qualifiers within one Target are conjunctive; independent ideas are separate
+Targets.
+
+The `title` is always derived and is never submitted or stored: the opponent
+tricode, `vs`, then each Qualifier as its slice label, the comparator symbol
+(`≥` or `≤`), and the threshold as a percentage, comma-separated in the order
+the author entered them. Percentages drop a trailing `.0`, so `0.4` reads as
+`40%` and `0.405` reads as `40.5%`. Editing the Qualifiers changes the title;
+editing the note never does.
+
+`slice_key` is provider vocabulary and is what gets stored; the title renders
+its label instead. The backend holds one source for this mapping
+(`PLAYER_DIET_SLICE_LABELS`), and every qualifiable slice must appear in it, so
+this table is both the accepted `slice_key` vocabulary and how each key reads:
+
+| Base | `slice_key` | Label |
+| --- | --- | --- |
+| `shot_zones` | `Restricted Area` | Restricted area |
+| `shot_zones` | `In The Paint (Non-RA)` | Paint (non-RA) |
+| `shot_zones` | `Mid-Range` | Mid-range |
+| `shot_zones` | `Corner 3` | Corner 3 |
+| `shot_zones` | `Above the Break 3` | Above-break 3 |
+| `play_types` | `Transition` | Transition |
+| `play_types` | `Isolation` | Isolation |
+| `play_types` | `PRBallHandler` | P&R ball handler |
+| `play_types` | `PRRollMan` | P&R roll man |
+| `play_types` | `Spotup` | Spot up |
+| `play_types` | `Cut` | Cut |
+| `play_types` | `Handoff` | Handoff |
+| `play_types` | `OffScreen` | Off screen |
+| `play_types` | `Postup` | Post up |
+| `play_types` | `OffRebound` | Putback |
+| `shot_types` | `Catch and Shoot` | Catch & shoot |
+| `shot_types` | `Pullups` | Pull-up |
+| `shot_types` | `Less Than 10 ft` | Inside 10 ft |
+| `assist_locations` | `Arc3Assists` | Arc 3 assists |
+| `assist_locations` | `Corner3Assists` | Corner 3 assists |
+| `assist_locations` | `AtRimAssists` | At-rim assists |
+| `assist_locations` | `ShortMidRangeAssists` | Short mid assists |
+| `assist_locations` | `LongMidRangeAssists` | Long mid assists |
+
+Update semantics: an absent key means unchanged, and `"note": null` clears the
+note. `opponent` is fixed -- aiming the same Qualifiers at another team is a
+different Target -- and is ignored if submitted.
+
+Validation and conflicts:
+
+- `400 invalid_input` for an opponent that is not an NBA team, an empty or
+  missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
+  unknown base or slice, a comparator outside the two accepted values, a
+  threshold outside 0-1, a note over 280 characters, and a `PATCH` body that
+  changes neither the Qualifiers nor the note.
+- `404 resource_not_found` for an id that does not exist or belongs to another
+  account. Foreign ids are never reported as `403`.
+- `409 operation_conflict` when the account already aims the same Qualifier set
+  at the same opponent -- the set is compared order-insensitively, so
+  reordering does not create a second Target -- and when the account already
+  holds its cap of 50 Targets.
+
+#### Resolve every Target against one Slate Date
+
+```http
+GET /api/user/targets/resolve?date=2026-01-16
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns every Target the account holds, evaluated against one ET Slate Date.
+`date` is optional and means exactly what it means on
+[Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
+is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
+response echoes the resolved `slate_date`.
+
+The request makes no NBA, PBP, or DFS call. It composes the Slate for the date
+and, for each game one of the caller's opponents plays, the same stored Matchup
+document [Get Matchup](#get-matchup) serves -- read once per game however many
+Targets name the teams in it, and never read at all for a game no Target names.
+Every per-slice share, thin flag, posted-markets list, injury badge,
+participant status, defense-sheet value, and player ordering below is therefore
+the Matchup's own value for that game, including which evidence named that
+game's players.
+
+`targets` lists **live** Targets -- the opponent plays that date -- before
+**idle** ones, each group keeping the newest-first order of `GET
+/api/user/targets`.
+
+```json
+{
+  "success": true,
+  "slate_date": "2026-01-16",
+  "targets": [
+    {
+      "target": {
+        "id": 7,
+        "opponent": "OKC",
+        "title": "OKC vs Corner 3 ≥ 40%",
+        "note": "Leaks corner threes",
+        "qualifiers": [
+          {
+            "base": "shot_zones",
+            "slice_key": "Corner 3",
+            "comparator": "at_or_above",
+            "threshold": 0.4
+          }
+        ],
+        "created_at": "2026-09-05T12:00:00+00:00",
+        "updated_at": "2026-09-05T12:00:00+00:00"
+      },
+      "game": {
+        "game_id": "0022500584",
+        "scheduled_at": "2026-01-17T00:30:00+00:00",
+        "status": { "state": "scheduled", "label": "Scheduled" },
+        "opponent": {
+          "team_id": 1610612760,
+          "tricode": "OKC",
+          "name": "Oklahoma City Thunder"
+        },
+        "opposing_team": {
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "name": "Los Angeles Lakers"
+        },
+        "away": {
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "name": "Los Angeles Lakers"
+        },
+        "home": {
+          "team_id": 1610612760,
+          "tricode": "OKC",
+          "name": "Oklahoma City Thunder"
+        }
+      },
+      "context": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "label": "Corner 3",
+          "availability": {
+            "season": { "status": "available", "unavailable_reason": null },
+            "last_15": { "status": "available", "unavailable_reason": null }
+          },
+          "metrics": [
+            {
+              "key": "Corner 3:FGA",
+              "label": "Corner 3 FGA",
+              "markets": ["FGA", "FG3A"],
+              "opponent": {
+                "season": {
+                  "allowed_per_48": 21.0,
+                  "percent_vs_league_average": 5.0,
+                  "sigma_deviation": 0.5,
+                  "rank": 4
+                },
+                "last_15": {
+                  "allowed_per_48": 23.0,
+                  "percent_vs_league_average": 6.0,
+                  "sigma_deviation": 0.33,
+                  "rank": 2
+                }
+              },
+              "league": {
+                "season": { "average_allowed_per_48": 20.0, "sigma": 2.0 },
+                "last_15": { "average_allowed_per_48": 22.0, "sigma": 2.5 }
+              }
+            }
+          ]
+        }
+      ],
+      "availability": {
+        "status": "available",
+        "source": "player_pool",
+        "context": "posted_markets",
+        "unavailable_reason": null
+      },
+      "players": [
+        {
+          "canonical_id": 2544,
+          "name": "LeBron James",
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "posted_markets": ["PTS", "3PM"],
+          "injury_badge_ref": "rotowire:6504",
+          "season_scoring": 25.4,
+          "thin": false,
+          "shares": [
+            {
+              "base": "shot_zones",
+              "slice_key": "Corner 3",
+              "share": 0.42,
+              "league_average_share": 0.2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "target": {
+        "id": 8,
+        "opponent": "MIA",
+        "title": "MIA vs Transition ≥ 20%",
+        "note": null,
+        "qualifiers": [
+          {
+            "base": "play_types",
+            "slice_key": "Transition",
+            "comparator": "at_or_above",
+            "threshold": 0.2
+          }
+        ],
+        "created_at": "2026-09-04T12:00:00+00:00",
+        "updated_at": "2026-09-04T12:00:00+00:00"
+      },
+      "game": null,
+      "context": [],
+      "availability": {
+        "status": "unavailable",
+        "source": null,
+        "context": null,
+        "unavailable_reason": "opponent_idle"
+      },
+      "players": []
+    }
+  ]
+}
+```
+
+`target` is the same item `GET /api/user/targets` returns, derived title
+included.
+
+`game` is `null` exactly when the opponent is idle that date. Otherwise it
+names the game, its tip time, its Slate status, the `opponent` the Target aims
+at, and the `opposing_team` whose Player Pool `players` is filtered from.
+`status` is the Slate card's own, so a postponed or final game is reported as
+such rather than folded into the idle group.
+
+The same two teams also appear as `away` and `home`, in the same
+`{team_id, tricode, name}` shape and taken from the same Slate event, so a
+client can print the Slate's `AWAY @ HOME` convention without knowing which
+side the Target aims at. Exactly one of `away`/`home` equals `opponent` and the
+other equals `opposing_team`; which way round depends on where the opponent is
+playing, so neither pair can be derived from the other.
+
+`context` is one entry per Qualifier, in the Target's own Qualifier order, and
+is empty for an idle Target -- a Defense Sheet window is read for a game, and
+an idle opponent has none. Each entry carries every Defense Sheet row for that
+Base and slice, with the opponent's window values, the league's, and the
+`league.surface_availability[base][window]` state that governs them. When that
+state is not `available`, the window value is `null` exactly as it is on
+[Get Matchup](#get-matchup); exact Synergy play types therefore always report
+`unavailable/provider_window_unsupported` and a `null` `last_15`, and a
+completed game whose Last-15 window was never snapshotted reports its own
+state there while its Season window still reads. Row `key`, `label`, and
+`markets` are the Matchup's.
+
+`availability` is the status of whatever named the opposing side's players, so
+an empty `players` is never mistaken for "nobody qualifies". It repeats the
+Matchup's own Participants section, with `source` restated in the
+`experience.player_source` vocabulary that route uses:
+
+- `player_pool` -- a scheduled game, resolved against the stored Player Pool.
+  `player_pool_unavailable` when no stored pool player belongs to the game.
+- `game_logs` -- a Historical Matchup, resolved against the canonical game-log
+  participants the Matchup detail page lists for that completed game, so the
+  two surfaces agree about the same game on the same date.
+  `game_logs_incomplete` or `no_game_log_rows` when that evidence is not
+  there.
+- `null` with `opponent_idle` -- the opponent does not play on the viewed
+  date, so no evidence named participants at all.
+
+`players` is the opposing participants meeting **every** Qualifier, in the
+Matchup's own order (Season scoring descending, canonical id breaking ties).
+`players` is always empty when `availability.status` is not `available`.
+
+- Comparators are inclusive on the player's Season Diet `share` for the slice:
+  `at_or_above` is `share >= threshold` and `at_or_below` is
+  `share <= threshold`.
+- A player with no stored fact for a Qualifier's slice does not fit: an absent
+  share is unjudged, not a share of zero.
+- `shares` is one entry per Qualifier, in the Target's Qualifier order, holding
+  the player's Season `share` for that slice and its `league_average_share`.
+  Both are the unthresholded Matchup values.
+- `thin` is the Matchup's own `diet_thin` verdict for the Bases this Target's
+  Qualifiers name, so the flag here and the flag there are one value. It is
+  `true` when **any** named Base is thin, since a fit resting on one unusable
+  Base is no better than the Base. See `diet_thin` under
+  [Get Matchup](#get-matchup) for what makes a Base thin. A thin player is
+  flagged, never removed, so this list never disagrees with the Matchup about
+  who is in the game.
+- `posted_markets`, `injury_badge_ref`, and `season_scoring` are the Matchup's
+  values for the same player, so the two surfaces agree. A game-log
+  participant has no posted markets, so `posted_markets` is `[]` and
+  `injury_badge_ref` is `null` for a completed game, exactly as on
+  [Get Matchup](#get-matchup).
+
+`401 authentication_required` for an unauthenticated caller. An account with no
+Targets is `200` with an empty `targets` list, not an error.
+
+#### Backtest one Target over the season to date
+
+```http
+GET /api/user/targets/7/backtest
+Authorization: Bearer <firebase-id-token>
+```
+
+Reports the season one Target has already had: every player **league-wide**
+whose current-season Diet meets every Qualifier and is not thin, with their
+games against that Target's opponent this season and their own season per-game
+averages over the same columns. It is a separate read from
+[Resolve](#resolve-every-target-against-one-slate-date) so the Slate stays
+cheap -- the league-wide game-log scan only runs when a reader expands a
+Target.
+
+The season is the configured current season, the same one the Slate and
+Matchup reads use, and is echoed as `season`. A Target has no season of its
+own. The request makes no NBA, PBP, or DFS call.
+
+```json
+{
+  "success": true,
+  "target": {
+    "id": 7,
+    "opponent": "OKC",
+    "title": "OKC vs Corner 3 ≥ 40%",
+    "note": "Leaks corner threes",
+    "qualifiers": [
+      {
+        "base": "shot_zones",
+        "slice_key": "Corner 3",
+        "comparator": "at_or_above",
+        "threshold": 0.4
+      }
+    ],
+    "created_at": "2026-09-04T12:00:00+00:00",
+    "updated_at": "2026-09-04T12:00:00+00:00"
+  },
+  "season": "2025-26",
+  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
+  "stat_columns": ["PTS", "3PM"],
+  "players": [
+    {
+      "canonical_id": 2544,
+      "name": "LeBron James",
+      "team_id": 1610612747,
+      "tricode": "LAL",
+      "season_scoring": 25.0,
+      "shares": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "share": 0.42,
+          "league_average_share": 0.2
+        }
+      ],
+      "season_averages": {"PTS": 25.0, "3PM": 2.0},
+      "games": [
+        {
+          "game_id": "0022500584",
+          "game_date": "2026-01-16",
+          "matchup": "LAL vs. OKC",
+          "minutes": 34.0,
+          "stats": {"PTS": 30.0, "3PM": 4.0}
+        },
+        {
+          "game_id": "0022500120",
+          "game_date": "2025-11-03",
+          "matchup": "LAL @ OKC",
+          "minutes": 34.0,
+          "stats": {"PTS": 22.0, "3PM": 2.0}
+        }
+      ]
+    }
+  ]
+}
+```
+
+`target` is the same item `GET /api/user/targets` returns, derived title
+included.
+
+`proxy` is always present and always says the same thing: no per-game shot-zone
+or play-type evidence exists, so a Qualifier's slice is measured through
+box-score markets. Read `"PTS": 30` as thirty points, never as thirty corner
+threes.
+
+`stat_columns` is the union of the **outcome** markets each Qualifier's slice
+maps to, deduplicated and in the Target's own Qualifier order.
+`season_averages` and every game's `stats` carry exactly these columns, in this
+order.
+
+The mapping is the Matchup's -- the same `markets` its defense-sheet rows
+advertise for that slice, so a backtest column can never disagree with
+[Get Matchup](#get-matchup) about the same slice -- but only the slice's
+outcome rows are asked. A backtest measures what a player produced, and an
+attempt is not production, so the attempt and possession rows a slice also
+publishes (`FGA`, `FG2A`, `FG3A`, `POSS`) never become columns:
+
+| Qualifier base | Rows asked | Example |
+| --- | --- | --- |
+| `shot_zones` | `FGM` | `Corner 3` -> `PTS`, `3PM`; `Restricted Area` -> `PTS` |
+| `play_types` | `PTS` | `Transition` -> `PTS`, `PA`, `PR`, `PRA` |
+| `shot_types` | `FG2M`, `FG3M` | `Catch and Shoot` -> `PTS`, `3PM` |
+| `assist_locations` | the slice itself | `Corner3Assists` -> `AST`, `PA`, `RA`, `PRA` |
+
+`players` holds the qualifying players in the Matchup's own order -- Season
+scoring descending, canonical id breaking ties.
+
+- Players are drawn from the **whole league**, not from one team. A player is
+  listed only if they have actually played the opponent this season, so
+  `games` is never empty.
+- Comparators are inclusive on the player's Season Diet `share` for the slice,
+  and every Qualifier has to be met, exactly as under
+  [Resolve](#resolve-every-target-against-one-slate-date). A player with no
+  stored fact for a Qualifier's slice does not fit.
+- **Thin-diet players are excluded**, which is where the backtest differs from
+  resolution. The verdict is the same `diet_evidence_thin` rule, asked of each
+  Base a Qualifier names; resolution flags such a player and keeps them so its
+  list agrees with the Matchup about who is in tonight's game, while the
+  backtest drops them, because a season-long production claim resting on an
+  unusable Diet is worse than no claim. See `diet_thin` under
+  [Get Matchup](#get-matchup) for what makes a Base thin.
+- `shares` is one entry per Qualifier, in Qualifier order, with the player's
+  Season `share` for the slice and its `league_average_share`.
+- Identity (`name`, `team_id`, `tricode`) is the player's identity **as of the
+  most recent game against this opponent**, not necessarily their current team:
+  a trade after that meeting is not reflected here. `season_scoring` is their
+  Season rate.
+- `games` are the player's **Regular Season** games against this opponent this
+  season, newest-first, each with its `game_id`, `game_date`, `matchup`,
+  `minutes`, and the `stat_columns`. Playoff games are excluded because
+  `season_averages` is a Regular Season rate, and a playoff line read against a
+  regular-season baseline compares two different populations. `matchup` uses
+  the game-time identity, so a mid-season trade cannot rewrite who a player
+  suited up for that night.
+
+`players` is `[]` when nobody qualifies and when nobody has faced the opponent
+yet; the two are not distinguished, because a player with no games has nothing
+to backtest. It is also `[]` on a deployment carrying no stored Player Diet at
+all -- the demo database, which has no Diet schema -- since no player has a
+share for any slice there and so nobody fits. That is an accurate empty list
+rather than a suppressed one; no Diet evidence exists to be withheld.
+
+`401 authentication_required` for an unauthenticated caller.
+`404 resource_not_found` for an id that does not exist or belongs to another
+account -- foreign ids are never reported as `403`.
+
 
 ## Filtering Reference
 
@@ -2325,6 +2929,21 @@ Ranking convention:
 
 - `rank_filter[]=5` means top 5 defenses for the selected filter.
 - `rank_filter[]=-8` means bottom 8 defenses for the selected filter.
+
+### One Specific Opponent
+
+`opponent_tricode` names a single opponent by NBA tricode instead of ranking
+opponents, so `opponent_tricode=OKC` returns only the player's games against
+Oklahoma City for the selected `season_filter`:
+
+```text
+opponent_tricode=OKC
+```
+
+Whitespace and letter case are normalized (` okc ` is `OKC`); any value that is
+not one of the 30 NBA tricodes returns `400` `invalid_input`. It combines with
+every other game-log filter, including the rank-based opponent filters above,
+as a conjunction.
 
 ### Self Filters
 

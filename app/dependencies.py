@@ -70,6 +70,8 @@ class ApplicationDependencies:
     projection_recorder: Any | None = None
     projection_player_pool_reader: Any | None = None
     projection_collection_coordinator: Any | None = None
+    target_resolution_service: Any | None = None
+    target_backtest_service: Any | None = None
 
 
 def build_dependencies(
@@ -102,7 +104,7 @@ def build_dependencies(
     from app.services.game_service import GameService
     from app.services.job_service import build_data_refresh_job_service
     from app.services.nl_service import NLService
-    from app.services.player_service import PlayerService
+    from app.services.player_service import PlayerProfileReader, PlayerService
     from app.services.player_diet import PlayerDietService
     from app.services.projection_archive import (
         LatestProjectionPlayerPoolReader,
@@ -125,6 +127,8 @@ def build_dependencies(
     from app.services.team_service import TeamService
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
+    from app.services.target_backtest import TargetBacktestService
+    from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
@@ -187,6 +191,13 @@ def build_dependencies(
 
         publication_reader = DatabaseFirstPublicationReader(engine)
         write_fence = LegacyWriteFence(engine)
+        from app.services.traditional_opponent_publications import (
+            TRADITIONAL_OPPONENT_FAMILY,
+        )
+        from app.services.traditional_opponent_rebuild import (
+            TraditionalOpponentRebuildService,
+        )
+
         collection_operations = CollectionOperationsService(
             engine,
             publication_service=publication_service,
@@ -194,6 +205,11 @@ def build_dependencies(
             collector_tokens=collector_tokens,
             alert_adapter=EmailAlertAdapter(),
             l15_expectation_resolver=l15_expectation_resolver,
+            publication_rebuilds={
+                TRADITIONAL_OPPONENT_FAMILY: TraditionalOpponentRebuildService(
+                    engine, publication_service=publication_service
+                ),
+            },
         )
         publication_write_capability = (
             publication_service.governed_publication_write_capability()
@@ -255,12 +271,6 @@ def build_dependencies(
         )
 
     game_service = None
-    player_service = PlayerService(
-        engine,
-        settings=settings,
-        nba_stats_provider=nba_stats_provider,
-        publication_reader=publication_reader,
-    )
     # One Season publication read seam serves both the game-log Team Filters
     # and the Team Profile categories, so neither can reach a provider client.
     season_rankings = (
@@ -290,12 +300,6 @@ def build_dependencies(
         nba_stats=nba_stats_provider,
         pbp_stats=pbp_stats_provider,
     )
-    data_refresh_jobs_service = build_data_refresh_job_service(
-        engine,
-        settings,
-        data_service=data_service,
-        player_service=player_service,
-    )
     athlete_catalog_service = None
     athlete_mapping_repository = None
     athlete_resolver = None
@@ -303,6 +307,10 @@ def build_dependencies(
     event_mapping_repository = None
     event_resolver = None
     player_diet_service = None
+    # The demo fixture intentionally carries no durable catalog/Diet schema.
+    # Compose the same narrow request seam in an explicit unavailable mode so
+    # absence cannot reactivate the retired legacy profile reads.
+    player_profile_reader = PlayerProfileReader.unavailable()
     team_matchup_query_service = None
     if not demo_database:
         athlete_catalog_service = AthleteCatalogService(
@@ -345,6 +353,9 @@ def build_dependencies(
             write_fence=write_fence,
             publication_reader=publication_reader,
             baseline_settings=settings.player_diet_baseline,
+        )
+        player_profile_reader = PlayerProfileReader(
+            AthleteCatalogReader(engine), player_diet_service.repository
         )
         team_matchup_repository = TeamMatchupRepository(
             engine,
@@ -423,6 +434,20 @@ def build_dependencies(
                 repository=canonical_game_ledger_repository,
                 max_concurrency=1,
             )
+
+    player_service = PlayerService(
+        engine,
+        settings=settings,
+        nba_stats_provider=nba_stats_provider,
+        publication_reader=publication_reader,
+        profile_reader=player_profile_reader,
+    )
+    data_refresh_jobs_service = build_data_refresh_job_service(
+        engine,
+        settings,
+        data_service=data_service,
+        player_service=player_service,
+    )
 
     dfs_board_service = DFSBoardService(
         provider_registry=cached_dfs_providers,
@@ -620,6 +645,32 @@ def build_dependencies(
         publication_reader=publication_reader,
         engine=engine,
     )
+    user_service = UserService(engine, settings=settings)
+    # Target resolution reads no provider: it composes the same Slate and
+    # Matchup documents the slate and matchup routes already serve, so the
+    # two surfaces cannot disagree about one game.
+    target_resolution_service = TargetResolutionService(
+        targets=user_service,
+        slates=slate_service,
+        matchups=matchup_service,
+    )
+    # The backtest reaches past the Matchup because its question is not about
+    # one game: it composes the league-wide game-log rows against the
+    # opponent, the Diet those players ate, and their Season rates. Diet
+    # access is the same read-only wrapper the game-log path uses, so the
+    # provider-backed refresh service stays unreachable from here.
+    target_backtest_service = TargetBacktestService(
+        targets=user_service,
+        player_logs=player_game_log_repository,
+        player_diets=(
+            PlayerDietReader(player_diet_service.repository)
+            if player_diet_service is not None
+            else None
+        ),
+        statistic_catalog=statistic_catalog,
+        settings=settings,
+        publication_reader=publication_reader,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -645,7 +696,7 @@ def build_dependencies(
         event_resolver=event_resolver,
         provider_health_service=provider_health_service,
         nl_service=NLService(engine, settings=settings),
-        user_service=UserService(engine, settings=settings),
+        user_service=user_service,
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,
         comparison_board_service=comparison_board_service,
@@ -668,6 +719,8 @@ def build_dependencies(
         projection_recorder=projection_recorder,
         projection_player_pool_reader=projection_player_pool_reader,
         projection_collection_coordinator=projection_collection_coordinator,
+        target_resolution_service=target_resolution_service,
+        target_backtest_service=target_backtest_service,
     )
 
 
