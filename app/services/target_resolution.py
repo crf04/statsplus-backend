@@ -16,9 +16,12 @@ evidence, posted markets, injury badges, participant status, defense-sheet
 values and player ordering are then the Matchup's own values, so the two
 surfaces cannot disagree about the same game -- including which evidence named
 that game's players, since a completed game resolves against the same
-canonical game-log participants the Matchup page lists.  One Matchup is read at most once per request
-however many Targets name the teams in it, and a game no Target names is never
-read at all.
+canonical game-log participants the Matchup page lists.  One Matchup is read
+at most once per request however many Targets name the teams in it, and a game
+no Target names is never read at all.
+
+What resolution adds of its own is the Qualifier conjunction, and nothing
+else: no threshold, floor, or verdict is recomputed here.
 """
 
 from __future__ import annotations
@@ -26,17 +29,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from app.config.settings import RuntimeSettings
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
+from app.models.target import TARGET_COMPARATOR_TESTS
 
 
 _WINDOW_NAMES = ("season", "last_15")
-
-#: How each comparator reads as a test on a stored share.  Both are inclusive.
-_COMPARATORS = {
-    "at_or_above": lambda share, threshold: share >= threshold,
-    "at_or_below": lambda share, threshold: share <= threshold,
-}
 
 #: An idle opponent has no game, so no evidence named participants for it and
 #: there is no source to report.
@@ -71,12 +68,10 @@ class TargetResolutionService:
         targets: TargetReader,
         slates: SlateReader,
         matchups: MatchupReader,
-        settings: RuntimeSettings,
     ) -> None:
         self.targets = targets
         self.slates = slates
         self.matchups = matchups
-        self.settings = settings
 
     def resolve(
         self, firebase_uid: str, *, requested_date: str | None = None
@@ -313,7 +308,7 @@ class TargetResolutionService:
                 # player is unjudged rather than judged to fit.
                 return None
             season = fact["season"]
-            if not _COMPARATORS[qualifier["comparator"]](
+            if not TARGET_COMPARATOR_TESTS[qualifier["comparator"]](
                 season["share"], qualifier["threshold"]
             ):
                 return None
@@ -325,7 +320,7 @@ class TargetResolutionService:
                     "league_average_share": season["league_average_share"],
                 }
             )
-            thin = thin or self._thin(qualifier["base"], base_facts)
+            thin = thin or player["diet_thin"][qualifier["base"]]
         return {
             "canonical_id": int(player["canonical_id"]),
             "name": player["name"],
@@ -337,27 +332,6 @@ class TargetResolutionService:
             "thin": thin,
             "shares": shares,
         }
-
-    def _thin(self, base: str, base_facts: Sequence[Mapping[str, Any]]) -> bool:
-        """Whether one Base's Diet evidence is too slight to lean on.
-
-        The same floors the Matchup Score marks a cell thin with: every stored
-        fact in the Base has to clear ``min_games``, and the player's total
-        Base volume per game -- the sum of each fact's own volume per game --
-        has to clear that Base's floor.
-        """
-
-        floors = self.settings.matchup_scores
-        if any(
-            fact["season"]["games_played"] < floors.min_games
-            for fact in base_facts
-        ):
-            return True
-        volume_per_game = sum(
-            fact["season"]["volume"] / fact["season"]["games_played"]
-            for fact in base_facts
-        )
-        return volume_per_game < floors.minimum_volume_per_game(base)
 
 
 __all__ = ["TargetResolutionService"]

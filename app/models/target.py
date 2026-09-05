@@ -39,8 +39,19 @@ TARGET_COMPARATOR_SYMBOLS = MappingProxyType({
     'at_or_below': '≤',
 })
 
-#: The comparator vocabulary a Qualifier may use.
+#: The comparator vocabulary a Qualifier may use.  Every entry needs a symbol
+#: above and a test below, or it can be accepted on write and then fail on the
+#: read that evaluates it.
 TARGET_COMPARATORS: tuple[str, ...] = tuple(TARGET_COMPARATOR_SYMBOLS)
+
+#: How each comparator reads as a test on a stored share.  Both bounds are
+#: inclusive: a Qualifier names a threshold a player is allowed to sit on.
+#: Resolution evaluates every Qualifier through this table, so the comparator
+#: a Target stores and the comparison it gets are one vocabulary.
+TARGET_COMPARATOR_TESTS = MappingProxyType({
+    'at_or_above': lambda share, threshold: share >= threshold,
+    'at_or_below': lambda share, threshold: share <= threshold,
+})
 
 
 def _share_as_percentage(threshold: float) -> str:

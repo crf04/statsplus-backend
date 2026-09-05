@@ -651,7 +651,6 @@ def build_dependencies(
         targets=user_service,
         slates=slate_service,
         matchups=matchup_service,
-        settings=settings,
     )
 
     return ApplicationDependencies(

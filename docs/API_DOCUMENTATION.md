@@ -651,6 +651,12 @@ Each stored pool player has this shape:
     "shot_types": [],
     "assist_locations": []
   },
+  "diet_thin": {
+    "play_types": false,
+    "shot_zones": true,
+    "shot_types": true,
+    "assist_locations": true
+  },
   "scores": {
     "PTS": {
       "season": {
@@ -697,6 +703,20 @@ exactly the key set of `scores`; in current mode it equals `posted_markets`,
 and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
+
+`diet_thin` carries one verdict per Diet Base: whether that Base's evidence for
+this player is too slight to lean on. It is the same rule a score component
+marks itself `thin` with, asked of the whole Base rather than of the slices one
+component consumed, and it is always present for all four Bases -- a component
+only exists where its market was posted and its window available, so `scores`
+cannot answer this on its own. A Base is thin when its stored Diet is not a
+usable partition of that Base (including a Base with no stored fact at all,
+which no score would consume), when exact Synergy play-type coverage falls
+below 0.85, when any stored fact in the Base has fewer than
+`MATCHUP_SCORE_MIN_GAMES` (default 5) games, when the player's total Base
+volume per game falls below `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME`, or when
+the player has no Season rate or fewer than `MATCHUP_SCORE_MIN_GAMES` Season
+games. It is additive; it filters nothing and changes no other field.
 
 Player Diet facts are unthresholded raw Season shares and volumes; `share` and
 `volume` are never filtered or floored. Each fact additionally carries
@@ -2695,14 +2715,13 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
 - `shares` is one entry per Qualifier, in the Target's Qualifier order, holding
   the player's Season `share` for that slice and its `league_average_share`.
   Both are the unthresholded Matchup values.
-- `thin` marks a player whose Diet evidence for a Qualifier's Base is too
-  slight to lean on, using the same floors that mark a Matchup Score cell thin:
-  every stored fact in the Base clears `MATCHUP_SCORE_MIN_GAMES` (default 5),
-  and the player's total Base volume per game -- the sum of each fact's own
-  `volume ÷ games_played` -- clears
-  `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME`. A thin player is flagged, never
-  removed, so this list never disagrees with the Matchup about who is in the
-  pool.
+- `thin` is the Matchup's own `diet_thin` verdict for the Bases this Target's
+  Qualifiers name, so the flag here and the flag there are one value. It is
+  `true` when **any** named Base is thin, since a fit resting on one unusable
+  Base is no better than the Base. See `diet_thin` under
+  [Get Matchup](#get-matchup) for what makes a Base thin. A thin player is
+  flagged, never removed, so this list never disagrees with the Matchup about
+  who is in the game.
 - `posted_markets`, `injury_badge_ref`, and `season_scoring` are the Matchup's
   values for the same player, so the two surfaces agree. A game-log
   participant has no posted markets, so `posted_markets` is `[]` and
