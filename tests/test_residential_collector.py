@@ -2305,7 +2305,9 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     assert len(detail) <= 160
 
 
-def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(tmp_path: Path):
+def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(
+    tmp_path: Path, monkeypatch,
+):
     """The terminus: the log file the scheduled task leaves behind.
 
     The other diagnostic test injects a logger straight into the collector, so
@@ -2335,6 +2337,17 @@ def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(tmp_path: Pat
             return _boston_zone_row(
                 **{"TEAM_ID": kwargs["team_id"], "Backcourt_OPP_FGA": 34}
             )
+
+    # Production sets COLLECTOR_RELEASE_ROOT (the scheduled task wrapper does),
+    # and ``run_once`` checksums every file under it.  Without that the root
+    # falls back to the repository, so the checksum walks the working tree --
+    # which under ``pytest -n auto`` races pytest-cov's transient
+    # ``.coverage.<host>.<pid>.<rand>`` files and fails when one is collected
+    # and then deleted before it can be read.
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    (release_root / "statsplus_collector.txt").write_text("release", encoding="utf-8")
+    monkeypatch.setenv("COLLECTOR_RELEASE_ROOT", str(release_root))
 
     log_path = tmp_path / "logs" / "collector.log"
     config = CollectorConfig(
