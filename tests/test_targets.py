@@ -17,6 +17,11 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
+from app.domain.player_diet_taxonomy import (
+    PLAYER_DIET_BASE_SLICES,
+    PLAYER_DIET_QUALIFIER_SLICES,
+    PLAYER_DIET_SLICE_LABELS,
+)
 from app.errors import ConflictError, InvalidInputError, ResourceNotFoundError
 from app.migrations import run_migrations
 from app.models.target import (
@@ -25,12 +30,7 @@ from app.models.target import (
     TargetQualifier,
 )
 from app.models.user import User
-from app.services.player_diet import (
-    PLAYER_DIET_BASE_SLICES,
-    PLAYER_DIET_BASES,
-    PLAYER_DIET_QUALIFIER_SLICES,
-    PLAYER_DIET_SLICE_LABELS,
-)
+from app.services.player_diet import PLAYER_DIET_BASES
 from app.services.user_service import (
     TARGET_LIMIT,
     TARGET_QUALIFIER_LIMIT,
@@ -834,6 +834,176 @@ def test_another_accounts_target_cannot_be_deleted(targets):
         targets.delete_target(OWNER, foreign["id"])
 
     assert len(targets.list_targets(OTHER)) == 1
+
+
+def test_the_vocabulary_stays_importable_from_the_diet_service(targets):
+    """Existing importers read these off the service; keep that path exact."""
+
+    from app.services import player_diet
+
+    assert player_diet.PLAYER_DIET_BASE_SLICES is PLAYER_DIET_BASE_SLICES
+    assert player_diet.PLAYER_DIET_QUALIFIER_SLICES is PLAYER_DIET_QUALIFIER_SLICES
+    assert player_diet.PLAYER_DIET_SLICE_LABELS is PLAYER_DIET_SLICE_LABELS
+
+
+def test_the_service_records_the_authors_order_as_the_qualifier_position(
+    targets, target_engine
+):
+    """Position is the durable record of the order, not a constant."""
+
+    created = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[TRANSITION, CORNER_THREE], note=None
+    )
+
+    with target_engine.connect() as connection:
+        stored = connection.execute(
+            text(
+                "SELECT position, slice_key FROM target_qualifiers "
+                "WHERE target_id = :target_id ORDER BY position"
+            ),
+            {"target_id": created["id"]},
+        ).all()
+
+    assert stored == [(0, "Transition"), (1, "Corner 3")]
+
+
+def test_editing_renumbers_the_positions_from_the_new_order(
+    targets, target_engine
+):
+    created = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[CORNER_THREE], note=None
+    )
+
+    targets.update_target(
+        OWNER, created["id"], changes={"qualifiers": [LOW_RIM, TRANSITION]}
+    )
+
+    with target_engine.connect() as connection:
+        stored = connection.execute(
+            text(
+                "SELECT position, slice_key FROM target_qualifiers "
+                "WHERE target_id = :target_id ORDER BY position"
+            ),
+            {"target_id": created["id"]},
+        ).all()
+
+    assert stored == [(0, "Restricted Area"), (1, "Transition")]
+
+
+def test_the_qualifiers_read_back_in_position_order_not_insertion_order(
+    targets, target_engine
+):
+    """Position is the author's order; row order is an accident of writing."""
+
+    created = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[CORNER_THREE], note=None
+    )
+    with target_engine.begin() as connection:
+        connection.execute(TargetQualifier.__table__.delete())
+        # Written back to front, so the later position gets the lower row id.
+        for position, qualifier in ((1, TRANSITION), (0, CORNER_THREE)):
+            connection.execute(
+                TargetQualifier.__table__.insert(),
+                {"target_id": created["id"], "position": position, **qualifier},
+            )
+
+    listed = targets.list_targets(OWNER)[0]
+
+    assert listed["qualifiers"] == [CORNER_THREE, TRANSITION]
+    assert listed["title"] == "OKC vs Corner 3 ≥ 40%, Transition ≥ 20%"
+
+
+def test_editing_moves_updated_at_strictly_past_created_at(targets, monkeypatch):
+    """A frozen clock, so the bump is asserted rather than merely permitted."""
+
+    from app.services import user_service as service_module
+
+    instants = iter([
+        datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 5, 12, 5, tzinfo=timezone.utc),
+    ])
+    monkeypatch.setattr(
+        service_module,
+        "datetime",
+        SimpleNamespace(now=lambda _timezone=None: next(instants)),
+    )
+
+    created = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[CORNER_THREE], note=None
+    )
+    updated = targets.update_target(
+        OWNER, created["id"], changes={"note": "Sharpened"}
+    )
+
+    assert created["created_at"] == created["updated_at"]
+    assert updated["created_at"] == created["created_at"]
+    assert updated["updated_at"] > created["updated_at"]
+
+
+def _qualifier_vocabulary():
+    """Every qualifiable slice as a distinct Qualifier."""
+
+    return [
+        {
+            "base": base,
+            "slice_key": slice_key,
+            "comparator": "at_or_above",
+            "threshold": 0.1,
+        }
+        for base, slices in PLAYER_DIET_QUALIFIER_SLICES.items()
+        for slice_key in slices
+    ]
+
+
+def test_exactly_the_qualifier_limit_is_accepted(targets):
+    at_limit = _qualifier_vocabulary()[:TARGET_QUALIFIER_LIMIT]
+    assert len(at_limit) == TARGET_QUALIFIER_LIMIT
+
+    created = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=at_limit, note=None
+    )
+
+    assert created["qualifiers"] == at_limit
+
+
+def test_two_thresholds_that_a_coarser_signature_would_merge_are_two_targets(
+    targets,
+):
+    """0.4 and 0.44 differ, so a signature rounded to one place is not enough."""
+
+    first = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[CORNER_THREE], note=None
+    )
+    second = targets.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[{**CORNER_THREE, "threshold": 0.44}],
+        note=None,
+    )
+
+    assert first["title"] == "OKC vs Corner 3 ≥ 40%"
+    assert second["title"] == "OKC vs Corner 3 ≥ 44%"
+    assert len(targets.list_targets(OWNER)) == 2
+
+
+def test_editing_moves_the_stored_signature_with_the_qualifiers(targets):
+    """The set a target moved off is free; the set it moved onto is taken."""
+
+    moved = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[CORNER_THREE], note=None
+    )
+
+    targets.update_target(OWNER, moved["id"], changes={"qualifiers": [TRANSITION]})
+
+    replacement = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[CORNER_THREE], note=None
+    )
+    assert replacement["title"] == "OKC vs Corner 3 ≥ 40%"
+
+    with pytest.raises(ConflictError):
+        targets.create_target(
+            OWNER, opponent="OKC", qualifiers=[TRANSITION], note=None
+        )
 
 
 # --- routes ----------------------------------------------------------------
