@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -1695,7 +1696,7 @@ def _collector(tmp_path, *, discovery, transport=None, provider=None, now=NOW, r
         clock=lambda: now,
         instruction_cache=InstructionCache(tmp_path / "instructions.json", clock=lambda: now),
         release_checksum=release_checksum,
-        **({"logger": logger} if logger is not None else {}),
+        logger=logger,
     ), fake_transport, outbox
 
 
@@ -2288,7 +2289,7 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     # one worth asserting.  Reading the in-memory status here would pass even
     # if nothing were ever written anywhere an operator looks.
     logged = [
-        json.loads(line.split(" ", 3)[-1])
+        json.loads(line[line.index("{"):])
         for line in log_path.read_text(encoding="utf-8").splitlines()
         if "value_invariant_failed" in line
     ]
@@ -2302,3 +2303,67 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     assert reported_team.group(1) in NBA_TEAM_IDS
     # Bounded: an operator diagnostic never becomes a payload channel.
     assert len(detail) <= 160
+
+
+def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(tmp_path: Path):
+    """The terminus: the log file the scheduled task leaves behind.
+
+    The other diagnostic test injects a logger straight into the collector, so
+    it cannot see whether the CLI still wires one from the configured log path.
+    Deleting that wiring leaves the fallback logger, which has no handlers and
+    writes nothing -- the diagnostic would vanish in production with every test
+    still green.  This goes through ``run_once`` so that wiring is what fails.
+    """
+
+    from app.collector.cli import run_once
+    from app.collector.config import CollectorConfig
+
+    # ``run_once`` builds its own collector on the real clock, so the manifest
+    # has to be live now rather than at the suite's frozen instant.
+    live = datetime.now(UTC)
+    manifest_scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
+    discovery = {"environment": "testing", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": "manifest-zone", "season": "2025-26",
+        "cutoff": live.isoformat(),
+        "collect_before": (live + timedelta(hours=1)).isoformat(),
+        "accepted_versions": [2], "scopes": sorted(manifest_scopes),
+        "scope_descriptors": _collector_scope_descriptors(manifest_scopes, live),
+    }]}
+
+    class IncoherentProvider(FakeProvider):
+        def fetch_opponent_shooting_zone(self, _date_from, **kwargs):
+            return _boston_zone_row(
+                **{"TEAM_ID": kwargs["team_id"], "Backcourt_OPP_FGA": 34}
+            )
+
+    log_path = tmp_path / "logs" / "collector.log"
+    config = CollectorConfig(
+        railway_url="http://127.0.0.1",
+        environment="testing",
+        identity_id="collector",
+        outbox_path=tmp_path / "outbox.sqlite3",
+        log_path=log_path,
+        release_version="0.0.0-test",
+        allow_insecure_localhost=True,
+    )
+    run_once(
+        config,
+        provider=IncoherentProvider(),
+        transport=FakeTransport(discovery=discovery),
+        secret="machine-secret",
+    )
+
+    for handler in list(logging.getLogger("statsplus.residential").handlers):
+        handler.close()
+        logging.getLogger("statsplus.residential").removeHandler(handler)
+
+    written = log_path.read_text(encoding="utf-8")
+    diagnostics = [
+        json.loads(line[line.index("{"):])
+        for line in written.splitlines()
+        if "value_invariant_failed" in line
+    ]
+    assert diagnostics, written
+    detail = diagnostics[-1]["detail"]
+    assert "equation=zones_plus_backcourt_equals_opponent_fga" in detail
+    assert "residual=1.0" in detail

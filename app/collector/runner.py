@@ -396,7 +396,7 @@ class ResidentialCollector:
                         f"{key}={value}"
                         for key, value in sorted(diagnostics.items())
                     )
-                    self.status.record(reason, scope=scope, detail=detail)
+                    self.status.record(reason, scope=scope)
                     # The in-memory status dies with the process, so the
                     # rotating log is where an operator actually reads this.
                     log_status(self.logger, reason, scope=scope, detail=detail)
