@@ -2404,6 +2404,7 @@ POST   /api/user/targets
 PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
+GET    /api/user/targets/<id>/backtest
 ```
 
 `GET` returns the caller's items newest-first:
@@ -2753,6 +2754,141 @@ Matchup's own order (Season scoring descending, canonical id breaking ties).
 
 `401 authentication_required` for an unauthenticated caller. An account with no
 Targets is `200` with an empty `targets` list, not an error.
+
+#### Backtest one Target over the season to date
+
+```http
+GET /api/user/targets/7/backtest
+Authorization: Bearer <firebase-id-token>
+```
+
+Reports the season one Target has already had: every player **league-wide**
+whose current-season Diet meets every Qualifier and is not thin, with their
+games against that Target's opponent this season and their own season per-game
+averages over the same columns. It is a separate read from
+[Resolve](#resolve-every-target-against-one-slate-date) so the Slate stays
+cheap -- the league-wide game-log scan only runs when a reader expands a
+Target.
+
+The season is the configured current season, the same one the Slate and
+Matchup reads use, and is echoed as `season`. A Target has no season of its
+own. The request makes no NBA, PBP, or DFS call.
+
+```json
+{
+  "success": true,
+  "target": {
+    "id": 7,
+    "opponent": "OKC",
+    "title": "OKC vs Corner 3 ≥ 40%",
+    "note": "Leaks corner threes",
+    "qualifiers": [
+      {
+        "base": "shot_zones",
+        "slice_key": "Corner 3",
+        "comparator": "at_or_above",
+        "threshold": 0.4
+      }
+    ],
+    "created_at": "2026-09-04T12:00:00+00:00",
+    "updated_at": "2026-09-04T12:00:00+00:00"
+  },
+  "season": "2025-26",
+  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
+  "stat_columns": ["PTS", "3PM", "FGA", "FG3A"],
+  "players": [
+    {
+      "canonical_id": 2544,
+      "name": "LeBron James",
+      "team_id": 1610612747,
+      "tricode": "LAL",
+      "season_scoring": 25.0,
+      "shares": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "share": 0.42,
+          "league_average_share": 0.2
+        }
+      ],
+      "season_averages": {
+        "PTS": 25.0,
+        "3PM": 2.0,
+        "FGA": 20.0,
+        "FG3A": 6.0
+      },
+      "games": [
+        {
+          "game_id": "0022500584",
+          "game_date": "2026-01-16",
+          "matchup": "LAL vs. OKC",
+          "minutes": 34.0,
+          "stats": {"PTS": 30.0, "3PM": 4.0, "FGA": 20.0, "FG3A": 8.0}
+        },
+        {
+          "game_id": "0022500120",
+          "game_date": "2025-11-03",
+          "matchup": "LAL @ OKC",
+          "minutes": 34.0,
+          "stats": {"PTS": 22.0, "3PM": 2.0, "FGA": 17.0, "FG3A": 5.0}
+        }
+      ]
+    }
+  ]
+}
+```
+
+`target` is the same item `GET /api/user/targets` returns, derived title
+included.
+
+`proxy` is always present and always says the same thing: no per-game shot-zone
+or play-type evidence exists, so a Qualifier's slice is measured through
+box-score markets. Read `"PTS": 30` as thirty points, never as thirty corner
+threes.
+
+`stat_columns` is the union of the markets each Qualifier's slice maps to,
+deduplicated and in the Target's own Qualifier order. The mapping is the
+Matchup's: it is exactly the `markets` its defense-sheet rows advertise for
+that slice, unioned over the rows that slice publishes. A shot zone publishes an
+FGM and an FGA row, so `Corner 3` contributes `PTS`, `3PM`, `FGA`, and `FG3A`;
+`Transition` contributes `PTS`, `PA`, `PR`, and `PRA`. `season_averages` and
+every game's `stats` carry exactly these columns, in this order. The row
+`markets` under [Get Matchup](#get-matchup) are the same mapping, so a backtest
+column can never disagree with the defense sheet about the same slice.
+
+`players` holds the qualifying players in the Matchup's own order -- Season
+scoring descending, canonical id breaking ties.
+
+- Players are drawn from the **whole league**, not from one team. A player is
+  listed only if they have actually played the opponent this season, so
+  `games` is never empty.
+- Comparators are inclusive on the player's Season Diet `share` for the slice,
+  and every Qualifier has to be met, exactly as under
+  [Resolve](#resolve-every-target-against-one-slate-date). A player with no
+  stored fact for a Qualifier's slice does not fit.
+- **Thin-diet players are excluded**, which is where the backtest differs from
+  resolution. The verdict is the same `diet_evidence_thin` rule, asked of each
+  Base a Qualifier names; resolution flags such a player and keeps them so its
+  list agrees with the Matchup about who is in tonight's game, while the
+  backtest drops them, because a season-long production claim resting on an
+  unusable Diet is worse than no claim. See `diet_thin` under
+  [Get Matchup](#get-matchup) for what makes a Base thin.
+- `shares` is one entry per Qualifier, in Qualifier order, with the player's
+  Season `share` for the slice and its `league_average_share`.
+- Identity (`name`, `team_id`, `tricode`) and `season_scoring` come from the
+  player's newest row against this opponent and their Season rate.
+- `games` are the player's games against this opponent this season,
+  newest-first, each with its `game_id`, `game_date`, `matchup`, `minutes`, and
+  the `stat_columns`. `matchup` uses the game-time identity, so a mid-season
+  trade cannot rewrite who a player suited up for that night.
+
+`players` is `[]` when nobody qualifies and when nobody has faced the opponent
+yet; the two are not distinguished, because a player with no games has nothing
+to backtest.
+
+`401 authentication_required` for an unauthenticated caller.
+`404 resource_not_found` for an id that does not exist or belongs to another
+account -- foreign ids are never reported as `403`.
 
 
 ## Filtering Reference

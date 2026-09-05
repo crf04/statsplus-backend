@@ -2028,6 +2028,33 @@ game resolves against the canonical game-log participants the Matchup page
 lists for it, exactly as a scheduled game resolves against the stored Player
 Pool.
 
+### Target backtest (#246)
+
+`TargetBacktestService` answers the season's question rather than the day's, so
+unlike resolution it cannot compose one game's Matchup. It reaches three
+durable seams directly and no provider: the league-wide game-log rows against
+the Target's opponent for the configured current season
+(`PlayerGameLogRepository.list_opponent_rows`, the same opponent-indexed read
+the head-to-head cards make with the player set left open), the Diet those
+players ate (`PlayerDietRepository.get_for_players` through the game-log path's
+read-only `PlayerDietReader`), and their Season rates
+(`get_player_summaries`). The opponent rows are both the population and the
+evidence: a qualifying player who has never faced this opponent has nothing to
+show, so scanning the opponent rather than the league costs the response
+nothing.
+
+What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
+`observed_diet_share`, both now module-level in `matchup.py` for that reason,
+so the player the Matchup marks thin is the player the backtest drops. The
+stat columns are `qualifier_slice_markets`, which is `MatchupService._markets`
+unioned over the rows a slice publishes, so a backtest column cannot disagree
+with the `markets` a Defense Sheet row advertises for the same slice. The
+Qualifier conjunction is `TARGET_COMPARATOR_TESTS`, as in resolution.
+
+The backtest is a separate route from resolution deliberately: the league-wide
+game-log scan runs only when a reader expands one Target, so the Slate's own
+read stays the cost of one Slate plus the Matchups its Targets name.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

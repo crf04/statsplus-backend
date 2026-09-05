@@ -875,6 +875,43 @@ def test_queries_derive_rates_last_ten_h2h_and_archetype_rows(tmp_path):
     ]
 
 
+def test_one_opponents_rows_are_listed_league_wide(tmp_path):
+    repository = _repository(tmp_path)
+    repository.publish(
+        SEASON,
+        [
+            _record(player_id=101, game_id="0022500001"),
+            replace(
+                _record(player_id=202, game_id="0022500001"),
+                team_id=3,
+                team_tricode="CCC",
+            ),
+            replace(
+                _record(player_id=303, game_id="0022500002"),
+                game_date=date(2026, 1, 9),
+                opponent_team_id=4,
+                opponent_team_tricode="DDD",
+            ),
+        ],
+        retrieved_at=RETRIEVED_AT,
+        source_provider="nba_stats",
+        source_row_count=3,
+    )
+
+    # Every player who faced team 2, whatever team they played for, and
+    # nobody who did not.
+    assert sorted(
+        row.player_id for row in repository.list_opponent_rows(SEASON, 2)
+    ) == [101, 202]
+    assert repository.list_opponent_rows(SEASON, 4) == (
+        *(
+            row
+            for row in repository.list_player_rows(SEASON, 303)
+            if row.opponent_team_id == 4
+        ),
+    )
+
+
 def _focal_game_repository(tmp_path):
     """Twelve stored games for one player, the seventh being the focal game."""
 

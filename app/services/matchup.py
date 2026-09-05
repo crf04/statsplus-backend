@@ -32,10 +32,13 @@ from app.domain.play_type_matchup import complete_play_type_shares, play_type_ma
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.team_matchup_taxonomy import (
+    PLAY_TYPE_STATS,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
+    SHOT_TYPE_STATS,
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
+    SHOT_ZONE_STATS,
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
 )
@@ -367,6 +370,37 @@ class _PlayerDiet:
                 for base, base_facts in by_base.items()
             },
         )
+
+
+def observed_diet_share(
+    base: str, facts: Sequence[StoredPlayerDietFact]
+) -> float | None:
+    """Return the observed share sum of a complete Diet, else ``None``.
+
+    A Base's own coverage, and the first leg of the thin rule below: ``None``
+    means the stored Diet is not a usable partition of the Base at all.  It is
+    module-level rather than private to the Matchup because every surface that
+    has to ask "is this player's Diet for this Base thin" -- the Target
+    backtest included -- has to read coverage the same way the Matchup does.
+    """
+
+    if not facts:
+        return None
+    if base == "play_types":
+        shares = complete_play_type_shares(
+            (fact.slice_key, fact.share) for fact in facts
+        )
+        return None if shares is None else sum(shares.values())
+    keys = [fact.slice_key for fact in facts]
+    if len(keys) != len(set(keys)):
+        return None
+    if set(keys) != _DIET_SLICE_KEYS[base]:
+        return None
+    lower, upper = _DIET_SHARE_BOUNDS[base]
+    share_sum = sum(fact.share for fact in facts)
+    if not lower - 1e-12 <= share_sum <= upper + 1e-12:
+        return None
+    return share_sum
 
 
 def diet_evidence_thin(
@@ -1163,7 +1197,7 @@ class MatchupService:
             diet_by_base = {base: [] for base in PLAYER_DIET_BASES}
             diet = _PlayerDiet.build(
                 diets.players.get(player.canonical_player_id, ()),
-                self._complete_diet,
+                observed_diet_share,
             )
             # One whole-Base verdict per Base, from the same rule a score cell
             # marks itself thin with.  A score component states it only for the
@@ -1712,30 +1746,6 @@ class MatchupService:
         }
 
     @staticmethod
-    def _complete_diet(
-        base: str, facts: Sequence[StoredPlayerDietFact]
-    ) -> float | None:
-        """Return the observed share sum of a complete Diet, else ``None``."""
-
-        if not facts:
-            return None
-        if base == "play_types":
-            shares = complete_play_type_shares(
-                (fact.slice_key, fact.share) for fact in facts
-            )
-            return None if shares is None else sum(shares.values())
-        keys = [fact.slice_key for fact in facts]
-        if len(keys) != len(set(keys)):
-            return None
-        if set(keys) != _DIET_SLICE_KEYS[base]:
-            return None
-        lower, upper = _DIET_SHARE_BOUNDS[base]
-        share_sum = sum(fact.share for fact in facts)
-        if not lower - 1e-12 <= share_sum <= upper + 1e-12:
-            return None
-        return share_sum
-
-    @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:
         if not window:
             return {"status": "missing", "unavailable_reason": "not_stored"}
@@ -2156,10 +2166,43 @@ class MatchupService:
         return round(float(value), _WIRE_PRECISION)
 
 
+#: The stat keys each Diet Base publishes a Defense Sheet row for.  Assist
+#: locations name the slice as their own stat key, so they are read from the
+#: slice rather than listed here.
+_BASE_STAT_KEYS = {
+    "play_types": PLAY_TYPE_STATS,
+    "shot_types": SHOT_TYPE_STATS,
+    "shot_zones": SHOT_ZONE_STATS,
+}
+
+
+def qualifier_slice_markets(base: str, slice_key: str) -> tuple[str, ...]:
+    """Every Stat Category the Defense Sheet maps to one Diet slice.
+
+    A slice publishes a row per stat key of its Base -- a shot zone has both
+    an FGM and an FGA row -- and each row already names the markets it bears
+    on.  This is the union of those, in row order, and it is the one mapping
+    from a Qualifier's slice to the box-score columns that stand in for it.
+    Because it is ``MatchupService._markets`` itself, a Target backtest column
+    can never disagree with the ``markets`` a Defense Sheet row advertises for
+    the same slice.
+    """
+
+    markets: list[str] = []
+    for stat_key in _BASE_STAT_KEYS.get(base, (slice_key,)):
+        for market in MatchupService._markets(base, slice_key, stat_key):
+            if market not in markets:
+                markets.append(market)
+    return tuple(markets)
+
+
 __all__ = [
     "CURRENT_MODE",
     "DEFENSE_BASES",
     "DEFENSIVE_COLUMNS",
     "HISTORICAL_MODE",
     "MatchupService",
+    "diet_evidence_thin",
+    "observed_diet_share",
+    "qualifier_slice_markets",
 ]
