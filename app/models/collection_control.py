@@ -5,7 +5,7 @@ collector is allowed to write only immutable observations; publications are
 advanced by the server under a database fence.
 """
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text, Index
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, Integer, String, Text, Index, text
 
 from . import Base
 
@@ -537,6 +537,93 @@ class OperatorJob(Base):
     __table_args__ = (CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_operator_job_status"),)
 
 
+class PublicationRebuild(Base):
+    """One durable, restart-safe rebuild of a publication family's format.
+
+    A rebuild regenerates every window of one family from ledger facts that
+    did not change, because the *rendered format* changed.  It is deliberately
+    not a composition job (those are created by new or corrected observations),
+    not failed-data repair, and not initial parity activation: each of those
+    already means something else, and overloading one of them would make
+    operational history describe an event that never happened.
+
+    The row is the operation.  It carries the expected active pair and their
+    fences so a concurrent correction cannot be silently overwritten, the
+    shared immutable authority it must reuse, a worker lease and a generation
+    for restart-safe claiming, the staged and promoted identities and
+    checksums that are its audit evidence, and one bounded failure code.
+    """
+
+    __tablename__ = "publication_rebuilds"
+
+    rebuild_id = Column(String(36), primary_key=True)
+    family = Column(String(64), nullable=False)
+    #: The format the *deployed code* owns, recorded with a fingerprint of its
+    #: exact taxonomy and invariants.  A request never names a target.
+    target_format = Column(String(64), nullable=False)
+    target_fingerprint = Column(String(64), nullable=False)
+    actor = Column(String(128), nullable=False)
+    reason = Column(String(255), nullable=False)
+    #: A digest of the request's full identity.  Two starts that agree on it
+    #: are the same operation; one that differs while another is active is a
+    #: conflicting request rather than a retry.
+    request_checksum = Column(String(64), nullable=False)
+    expected_season_publication_id = Column(String(36), nullable=False)
+    expected_season_fence = Column(Integer, nullable=False)
+    expected_l15_publication_id = Column(String(36), nullable=False)
+    expected_l15_fence = Column(Integer, nullable=False)
+    #: The active pair's own authority, reused rather than re-supplied.
+    season = Column(String(7), nullable=False)
+    cutoff = Column(DateTime(timezone=True), nullable=False)
+    manifest_id = Column(String(36), nullable=True)
+    event_catalog_publication_id = Column(String(36), nullable=True)
+    event_catalog_checksum = Column(String(64), nullable=True)
+    #: The accepted ledger provenance the candidates must still rest on.  A
+    #: correction that changes it makes the rebuild terminate as stale.
+    source_checksum = Column(String(64), nullable=True)
+    state = Column(String(16), nullable=False, default="queued")
+    attempts = Column(Integer, nullable=False, default=0)
+    generation = Column(Integer, nullable=False, default=1)
+    claimed_generation = Column(Integer, nullable=True)
+    lease_owner = Column(String(128), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    staged_season_publication_id = Column(String(36), nullable=True)
+    staged_season_checksum = Column(String(64), nullable=True)
+    staged_l15_publication_id = Column(String(36), nullable=True)
+    staged_l15_checksum = Column(String(64), nullable=True)
+    promoted_season_publication_id = Column(String(36), nullable=True)
+    promoted_season_checksum = Column(String(64), nullable=True)
+    promoted_l15_publication_id = Column(String(36), nullable=True)
+    promoted_l15_checksum = Column(String(64), nullable=True)
+    error_code = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('queued', 'composing', 'validating', 'promoting',"
+            " 'succeeded', 'failed')",
+            name="ck_publication_rebuild_state",
+        ),
+        # One family may have at most one rebuild in flight.  Enforced in the
+        # database on both dialects so two concurrent operators cannot both
+        # observe an empty table and both insert.
+        Index(
+            "uq_publication_rebuild_active_family",
+            "family",
+            unique=True,
+            sqlite_where=text(
+                "state IN ('queued', 'composing', 'validating', 'promoting')"
+            ),
+            postgresql_where=text(
+                "state IN ('queued', 'composing', 'validating', 'promoting')"
+            ),
+        ),
+        Index("ix_publication_rebuilds_family_created", "family", "created_at"),
+    )
+
+
 class CredentialDelivery(Base):
     __tablename__ = "collector_credential_deliveries"
 
@@ -556,5 +643,5 @@ __all__ = [
     "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",
     "CollectorUsage", "ValidationSummary",
-    "GovernedNotApplicable", "OperatorJob", "CredentialDelivery",
+    "GovernedNotApplicable", "OperatorJob", "PublicationRebuild", "CredentialDelivery",
 ]

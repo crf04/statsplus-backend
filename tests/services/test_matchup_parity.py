@@ -51,9 +51,11 @@ from app.services.ledger_parity import (
 from app.services.nba_stats_adapter import player_per36_request_descriptor
 from app.services.nba_stats_adapter import player_totals_request_descriptor
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from app.services.traditional_opponent_publications import (
+    TRADITIONAL_OPPONENT_V2,
+)
 from app.services.ledger_derivations import (
     ASSIST_DERIVED_METRICS,
-    TEAM_METRICS,
     competition_ranks,
 )
 from app.services.matchup_parity import (
@@ -751,13 +753,25 @@ def test_l15_requires_exactly_15_games_per_team():
     )
 
 
+#: The traditional-opponent taxonomy this deployment reads.
+TRADITIONAL_METRICS = TRADITIONAL_OPPONENT_V2.metrics
+
+
 # --- Publication resolution tests ------------------------------------------
 
 def _publication_payload(game_ids_by_team, *, surface, offset=0, minutes=48.0):
-    payload_metrics = TEAM_METRICS if surface == "traditional" else ASSIST_DERIVED_METRICS
+    payload_metrics = (
+        TRADITIONAL_METRICS if surface == "traditional" else ASSIST_DERIVED_METRICS
+    )
     rows = []
     for team_id in TEAM_IDS:
         counts = {metric: float(team_id + offset) for metric in payload_metrics}
+        if "offensive_rebounds" in counts:
+            # v2 derives the total from the split, so split the total rather
+            # than restating it: the legacy diagnostic still compares against
+            # the same OPP_REB value it always did.
+            counts["offensive_rebounds"] = 1.0
+            counts["defensive_rebounds"] = counts["rebounds"] - 1.0
         per48 = {metric: value * 48.0 / minutes for metric, value in counts.items()}
         competition_rank = {
             metric: TEAM_IDS.index(team_id) + 1 for metric in payload_metrics

@@ -39,6 +39,10 @@ from app.services.team_matchup_publications import (
     resolve_governed_team_game_ids,
     validate_publication_rows,
 )
+from app.services.traditional_opponent_publications import (
+    TraditionalOpponentFormatError,
+    normalize_traditional_opponent_window,
+)
 
 EASTERN = ZoneInfo("America/New_York")
 
@@ -345,6 +349,23 @@ class TeamFilterRankingService:
                 stream_key,
             )
             return None
+        if base == _TRADITIONAL:
+            # The traditional-opponent family is read through its own module,
+            # which recognizes the stored format and returns one normalized
+            # window.  Callers below read the same attributes they always did
+            # and never learn which format served them.
+            try:
+                return normalize_traditional_opponent_window(
+                    rows, stream_key=stream_key
+                ).teams
+            except TraditionalOpponentFormatError as error:
+                logger.warning(
+                    "%s publication is not a supported traditional-opponent"
+                    " format (%s); refusing to rank",
+                    stream_key,
+                    error.reason,
+                )
+                return None
         return rows
 
     def _governed(self, read, rows, base: str, stream_key: str) -> bool:

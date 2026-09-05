@@ -532,6 +532,31 @@ def test_demo_database_never_constructs_rotowire_and_degrades_with_closed_reason
     assert result.block["unavailable_reason"] == "fetch_failed"
 
 
+def test_demo_database_composes_a_non_legacy_player_profile_reader(monkeypatch):
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.errors import ResourceNotFoundError
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr("app.utils.cache_config.get_redis_client", Mock(return_value=None))
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+        )
+    )
+    legacy_read = Mock(side_effect=AssertionError("legacy profile table read"))
+    dependencies.player_service._fetch_data_from_table = legacy_read
+
+    assert dependencies.player_service.profile_reader is not None
+    assert dependencies.player_service.get_all_players() == []
+    with pytest.raises(ResourceNotFoundError):
+        dependencies.player_service.get_player_profile("Jayson Tatum", "Playtypes")
+    legacy_read.assert_not_called()
+
+
 def test_dependency_assembly_fails_fast_on_malformed_catalog_yaml(monkeypatch, tmp_path):
     from app.dependencies import build_dependencies
     from app.services.statistic_catalog import StatisticCatalogError
@@ -721,3 +746,28 @@ def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
     assert isinstance(
         publications.publication_reader, DatabaseFirstPublicationReader
     )
+
+
+def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatch):
+    """Resolution adds no seam of its own, so it adds no provider load (#245)."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+        )
+    )
+
+    resolution = dependencies.target_resolution_service
+    assert resolution.targets is dependencies.user_service
+    assert resolution.slates is dependencies.slate_service
+    assert resolution.matchups is dependencies.matchup_service

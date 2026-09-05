@@ -588,6 +588,16 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             "shot_types": [],
             "assist_locations": [],
         },
+        # A whole-Base verdict per Base. One observed shot zone is not a
+        # usable partition of the Base, so shot zones are thin here even
+        # though that one fact clears both floors; the two Bases with no
+        # stored fact at all are thin for the same reason.
+        "diet_thin": {
+            "play_types": True,
+            "shot_zones": True,
+            "shot_types": True,
+            "assist_locations": True,
+        },
         "scores": {
             "PTS": {
                 # One observed play type is a complete Synergy Diet, so the

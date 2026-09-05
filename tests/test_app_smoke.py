@@ -1,5 +1,6 @@
 """Application and route smoke tests."""
 
+import pytest
 import requests
 
 
@@ -149,6 +150,155 @@ def test_players_endpoint_smoke(client):
 
     assert response.status_code == 200
     assert isinstance(response.get_json(), list)
+
+
+def test_player_routes_preserve_profile_response_shapes(client):
+    service = client.application.extensions["dependencies"].player_service
+    service.get_all_players.return_value = ["Jayson Tatum"]
+
+    def profile(player_name, category, opp_team=None):
+        assert player_name == "Jayson Tatum"
+        if category == "Playtypes":
+            return {
+                "PLAYER_NAME": "Jayson Tatum",
+                "TEAM_ABBREVIATION": "BOS",
+                "Transition%": 20.0,
+            }
+        return [{"Name": "Jayson Tatum", "ThreePtAssists": 30.0}]
+
+    service.get_player_profile.side_effect = profile
+
+    players = client.get("/api/players")
+    playtypes = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes"
+    )
+    assists = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
+    )
+
+    assert players.status_code == 200
+    assert players.get_json() == ["Jayson Tatum"]
+    assert playtypes.status_code == 200
+    assert playtypes.get_json()["Transition%"] == 20.0
+    assert assists.status_code == 200
+    assert assists.get_json()[0]["ThreePtAssists"] == 30.0
+
+
+def test_tatum_profile_routes_use_the_real_durable_service(client):
+    from datetime import datetime, timezone
+
+    import pandas as pd
+    from sqlalchemy import create_engine
+
+    from app.services.player_diet import (
+        PlayerDietBaseline,
+        PlayerDietResult,
+        StoredPlayerDietFact,
+    )
+    from app.services.player_service import PlayerService
+
+    player_id = 111
+    assist_slices = {
+        "Arc3Assists": 0.20,
+        "Corner3Assists": 0.10,
+        "AtRimAssists": 0.30,
+        "ShortMidRangeAssists": 0.15,
+        "LongMidRangeAssists": 0.05,
+    }
+
+    class Reader:
+        def get_catalog(self, season, *, active_only=False):
+            return [
+                {
+                    "player_id": player_id,
+                    "display_name": "Jayson Tatum",
+                    "team_abbreviation": "BOS",
+                    "is_active_for_season": True,
+                }
+            ]
+
+        def get_for_players(self, season, player_ids):
+            return PlayerDietResult(
+                season=season,
+                players={
+                    player_id: (
+                        StoredPlayerDietFact(
+                            player_id=player_id,
+                            base="play_types",
+                            slice_key="Transition",
+                            share=0.2,
+                            volume=100,
+                            games_played=20,
+                            volume_unit="possessions",
+                            provider="nba_synergy",
+                            retrieved_at=datetime(2026, 8, 23, tzinfo=timezone.utc),
+                        ),
+                        *(
+                            StoredPlayerDietFact(
+                                player_id=player_id,
+                                base="assist_locations",
+                                slice_key=slice_key,
+                                share=share,
+                                volume=100,
+                                games_played=20,
+                                volume_unit="assists",
+                                provider="pbp_stats",
+                                retrieved_at=datetime(
+                                    2026, 8, 23, tzinfo=timezone.utc
+                                ),
+                            )
+                            for slice_key, share in assist_slices.items()
+                        ),
+                    )
+                },
+                observations=(),
+                baselines={
+                    ("assist_locations", slice_key): PlayerDietBaseline(
+                        baseline, 0.1
+                    )
+                    for slice_key, baseline in {
+                        "Arc3Assists": 0.10,
+                        "Corner3Assists": 0.10,
+                        "AtRimAssists": 0.20,
+                        "ShortMidRangeAssists": 0.10,
+                        "LongMidRangeAssists": 0.05,
+                    }.items()
+                },
+            )
+
+    dependencies = client.application.extensions["dependencies"]
+    legacy_engine = create_engine("sqlite:///:memory:")
+    pd.DataFrame(
+        [{"PLAYER_NAME": "Other Player", "Transition%": 10.0}]
+    ).to_sql("player_play_types", legacy_engine, index=False)
+    pd.DataFrame(
+        [{"Name": "Other Player", "ThreePtAssists": 20.0}]
+    ).to_sql("processed_player_assists", legacy_engine, index=False)
+
+    dependencies.player_service = PlayerService(
+        legacy_engine,
+        Reader(),
+        settings=dependencies.settings,
+    )
+
+    playtypes_response = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=Playtypes"
+    )
+    assists_response = client.get(
+        "/api/players/profile?player_name=Jayson%20Tatum&category=assists"
+    )
+
+    assert playtypes_response.status_code == 200
+    playtypes = playtypes_response.get_json()
+    assert playtypes["PLAYER_NAME"] == "Jayson Tatum"
+    assert playtypes["TEAM_ABBREVIATION"] == "BOS"
+    assert playtypes["Transition%"] == pytest.approx(20.0)
+    assert assists_response.status_code == 200
+    profile = assists_response.get_json()[0]
+    assert profile["TwoPtAssists"] == pytest.approx(50.0)
+    assert profile["TwoPtAssists+"] == pytest.approx(1.4285714285714286)
+    assert profile["ThreePtAssists"] == pytest.approx(30.0)
+    assert profile["ThreePtAssists+"] == pytest.approx(1.5)
 
 
 def test_game_logs_endpoint_can_be_exercised_with_mocked_service(client, monkeypatch):

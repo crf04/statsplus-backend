@@ -16,7 +16,7 @@ from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.nba_teams import (
-    NBA_TEAM_ID_TO_TRICODE,
+    NBA_TEAM_TRICODE_TO_ID,
     canonical_nba_team_abbreviation,
 )
 from app.domain.team_matchup_taxonomy import (
@@ -35,8 +35,10 @@ from app.services.team_matchup_query import (
 )
 
 #: The opponent box columns the panel renders and the ledger metric each one
-#: reads.  ``OPP_OREB`` and ``OPP_DREB`` are absent because the ledger
-#: publishes no rebound split; they render as ``N/A``.
+#: reads.  ``OPP_OREB`` and ``OPP_DREB`` are served only by publications whose
+#: format carries the rebound split; a publication without it omits those two
+#: fields, which the panel renders as ``N/A``.  They are never sent as zero:
+#: a fabricated zero is indistinguishable from a defense that allowed none.
 _TRADITIONAL_FIELDS: dict[str, str] = {
     "OPP_PTS": "points",
     "OPP_FGM": "field_goals_made",
@@ -45,6 +47,8 @@ _TRADITIONAL_FIELDS: dict[str, str] = {
     "OPP_FG3A": "three_pointers_attempted",
     "OPP_FTA": "free_throws_attempted",
     "OPP_REB": "rebounds",
+    "OPP_OREB": "offensive_rebounds",
+    "OPP_DREB": "defensive_rebounds",
     "OPP_AST": "assists",
     "OPP_TOV": "turnovers",
     "OPP_STL": "steals",
@@ -65,10 +69,6 @@ _ASSIST_FIELDS: dict[str, str] = {
 
 #: The one display name the panel sends that the team catalog does not carry.
 _TEAM_NAME_ALIASES: dict[str, str] = {"LA Clippers": "Los Angeles Clippers"}
-
-_TRICODE_TO_TEAM_ID: dict[str, int] = {
-    tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-}
 
 #: A rate no team in the league has: every field it would place is omitted.
 _NO_RATE_COLUMN = LeagueMetricColumn(
@@ -128,7 +128,7 @@ def _resolve_team_id(team_name) -> int | None:
     name = _TEAM_NAME_ALIASES.get(name, name)
     for entry in teams.get_teams():
         if entry["full_name"] == name:
-            return _TRICODE_TO_TEAM_ID.get(
+            return NBA_TEAM_TRICODE_TO_ID.get(
                 canonical_nba_team_abbreviation(entry["abbreviation"])
             )
     return None
@@ -196,7 +196,15 @@ def _place_ratio(stats, field, column, team_id) -> None:
 def _traditional_profile(table, team_id) -> dict:
     stats: dict = {}
     for field, metric_key in _TRADITIONAL_FIELDS.items():
-        _place(stats, field, table[metric_key], team_id)
+        column = table.get(metric_key)
+        if column is None:
+            # Unreachable while one format is supported: the read boundary
+            # proves the publication carries the full taxonomy before these
+            # rows arrive.  Kept so that opening the next compatibility window
+            # omits a field rather than failing the whole panel, which is the
+            # same choice `_place` makes for a team with no value.
+            continue
+        _place(stats, field, column, team_id)
     _place(
         stats,
         "OPP_STL+BLK",

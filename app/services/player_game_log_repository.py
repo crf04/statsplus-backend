@@ -459,26 +459,29 @@ class PlayerGameLogRepository:
         publication_id: str | None,
         season: str,
         *,
-        player_ids: tuple[int, ...],
+        player_ids: tuple[int, ...] | None,
         opponent_team_id: int,
         connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...]:
-        """Read one opponent's rows for a player set from the projection.
+        """Read one opponent's rows from the projection.
 
         The where clause leads with the opponent index's columns, so a card
-        never scans the publication's other opponents.
+        never scans the publication's other opponents.  ``player_ids`` of
+        ``None`` narrows to the opponent alone.
         """
 
         if publication_id is None:
             return ()
         projection = PublicationPlayerGameLog.__table__
+        conditions = [
+            projection.c.publication_id == publication_id,
+            projection.c.opponent_team_id == opponent_team_id,
+        ]
+        if player_ids is not None:
+            conditions.append(projection.c.player_id.in_(player_ids))
         return self._decode_projection(
             select(projection.c.row_payload)
-            .where(
-                projection.c.publication_id == publication_id,
-                projection.c.opponent_team_id == opponent_team_id,
-                projection.c.player_id.in_(player_ids),
-            )
+            .where(*conditions)
             .order_by(
                 projection.c.game_date.desc(),
                 projection.c.player_id.asc(),
@@ -1110,6 +1113,35 @@ class PlayerGameLogRepository:
             connection=connection,
         )
 
+    def list_opponent_rows(
+        self,
+        season: str,
+        opponent_team_id: int,
+        *,
+        publication_snapshot: Any | None = None,
+        connection: Connection | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Return every stored row against one opponent, league-wide.
+
+        The same read the head-to-head cards make with the player set left
+        open: a Target backtest asks which players in the whole league have
+        faced this team, and only the evidence itself can say.
+
+        How much this costs is the caller's choice, exactly as it is for the
+        per-player reads.  Given a projection-ready ``publication_snapshot``
+        it is one indexed scan of the opponent's own rows; given a rendered
+        payload or none, it falls back to decoding the season and filtering in
+        Python, which for a league-wide question is the whole league.
+        """
+
+        return self._list_rows(
+            season,
+            player_ids=None,
+            opponent_team_id=opponent_team_id,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+
     def list_archetype_rows(
         self,
         season: str,
@@ -1136,7 +1168,7 @@ class PlayerGameLogRepository:
         self,
         season: str,
         *,
-        player_ids: tuple[int, ...],
+        player_ids: tuple[int, ...] | None,
         opponent_team_id: int,
         before_date: date | None = None,
         publication_snapshot: Any | None = None,
@@ -1169,8 +1201,11 @@ class PlayerGameLogRepository:
                         (
                             record
                             for record in publication_rows
-                            if record.player_id in player_ids
-                            and record.opponent_team_id == opponent_team_id
+                            if record.opponent_team_id == opponent_team_id
+                            and (
+                                player_ids is None
+                                or record.player_id in player_ids
+                            )
                         ),
                         key=lambda record: (
                             record.game_date,
@@ -1187,9 +1222,10 @@ class PlayerGameLogRepository:
         log_table = PlayerGameLog.__table__
         statement = self._published_rows_statement().where(
             log_table.c.season == canonical_season,
-            log_table.c.player_id.in_(player_ids),
             log_table.c.opponent_team_id == opponent_team_id,
         )
+        if player_ids is not None:
+            statement = statement.where(log_table.c.player_id.in_(player_ids))
         if before_date is not None:
             statement = statement.where(log_table.c.game_date < before_date)
         with read_connection(self.engine, connection) as connection:

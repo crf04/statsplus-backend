@@ -143,6 +143,10 @@ class AssistLocationWindowMaterialization:
     teams: tuple[AssistLocationWindowMetric, ...]
 
 
+#: The traditional-opponent metric set as it stood before the rebound split.
+#: It is the exact taxonomy of every publication composed up to that point, so
+#: it is pinned here as history rather than edited: see
+#: ``traditional_opponent_publications.TRADITIONAL_OPPONENT_V1``.
 TEAM_METRICS = (
     "points",
     "rebounds",
@@ -158,6 +162,12 @@ TEAM_METRICS = (
     "blocks",
     "personal_fouls",
 )
+#: The player-credited rebound split.  ``rebounds`` is derived from these two
+#: rather than observed beside them, so the three values cannot disagree.
+TEAM_REBOUND_SPLIT_METRICS = ("offensive_rebounds", "defensive_rebounds")
+#: What a team window composes today.  Reads accept the older taxonomy too;
+#: only composition is pinned to the current one.
+TEAM_WINDOW_METRICS = TEAM_METRICS + TEAM_REBOUND_SPLIT_METRICS
 NBA_TEAM_IDS = frozenset(1610612737 + index for index in range(30))
 ASSIST_METRICS = (
     "two_point_assists",
@@ -189,7 +199,12 @@ MATCHUP_TRADITIONAL_KEYS = {
     "OPP_STL": "steals",
     "OPP_BLK": "blocks",
 }
-_PLAYER_CREDITED_MATCHUP_METRICS = frozenset({"rebounds"})
+#: LeagueDashTeamStats' rebound surfaces are player-credited: team-only
+#: rebounds are excluded from the total and from each side of the split, so
+#: all three stay one arithmetic family.
+_PLAYER_CREDITED_MATCHUP_METRICS = frozenset(
+    {"rebounds", *TEAM_REBOUND_SPLIT_METRICS}
+)
 
 
 #: A regulation NBA game is 48 minutes and every overtime adds 5.  The legacy
@@ -571,7 +586,7 @@ def materialize_team_window(
     minutes_by_team: dict[int, float] = {}
     team_codes: dict[int, str] = {}
     for team_id, game_ids in ids_by_team.items():
-        totals = {metric: 0.0 for metric in TEAM_METRICS}
+        totals = {metric: 0.0 for metric in TEAM_WINDOW_METRICS}
         team_minutes = 0.0
         for game_id in game_ids:
             game = game_by_id[game_id]
@@ -582,16 +597,26 @@ def materialize_team_window(
             )
             team_codes[team_id] = defense.team_tricode
             team_minutes += nominal_team_minutes(defense.team_minutes)
-            for metric in TEAM_METRICS:
+            for metric in TEAM_WINDOW_METRICS:
+                if metric == "rebounds":
+                    # Derived below from the split, never observed beside it.
+                    continue
                 if metric in _PLAYER_CREDITED_MATCHUP_METRICS:
-                    # LeagueDashTeamStats' OPP_REB surface is player-credited.
-                    # Canonical team facts intentionally also retain team-only
-                    # rebounds, which must not leak into that legacy contract.
+                    # LeagueDashTeamStats' rebound surfaces are
+                    # player-credited.  Canonical team facts intentionally also
+                    # retain team-only rebounds, which must not leak into that
+                    # legacy contract.
                     totals[metric] += float(
                         player_credited_count(game, opponent.team_id, metric)
                     )
                 else:
                     totals[metric] += float(getattr(opponent, metric))
+        # The rebound total is the split's sum rather than a third
+        # observation, so the published identity holds by construction and
+        # cannot drift from the two values it is supposed to summarize.
+        totals["rebounds"] = (
+            totals["offensive_rebounds"] + totals["defensive_rebounds"]
+        )
         counts_by_team[team_id] = totals
         minutes_by_team[team_id] = team_minutes
         # ``team_minutes`` here is the nominal game length (48 plus 5 per
@@ -599,28 +624,33 @@ def materialize_team_window(
         # over five) establishes; see ``nominal_team_minutes``.
         # A manually assembled fact may not carry minutes; its count-per-game
         # values are the conservative equivalent for that test/replay seam.
-        if team_minutes > 0:
-            raw_by_team[team_id] = {
-                metric: totals[metric] * 48.0 / team_minutes
-                for metric in TEAM_METRICS
-            }
-        else:
-            denominator = float(len(game_ids))
-            raw_by_team[team_id] = {metric: totals[metric] / denominator for metric in TEAM_METRICS}
+        denominator = (
+            team_minutes / 48.0 if team_minutes > 0 else float(len(game_ids))
+        )
+        raw = {
+            metric: totals[metric] / denominator
+            for metric in TEAM_WINDOW_METRICS
+            if metric != "rebounds"
+        }
+        # Same order of operations as the counts: the split is served first
+        # and the total is its sum, so the served values satisfy the identity
+        # exactly rather than to within a rounding difference.
+        raw["rebounds"] = raw["offensive_rebounds"] + raw["defensive_rebounds"]
+        raw_by_team[team_id] = raw
     averages = {
         metric: sum(values[metric] for values in raw_by_team.values()) / len(raw_by_team)
-        for metric in TEAM_METRICS
+        for metric in TEAM_WINDOW_METRICS
     }
     sigma = {
         metric: math.sqrt(sum((values[metric] - averages[metric]) ** 2 for values in raw_by_team.values()) / len(raw_by_team))
-        for metric in TEAM_METRICS
+        for metric in TEAM_WINDOW_METRICS
     }
     ranks = {
         metric: competition_ranks(
             {team_id: values[metric] for team_id, values in raw_by_team.items()},
             descending=False,
         )
-        for metric in TEAM_METRICS
+        for metric in TEAM_WINDOW_METRICS
     }
     teams = tuple(
         TeamWindowMetric(
@@ -631,7 +661,9 @@ def materialize_team_window(
             per48=raw_by_team[team_id],
             league_average=averages,
             population_sigma=sigma,
-            competition_rank={metric: ranks[metric][team_id] for metric in TEAM_METRICS},
+            competition_rank={
+                metric: ranks[metric][team_id] for metric in TEAM_WINDOW_METRICS
+            },
             counts=counts_by_team[team_id],
             team_minutes=minutes_by_team[team_id],
         )
@@ -779,6 +811,8 @@ __all__ = [
     "MATCHUP_ASSIST_KEYS",
     "MATCHUP_TRADITIONAL_KEYS",
     "TEAM_METRICS",
+    "TEAM_REBOUND_SPLIT_METRICS",
+    "TEAM_WINDOW_METRICS",
     "AssistLocationFact",
     "AssistLocationWindowMaterialization",
     "AssistLocationWindowMetric",

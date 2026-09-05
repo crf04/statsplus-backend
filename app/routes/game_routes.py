@@ -107,6 +107,7 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         "date_filter": request.args.get("date_filter"),
         "teams_against": request.args.getlist("teams_against[]"),
         "rank_filter": request.args.getlist("rank_filter[]"),
+        "opponent_tricode": request.args.get("opponent_tricode"),
         "location_filter": request.args.get("location_filter", "Both"),
         "game_filter": request.args.get("game_filter"),
         "playstyle_range": [

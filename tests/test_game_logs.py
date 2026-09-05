@@ -53,6 +53,16 @@ def test_game_log_query_trims_and_validates_canonical_season():
     assert query.season_filter == "2024-25"
 
 
+def test_game_log_query_normalizes_one_specific_opponent_tricode():
+    query = GameLogQuery(season_filter="2024-25", opponent_tricode=" okc ")
+
+    assert query.opponent_tricode == "OKC"
+
+
+def test_game_log_query_defaults_to_no_specific_opponent():
+    assert GameLogQuery(season_filter="2024-25").opponent_tricode is None
+
+
 @pytest.mark.parametrize("season", ["", "potato", "2024-27"])
 def test_game_log_query_rejects_invalid_season(season):
     with pytest.raises(Exception):
@@ -74,6 +84,8 @@ def test_game_log_query_rejects_nonfinite_playstyle_range(value):
         {"date_filter": "not-a-date"},
         {"teams_against": ["OPP_PTS"], "rank_filter": []},
         {"teams_against": ["OPP_PTS"], "rank_filter": ["3", "9"]},
+        {"opponent_tricode": "XXX"},
+        {"opponent_tricode": ""},
         {"game_filter": 0},
         {"rank_filter": ["abc"]},
         {"self_filters": {"PTS": "25"}},
@@ -406,6 +418,43 @@ def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
 
     assert result["game_logs"] == []
     assert result["averages"] == []
+
+
+def test_a_specific_opponent_keeps_only_games_against_that_team(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    query = GameLogQuery(season_filter="2024-25", opponent_tricode="MIA")
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert [row["MATCHUP"] for row in result["game_logs"]] == ["BOS @ MIA"]
+    assert result["averages"][0]["PTS"] == 15
+    GameLogResponse.model_validate(result)
+
+
+def test_a_specific_opponent_narrows_the_rank_based_opponent_filter(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """The two opponent filters compose as a conjunction, never a union."""
+
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+
+    def matchups(opponent):
+        query = GameLogQuery(
+            season_filter="2024-25",
+            teams_against=["OPP_PTS"],
+            rank_filter=[1],
+            opponent_tricode=opponent,
+        )
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    # The stubbed rankings resolve OPP_PTS rank 1 to LAL.
+    assert matchups("LAL") == ["BOS vs. LAL"]
+    assert matchups("MIA") == []
 
 
 def _ranked_service(monkeypatch, mock_db_engine, mock_redis_client, ranked):
@@ -797,12 +846,42 @@ def test_route_returns_arrays_from_typed_service(client, monkeypatch):
     assert captured["season"] == "2024-25"
 
 
+def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
+    from app.routes import game_routes
+
+    captured = {}
+
+    def fake_get_filtered_logs(player_name, query):
+        captured["query"] = query
+        return {
+            "game_logs": [],
+            "averages": [],
+            "season_averages": [],
+            "next_game": None,
+        }
+
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
+        )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&opponent_tricode=okc"
+    )
+
+    assert response.status_code == 200
+    assert captured["query"].opponent_tricode == "OKC"
+
+
 @pytest.mark.parametrize(
     "query_string",
     [
         "player_name=LeBron%20James&minutes_filter=not-a-range",
         "player_name=LeBron%20James&location_filter=home",
         "player_name=LeBron%20James&teams_against[]=OPP_PTS",
+        "player_name=LeBron%20James&opponent_tricode=XXX",
+        "player_name=LeBron%20James&opponent_tricode=",
         "player_name=LeBron%20James&date_filter=not-a-date",
         "player_name=LeBron%20James&game_filter=0",
     ],

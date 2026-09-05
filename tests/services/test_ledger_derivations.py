@@ -1180,3 +1180,133 @@ def test_historical_materialization_ignores_later_ledger_rows(tmp_path):
 
     assert result.season_window.complete
     assert "later-game" not in result.season_window.governed_game_ids
+
+
+# --- Opponent rebound split (#50) ------------------------------------------
+
+
+def _rebound_window(games, *, window_games=None):
+    expected = frozenset(game.game_id for game in games)
+    expected_by_team = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in range(1, 31)
+    }
+    return materialize_team_window(
+        games,
+        season="2025-26",
+        as_of=date(2025, 10, 20),
+        window_games=window_games,
+        expected_game_ids=expected,
+        expected_team_game_ids=(
+            expected_by_team if window_games is not None else None
+        ),
+        team_ids=frozenset(range(1, 31)),
+    )
+
+
+@pytest.mark.parametrize("window_games", [None, 15])
+def test_the_window_publishes_the_player_credited_rebound_split(window_games):
+    window = _rebound_window(_league_games(), window_games=window_games)
+
+    assert window.complete
+    for team in window.teams:
+        for block in (
+            team.counts, team.per48, team.league_average,
+            team.population_sigma, team.competition_rank,
+        ):
+            assert {"offensive_rebounds", "defensive_rebounds"} <= set(block)
+
+
+@pytest.mark.parametrize("window_games", [None, 15])
+def test_rebound_counts_and_per48_values_satisfy_the_identity_exactly(
+    window_games,
+):
+    """Both are derived from the split, so neither can drift from it."""
+
+    window = _rebound_window(_league_games(), window_games=window_games)
+
+    for team in window.teams:
+        assert team.counts["rebounds"] == (
+            team.counts["offensive_rebounds"] + team.counts["defensive_rebounds"]
+        )
+        assert team.per48["rebounds"] == (
+            team.per48["offensive_rebounds"] + team.per48["defensive_rebounds"]
+        )
+
+
+def test_the_split_excludes_team_only_rebounds():
+    """The split is summed over opposing player rows, as OPP_REB always was."""
+
+    games = _league_games()
+    # Each team fact claims more rebounds than its players are credited with;
+    # the residual is a team-only board and must not reach the publication.
+    inflated = tuple(
+        replace(game, team_facts=tuple(
+            replace(
+                fact,
+                offensive_rebounds=fact.offensive_rebounds + 7,
+                rebounds=fact.rebounds + 7,
+            )
+            for fact in game.team_facts
+        ))
+        for game in games
+    )
+
+    window = _rebound_window(inflated)
+
+    for team in window.teams:
+        # One player per team, credited with one offensive board per game.
+        assert team.counts["offensive_rebounds"] == float(team.game_count)
+        assert team.counts["defensive_rebounds"] == float(team.game_count * 4)
+
+
+def test_the_split_uses_the_same_overtime_denominator_as_every_other_metric():
+    games = _league_games()
+    # Give every game one overtime: the nominal length becomes 53 minutes.
+    overtime = tuple(
+        replace(game, team_facts=tuple(
+            replace(fact, team_minutes=53.0) for fact in game.team_facts
+        ))
+        for game in games
+    )
+
+    window = _rebound_window(overtime)
+
+    for team in window.teams:
+        denominator = team.team_minutes / 48.0
+        assert team.per48["offensive_rebounds"] == pytest.approx(
+            team.counts["offensive_rebounds"] / denominator
+        )
+        assert team.per48["defensive_rebounds"] == pytest.approx(
+            team.counts["defensive_rebounds"] / denominator
+        )
+        assert team.team_minutes == 53.0 * team.game_count
+
+
+def test_the_split_is_ranked_ascending_with_the_league_it_belongs_to():
+    window = _rebound_window(_league_games())
+
+    for metric in ("offensive_rebounds", "defensive_rebounds"):
+        values = {team.team_id: team.per48[metric] for team in window.teams}
+        ranks = {team.team_id: team.competition_rank[metric] for team in window.teams}
+        fewest = min(values, key=lambda team_id: values[team_id])
+        assert ranks[fewest] == 1
+        assert window.teams[0].league_average[metric] == pytest.approx(
+            sum(values.values()) / 30
+        )
+
+
+def test_the_composed_window_is_the_deployed_target_publication_format():
+    from app.services.traditional_opponent_publications import (
+        TRADITIONAL_OPPONENT_TARGET_FORMAT,
+        recognize_traditional_opponent_format,
+    )
+
+    window = _rebound_window(_league_games())
+
+    assert recognize_traditional_opponent_format(
+        window.teams[0].per48
+    ) is TRADITIONAL_OPPONENT_TARGET_FORMAT

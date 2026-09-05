@@ -12,33 +12,115 @@ from ..errors import (
     ResourceNotFoundError,
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.models.catalogs import PLAY_TYPES
 from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
+from app.services.athlete_resolver import CanonicalAthlete, normalize_athlete_name
+from app.services.player_diet import PlayerDietResult
 from app.services.progress import RefreshProgress
 from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
 
+
+class PlayerProfileReader:
+    """Read-only catalog and Player Diet capability for player profiles.
+
+    ``PlayerDietService`` owns the provider-backed refresh adapters, so the
+    request service receives its repository directly through this narrow
+    wrapper.  The catalog reader follows the same engine-only pattern.  This
+    keeps the profile/list read path unable to reach NBA Stats or PBP Stats.
+    """
+
+    __slots__ = ("_catalog", "_diets")
+
+    def __init__(self, catalog_reader, diet_reader) -> None:
+        if not callable(getattr(catalog_reader, "get_catalog", None)):
+            raise TypeError("player profile catalog reader must expose get_catalog")
+        if not callable(getattr(diet_reader, "get_for_players", None)):
+            raise TypeError("player profile diet reader must expose get_for_players")
+        self._catalog = catalog_reader
+        self._diets = diet_reader
+
+    @classmethod
+    def unavailable(cls) -> "PlayerProfileReader":
+        """Build the database-only empty reader used by the demo fixture."""
+
+        class UnavailableCatalogReader:
+            @staticmethod
+            def get_catalog(season: str, *, active_only: bool = False):
+                del season, active_only
+                return ()
+
+        class UnavailableDietReader:
+            @staticmethod
+            def get_for_players(season: str, player_ids):
+                del player_ids
+                return PlayerDietResult(
+                    season=season,
+                    players={},
+                    observations=(),
+                )
+
+        return cls(UnavailableCatalogReader(), UnavailableDietReader())
+
+    def get_catalog(self, season: str, *, active_only: bool = False):
+        return self._catalog.get_catalog(season, active_only=active_only)
+
+    def get_for_players(self, season: str, player_ids):
+        return self._diets.get_for_players(season, player_ids)
+
+
+_ASSIST_LOCATION_SLICES = (
+    "Arc3Assists",
+    "Corner3Assists",
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+_TWO_POINT_ASSIST_SLICES = (
+    "AtRimAssists",
+    "ShortMidRangeAssists",
+    "LongMidRangeAssists",
+)
+_THREE_POINT_ASSIST_SLICES = ("Arc3Assists", "Corner3Assists")
+_DURABLE_PROFILE_CATEGORIES = frozenset(("Playtypes", "assists"))
+
+
 class PlayerService:
     def __init__(
         self,
         db_engine,
+        profile_reader: PlayerProfileReader,
         settings: RuntimeSettings | None = None,
         nba_stats_provider: NBAStatsProvider | None = None,
         publication_reader=None,
     ):
+        if profile_reader is None:
+            raise TypeError("player profile reader is required")
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
         self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self.publication_reader = publication_reader
+        self.profile_reader = profile_reader
 
     def get_all_players(self):
         """Fetch list of all players from database"""
-        try:
-            df = self._fetch_data_from_table('player_play_types')
-            return df['PLAYER_NAME'].values.tolist()
-        except Exception as e:
-            logger.error("Error fetching players: %s", e)
+        season = self.settings.nba.current_season
+        catalog = self.profile_reader.get_catalog(season, active_only=False)
+        catalog_by_id = {int(row["player_id"]): row for row in catalog}
+        if not catalog_by_id:
             return []
+        result = self.profile_reader.get_for_players(
+            season, tuple(sorted(catalog_by_id))
+        )
+        return [
+            catalog_by_id[player_id]["display_name"]
+            for player_id in sorted(catalog_by_id)
+            if any(
+                fact.base == "play_types"
+                for fact in result.players.get(player_id, ())
+            )
+        ]
 
     def get_player_profile(self, player_name, category, opp_team=None):
         """
@@ -49,24 +131,36 @@ class PlayerService:
         if not player_name or not category:
             raise InvalidInputError("player_name and category are required.")
 
-        # Fuzzy match player name.
-        player_name = self._fuzzy_match_player_name(player_name)
-        if player_name is None:
-            raise ResourceNotFoundError("The requested player was not found.")
+        if category in _DURABLE_PROFILE_CATEGORIES:
+            canonical = self._resolve_profile_player(player_name)
+            if canonical is None:
+                raise ResourceNotFoundError("The requested player was not found.")
+            player_id = canonical.player_id
+            canonical_name = canonical.display_name
+            team_abbreviation = canonical.team_abbreviation
+        else:
+            player_name = self._fuzzy_match_player_name(player_name)
+            if player_name is None:
+                raise ResourceNotFoundError("The requested player was not found.")
 
         try:
-            if category == 'Playtypes':
-                return self._get_player_playtypes(player_name)
-            elif category == 'assists':
-                return self._get_player_assists(player_name)
-            elif category == 'Archetype':
-                return self._get_archetype_gamelogs(player_name, opp_team)
-            elif category == 'Shooting Type':
-                return self._get_shooting_type(player_name)
-            elif category == 'Zone Shooting':
-                return self._get_player_zone_shooting(player_name)
-            else:
+            handlers = {
+                "Playtypes": lambda: self._get_durable_player_playtypes(
+                    player_id, canonical_name, team_abbreviation
+                ),
+                "assists": lambda: self._get_durable_player_assists(
+                    player_id, canonical_name
+                ),
+                "Archetype": lambda: self._get_archetype_gamelogs(
+                    player_name, opp_team
+                ),
+                "Shooting Type": lambda: self._get_shooting_type(player_name),
+                "Zone Shooting": lambda: self._get_player_zone_shooting(player_name),
+            }
+            handler = handlers.get(category)
+            if handler is None:
                 raise InvalidInputError("The requested profile category is invalid.")
+            return handler()
         except AppError:
             raise
         except requests.exceptions.RequestException as error:
@@ -78,6 +172,130 @@ class PlayerService:
         except Exception:
             logger.exception("Error getting player profile")
             raise
+
+    def _resolve_profile_player(self, player_name):
+        """Resolve one input to the current-season canonical catalog row."""
+
+        season = self.settings.nba.current_season
+        rows = self.profile_reader.get_catalog(season, active_only=False)
+        target = normalize_athlete_name(player_name)
+        if not target:
+            return None
+        matches = [
+            CanonicalAthlete.from_row(row)
+            for row in rows
+            if normalize_athlete_name(row.get("display_name")) == target
+        ]
+        if not matches:
+            return None
+        return min(
+            matches,
+            key=lambda athlete: (
+                not athlete.is_active_for_season,
+                athlete.player_id,
+            ),
+        )
+
+    def _durable_profile_result(self, player_id):
+        result = self.profile_reader.get_for_players(
+            self.settings.nba.current_season, [player_id]
+        )
+        return result, tuple(result.players.get(player_id, ()))
+
+    def _get_durable_player_playtypes(
+        self, player_id: int, canonical_name: str, team_abbreviation: str | None
+    ):
+        _, facts = self._durable_profile_result(player_id)
+        facts_by_slice = {
+            fact.slice_key: fact
+            for fact in facts
+            if fact.base == "play_types"
+        }
+        if not facts_by_slice:
+            raise ResourceNotFoundError("The requested player profile was not found.")
+        return {
+            "PLAYER_NAME": canonical_name,
+            "TEAM_ABBREVIATION": team_abbreviation,
+            **{
+                f"{play_type}%": float(
+                    facts_by_slice[play_type].share * 100
+                )
+                if play_type in facts_by_slice
+                else 0
+                for play_type in PLAY_TYPES
+            },
+        }
+
+    def _get_durable_player_assists(self, player_id: int, canonical_name: str):
+        result, facts = self._durable_profile_result(player_id)
+        facts_by_slice = {
+            fact.slice_key: fact
+            for fact in facts
+            if fact.base == "assist_locations"
+        }
+        if not facts_by_slice:
+            return []
+
+        shares = {
+            slice_key: float(facts_by_slice[slice_key].share)
+            for slice_key in _ASSIST_LOCATION_SLICES
+            if slice_key in facts_by_slice
+        }
+        baselines = result.baselines
+
+        def baseline_share(slice_keys):
+            values = []
+            for slice_key in slice_keys:
+                baseline = baselines.get(("assist_locations", slice_key))
+                if baseline is None or baseline.league_average_share is None:
+                    return None
+                values.append(baseline.league_average_share)
+            total = sum(values)
+            return total if total > 0 else None
+
+        derived = {}
+        if all(key in shares for key in _TWO_POINT_ASSIST_SLICES):
+            derived["TwoPtAssists"] = sum(
+                shares[key] for key in _TWO_POINT_ASSIST_SLICES
+            )
+        if all(key in shares for key in _THREE_POINT_ASSIST_SLICES):
+            derived["ThreePtAssists"] = sum(
+                shares[key] for key in _THREE_POINT_ASSIST_SLICES
+            )
+        all_shares = {**shares, **derived}
+        all_baseline_slices = {
+            **{
+                key: ("assist_locations", key)
+                for key in _ASSIST_LOCATION_SLICES
+            },
+            "TwoPtAssists": ("assist_locations", _TWO_POINT_ASSIST_SLICES),
+            "ThreePtAssists": ("assist_locations", _THREE_POINT_ASSIST_SLICES),
+        }
+        output = {"Name": canonical_name}
+        for key in (
+            "TwoPtAssists",
+            "ThreePtAssists",
+            *_ASSIST_LOCATION_SLICES,
+        ):
+            share = all_shares.get(key)
+            value = None if share is None else share * 100
+            output[key] = value
+            baseline_key = all_baseline_slices[key]
+            if isinstance(baseline_key[1], tuple):
+                denominator = baseline_share(baseline_key[1])
+            else:
+                baseline = baselines.get(baseline_key)
+                denominator = (
+                    None
+                    if baseline is None
+                    else baseline.league_average_share
+                )
+            output[f"{key}+"] = (
+                value / (denominator * 100)
+                if value is not None and denominator is not None and denominator > 0
+                else None
+            )
+        return [output]
         
     def _fuzzy_match_player_name(self, player_name: str) -> Optional[str]:
         """
@@ -121,21 +339,10 @@ class PlayerService:
             logger.exception("Error fuzzy matching player name %r", player_name)
             raise
 
-    def _get_player_playtypes(self, player_name):
-        """Get player playtypes data"""
-        df = self._fetch_data_from_table('player_play_types')
-        return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
-    
     def _get_player_zone_shooting(self, player_name):
         """Get player zone shooting data"""
         df = self._fetch_data_from_table('player_shooting_zones')
         return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
-
-    def _get_player_assists(self, player_name):
-        """Get player assists data"""
-        df = self._fetch_data_from_table('processed_player_assists')
-        player_data = df[df['Name'] == player_name]
-        return player_data.to_dict(orient='records')
 
     def _get_shooting_type(self, player_name):
         """Get player shooting type data"""

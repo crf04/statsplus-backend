@@ -2086,6 +2086,33 @@ def _drop_legacy_ranking_tables(connection: Connection) -> None:
         connection.execute(text(f"DROP TABLE IF EXISTS {table}"))
 
 
+def _create_publication_rebuilds_table(connection: Connection) -> None:
+    """Create durable publication-format rebuild operations (#50).
+
+    The table carries a partial unique index restricting one family to a
+    single in-flight rebuild.  Both SQLite and PostgreSQL support the partial
+    index, so no dialect branch is needed.
+    """
+    from app.models.collection_control import PublicationRebuild
+
+    PublicationRebuild.__table__.create(connection, checkfirst=True)
+
+
+def _create_targets_tables(connection: Connection) -> None:
+    """Create account-private Targets and their Qualifiers (#244).
+
+    Two tables so a Target's Qualifiers stay first-class rows rather than an
+    opaque blob.  Both carry their own indexes: the newest-first listing index
+    and the per-account unique index on ``(opponent, qualifier_signature)`` on
+    the parent, and the ordered per-target read index on the child.  ``targets``
+    is created first because the child's foreign key references it.
+    """
+    from app.models.target import Target, TargetQualifier
+
+    Target.__table__.create(connection, checkfirst=True)
+    TargetQualifier.__table__.create(connection, checkfirst=True)
+
+
 def _create_publication_repair_groups(connection: Connection) -> None:
     """Persist immutable atomic publication repair group declarations."""
 
@@ -2227,12 +2254,22 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
     ),
     Migration(
         49,
-        "049_publication_repair_groups",
-        _create_publication_repair_groups,
+        "049_create_publication_rebuilds",
+        _create_publication_rebuilds_table,
     ),
     Migration(
         50,
-        "050_repair_group_promotion",
+        "050_create_targets",
+        _create_targets_tables,
+    ),
+    Migration(
+        51,
+        "051_publication_repair_groups",
+        _create_publication_repair_groups,
+    ),
+    Migration(
+        52,
+        "052_repair_group_promotion",
         _add_repair_group_promotion,
     ),
 )

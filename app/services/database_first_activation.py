@@ -45,14 +45,29 @@ from app.services.team_matchup_publications import (
     validate_publication_rows,
 )
 from app.services.publication_authority import verify_publication_authority
-from app.services.ledger_derivations import ASSIST_DERIVED_METRICS, TEAM_METRICS
+from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
+from app.services.traditional_opponent_publications import (
+    TraditionalOpponentFormat,
+    TraditionalOpponentFormatError,
+    is_traditional_opponent_stream,
+    validate_traditional_opponent_team,
+)
 
 
 UTC = timezone.utc
 
 
 class PublicationPayloadError(ValueError):
-    """An immutable publication payload is not safe to serve as facts."""
+    """An immutable publication payload is not safe to serve as facts.
+
+    ``reason`` carries the owning module's stable refusal code when there is
+    one, so a caller can distinguish "this deployment no longer reads that
+    format" from "these bytes are malformed" without parsing a message.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 def _reject_duplicate_json_keys(pairs):
@@ -413,7 +428,14 @@ class PublicationTeamWindowRow:
 
 
 def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTeamWindowRow, ...]:
-    """Decode a complete, immutable team-window publication."""
+    """Decode a complete, immutable team-window publication.
+
+    Traditional-opponent payloads do not have one metric taxonomy: they have a
+    format, and this deployment reads exactly the formats
+    ``traditional_opponent_publications`` supports.  That module owns
+    recognition and the format's own invariants, so widening what new
+    publications produce never retroactively invalidates an active one.
+    """
 
     publication_base = publication_base_for_stream(stream_key)
     supported = {
@@ -424,12 +446,12 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
         raise PublicationPayloadError(f"unsupported team-window publication {stream_key}")
     rows = _payload_rows(payload, stream_key=stream_key)
     ledger_metrics = None
-    if publication_base is None:
-        ledger_metrics = frozenset(
-            ASSIST_DERIVED_METRICS
-            if stream_key.startswith("assist_locations_")
-            else TEAM_METRICS
-        )
+    traditional_family = is_traditional_opponent_stream(stream_key)
+    if publication_base is None and not traditional_family:
+        ledger_metrics = frozenset(ASSIST_DERIVED_METRICS)
+    # The one format every row of a traditional-opponent publication must
+    # share.  A payload that mixes generations is not a readable publication.
+    traditional_format: TraditionalOpponentFormat | None = None
     decoded = []
     for row in rows:
         for field in (
@@ -476,19 +498,38 @@ def decode_team_window(payload: Any, *, stream_key: str) -> tuple[PublicationTea
             field="competition_rank",
             stream_key=stream_key,
         ) if "competition_rank" in row else {}
-        if ledger_metrics is not None:
+        if ledger_metrics is not None or traditional_family:
             counts = _strict_mapping(row["counts"], field="counts", stream_key=stream_key)
-            for field_name, values in (
-                ("counts", counts),
-                ("per48", per48),
-                ("league_average", average),
-                ("population_sigma", sigma),
-                ("competition_rank", ranks),
-            ):
-                if frozenset(values) != ledger_metrics:
+            blocks = {
+                "counts": counts,
+                "per48": per48,
+                "league_average": average,
+                "population_sigma": sigma,
+                "competition_rank": ranks,
+            }
+            if traditional_family:
+                # The family module owns which taxonomies exist and what each
+                # one must satisfy semantically; one row may not disagree with
+                # the format the publication's first row established.
+                try:
+                    row_format = validate_traditional_opponent_team(blocks)
+                except TraditionalOpponentFormatError as error:
                     raise PublicationPayloadError(
-                        f"{stream_key} publication metric taxonomy mismatch"
+                        f"{stream_key} publication {error.reason}",
+                        reason=error.reason,
+                    ) from error
+                if traditional_format is None:
+                    traditional_format = row_format
+                elif row_format is not traditional_format:
+                    raise PublicationPayloadError(
+                        f"{stream_key} publication mixes traditional-opponent formats"
                     )
+            else:
+                for field_name, values in blocks.items():
+                    if frozenset(values) != ledger_metrics:
+                        raise PublicationPayloadError(
+                            f"{stream_key} publication metric taxonomy mismatch"
+                        )
             for key, value in counts.items():
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     raise PublicationPayloadError(
@@ -1142,11 +1183,17 @@ class DatabaseFirstPublicationReader:
                 season=publication.season,
                 retrieved_at=retrieved_at,
             )
-        except PublicationPayloadError:
+        except PublicationPayloadError as error:
             return self._missing(
                 stream_key,
                 "unavailable",
-                reason="publication_payload_invalid",
+                # A refusal the owning module gave a stable code keeps that
+                # code here.  "This deployment no longer reads that format" is
+                # a different operational fact from "these bytes are
+                # malformed", and every consumer reports what it was told.
+                reason=(
+                    getattr(error, "reason", None) or "publication_payload_invalid"
+                ),
                 fence=pointer.fence,
                 publication_id=publication.publication_id,
                 season=publication.season,

@@ -30,11 +30,9 @@ REQUIRED_DEMO_COLUMNS: Final[dict[str, frozenset[str]]] = {
     "Player_Team_Table": frozenset({"Player", "Current Team", "Team_ID"}),
     "Team_Info": frozenset({"id", "full_name", "abbreviation"}),
     "pbp_opponent_stats": frozenset({"EntityId", "TeamId", "Name"}),
-    "pbp_player_stats": frozenset({"EntityId", "TeamId", "Name"}),
     "player_clusters": frozenset({"PlayerName", "ClusterID", "PlayerID"}),
     "player_play_types": frozenset({"PLAYER_NAME", "TEAM_ABBREVIATION"}),
     "player_shooting_zones": frozenset({"PLAYER_NAME", "Restricted Area_FGM"}),
-    "processed_player_assists": frozenset({"Name", "TwoPtAssists"}),
     "users": frozenset({"firebase_uid", "email", "is_active"}),
 }
 
