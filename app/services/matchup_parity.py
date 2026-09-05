@@ -441,9 +441,9 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
         if not isinstance(document, list):
             raise ValueError("ledger publication payload must be a row list")
         from app.services.database_first_activation import decode_team_window
-        from app.services.ledger_derivations import (
-            ASSIST_DERIVED_METRICS,
-            TEAM_METRICS,
+        from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
+        from app.services.traditional_opponent_publications import (
+            recognize_traditional_opponent_format,
         )
 
         surface = (
@@ -456,16 +456,25 @@ def _decode_ledger_rows(payload: Any, *, stream_key: str) -> tuple[LedgerTeamWin
         # empty or malformed payload remains invalid evidence.
         if document or surface != "assist_locations":
             decode_team_window(document, stream_key=stream_key)
-        expected_metrics = frozenset(
-            ASSIST_DERIVED_METRICS if surface == "assist_locations" else TEAM_METRICS
-        )
+        if surface == "assist_locations":
+            expected_metrics = frozenset(ASSIST_DERIVED_METRICS)
+        else:
+            # The traditional-opponent family has explicit formats rather than
+            # one taxonomy.  The decoder above already proved the whole
+            # payload is exactly one of them, so recognizing the first row's
+            # format here binds the comparison to that same format.
+            expected_metrics = recognize_traditional_opponent_format(
+                document[0]["counts"]
+            ).metric_set
         expected_keys = frozenset({
             "team_id", "team_tricode", "game_ids", "game_count", "per48",
             "league_average", "population_sigma", "competition_rank",
             "counts", "team_minutes",
         })
     except (ImportError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
-        raise MatchupParityError("publication_payload_invalid") from error
+        raise MatchupParityError(
+            getattr(error, "reason", None) or "publication_payload_invalid"
+        ) from error
 
     rows = []
     seen_team_ids: set[int] = set()

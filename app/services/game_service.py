@@ -317,6 +317,13 @@ class GameService:
             else:
                 df = df[matchup.str.contains('@')]
 
+        # A named opponent narrows the same resolved set the rank-based
+        # opponent filters produce, so the named opponent and the ranked
+        # opponents compose as a conjunction rather than a union.
+        if query.opponent_tricode:
+            named = {query.opponent_tricode}
+            teams_against = named if teams_against is None else teams_against & named
+
         # Apply teams-against filter (resolved opponent set from the query).
         # None means the query had no opponent filter; an empty set is a
         # resolved-but-emptied filter and must match zero games, not all games.

@@ -149,7 +149,7 @@ def build_default_refresh_handlers(
     settings,
     *,
     data_service: Any | None = None,
-    player_service: Any | None = None,
+    player_service: Any,
 ) -> Mapping[str, RefreshCallable]:
     """Build the complete operation registry for one application instance.
 
@@ -161,7 +161,6 @@ def build_default_refresh_handlers(
 
     from app.services.data_service import DataService
     from app.services.database_first_activation import LegacyWriteFence
-    from app.services.player_service import PlayerService
     from app.services.stats_freshness_repository import StatsFreshnessRepository
 
     data_service = data_service or DataService(
@@ -170,8 +169,6 @@ def build_default_refresh_handlers(
         stats_freshness=StatsFreshnessRepository(engine),
         write_fence=LegacyWriteFence(engine),
     )
-    player_service = player_service or PlayerService(engine, settings=settings)
-
     def player_pbp(
         *,
         progress_callback: ProgressCallback,
@@ -208,7 +205,7 @@ def build_data_refresh_job_service(
     settings,
     *,
     data_service: Any | None = None,
-    player_service: Any | None = None,
+    player_service: Any,
 ) -> "DataRefreshJobService":
     """Build the canonical app-scoped durable refresh coordinator."""
 

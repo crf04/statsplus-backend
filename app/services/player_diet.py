@@ -16,6 +16,12 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import Connection, Engine
 
 from app.config.settings import PlayerDietBaselineSettings
+from app.domain.player_diet_taxonomy import (
+    ASSIST_SLICES,
+    PLAYER_DIET_BASE_SLICES,
+    PLAYER_DIET_QUALIFIER_SLICES,
+    PLAYER_DIET_SLICE_LABELS,
+)
 from app.domain.team_matchup_taxonomy import SHOT_ZONE_SLICES
 from app.domain.utc import assume_utc
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
@@ -49,13 +55,9 @@ PLAYER_DIET_PUBLICATION_STREAM_KEYS = frozenset(
     PLAYER_DIET_PUBLICATION_STREAMS.values()
 )
 _SHOT_ZONE_SLICES = SHOT_ZONE_SLICES
-_ASSIST_SLICES = (
-    "Arc3Assists",
-    "Corner3Assists",
-    "AtRimAssists",
-    "ShortMidRangeAssists",
-    "LongMidRangeAssists",
-)
+# The diet slice vocabulary is owned by the domain layer; these names stay
+# importable from here for the callers that already read them off this module.
+_ASSIST_SLICES = ASSIST_SLICES
 _VOLUME_UNITS = {
     "play_types": "possessions",
     "shot_types": "field_goal_attempts",
@@ -1125,6 +1127,9 @@ class PlayerDietService:
 
 __all__ = [
     "PLAYER_DIET_BASES",
+    "PLAYER_DIET_BASE_SLICES",
+    "PLAYER_DIET_QUALIFIER_SLICES",
+    "PLAYER_DIET_SLICE_LABELS",
     "PLAYER_DIET_PUBLICATION_STREAM_KEYS",
     "PLAYER_DIET_PUBLICATION_STREAMS",
     "PlayerDietBaseline",

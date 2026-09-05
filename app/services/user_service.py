@@ -7,17 +7,29 @@ including creating, updating, and retrieving user information.
 
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 import logging
 import re
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.domain.nba_teams import (
+    NBA_TEAM_TRICODES,
+    canonical_nba_team_abbreviation,
+)
 from app.errors import ConflictError, InvalidInputError, ResourceNotFoundError
-from app.models import get_session, SavedFilterSet, User
+from app.models import get_session, SavedFilterSet, Target, TargetQualifier, User
 from app.models.saved_filter_set import (
     SAVED_FILTER_SET_NAME_MAX_LENGTH,
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
+)
+from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.models.target import (
+    TARGET_COMPARATORS,
+    TARGET_NOTE_MAX_LENGTH,
+    target_qualifier_part,
+    target_qualifier_signature,
 )
 from app.utils.db import get_engine
 
@@ -84,6 +96,121 @@ def _validated_saved_filter_set_query_string(value: Any) -> str:
         raise InvalidInputError(_BARE_QUERY_STRING_MESSAGE)
 
     return value
+
+
+TARGET_LIMIT = 50
+TARGET_QUALIFIER_LIMIT = 10
+
+TARGET_DUPLICATE_MESSAGE = (
+    "A target for that opponent already has those qualifiers."
+)
+_TARGET_OPPONENT_MESSAGE = "A target needs one NBA team as its opponent."
+_TARGET_QUALIFIER_MESSAGE = (
+    "A qualifier needs a known diet base, a slice of that base, a comparator "
+    "of at_or_above or at_or_below, and a threshold share between 0 and 1."
+)
+
+
+def _validated_target_opponent(value: Any) -> str:
+    """Return the canonical tricode, or refuse an opponent that is not a team."""
+
+    if not isinstance(value, str):
+        raise InvalidInputError(_TARGET_OPPONENT_MESSAGE)
+
+    opponent = canonical_nba_team_abbreviation(value)
+    if opponent not in NBA_TEAM_TRICODES:
+        raise InvalidInputError(_TARGET_OPPONENT_MESSAGE)
+    return opponent
+
+
+def _validated_target_threshold(value: Any) -> float:
+    """Return the share, or refuse one that is not a number within 0-1.
+
+    ``bool`` is excluded deliberately: it is a subclass of ``int``, so ``True``
+    would otherwise read as the share 1.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
+
+    threshold = float(value)
+    if not isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
+    return threshold
+
+
+def _validated_target_qualifier(value: Any) -> Dict[str, Any]:
+    """Return one normalized Qualifier, or refuse one the catalogue rejects."""
+
+    if not isinstance(value, dict):
+        raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
+
+    base = value.get("base")
+    if not isinstance(base, str) or base not in PLAYER_DIET_QUALIFIER_SLICES:
+        raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
+
+    # The slice has to belong to this base, so a real slice key borrowed from
+    # another base is refused rather than stored against a base that never
+    # publishes it.
+    slice_key = value.get("slice_key")
+    if (
+        not isinstance(slice_key, str)
+        or slice_key not in PLAYER_DIET_QUALIFIER_SLICES[base]
+    ):
+        raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
+
+    comparator = value.get("comparator")
+    if not isinstance(comparator, str) or comparator not in TARGET_COMPARATORS:
+        raise InvalidInputError(_TARGET_QUALIFIER_MESSAGE)
+
+    return {
+        "base": base,
+        "slice_key": slice_key,
+        "comparator": comparator,
+        "threshold": _validated_target_threshold(value.get("threshold")),
+    }
+
+
+def _validated_target_qualifiers(value: Any) -> List[Dict[str, Any]]:
+    """Return the caller's Qualifiers in order, or refuse an unusable set."""
+
+    if not isinstance(value, list) or not value:
+        raise InvalidInputError("A target needs at least one qualifier.")
+
+    if len(value) > TARGET_QUALIFIER_LIMIT:
+        raise InvalidInputError(
+            f"A target may hold at most {TARGET_QUALIFIER_LIMIT} qualifiers."
+        )
+
+    qualifiers = [_validated_target_qualifier(item) for item in value]
+    # Compared through the same part the stored signature is built from, so a
+    # repeat within one request means exactly what a duplicate across two does.
+    identities = [target_qualifier_part(qualifier) for qualifier in qualifiers]
+    if len(set(identities)) != len(identities):
+        raise InvalidInputError("A target cannot repeat the same qualifier.")
+    return qualifiers
+
+
+def _validated_target_note(value: Any) -> Optional[str]:
+    """Return the trimmed note, or refuse one the contract cannot store.
+
+    A note is optional, and one that is only whitespace is stored as absent
+    rather than as an empty string.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidInputError("A target note must be text.")
+
+    note = value.strip()
+    if not note:
+        return None
+    if len(note) > TARGET_NOTE_MAX_LENGTH:
+        raise InvalidInputError(
+            f"A target note may be at most {TARGET_NOTE_MAX_LENGTH} characters."
+        )
+    return note
 
 
 def _days_since(timestamp: Optional[datetime]) -> int:
@@ -544,6 +671,250 @@ class UserService:
                 session, firebase_uid, saved_filter_set_id
             )
             session.delete(saved_filter_set)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    # --- Targets -----------------------------------------------------------
+    #
+    # Every operation is scoped to the caller's ``firebase_uid``.  A row that
+    # belongs to another account is reported as missing rather than forbidden,
+    # so one account cannot probe another's identifiers.
+
+    @staticmethod
+    def _target_signature_taken(
+        session,
+        firebase_uid: str,
+        opponent: str,
+        signature: str,
+        *,
+        exclude_id: Optional[int] = None,
+    ) -> bool:
+        """Whether the account already aims this Qualifier set at this team."""
+
+        query = session.query(Target.id).filter(
+            Target.firebase_uid == firebase_uid,
+            Target.opponent == opponent,
+            Target.qualifier_signature == signature,
+        )
+        if exclude_id is not None:
+            query = query.filter(Target.id != exclude_id)
+        return session.query(query.exists()).scalar()
+
+    def _commit_unique_target(
+        self,
+        session,
+        firebase_uid: str,
+        opponent: str,
+        signature: str,
+        *,
+        exclude_id: Optional[int] = None,
+    ) -> None:
+        """Commit a write whose only conflict can be a duplicate Target.
+
+        The pre-insert check cannot see a row a competing transaction has not
+        committed yet, so ``uq_targets_owner_opponent_signature`` is the real
+        arbiter.  Re-reading after the rollback tells a lost uniqueness race
+        (the caller's 409) apart from any other integrity failure, such as an
+        owner that does not exist, which stays a server error.
+        """
+
+        try:
+            session.commit()
+        except IntegrityError as error:
+            session.rollback()
+            if self._target_signature_taken(
+                session, firebase_uid, opponent, signature, exclude_id=exclude_id
+            ):
+                raise ConflictError(
+                    TARGET_DUPLICATE_MESSAGE, detail=error
+                ) from error
+            raise
+
+    @staticmethod
+    def _owned_target(session, firebase_uid: str, target_id: int) -> Target:
+        """Load one of the caller's targets or report it missing."""
+
+        target = (
+            session.query(Target)
+            .filter(Target.id == target_id, Target.firebase_uid == firebase_uid)
+            .first()
+        )
+        if target is None:
+            raise ResourceNotFoundError("The requested target was not found.")
+        return target
+
+    def list_targets(self, firebase_uid: str) -> List[Dict[str, Any]]:
+        """Return the caller's targets, newest first."""
+
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(Target)
+                .filter(Target.firebase_uid == firebase_uid)
+                .order_by(Target.created_at.desc(), Target.id.desc())
+                .all()
+            )
+            return [row.to_dict() for row in rows]
+        finally:
+            session.close()
+
+    def get_target(self, firebase_uid: str, target_id: int) -> Dict[str, Any]:
+        """Return one of the caller's targets, or report it missing."""
+
+        session = self._get_session()
+        try:
+            return self._owned_target(session, firebase_uid, target_id).to_dict()
+        finally:
+            session.close()
+
+    def create_target(
+        self,
+        firebase_uid: str,
+        *,
+        opponent: Any,
+        qualifiers: Any,
+        note: Any = None,
+    ) -> Dict[str, Any]:
+        """Create a target for the caller and return the new item."""
+
+        validated_opponent = _validated_target_opponent(opponent)
+        validated_qualifiers = _validated_target_qualifiers(qualifiers)
+        validated_note = _validated_target_note(note)
+        signature = target_qualifier_signature(validated_qualifiers)
+
+        session = self._get_session()
+        try:
+            held = (
+                session.query(Target)
+                .filter(Target.firebase_uid == firebase_uid)
+                .count()
+            )
+            # Advisory under concurrency, like the saved filter set cap: two
+            # simultaneous writes can both observe room and leave the account
+            # one over.  Deliberate -- a per-account limit does not justify
+            # locking or a counter table.
+            if held >= TARGET_LIMIT:
+                raise ConflictError(
+                    f"An account may hold at most {TARGET_LIMIT} targets."
+                )
+            if self._target_signature_taken(
+                session, firebase_uid, validated_opponent, signature
+            ):
+                raise ConflictError(TARGET_DUPLICATE_MESSAGE)
+
+            now = datetime.now(timezone.utc)
+            target = Target(
+                firebase_uid=firebase_uid,
+                opponent=validated_opponent,
+                note=validated_note,
+                qualifier_signature=signature,
+                created_at=now,
+                updated_at=now,
+                qualifiers=[
+                    TargetQualifier(position=position, **qualifier)
+                    for position, qualifier in enumerate(validated_qualifiers)
+                ],
+            )
+            session.add(target)
+            self._commit_unique_target(
+                session, firebase_uid, validated_opponent, signature
+            )
+            return target.to_dict()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def update_target(
+        self,
+        firebase_uid: str,
+        target_id: int,
+        *,
+        changes: Any,
+    ) -> Dict[str, Any]:
+        """Edit one of the caller's targets and return the updated item.
+
+        Only the Qualifiers and the note are editable.  A target's opponent is
+        fixed: aiming the same criteria at another team is a different target,
+        so any ``opponent`` key in ``changes`` is ignored.  Absent keys mean
+        unchanged, which is why ``note`` is read by presence rather than by
+        value -- ``None`` clears it.
+        """
+
+        if not isinstance(changes, dict):
+            raise InvalidInputError("No target changes were provided.")
+
+        editable = {
+            key: changes[key] for key in ("qualifiers", "note") if key in changes
+        }
+        if not editable:
+            raise InvalidInputError(
+                "A target update must change its qualifiers or its note."
+            )
+
+        validated_qualifiers = (
+            _validated_target_qualifiers(editable["qualifiers"])
+            if "qualifiers" in editable
+            else None
+        )
+        validated_note = (
+            _validated_target_note(editable["note"]) if "note" in editable else None
+        )
+
+        session = self._get_session()
+        try:
+            target = self._owned_target(session, firebase_uid, target_id)
+            edited_id = target.id
+            opponent = target.opponent
+            signature = target.qualifier_signature
+
+            if validated_qualifiers is not None:
+                signature = target_qualifier_signature(validated_qualifiers)
+                if self._target_signature_taken(
+                    session,
+                    firebase_uid,
+                    opponent,
+                    signature,
+                    exclude_id=edited_id,
+                ):
+                    raise ConflictError(TARGET_DUPLICATE_MESSAGE)
+                target.qualifier_signature = signature
+                # Replacing the collection deletes the previous rows through
+                # ``delete-orphan`` rather than leaving them behind.
+                target.qualifiers = [
+                    TargetQualifier(position=position, **qualifier)
+                    for position, qualifier in enumerate(validated_qualifiers)
+                ]
+            if "note" in editable:
+                target.note = validated_note
+            target.updated_at = datetime.now(timezone.utc)
+
+            self._commit_unique_target(
+                session,
+                firebase_uid,
+                opponent,
+                signature,
+                exclude_id=edited_id,
+            )
+            return target.to_dict()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def delete_target(self, firebase_uid: str, target_id: int) -> None:
+        """Delete one of the caller's targets and its qualifiers."""
+
+        session = self._get_session()
+        try:
+            target = self._owned_target(session, firebase_uid, target_id)
+            session.delete(target)
             session.commit()
         except Exception:
             session.rollback()

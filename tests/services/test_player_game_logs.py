@@ -875,6 +875,166 @@ def test_queries_derive_rates_last_ten_h2h_and_archetype_rows(tmp_path):
     ]
 
 
+#: Two players who faced team 2 from different teams, plus one who faced only
+#: team 4.  A league-wide read of team 2 is the first two and nothing else.
+def _league_opponent_rows():
+    return [
+        _record(player_id=101, game_id="0022500001"),
+        replace(
+            _record(player_id=202, game_id="0022500001"),
+            team_id=3,
+            team_tricode="CCC",
+        ),
+        replace(
+            _record(player_id=303, game_id="0022500002"),
+            game_date=date(2026, 1, 9),
+            opponent_team_id=4,
+            opponent_team_tricode="DDD",
+        ),
+    ]
+
+
+def _payload_rows(records):
+    rows = []
+    for record in records:
+        row = asdict(record)
+        row["game_date"] = record.game_date.isoformat()
+        rows.append(row)
+    return rows
+
+
+class _RenderedPayloadReader:
+    """An active publication that serves its rendered payload, not an index."""
+
+    def __init__(self, records):
+        self.payload = {"rows": _payload_rows(records)}
+
+    def read(self, stream_key, *, season=None):
+        assert stream_key == "player_game_logs"
+        return type(
+            "Read",
+            (),
+            {
+                "legacy_fallback_allowed": False,
+                "available": True,
+                "decoded": None,
+                "payload": self.payload,
+                "projection_ready": False,
+                "publication_id": None,
+            },
+        )()
+
+
+@pytest.fixture(params=["legacy_sql", "rendered_payload", "projection"])
+def league_opponent_reads(request, tmp_path):
+    """One opponent's league-wide rows over each of the three read paths."""
+
+    records = _league_opponent_rows()
+    if request.param == "legacy_sql":
+        repository = _repository(tmp_path)
+        repository.publish(
+            SEASON,
+            records,
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=len(records),
+        )
+        # A prior season's game against the same opponent. Only the legacy
+        # table can hold one: a Publication is season-scoped and refuses a row
+        # whose season is not its own, so the other two paths cannot express
+        # this case at all.
+        repository.publish(
+            HISTORICAL_SEASON,
+            [
+                replace(
+                    _record(player_id=404, game_id="0022400001"),
+                    season=HISTORICAL_SEASON,
+                )
+            ],
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=1,
+        )
+        return repository, None
+
+    if request.param == "rendered_payload":
+        return _repository(
+            tmp_path, publication_reader=_RenderedPayloadReader(records)
+        ), None
+
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+    )
+    from app.services.collection_control import PublicationService
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'player-logs.sqlite3'}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: RETRIEVED_AT)
+    publications.register_stream(
+        "player_game_logs",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    publications.compose(
+        "player_game_logs",
+        season=SEASON,
+        cutoff=RETRIEVED_AT,
+        payload={"rows": _payload_rows(records)},
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: RETRIEVED_AT)
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: RETRIEVED_AT,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    snapshot = reader.snapshot(
+        ("player_game_logs",),
+        season=SEASON,
+        projection_only_keys=frozenset({"player_game_logs"}),
+    )
+    assert snapshot.read("player_game_logs").projection_ready is True
+    return repository, snapshot
+
+
+def test_one_opponents_rows_are_listed_league_wide(league_opponent_reads):
+    repository, snapshot = league_opponent_reads
+
+    rows = repository.list_opponent_rows(
+        SEASON, 2, publication_snapshot=snapshot
+    )
+
+    # Every player who faced team 2, whatever team they played for: an open
+    # player set is every player, not none.
+    assert sorted(row.player_id for row in rows) == [101, 202]
+    # Nobody who faced only another opponent, and nothing from another season.
+    assert {row.opponent_team_id for row in rows} == {2}
+    assert {row.season for row in rows} == {SEASON}
+
+
+def test_a_league_wide_opponent_read_agrees_with_the_named_player_read(
+    league_opponent_reads,
+):
+    repository, snapshot = league_opponent_reads
+
+    everyone = repository.list_opponent_rows(
+        SEASON, 4, publication_snapshot=snapshot
+    )
+    named = repository.list_archetype_rows(
+        SEASON, [101, 202, 303], 4, publication_snapshot=snapshot
+    )
+
+    # Leaving the player set open is the same read as naming everybody in it.
+    assert everyone == named
+    assert [row.player_id for row in everyone] == [303]
+
+
 def _focal_game_repository(tmp_path):
     """Twelve stored games for one player, the seventh being the focal game."""
 
