@@ -17,8 +17,9 @@ from sqlalchemy import create_engine
 
 from app.errors import InvalidInputError
 from app.migrations import run_migrations
+from app.models.target import TARGET_COMPARATORS
 from app.models.user import User
-from app.services.target_resolution import TargetResolutionService
+from app.services.target_resolution import _COMPARATORS, TargetResolutionService
 from app.services.user_service import UserService
 
 
@@ -432,6 +433,12 @@ def _create(targets, *, opponent="OKC", qualifiers=(CORNER_THREE,), note=None):
     return targets.create_target(
         OWNER, opponent=opponent, qualifiers=list(qualifiers), note=note
     )
+
+
+def test_every_comparator_a_qualifier_may_be_stored_with_can_be_resolved():
+    """A stored comparator resolution cannot test would fail on read, not write."""
+
+    assert set(_COMPARATORS) == set(TARGET_COMPARATORS)
 
 
 def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(

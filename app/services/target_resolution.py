@@ -27,11 +27,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
-from app.services.player_diet import PLAYER_DIET_SLICE_LABELS
+from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
 
 
 _WINDOW_NAMES = ("season", "last_15")
 
+#: How each comparator reads as a test on a stored share.  Both are inclusive.
 _COMPARATORS = {
     "at_or_above": lambda share, threshold: share >= threshold,
     "at_or_below": lambda share, threshold: share <= threshold,
