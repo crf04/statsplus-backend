@@ -3846,7 +3846,14 @@ checksum, is stored as normalized group/member rows, and holds its members'
 composition jobs `queued` instead of promoting them independently -- the
 worker skips them and `compose_from_observations` refuses them with
 `grouped_repair_pending`. Collector reads see the group filtered to the
-surfaces they already hold and never its pointer guards. See
+surfaces they already hold and never its pointer guards. The operator
+promotion is one transaction in two phases: every member pointer is locked in
+stream-key order and rechecked against its declared active identity and fence,
+every replacement is composed and validated, and only then does any pointer
+advance. Success clears each member's `previous_publication_id`, so the
+defect it displaced can never be rolled back to, and records one audit naming
+the discarded identities; any failure rolls pointers, version status, jobs,
+and that audit back together. See
 [PUBLICATION_REPAIR_GROUPS.md](PUBLICATION_REPAIR_GROUPS.md). Production
 requires `COLLECTOR_SIGNING_SECRET`; only non-production credential-free runs
 may use a process-local key.

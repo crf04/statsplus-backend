@@ -99,7 +99,8 @@ def _control_error(error: Exception) -> AppError:
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
-        "grouped_repair_pending",
+        "grouped_repair_pending", "repair_group_guard_stale",
+        "repair_group_already_promoted", "repair_group_manifest_inactive",
         # A rebuild that lost a race with durable state, or a per-stream
         # request that would split a coupled family.
         "stale_publication_family", "rebuild_lease_held",
@@ -711,6 +712,44 @@ def rollback_publication_family(family: str):
         "publication_ids": [
             version.publication_id for version in result.resource
         ],
+    }), 202
+
+
+@collection_bp.get("/admin/collection/manifests/<manifest_id>/repair-group")
+@require_admin
+@route_error_boundary("Failed to read the publication repair group.")
+def read_repair_group(manifest_id: str):
+    """Operator view of one manifest's repair group beside live pointer state."""
+    try:
+        state = _service("collection_control").repair_group_state(manifest_id)
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    if state is None:
+        raise _control_error(ControlPlaneError("repair_group_not_found"))
+    return jsonify(state)
+
+
+@collection_bp.post("/admin/collection/manifests/<manifest_id>/repair-group/promote")
+@require_admin
+@route_error_boundary("Failed to promote the publication repair group.")
+def promote_repair_group(manifest_id: str):
+    body = _body()
+    actor, reason = _actor(), str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").promote_repair_group(
+            manifest_id, actor=actor, reason=reason,
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    promotion = result.resource
+    return jsonify({
+        "job_id": result.job_id,
+        "repair_group_id": promotion.group_id,
+        "manifest_id": promotion.manifest_id,
+        "discarded_publications": [dict(item) for item in promotion.discarded],
+        "published_publications": [dict(item) for item in promotion.published],
     }), 202
 
 

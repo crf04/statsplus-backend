@@ -1446,3 +1446,84 @@ def test_grouped_repair_jobs_stay_queued_and_unclaimed_by_the_worker(tmp_path):
         }
     assert {row["status"] for row in jobs.values()} == {"queued"}
     assert {row["claimed_generation"] for row in jobs.values()} == {None}
+
+
+def test_a_held_group_does_not_stop_unrelated_work_in_the_same_slice(tmp_path):
+    """The grouped members are held; everything else in the slice still runs.
+
+    The hold is a filter on which jobs the worker claims, not a lock on the
+    slice, so an unrelated stream queued against the same manifest and cutoff
+    must still be picked up and resolved on its own merits.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'held-slice.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    _seed_governed_catalog_evidence(engine, now=now)
+    control = CollectionControlService(engine, clock=lambda: now)
+    PublicationService(engine, clock=lambda: now).register_default_streams()
+    control.activate_season("2025-26", actor="operator")
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(
+            request.request_id, _catalog_payload(kind), version=f"{kind}-v1",
+        )
+    expected = {
+        stream_key: _seed_active_publication(
+            engine, stream_key=stream_key, cutoff=cutoff,
+        )
+        for stream_key in (SEASON_ZONES, L15_ZONES)
+    }
+    unrelated = "grouped_shot_types_opponent_season"
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=[SEASON_ZONES, L15_ZONES, unrelated],
+        collect_before=now + timedelta(hours=1),
+        repair_group=_zone_repair_declaration(
+            expected[SEASON_ZONES], expected[L15_ZONES],
+        ),
+    )
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert(), [{
+            "job_id": stream_key, "stream_key": stream_key,
+            "manifest_id": manifest.manifest_id, "season": "2025-26",
+            "cutoff": cutoff, "status": "queued", "attempts": 0,
+            "created_at": cutoff, "updated_at": cutoff,
+        } for stream_key in (SEASON_ZONES, L15_ZONES, unrelated)])
+
+    team_ids = frozenset(range(1, 31))
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, governed_cutoff, frozenset(), team_ids, {},
+            )
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=SimpleNamespace(engine=engine, list_games=lambda *a, **k: []),
+        materialization=SimpleNamespace(publication_service=None),
+        governance=Governance(),
+        clock=lambda: now,
+    )
+
+    runtime.compose_queued("2025-26")
+
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(
+                select(CompositionJob.__table__)
+            ).mappings()
+        }
+    # The grouped members were never claimed.
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        assert jobs[stream_key]["status"] == "queued"
+        assert jobs[stream_key]["claimed_generation"] is None
+        assert jobs[stream_key]["last_error"] is None
+    # The unrelated stream was claimed and resolved on its own merits -- here
+    # it fails because the registry ships it disabled, not because of the hold.
+    assert jobs[unrelated]["status"] == "failed"
+    assert jobs[unrelated]["last_error"] == "stream_unavailable"
