@@ -472,21 +472,31 @@ def test_a_live_target_lists_the_opposing_pool_members_meeting_the_qualifier(
     assert len(payload["targets"]) == 1
     resolved = payload["targets"][0]
     assert resolved["target"] == created
+    thunder = {
+        "team_id": OKC,
+        "tricode": "OKC",
+        "name": "Oklahoma City Thunder",
+    }
+    lakers = {
+        "team_id": LAL,
+        "tricode": "LAL",
+        "name": "Los Angeles Lakers",
+    }
     assert resolved["game"] == {
         "game_id": GAME_ID,
         "scheduled_at": TIP_OFF,
         "status": {"state": "scheduled", "label": "Scheduled"},
-        "opponent": {
-            "team_id": OKC,
-            "tricode": "OKC",
-            "name": "Oklahoma City Thunder",
-        },
-        "opposing_team": {
-            "team_id": LAL,
-            "tricode": "LAL",
-            "name": "Los Angeles Lakers",
-        },
+        "opponent": thunder,
+        "opposing_team": lakers,
+        "away": lakers,
+        "home": thunder,
     }
+    # The Slate prints "AWAY @ HOME"; this opponent is at home, so the two
+    # namings cross.
+    assert resolved["game"]["away"]["tricode"] == "LAL"
+    assert resolved["game"]["home"]["tricode"] == "OKC"
+    assert resolved["game"]["home"] == resolved["game"]["opponent"]
+    assert resolved["game"]["away"] == resolved["game"]["opposing_team"]
     assert [player["name"] for player in resolved["players"]] == ["Corner Sniper"]
     assert resolved["players"][0] == {
         "canonical_id": 1,
@@ -1182,20 +1192,71 @@ def test_an_opponent_playing_away_resolves_against_the_home_pool(targets, resolv
 
     assert resolved["game"]["opponent"]["tricode"] == "LAL"
     assert resolved["game"]["opposing_team"]["tricode"] == "OKC"
+    # The same card, the same sides: only the Target's aim moved.
+    assert resolved["game"]["away"]["tricode"] == "LAL"
+    assert resolved["game"]["home"]["tricode"] == "OKC"
+    assert resolved["game"]["away"] == resolved["game"]["opponent"]
+    assert resolved["game"]["home"] == resolved["game"]["opposing_team"]
     assert resolved["players"] == []
 
 
 # --- routes ----------------------------------------------------------------
 
 
+#: A live entry and an idle one, so the route's serialization is exercised
+#: over the whole documented shape rather than only its emptiest case.
 RESOLVED = {
     "slate_date": SLATE_DATE,
     "targets": [
         {
             "target": {
-                "id": 7,
+                "id": 6,
                 "opponent": "OKC",
                 "title": "OKC vs Corner 3 ≥ 40%",
+                "note": None,
+                "qualifiers": [CORNER_THREE],
+                "created_at": "2026-09-05T12:00:00+00:00",
+                "updated_at": "2026-09-05T12:00:00+00:00",
+            },
+            "game": {
+                "game_id": GAME_ID,
+                "scheduled_at": TIP_OFF,
+                "status": {"state": "scheduled", "label": "Scheduled"},
+                "opponent": {
+                    "team_id": OKC,
+                    "tricode": "OKC",
+                    "name": "Oklahoma City Thunder",
+                },
+                "opposing_team": {
+                    "team_id": LAL,
+                    "tricode": "LAL",
+                    "name": "Los Angeles Lakers",
+                },
+                "away": {
+                    "team_id": LAL,
+                    "tricode": "LAL",
+                    "name": "Los Angeles Lakers",
+                },
+                "home": {
+                    "team_id": OKC,
+                    "tricode": "OKC",
+                    "name": "Oklahoma City Thunder",
+                },
+            },
+            "context": [],
+            "availability": {
+                "status": "available",
+                "source": "player_pool",
+                "context": "posted_markets",
+                "unavailable_reason": None,
+            },
+            "players": [],
+        },
+        {
+            "target": {
+                "id": 7,
+                "opponent": "MIA",
+                "title": "MIA vs Corner 3 ≥ 40%",
                 "note": None,
                 "qualifiers": [CORNER_THREE],
                 "created_at": "2026-09-05T12:00:00+00:00",
@@ -1239,7 +1300,15 @@ def test_the_resolve_route_returns_the_resolution_for_the_requested_date(
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"success": True, **RESOLVED}
+    body = response.get_json()
+    assert body == {"success": True, **RESOLVED}
+    # The Slate's own side markers reach the wire, so a client can print
+    # "AWAY @ HOME" without knowing which side the Target aims at.
+    live = body["targets"][0]["game"]
+    assert (live["away"]["tricode"], live["home"]["tricode"]) == ("LAL", "OKC")
+    assert live["home"] == live["opponent"]
+    assert live["away"] == live["opposing_team"]
+    assert body["targets"][1]["game"] is None
     resolution_service.resolve.assert_called_once_with(
         "test-uid", requested_date=SLATE_DATE
     )
@@ -1586,3 +1655,12 @@ def test_resolution_reports_the_real_matchups_own_defense_sheet(targets, parity)
     }
     assert resolved["game"]["game_id"] == expected["game"]["game_id"]
     assert resolved["game"]["scheduled_at"] == expected["game"]["scheduled_at"]
+    for side in ("away", "home"):
+        assert resolved["game"][side] == {
+            "team_id": expected["game"][f"{side}_team"]["team_id"],
+            "tricode": expected["game"][f"{side}_team"]["tricode"],
+            "name": expected["game"][f"{side}_team"]["name"],
+        }
+    # BOS hosts, and BOS is what this Target aims at.
+    assert resolved["game"]["home"] == resolved["game"]["opponent"]
+    assert resolved["game"]["away"] == resolved["game"]["opposing_team"]

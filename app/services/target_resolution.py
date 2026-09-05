@@ -167,8 +167,14 @@ class TargetResolutionService:
                 "game_id": game["game_id"],
                 "scheduled_at": game["scheduled_at"],
                 "status": dict(game["status"]),
+                # The same two teams twice, under both namings a reader needs:
+                # by their role in the Target, and by the side of the Slate
+                # card they sit on, which is the only way to print "AWAY @
+                # HOME" without knowing which one the Target aims at.
                 "opponent": self._team(game[opponent_side]),
                 "opposing_team": self._team(game[filtered_side]),
+                "away": self._team(game["away_team"]),
+                "home": self._team(game["home_team"]),
             },
             "context": [
                 self._context(qualifier, opponent_sheet, league)
