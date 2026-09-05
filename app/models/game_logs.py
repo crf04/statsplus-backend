@@ -32,6 +32,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.domain.nba_teams import NBA_TEAM_TRICODES
 from app.models.catalogs import (
     SUPPORTED_SELF_FILTER_STATS,
     TEAM_FILTER_ALIASES,
@@ -246,6 +247,7 @@ class GameLogQuery(BaseModel):
     date_filter: date | None = None
     teams_against: list[str] = Field(default_factory=list)
     rank_filter: list[int] = Field(default_factory=list)
+    opponent_filter: str | None = None
     location_filter: Location = "Both"
     game_filter: int | None = Field(default=None, ge=1)
     playstyle_range: tuple[float, float] = (0.0, 200.0)
@@ -308,6 +310,27 @@ class GameLogQuery(BaseModel):
                     f"rank_filter entry {entry!r} is not a valid integer"
                 ) from error
         return ranks
+
+    @field_validator("opponent_filter", mode="before")
+    @classmethod
+    def normalize_opponent_filter(cls, value: Any) -> str | None:
+        """Require one canonical NBA tricode naming a single opponent.
+
+        This is a filter on the opponent recorded against each game log, not
+        a ranking, so it is validated against the closed tricode catalog
+        rather than the rank-able Team Filters.
+        """
+
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("opponent_filter must be an NBA team tricode")
+        tricode = value.strip().upper()
+        if tricode not in NBA_TEAM_TRICODES:
+            raise ValueError(
+                f"opponent_filter {value!r} is not an NBA team tricode"
+            )
+        return tricode
 
     @field_validator("playstyle_range", mode="before")
     @classmethod
