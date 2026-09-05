@@ -2346,16 +2346,27 @@ def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(tmp_path: Pat
         release_version="0.0.0-test",
         allow_insecure_localhost=True,
     )
-    run_once(
-        config,
-        provider=IncoherentProvider(),
-        transport=FakeTransport(discovery=discovery),
-        secret="machine-secret",
-    )
+    # ``build_safe_logger`` caches by logger name and skips re-adding a handler
+    # when one is already attached, so a handler left behind here would make a
+    # later test write into this test's ``tmp_path``.  Start clean, and clean
+    # up even if the run raises.
+    shared = logging.getLogger("statsplus.residential")
 
-    for handler in list(logging.getLogger("statsplus.residential").handlers):
-        handler.close()
-        logging.getLogger("statsplus.residential").removeHandler(handler)
+    def _detach() -> None:
+        for handler in list(shared.handlers):
+            handler.close()
+            shared.removeHandler(handler)
+
+    _detach()
+    try:
+        run_once(
+            config,
+            provider=IncoherentProvider(),
+            transport=FakeTransport(discovery=discovery),
+            secret="machine-secret",
+        )
+    finally:
+        _detach()
 
     written = log_path.read_text(encoding="utf-8")
     diagnostics = [
