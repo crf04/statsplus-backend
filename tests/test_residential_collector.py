@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2160,8 +2161,15 @@ def _boston_zone_row(**overrides):
     return pd.DataFrame([{k: v for k, v in base.items() if v is not None}])
 
 
-def test_boston_restricted_area_publishes_a_true_per_48_rate():
-    """The defect this correction exists for, at realistic scale."""
+def test_boston_zone_evidence_carries_integer_totals_and_minutes():
+    """The inputs the derived rate is computed from, at realistic scale.
+
+    This asserts the observation's own contract -- integer Totals beside the
+    window's minutes, never a provider rate.  That the *publication* divides
+    them into about 18.3 is proven against a composed publication in
+    ``tests/services/test_publication_repair_promotion.py``; recomputing the
+    division here would only assert that 1504 * 48 / 3946 is 18.3.
+    """
 
     observation = normalize_opponent_zone_response(
         _boston_zone_row(), season="2025-26", cutoff=NOW, team_id=1610612738,
@@ -2174,10 +2182,9 @@ def test_boston_restricted_area_publishes_a_true_per_48_rate():
     assert restricted["FGA"] == 1504
     assert restricted["minutes"] == 3946
 
-    published = restricted["FGA"] * 48.0 / restricted["minutes"]
-    assert published == pytest.approx(18.3, abs=0.05)
-    # The broken Per48 mode reported this same cell as 137.1.
-    assert published < 20
+    # No provider rate survives into the evidence: 1504 is a count.
+    assert float(restricted["FGA"]).is_integer()
+    assert restricted["FGA"] > 1000
 
 
 def test_a_transient_zone_mismatch_refetches_the_pair_once():
@@ -2240,7 +2247,6 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     record the equation and residual would be built and thrown away.
     """
 
-    team_id = int(sorted(NBA_TEAM_IDS)[0])
     # A real manifest freezes the stream key beside the observation type it
     # authorizes; the runner matches descriptors against the latter.
     manifest_scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
@@ -2276,6 +2282,8 @@ def test_a_persistent_zone_mismatch_reports_its_residual_to_the_operator(tmp_pat
     assert detailed[-1]["code"] == "value_invariant_failed"
     assert "equation=zones_plus_backcourt_equals_opponent_fga" in detail
     assert "residual=1.0" in detail
-    assert f"team_id={team_id}" in detail or "team_id=" in detail
+    reported_team = re.search(r"team_id=(\d+)", detail)
+    assert reported_team is not None, detail
+    assert reported_team.group(1) in NBA_TEAM_IDS
     # Bounded: an operator diagnostic never becomes a payload channel.
     assert len(detail) <= 160

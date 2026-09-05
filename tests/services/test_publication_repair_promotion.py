@@ -784,3 +784,100 @@ def test_boston_restricted_area_publishes_about_18_3_not_137_1(tmp_path, monkeyp
         "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
         "Corner 3", "Above the Break 3",
     }
+
+
+def _compose_boston_zones(engine, control, publications, *, reconciliation):
+    """Ingest one Boston-scale zone observation per team and compose."""
+
+    manifest = control.create_manifest(
+        SEASON, cutoff=REPAIR_CUTOFF, scopes=[SEASON_ZONES, "canonical_game_ledger"],
+        collect_before=NOW + timedelta(hours=1),
+    )
+    rows = []
+    for team_id in sorted(NBA_TEAM_IDS):
+        payload = json.dumps({
+            "base": "shot_zones",
+            "records": _boston_scale_zone_records(
+                int(team_id), restricted_fga=BOSTON_RESTRICTED_FGA,
+            ),
+            "reconciliation": reconciliation,
+        }, separators=(",", ":"))
+        rows.append({
+            "observation_id": f"tampered-{team_id}",
+            "client_observation_id": f"tampered-client-{team_id}",
+            "collector_id": "collector", "manifest_id": manifest.manifest_id,
+            "environment": "testing", "provider": "nba",
+            "observation_type": "shot_zones_opponent",
+            "scope": json.dumps({
+                "window": "season", "subject": "opponent",
+                "team_id": int(team_id), "phase": "Regular Season",
+                "value_mode": "totals_with_minutes", "season": SEASON,
+                "season_type": "Regular Season",
+                "endpoint_window": {
+                    "last_n_games": 0, "date_from": None,
+                    "date_to": slate_date_for_instant(
+                        REPAIR_CUTOFF
+                    ).strftime("%m/%d/%Y"),
+                },
+            }),
+            "season": SEASON, "cutoff": REPAIR_CUTOFF, "schema_version": 2,
+            "checksum": hashlib.sha256(payload.encode()).hexdigest(),
+            "payload": payload, "payload_bytes": len(payload),
+            "retrieved_at": REPAIR_CUTOFF, "accepted_at": REPAIR_CUTOFF,
+        })
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert(), rows)
+    return publications.compose_from_observations(
+        SEASON_ZONES, season=SEASON, cutoff=REPAIR_CUTOFF,
+        manifest_id=manifest.manifest_id,
+    )
+
+
+def test_composition_refuses_an_observation_whose_evidence_does_not_add_up(
+    tmp_path, monkeypatch,
+):
+    """The composition boundary must call the check, not merely contain it.
+
+    Testing ``_assert_zone_reconciliation`` directly proves the function
+    works.  This drives a tampered observation through the real composition
+    path, so it fails if the boundary stops invoking it.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'tampered.sqlite3'}")
+    run_migrations(engine)
+    _seed_governed_evidence(engine)
+    control = CollectionControlService(engine, clock=lambda: NOW)
+    expected = {
+        int(team_id): frozenset(f"season-{team_id}-{index}" for index in range(82))
+        for team_id in sorted(NBA_TEAM_IDS)
+    }
+    publications = PublicationService(
+        engine, clock=lambda: NOW,
+        l15_expectation_resolver=_GovernanceStub(expected),
+    )
+    publications.register_stream(
+        SEASON_ZONES, provider="nba", owner="residential_collector",
+        required_observations=["shot_zones_opponent"],
+        publication_strategy="snapshot_replace", supported_windows=["season"],
+        completeness_rule="base_complete", enabled=True,
+    )
+    control.activate_season(SEASON, actor="operator")
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request(SEASON, kind, cutoff=REPAIR_CUTOFF)
+        control.publish_catalog(
+            request.request_id, _catalog_document(kind), version=f"{kind}-tampered",
+        )
+
+    # Backcourt one attempt short: the zones no longer reach the independent
+    # opponent total.  A collector that skipped its own check, or was modified
+    # to, would upload exactly this.
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        _compose_boston_zones(engine, control, publications, reconciliation={
+            "opponent_totals": {"FGM": 2608, "FGA": 5965},
+            "Backcourt": {"FGM": 2, "FGA": 32},
+            "Left Corner 3": {"FGM": 129, "FGA": 331},
+            "Right Corner 3": {"FGM": 131, "FGA": 337},
+        })
+
+    # Nothing was published: the defective evidence never became a pointer.
+    assert publications.current(SEASON_ZONES) is None

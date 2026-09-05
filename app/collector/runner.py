@@ -391,14 +391,18 @@ class ResidentialCollector:
                 # the error to a bare reason code.
                 diagnostics = getattr(error, "diagnostics", None)
                 if isinstance(diagnostics, Mapping):
-                    self.status.record(
-                        safe_code(code, fallback="provider_schema_changed"),
-                        scope=scope,
-                        detail=" ".join(
-                            f"{key}={value}"
-                            for key, value in sorted(diagnostics.items())
-                        ),
+                    reason = safe_code(code, fallback="provider_schema_changed")
+                    detail = " ".join(
+                        f"{key}={value}"
+                        for key, value in sorted(diagnostics.items())
                     )
+                    self.status.record(reason, scope=scope, detail=detail)
+                    # The in-memory status dies with the process, so the
+                    # durable log is where an operator actually reads this.
+                    if self.logger is not None:
+                        log_status(
+                            self.logger, reason, scope=scope, detail=detail,
+                        )
             except Exception as error:
                 failures.append(safe_code(type(error).__name__, fallback="provider_failure"))
         return attempted, spooled, tuple(skipped), tuple(failures), transient

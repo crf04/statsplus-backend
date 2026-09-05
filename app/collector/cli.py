@@ -89,6 +89,13 @@ def run_once(
         print(json.dumps({
             "status": result.disposition.value,
             "exit_code": result.exit_code,
+            # Bounded per-failure diagnostics, so a persistent provider defect
+            # names its team, window, equation and residual in the run output
+            # instead of only in an in-memory deque that exits with us.
+            "diagnostics": [
+                event for event in result.status.get("recent", ())
+                if event.get("detail")
+            ],
             "uploaded": result.uploaded,
             "spooled": result.spooled,
             "pending": outbox.count(),
