@@ -26,6 +26,7 @@ user_bp = Blueprint('users', __name__)
 
 user_service = CurrentAppService("user")
 target_resolution_service = CurrentAppService("target_resolution")
+target_backtest_service = CurrentAppService("target_backtest")
 
 @user_bp.route('/profile', methods=['GET'])
 @require_auth
@@ -368,6 +369,25 @@ def resolve_targets():
         requested_date=request.args.get('date')
     )
     return jsonify({'success': True, **resolved})
+
+@user_bp.route('/targets/<int:target_id>/backtest', methods=['GET'])
+@require_auth
+@route_error_boundary("Failed to backtest the target.")
+def backtest_target(target_id):
+    """
+    Report one Target's season to date over the whole league.
+
+    Every player league-wide whose current-season Diet meets every Qualifier
+    and is not thin, with their games against the Target's opponent this
+    season and their own season per-game averages for the same stat columns.
+
+    Returns:
+        JSON response with the target, its stat columns, and the players
+    """
+    backtested = target_backtest_service.backtest(
+        _authenticated_uid(), target_id
+    )
+    return jsonify({'success': True, **backtested})
 
 @user_bp.route('/targets/<int:target_id>', methods=['PATCH'])
 @require_auth

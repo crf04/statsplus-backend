@@ -369,6 +369,63 @@ class _PlayerDiet:
         )
 
 
+def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
+    """The Stat Categories one Defense Sheet row bears on.
+
+    The single mapping from a (Base, slice, stat) identity to the markets it
+    is evidence for.  A shot zone's markets depend on the slice as well as the
+    statistic -- only a three-point zone's makes bear on 3PM -- so the zone
+    cases are stated before the statistic table.  Public because the Defense
+    Sheet is not the only reader: a Target backtest picks its stat columns
+    from this same mapping, and a second copy could disagree with the
+    ``markets`` a row advertises.
+    """
+
+    if base == "shot_zones":
+        if slice_key in _TWO_POINT_SHOT_ZONES:
+            if stat_key == "FGA":
+                return ("FGA", "FG2A")
+            if stat_key == "FGM":
+                return ("PTS",)
+        if slice_key in _THREE_POINT_SHOT_ZONES:
+            if stat_key == "FGA":
+                return ("FGA", "FG3A")
+            if stat_key == "FGM":
+                return ("PTS", "3PM")
+    return _STAT_MARKETS.get(stat_key, ())
+
+
+def observed_diet_share(
+    base: str, facts: Sequence[StoredPlayerDietFact]
+) -> float | None:
+    """Return the observed share sum of a complete Diet, else ``None``.
+
+    A Base's own coverage, and the first leg of the thin rule below: ``None``
+    means the stored Diet is not a usable partition of the Base at all.  It is
+    module-level rather than private to the Matchup because every surface that
+    has to ask "is this player's Diet for this Base thin" -- the Target
+    backtest included -- has to read coverage the same way the Matchup does.
+    """
+
+    if not facts:
+        return None
+    if base == "play_types":
+        shares = complete_play_type_shares(
+            (fact.slice_key, fact.share) for fact in facts
+        )
+        return None if shares is None else sum(shares.values())
+    keys = [fact.slice_key for fact in facts]
+    if len(keys) != len(set(keys)):
+        return None
+    if set(keys) != _DIET_SLICE_KEYS[base]:
+        return None
+    lower, upper = _DIET_SHARE_BOUNDS[base]
+    share_sum = sum(fact.share for fact in facts)
+    if not lower - 1e-12 <= share_sum <= upper + 1e-12:
+        return None
+    return share_sum
+
+
 def diet_evidence_thin(
     *,
     base: str,
@@ -1103,7 +1160,7 @@ class MatchupService:
                 {
                     "key": cls._metric_key(base, slice_key, stat_key),
                     "label": cls._metric_label(base, slice_key, stat_key),
-                    "markets": list(cls._markets(base, slice_key, stat_key)),
+                    "markets": list(slice_markets(base, slice_key, stat_key)),
                     **{
                         window_name: cls._team_window_value(
                             metric_indexes[window_name],
@@ -1163,7 +1220,7 @@ class MatchupService:
             diet_by_base = {base: [] for base in PLAYER_DIET_BASES}
             diet = _PlayerDiet.build(
                 diets.players.get(player.canonical_player_id, ()),
-                self._complete_diet,
+                observed_diet_share,
             )
             # One whole-Base verdict per Base, from the same rule a score cell
             # marks itself thin with.  A score component states it only for the
@@ -1712,30 +1769,6 @@ class MatchupService:
         }
 
     @staticmethod
-    def _complete_diet(
-        base: str, facts: Sequence[StoredPlayerDietFact]
-    ) -> float | None:
-        """Return the observed share sum of a complete Diet, else ``None``."""
-
-        if not facts:
-            return None
-        if base == "play_types":
-            shares = complete_play_type_shares(
-                (fact.slice_key, fact.share) for fact in facts
-            )
-            return None if shares is None else sum(shares.values())
-        keys = [fact.slice_key for fact in facts]
-        if len(keys) != len(set(keys)):
-            return None
-        if set(keys) != _DIET_SLICE_KEYS[base]:
-            return None
-        lower, upper = _DIET_SHARE_BOUNDS[base]
-        share_sum = sum(fact.share for fact in facts)
-        if not lower - 1e-12 <= share_sum <= upper + 1e-12:
-            return None
-        return share_sum
-
-    @staticmethod
     def _availability(window: TeamMatchupWindow | None, base: str) -> dict[str, Any]:
         if not window:
             return {"status": "missing", "unavailable_reason": "not_stored"}
@@ -1987,21 +2020,6 @@ class MatchupService:
         return slice_key
 
     @staticmethod
-    def _markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
-        if base == "shot_zones":
-            if slice_key in _TWO_POINT_SHOT_ZONES:
-                if stat_key == "FGA":
-                    return ("FGA", "FG2A")
-                if stat_key == "FGM":
-                    return ("PTS",)
-            if slice_key in _THREE_POINT_SHOT_ZONES:
-                if stat_key == "FGA":
-                    return ("FGA", "FG3A")
-                if stat_key == "FGM":
-                    return ("PTS", "3PM")
-        return _STAT_MARKETS.get(stat_key, ())
-
-    @staticmethod
     def _event_team(event: Mapping[str, Any], team_id: int) -> Mapping[str, Any]:
         for side in ("away_team", "home_team"):
             team = event.get(side)
@@ -2162,4 +2180,7 @@ __all__ = [
     "DEFENSIVE_COLUMNS",
     "HISTORICAL_MODE",
     "MatchupService",
+    "diet_evidence_thin",
+    "observed_diet_share",
+    "slice_markets",
 ]

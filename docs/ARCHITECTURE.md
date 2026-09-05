@@ -2028,6 +2028,49 @@ game resolves against the canonical game-log participants the Matchup page
 lists for it, exactly as a scheduled game resolves against the stored Player
 Pool.
 
+### Target backtest (#246)
+
+`TargetBacktestService` answers the season's question rather than the day's, so
+unlike resolution it cannot compose one game's Matchup. It reaches three
+durable seams directly and no provider: the league-wide game-log rows against
+the Target's opponent for the configured current season
+(`PlayerGameLogRepository.list_opponent_rows`, the head-to-head cards' read
+with the player set left open), the Diet those players ate
+(`PlayerDietRepository.get_for_players` through the game-log path's read-only
+`PlayerDietReader`), and their Season rates (`get_player_summaries`). The
+opponent rows are both the population and the evidence: a qualifying player who
+has never faced this opponent has nothing to show, so scanning the opponent
+rather than the league costs the response nothing. Only Regular Season rows
+count, because the Season rate they are read against is a Regular Season rate.
+
+It resolves one `_publication_snapshot` per request and passes it to all three
+seams, as the Matchup and Selection reads do, with the same
+`projection_only_keys` narrowing. Both halves matter. Passing one snapshot
+means the Diet and the game logs come from a single Publication generation
+rather than two. Passing it at all is what makes the game-log reads use the
+projection's opponent and player indexes; without it they fall back to decoding
+the season-wide payload in Python, which for a league-wide question means
+decoding the whole league twice per request.
+
+What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
+`observed_diet_share`, both now module-level in `matchup.py` for that reason,
+so the player the Matchup marks thin is the player the backtest drops. The
+stat columns are `qualifier_slice_outcome_markets`, which is
+`MatchupService._markets` over the rows a slice states an *outcome* in -- a
+shot zone's FGM row, not its FGA row -- so a backtest column cannot disagree
+with the `markets` a Defense Sheet row advertises for the same slice, and never
+reports an attempt as production. The Qualifier conjunction is
+`TARGET_COMPARATOR_TESTS`, as in resolution.
+
+A deployment with no Diet service (the demo database, which carries no Diet
+schema) yields an empty `players`: no player has a share for any slice, so
+nobody fits. The absence is accurate rather than suppressed, so the read
+degrades the way an unmet Target does instead of refusing.
+
+The backtest is a separate route from resolution deliberately: the league-wide
+game-log scan runs only when a reader expands one Target, so the Slate's own
+read stays the cost of one Slate plus the Matchups its Targets name.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

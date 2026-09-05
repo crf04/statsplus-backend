@@ -762,6 +762,15 @@ class UserService:
         finally:
             session.close()
 
+    def get_target(self, firebase_uid: str, target_id: int) -> Dict[str, Any]:
+        """Return one of the caller's targets, or report it missing."""
+
+        session = self._get_session()
+        try:
+            return self._owned_target(session, firebase_uid, target_id).to_dict()
+        finally:
+            session.close()
+
     def create_target(
         self,
         firebase_uid: str,

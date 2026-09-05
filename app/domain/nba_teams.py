@@ -18,6 +18,12 @@ NBA_TEAM_ID_TO_TRICODE = dict(zip(
      "POR", "SAC", "SAS", "OKC", "TOR", "UTA", "MEM", "WAS", "DET", "CHA"),
 ))
 
+#: The same catalog read the other way, for a surface that stores a tricode
+#: and has to query evidence keyed by team id.
+NBA_TEAM_TRICODE_TO_ID = {
+    tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
+}
+
 NBA_TEAM_ABBREVIATION_DIALECTS = {
     "GS": "GSW",
     "NO": "NOP",
@@ -36,6 +42,8 @@ def canonical_nba_team_abbreviation(value: object) -> str:
 
 __all__ = [
     "NBA_TEAM_ABBREVIATION_DIALECTS",
+    "NBA_TEAM_ID_TO_TRICODE",
     "NBA_TEAM_TRICODES",
+    "NBA_TEAM_TRICODE_TO_ID",
     "canonical_nba_team_abbreviation",
 ]

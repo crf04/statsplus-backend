@@ -71,6 +71,7 @@ class ApplicationDependencies:
     projection_player_pool_reader: Any | None = None
     projection_collection_coordinator: Any | None = None
     target_resolution_service: Any | None = None
+    target_backtest_service: Any | None = None
 
 
 def build_dependencies(
@@ -126,6 +127,7 @@ def build_dependencies(
     from app.services.team_service import TeamService
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
+    from app.services.target_backtest import TargetBacktestService
     from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
@@ -652,6 +654,23 @@ def build_dependencies(
         slates=slate_service,
         matchups=matchup_service,
     )
+    # The backtest reaches past the Matchup because its question is not about
+    # one game: it composes the league-wide game-log rows against the
+    # opponent, the Diet those players ate, and their Season rates. Diet
+    # access is the same read-only wrapper the game-log path uses, so the
+    # provider-backed refresh service stays unreachable from here.
+    target_backtest_service = TargetBacktestService(
+        targets=user_service,
+        player_logs=player_game_log_repository,
+        player_diets=(
+            PlayerDietReader(player_diet_service.repository)
+            if player_diet_service is not None
+            else None
+        ),
+        statistic_catalog=statistic_catalog,
+        settings=settings,
+        publication_reader=publication_reader,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -701,6 +720,7 @@ def build_dependencies(
         projection_player_pool_reader=projection_player_pool_reader,
         projection_collection_coordinator=projection_collection_coordinator,
         target_resolution_service=target_resolution_service,
+        target_backtest_service=target_backtest_service,
     )
 
 

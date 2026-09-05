@@ -37,6 +37,7 @@ from app.domain.nba_events import (
 )
 from app.domain.nba_teams import (
     NBA_TEAM_ID_TO_TRICODE as _NBA_TEAM_ID_TO_TRICODE,
+    NBA_TEAM_TRICODE_TO_ID as _NBA_TEAM_TRICODE_TO_ID,
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
@@ -136,7 +137,7 @@ FRESHNESS_RULE_SECONDS = {
 }
 NBA_TEAM_IDS = frozenset(str(1610612737 + index) for index in range(30))
 NBA_TEAM_ID_TO_TRICODE = {str(key): value for key, value in _NBA_TEAM_ID_TO_TRICODE.items()}
-NBA_TRICODE_TO_TEAM_ID = {value: int(key) for key, value in NBA_TEAM_ID_TO_TRICODE.items()}
+NBA_TRICODE_TO_TEAM_ID = dict(_NBA_TEAM_TRICODE_TO_ID)
 REGISTERED_BASES = frozenset({"play_types", "shot_zones", "shot_types", "assist_locations"})
 STREAM_BASES: dict[str, frozenset[str]] = {
     "synergy_play_types": frozenset({"play_types"}),
