@@ -651,6 +651,12 @@ Each stored pool player has this shape:
     "shot_types": [],
     "assist_locations": []
   },
+  "diet_thin": {
+    "play_types": false,
+    "shot_zones": true,
+    "shot_types": true,
+    "assist_locations": true
+  },
   "scores": {
     "PTS": {
       "season": {
@@ -697,6 +703,20 @@ exactly the key set of `scores`; in current mode it equals `posted_markets`,
 and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
+
+`diet_thin` carries one verdict per Diet Base: whether that Base's evidence for
+this player is too slight to lean on. It is the same rule a score component
+marks itself `thin` with, asked of the whole Base rather than of the slices one
+component consumed, and it is always present for all four Bases -- a component
+only exists where its market was posted and its window available, so `scores`
+cannot answer this on its own. A Base is thin when its stored Diet is not a
+usable partition of that Base (including a Base with no stored fact at all,
+which no score would consume), when exact Synergy play-type coverage falls
+below 0.85, when any stored fact in the Base has fewer than
+`MATCHUP_SCORE_MIN_GAMES` (default 5) games, when the player's total Base
+volume per game falls below `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME`, or when
+the player has no Season rate or fewer than `MATCHUP_SCORE_MIN_GAMES` Season
+games. It is additive; it filters nothing and changes no other field.
 
 Player Diet facts are unthresholded raw Season shares and volumes; `share` and
 `volume` are never filtered or floored. Each fact additionally carries
@@ -2383,6 +2403,7 @@ GET    /api/user/targets
 POST   /api/user/targets
 PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
+GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 ```
 
 `GET` returns the caller's items newest-first:
@@ -2494,6 +2515,244 @@ Validation and conflicts:
   at the same opponent -- the set is compared order-insensitively, so
   reordering does not create a second Target -- and when the account already
   holds its cap of 50 Targets.
+
+#### Resolve every Target against one Slate Date
+
+```http
+GET /api/user/targets/resolve?date=2026-01-16
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns every Target the account holds, evaluated against one ET Slate Date.
+`date` is optional and means exactly what it means on
+[Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
+is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
+response echoes the resolved `slate_date`.
+
+The request makes no NBA, PBP, or DFS call. It composes the Slate for the date
+and, for each game one of the caller's opponents plays, the same stored Matchup
+document [Get Matchup](#get-matchup) serves -- read once per game however many
+Targets name the teams in it, and never read at all for a game no Target names.
+Every per-slice share, thin flag, posted-markets list, injury badge,
+participant status, defense-sheet value, and player ordering below is therefore
+the Matchup's own value for that game, including which evidence named that
+game's players.
+
+`targets` lists **live** Targets -- the opponent plays that date -- before
+**idle** ones, each group keeping the newest-first order of `GET
+/api/user/targets`.
+
+```json
+{
+  "success": true,
+  "slate_date": "2026-01-16",
+  "targets": [
+    {
+      "target": {
+        "id": 7,
+        "opponent": "OKC",
+        "title": "OKC vs Corner 3 ≥ 40%",
+        "note": "Leaks corner threes",
+        "qualifiers": [
+          {
+            "base": "shot_zones",
+            "slice_key": "Corner 3",
+            "comparator": "at_or_above",
+            "threshold": 0.4
+          }
+        ],
+        "created_at": "2026-09-05T12:00:00+00:00",
+        "updated_at": "2026-09-05T12:00:00+00:00"
+      },
+      "game": {
+        "game_id": "0022500584",
+        "scheduled_at": "2026-01-17T00:30:00+00:00",
+        "status": { "state": "scheduled", "label": "Scheduled" },
+        "opponent": {
+          "team_id": 1610612760,
+          "tricode": "OKC",
+          "name": "Oklahoma City Thunder"
+        },
+        "opposing_team": {
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "name": "Los Angeles Lakers"
+        },
+        "away": {
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "name": "Los Angeles Lakers"
+        },
+        "home": {
+          "team_id": 1610612760,
+          "tricode": "OKC",
+          "name": "Oklahoma City Thunder"
+        }
+      },
+      "context": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "label": "Corner 3",
+          "availability": {
+            "season": { "status": "available", "unavailable_reason": null },
+            "last_15": { "status": "available", "unavailable_reason": null }
+          },
+          "metrics": [
+            {
+              "key": "Corner 3:FGA",
+              "label": "Corner 3 FGA",
+              "markets": ["FGA", "FG3A"],
+              "opponent": {
+                "season": {
+                  "allowed_per_48": 21.0,
+                  "percent_vs_league_average": 5.0,
+                  "sigma_deviation": 0.5,
+                  "rank": 4
+                },
+                "last_15": {
+                  "allowed_per_48": 23.0,
+                  "percent_vs_league_average": 6.0,
+                  "sigma_deviation": 0.33,
+                  "rank": 2
+                }
+              },
+              "league": {
+                "season": { "average_allowed_per_48": 20.0, "sigma": 2.0 },
+                "last_15": { "average_allowed_per_48": 22.0, "sigma": 2.5 }
+              }
+            }
+          ]
+        }
+      ],
+      "availability": {
+        "status": "available",
+        "source": "player_pool",
+        "context": "posted_markets",
+        "unavailable_reason": null
+      },
+      "players": [
+        {
+          "canonical_id": 2544,
+          "name": "LeBron James",
+          "team_id": 1610612747,
+          "tricode": "LAL",
+          "posted_markets": ["PTS", "3PM"],
+          "injury_badge_ref": "rotowire:6504",
+          "season_scoring": 25.4,
+          "thin": false,
+          "shares": [
+            {
+              "base": "shot_zones",
+              "slice_key": "Corner 3",
+              "share": 0.42,
+              "league_average_share": 0.2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "target": {
+        "id": 8,
+        "opponent": "MIA",
+        "title": "MIA vs Transition ≥ 20%",
+        "note": null,
+        "qualifiers": [
+          {
+            "base": "play_types",
+            "slice_key": "Transition",
+            "comparator": "at_or_above",
+            "threshold": 0.2
+          }
+        ],
+        "created_at": "2026-09-04T12:00:00+00:00",
+        "updated_at": "2026-09-04T12:00:00+00:00"
+      },
+      "game": null,
+      "context": [],
+      "availability": {
+        "status": "unavailable",
+        "source": null,
+        "context": null,
+        "unavailable_reason": "opponent_idle"
+      },
+      "players": []
+    }
+  ]
+}
+```
+
+`target` is the same item `GET /api/user/targets` returns, derived title
+included.
+
+`game` is `null` exactly when the opponent is idle that date. Otherwise it
+names the game, its tip time, its Slate status, the `opponent` the Target aims
+at, and the `opposing_team` whose Player Pool `players` is filtered from.
+`status` is the Slate card's own, so a postponed or final game is reported as
+such rather than folded into the idle group.
+
+The same two teams also appear as `away` and `home`, in the same
+`{team_id, tricode, name}` shape and taken from the same Slate event, so a
+client can print the Slate's `AWAY @ HOME` convention without knowing which
+side the Target aims at. Exactly one of `away`/`home` equals `opponent` and the
+other equals `opposing_team`; which way round depends on where the opponent is
+playing, so neither pair can be derived from the other.
+
+`context` is one entry per Qualifier, in the Target's own Qualifier order, and
+is empty for an idle Target -- a Defense Sheet window is read for a game, and
+an idle opponent has none. Each entry carries every Defense Sheet row for that
+Base and slice, with the opponent's window values, the league's, and the
+`league.surface_availability[base][window]` state that governs them. When that
+state is not `available`, the window value is `null` exactly as it is on
+[Get Matchup](#get-matchup); exact Synergy play types therefore always report
+`unavailable/provider_window_unsupported` and a `null` `last_15`, and a
+completed game whose Last-15 window was never snapshotted reports its own
+state there while its Season window still reads. Row `key`, `label`, and
+`markets` are the Matchup's.
+
+`availability` is the status of whatever named the opposing side's players, so
+an empty `players` is never mistaken for "nobody qualifies". It repeats the
+Matchup's own Participants section, with `source` restated in the
+`experience.player_source` vocabulary that route uses:
+
+- `player_pool` -- a scheduled game, resolved against the stored Player Pool.
+  `player_pool_unavailable` when no stored pool player belongs to the game.
+- `game_logs` -- a Historical Matchup, resolved against the canonical game-log
+  participants the Matchup detail page lists for that completed game, so the
+  two surfaces agree about the same game on the same date.
+  `game_logs_incomplete` or `no_game_log_rows` when that evidence is not
+  there.
+- `null` with `opponent_idle` -- the opponent does not play on the viewed
+  date, so no evidence named participants at all.
+
+`players` is the opposing participants meeting **every** Qualifier, in the
+Matchup's own order (Season scoring descending, canonical id breaking ties).
+`players` is always empty when `availability.status` is not `available`.
+
+- Comparators are inclusive on the player's Season Diet `share` for the slice:
+  `at_or_above` is `share >= threshold` and `at_or_below` is
+  `share <= threshold`.
+- A player with no stored fact for a Qualifier's slice does not fit: an absent
+  share is unjudged, not a share of zero.
+- `shares` is one entry per Qualifier, in the Target's Qualifier order, holding
+  the player's Season `share` for that slice and its `league_average_share`.
+  Both are the unthresholded Matchup values.
+- `thin` is the Matchup's own `diet_thin` verdict for the Bases this Target's
+  Qualifiers name, so the flag here and the flag there are one value. It is
+  `true` when **any** named Base is thin, since a fit resting on one unusable
+  Base is no better than the Base. See `diet_thin` under
+  [Get Matchup](#get-matchup) for what makes a Base thin. A thin player is
+  flagged, never removed, so this list never disagrees with the Matchup about
+  who is in the game.
+- `posted_markets`, `injury_badge_ref`, and `season_scoring` are the Matchup's
+  values for the same player, so the two surfaces agree. A game-log
+  participant has no posted markets, so `posted_markets` is `[]` and
+  `injury_badge_ref` is `null` for a completed game, exactly as on
+  [Get Matchup](#get-matchup).
+
+`401 authentication_required` for an unauthenticated caller. An account with no
+Targets is `200` with an empty `targets` list, not an error.
 
 
 ## Filtering Reference

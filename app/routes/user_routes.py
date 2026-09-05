@@ -25,6 +25,7 @@ from ._service_proxy import CurrentAppService
 user_bp = Blueprint('users', __name__)
 
 user_service = CurrentAppService("user")
+target_resolution_service = CurrentAppService("target_resolution")
 
 @user_bp.route('/profile', methods=['GET'])
 @require_auth
@@ -345,6 +346,28 @@ def create_target():
         note=data.get('note')
     )
     return jsonify({'success': True, 'target': created}), 201
+
+@user_bp.route('/targets/resolve', methods=['GET'])
+@require_auth
+@route_error_boundary("Failed to resolve targets.")
+def resolve_targets():
+    """
+    Resolve every Target for the caller against one ET Slate Date.
+
+    Query parameters:
+        date: YYYY-MM-DD; absent means the current ET slate date.
+
+    Live Targets come first, then idle ones.  A malformed date is refused by
+    the slate's own rule, as ``400 invalid_input``.
+
+    Returns:
+        JSON response with the slate date and the resolved targets
+    """
+    resolved = target_resolution_service.resolve(
+        _authenticated_uid(),
+        requested_date=request.args.get('date')
+    )
+    return jsonify({'success': True, **resolved})
 
 @user_bp.route('/targets/<int:target_id>', methods=['PATCH'])
 @require_auth

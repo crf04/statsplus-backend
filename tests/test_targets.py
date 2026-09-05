@@ -25,6 +25,9 @@ from app.domain.player_diet_taxonomy import (
 from app.errors import ConflictError, InvalidInputError, ResourceNotFoundError
 from app.migrations import run_migrations
 from app.models.target import (
+    TARGET_COMPARATOR_SYMBOLS,
+    TARGET_COMPARATOR_TESTS,
+    TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
     Target,
     TargetQualifier,
@@ -577,6 +580,13 @@ def test_the_title_reads_the_slice_label_rather_than_the_stored_key(targets):
 
     assert created["title"] == "OKC vs P&R ball handler ≥ 35%"
     assert created["qualifiers"][0]["slice_key"] == "PRBallHandler"
+
+
+def test_every_comparator_has_both_a_title_symbol_and_a_share_test():
+    """A comparator missing either is accepted on write and fails on read."""
+
+    assert set(TARGET_COMPARATORS) == set(TARGET_COMPARATOR_SYMBOLS)
+    assert set(TARGET_COMPARATORS) == set(TARGET_COMPARATOR_TESTS)
 
 
 def test_every_qualifiable_slice_has_a_label():

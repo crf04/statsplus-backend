@@ -1995,6 +1995,39 @@ Injury reconciliation can remove a canonical Out player or attach a badge
 reference; it does not change Matchup Scores, Diet Shares, scoring history, or
 projected roles.
 
+`diet_evidence_thin` is the one statement of "thin" in the backend. A Matchup
+Score cell marks itself thin with it over the slices that cell consumed, and
+each player row additionally carries `diet_thin`, the same verdict asked of
+each whole Base. Evidence that no score would consume -- a Base with no stored
+fact, or a stored Diet that is not a usable partition of its Base -- is thin
+by that rule, so a surface reporting the flag never presents a share the
+Matchup itself would refuse to score. `_PlayerDiet` reads each Base's coverage
+once per player and hands the same number to every consumer.
+
+### Target resolution (#245)
+
+`TargetResolutionService` is a composed read with no seam of its own. It takes
+three readers -- the caller's stored Targets, `SlateService`, and
+`MatchupService` -- and reaches no provider, no repository, and no database
+directly. For one ET Slate Date it partitions the account's Targets into those
+whose opponent has a game and those that do not, and for each distinct game a
+Target names it reads that game's Matchup once.
+
+Every number it returns is the Matchup's own: per-slice shares and their
+league averages, the `diet_thin` verdict, posted markets, injury badge
+references, Season scoring and the player ordering derived from it, the
+Defense Sheet rows for a Qualifier's slice, the Base/window availability that
+governs them, and the Participants section that says which evidence named the
+game's players. Resolution therefore adds no rule that could disagree with the
+Matchup detail page about the same game; what it adds is the Qualifier
+conjunction, evaluated through `TARGET_COMPARATOR_TESTS` so the comparator a
+Target stores and the comparison it gets are one vocabulary.
+
+Because the Participants section is carried rather than judged, a completed
+game resolves against the canonical game-log participants the Matchup page
+lists for it, exactly as a scheduled game resolves against the stored Player
+Pool.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first
