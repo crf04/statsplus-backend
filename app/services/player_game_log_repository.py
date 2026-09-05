@@ -1123,10 +1123,15 @@ class PlayerGameLogRepository:
     ) -> tuple[PlayerGameLogRecord, ...]:
         """Return every stored row against one opponent, league-wide.
 
-        The same opponent-indexed read the head-to-head cards make, with the
-        player set left open: a Target backtest asks which players in the
-        whole league have faced this team, and only the evidence itself can
-        say.
+        The same read the head-to-head cards make with the player set left
+        open: a Target backtest asks which players in the whole league have
+        faced this team, and only the evidence itself can say.
+
+        How much this costs is the caller's choice, exactly as it is for the
+        per-player reads.  Given a projection-ready ``publication_snapshot``
+        it is one indexed scan of the opponent's own rows; given a rendered
+        payload or none, it falls back to decoding the season and filtering in
+        Python, which for a league-wide question is the whole league.
         """
 
         return self._list_rows(

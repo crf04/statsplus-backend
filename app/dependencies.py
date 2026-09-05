@@ -669,6 +669,7 @@ def build_dependencies(
         ),
         statistic_catalog=statistic_catalog,
         settings=settings,
+        publication_reader=publication_reader,
     )
 
     return ApplicationDependencies(

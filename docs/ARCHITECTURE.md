@@ -2034,14 +2034,23 @@ Pool.
 unlike resolution it cannot compose one game's Matchup. It reaches three
 durable seams directly and no provider: the league-wide game-log rows against
 the Target's opponent for the configured current season
-(`PlayerGameLogRepository.list_opponent_rows`, the same opponent-indexed read
-the head-to-head cards make with the player set left open), the Diet those
-players ate (`PlayerDietRepository.get_for_players` through the game-log path's
-read-only `PlayerDietReader`), and their Season rates
-(`get_player_summaries`). The opponent rows are both the population and the
-evidence: a qualifying player who has never faced this opponent has nothing to
-show, so scanning the opponent rather than the league costs the response
-nothing.
+(`PlayerGameLogRepository.list_opponent_rows`, the head-to-head cards' read
+with the player set left open), the Diet those players ate
+(`PlayerDietRepository.get_for_players` through the game-log path's read-only
+`PlayerDietReader`), and their Season rates (`get_player_summaries`). The
+opponent rows are both the population and the evidence: a qualifying player who
+has never faced this opponent has nothing to show, so scanning the opponent
+rather than the league costs the response nothing. Only Regular Season rows
+count, because the Season rate they are read against is a Regular Season rate.
+
+It resolves one `_publication_snapshot` per request and passes it to all three
+seams, as the Matchup and Selection reads do, with the same
+`projection_only_keys` narrowing. Both halves matter. Passing one snapshot
+means the Diet and the game logs come from a single Publication generation
+rather than two. Passing it at all is what makes the game-log reads use the
+projection's opponent and player indexes; without it they fall back to decoding
+the season-wide payload in Python, which for a league-wide question means
+decoding the whole league twice per request.
 
 What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
 `observed_diet_share`, both now module-level in `matchup.py` for that reason,

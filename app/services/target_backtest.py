@@ -27,8 +27,15 @@ so in ``proxy``.
 The player set is drawn from the whole league rather than one team, and it is
 drawn from the opponent's own game-log rows: a qualifying player who has never
 faced this opponent has nothing to show and is not listed, so the rows are
-both the population and the evidence.  No NBA, PBP, or DFS provider is
-reached.
+both the population and the evidence.  Only Regular Season rows count, because
+the season average they are read against is a Regular Season rate; comparing a
+playoff line to a regular-season baseline would be comparing two populations.
+
+One immutable Publication snapshot is resolved per request and passed to every
+seam, so the whole response is composed from one generation of evidence rather
+than a Diet from one and game logs from another, and the game-log reads take
+the opponent-indexed projection instead of decoding a season-wide payload.  No
+NBA, PBP, or DFS provider is reached.
 """
 
 from __future__ import annotations
@@ -37,14 +44,22 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
+from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.models.target import TARGET_COMPARATOR_TESTS
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
-    qualifier_slice_outcome_markets,
+    slice_markets,
 )
-from app.services.player_diet import PlayerDietResult
+from app.services.player_diet import (
+    PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    PlayerDietResult,
+)
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_read_scope,
+)
 from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerSeasonLogSummary,
@@ -54,6 +69,54 @@ from app.services.statistic_catalog import StatisticCatalog
 
 
 _WIRE_PRECISION = 6
+
+#: Every stream this read composes.  The Diet and the game logs are resolved
+#: from one snapshot so a response cannot mix generations.
+_PUBLICATION_STREAM_KEYS = (
+    "player_game_logs",
+    *sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS),
+)
+#: The season-wide game-log payload is never worth shipping: both game-log
+#: reads resolve their own rows from the projection's opponent and player
+#: indexes.
+_PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+
+#: The stat key each Diet Base states an *outcome* in.  A Base publishes a
+#: Defense Sheet row per stat key, but only some of those rows are things a
+#: player produced: a shot zone has an FGM row and an FGA row, and only FGM is
+#: production.  Attempt and possession rows (``FGA``, ``FG2A``, ``FG3A``,
+#: ``POSS``) are deliberately absent, so a backtest column is always something
+#: that happened rather than something that was tried.  Assist locations name
+#: the slice as their own stat key, so they are read from the slice rather
+#: than listed here.
+_BASE_OUTCOME_STAT_KEYS = {
+    "play_types": ("PTS",),
+    "shot_types": ("FG2M", "FG3M"),
+    "shot_zones": ("FGM",),
+}
+
+
+def qualifier_slice_outcome_markets(base: str, slice_key: str) -> tuple[str, ...]:
+    """The Stat Categories a Diet slice's outcome rows map to.
+
+    The mapping from a Qualifier's slice to the box-score columns that stand
+    in for it, restricted to the rows that state an outcome: ``Corner 3`` is
+    points and threes, ``Transition`` is points and the point combos, and
+    neither carries the attempts its own Defense Sheet row also reports.
+
+    The mapping itself is ``slice_markets``, the Matchup's own, so a column
+    here can never disagree with the ``markets`` a Defense Sheet row
+    advertises for the same slice; what this narrows is which of that slice's
+    rows are asked.  It lives here rather than in ``matchup.py`` because a
+    Qualifier is a Target's concern, not the Defense Sheet's.
+    """
+
+    markets: list[str] = []
+    for stat_key in _BASE_OUTCOME_STAT_KEYS.get(base, (slice_key,)):
+        for market in slice_markets(base, slice_key, stat_key):
+            if market not in markets:
+                markets.append(market)
+    return tuple(markets)
 
 #: The one sentence this response owes its reader.  Every column below is a
 #: box-score market the Qualifier's slice maps to, not the slice itself.
@@ -73,17 +136,29 @@ class TargetReader(Protocol):
 
 class PlayerLogReader(Protocol):
     def list_opponent_rows(
-        self, season: str, opponent_team_id: int
+        self,
+        season: str,
+        opponent_team_id: int,
+        *,
+        publication_snapshot: Any | None = None,
     ) -> Sequence[PlayerGameLogRecord]: ...
 
     def get_player_summaries(
-        self, season: str, player_ids: Iterable[int]
+        self,
+        season: str,
+        player_ids: Iterable[int],
+        *,
+        publication_snapshot: Any | None = None,
     ) -> Mapping[int, PlayerSeasonLogSummary]: ...
 
 
 class PlayerDietReader(Protocol):
     def get_for_players(
-        self, season: str, player_ids: Sequence[int]
+        self,
+        season: str,
+        player_ids: Sequence[int],
+        *,
+        publication_snapshot: Any | None = None,
     ) -> PlayerDietResult: ...
 
 
@@ -98,10 +173,12 @@ class TargetBacktestService:
         player_diets: PlayerDietReader | None,
         statistic_catalog: StatisticCatalog,
         settings: RuntimeSettings,
+        publication_reader: Any | None = None,
     ) -> None:
         self.targets = targets
         self.player_logs = player_logs
         self.player_diets = player_diets
+        self.publication_reader = publication_reader
         self.settings = settings
         self._statistics = {
             statistic.market_category: statistic
@@ -120,13 +197,40 @@ class TargetBacktestService:
         season = self.settings.nba.current_season
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
+        # One snapshot for the whole response: the Diet a player ate and the
+        # games they played have to come from the same generation of evidence.
+        snapshot = self._publication_snapshot(season)
         return {
             "target": dict(target),
             "season": season,
             "proxy": PROXY_NOTE,
             "stat_columns": list(markets),
-            "players": self._players(target, qualifiers, markets, season),
+            "players": self._players(
+                target, qualifiers, markets, season, snapshot
+            ),
         }
+
+    def _publication_snapshot(self, season: str):
+        """Resolve this request's immutable Publication generation, if any.
+
+        Mirrors the Matchup and Selection reads, including their
+        ``projection_only_keys`` narrowing: this service resolves its rows
+        from the projection's own opponent and player indexes, so shipping the
+        season-wide game-log payload alongside it would be decoding the whole
+        league to answer a question about one opponent.
+        """
+
+        if self.publication_reader is None:
+            return None
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if not callable(snapshot):
+            snapshot = getattr(self.publication_reader, "read_snapshot", None)
+        if not callable(snapshot):
+            return None
+        keyword = {}
+        if accepts_keyword(snapshot, "projection_only_keys"):
+            keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     @staticmethod
     def _stat_columns(
@@ -154,12 +258,20 @@ class TargetBacktestService:
         qualifiers: Sequence[Mapping[str, Any]],
         markets: Sequence[str],
         season: str,
+        snapshot: Any | None,
     ) -> list[dict[str, Any]]:
         opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {}
-        for record in self.player_logs.list_opponent_rows(
-            season, opponent_team_id
+        for record in call_with_read_scope(
+            self.player_logs.list_opponent_rows,
+            season,
+            opponent_team_id,
+            publication_snapshot=snapshot,
         ):
+            # A playoff line is not evidence against a Regular Season average,
+            # which is the baseline every column below is read against.
+            if record.season_type != REGULAR_SEASON_TYPE:
+                continue
             rows_by_player.setdefault(int(record.player_id), []).append(record)
         if not rows_by_player:
             # Nobody has faced this opponent, so there is nobody to judge and
@@ -175,9 +287,19 @@ class TargetBacktestService:
         diets = (
             PlayerDietResult(season, {}, ())
             if self.player_diets is None
-            else self.player_diets.get_for_players(season, player_ids)
+            else call_with_read_scope(
+                self.player_diets.get_for_players,
+                season,
+                player_ids,
+                publication_snapshot=snapshot,
+            )
         )
-        summaries = self.player_logs.get_player_summaries(season, player_ids)
+        summaries = call_with_read_scope(
+            self.player_logs.get_player_summaries,
+            season,
+            player_ids,
+            publication_snapshot=snapshot,
+        )
 
         players = []
         for player_id in player_ids:
@@ -277,10 +399,12 @@ class TargetBacktestService:
     ) -> dict[str, Any]:
         """Shape one qualifying player against the games they have played.
 
-        Identity is the newest row's, which is the game-time identity the
-        Matchup's historical participants also use: a mid-season trade cannot
-        rewrite who a player suited up for, and the newest row is who they are
-        now.
+        Identity is the game-time identity the Matchup's historical
+        participants also use, taken from the most recent game against this
+        opponent.  That is deliberately not a claim about the player's current
+        team: a trade after their last meeting with this opponent is not
+        visible here, and the row still says who they suited up for that
+        night, which is what the games below are evidence about.
         """
 
         newest = rows[0]
@@ -313,4 +437,4 @@ class TargetBacktestService:
         return None if value is None else cls._number(value)
 
 
-__all__ = ["PROXY_NOTE", "TargetBacktestService"]
+__all__ = ["TargetBacktestService"]

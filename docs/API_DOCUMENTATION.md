@@ -2879,12 +2879,17 @@ scoring descending, canonical id breaking ties.
   [Get Matchup](#get-matchup) for what makes a Base thin.
 - `shares` is one entry per Qualifier, in Qualifier order, with the player's
   Season `share` for the slice and its `league_average_share`.
-- Identity (`name`, `team_id`, `tricode`) and `season_scoring` come from the
-  player's newest row against this opponent and their Season rate.
-- `games` are the player's games against this opponent this season,
-  newest-first, each with its `game_id`, `game_date`, `matchup`, `minutes`, and
-  the `stat_columns`. `matchup` uses the game-time identity, so a mid-season
-  trade cannot rewrite who a player suited up for that night.
+- Identity (`name`, `team_id`, `tricode`) is the player's identity **as of the
+  most recent game against this opponent**, not necessarily their current team:
+  a trade after that meeting is not reflected here. `season_scoring` is their
+  Season rate.
+- `games` are the player's **Regular Season** games against this opponent this
+  season, newest-first, each with its `game_id`, `game_date`, `matchup`,
+  `minutes`, and the `stat_columns`. Playoff games are excluded because
+  `season_averages` is a Regular Season rate, and a playoff line read against a
+  regular-season baseline compares two different populations. `matchup` uses
+  the game-time identity, so a mid-season trade cannot rewrite who a player
+  suited up for that night.
 
 `players` is `[]` when nobody qualifies and when nobody has faced the opponent
 yet; the two are not distinguished, because a player with no games has nothing

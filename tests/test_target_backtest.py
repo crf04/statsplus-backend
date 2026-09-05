@@ -13,6 +13,7 @@ stub service, matching ``test_target_resolution``.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -107,6 +108,7 @@ def _row(
     player_id,
     *,
     name="LeBron James",
+    season_type="Regular Season",
     game_id="0022500584",
     game_date=date(2026, 1, 16),
     team_id=LAL,
@@ -124,7 +126,7 @@ def _row(
 ):
     return PlayerGameLogRecord(
         season=SEASON,
-        season_type="Regular Season",
+        season_type=season_type,
         player_id=player_id,
         game_id=game_id,
         player_name=name,
@@ -154,14 +156,17 @@ class FakeLogs:
         self.scoring = scoring or {}
         self.opponent_calls = []
         self.summary_calls = []
+        self.snapshots = []
 
-    def list_opponent_rows(self, season, opponent_team_id):
+    def list_opponent_rows(self, season, opponent_team_id, *, publication_snapshot=None):
         self.opponent_calls.append((season, opponent_team_id))
+        self.snapshots.append(publication_snapshot)
         return self.rows
 
-    def get_player_summaries(self, season, player_ids):
+    def get_player_summaries(self, season, player_ids, *, publication_snapshot=None):
         player_ids = tuple(player_ids)
         self.summary_calls.append((season, player_ids))
+        self.snapshots.append(publication_snapshot)
         return {
             player_id: PlayerSeasonLogSummary(
                 season=season,
@@ -191,10 +196,12 @@ class FakeDiets:
         self.play_types = play_types or {}
         self.volume = volume or {}
         self.calls = []
+        self.snapshots = []
 
-    def get_for_players(self, season, player_ids):
+    def get_for_players(self, season, player_ids, *, publication_snapshot=None):
         player_ids = tuple(player_ids)
         self.calls.append((season, player_ids))
+        self.snapshots.append(publication_snapshot)
         return PlayerDietResult(
             season=season,
             players={
@@ -299,13 +306,18 @@ def targets(backtest_engine, backtest_settings):
 def backtest(targets, backtest_settings):
     """Build the backtest over the caller's real Targets and fake seams."""
 
-    def _backtest(target_id, *, logs=None, diets=None, uid=OWNER):
+    unset = object()
+
+    def _backtest(
+        target_id, *, logs=None, diets=unset, uid=OWNER, publication_reader=None
+    ):
         service = TargetBacktestService(
             targets=targets,
             player_logs=logs if logs is not None else FakeLogs(),
-            player_diets=diets if diets is not None else FakeDiets(),
+            player_diets=FakeDiets() if diets is unset else diets,
             statistic_catalog=StatisticCatalog.load_default(),
             settings=backtest_settings,
+            publication_reader=publication_reader,
         )
         return service.backtest(uid, target_id)
 
@@ -400,6 +412,8 @@ def test_the_opponents_games_are_read_league_wide_for_the_current_season(
 
     assert logs.opponent_calls == [(SEASON, OKC)]
     assert diets.calls == [(SEASON, (LEBRON, TATUM))]
+    # The averages a game is read against are this season's, not any other's.
+    assert logs.summary_calls == [(SEASON, (LEBRON, TATUM))]
     # Season scoring descending, as the Matchup and Target resolution order.
     assert [player["tricode"] for player in payload["players"]] == ["BOS", "LAL"]
 
@@ -546,6 +560,180 @@ def test_stat_columns_are_outcomes_never_attempts(
 
     assert payload["stat_columns"] == expected
     assert not {"FGA", "FG2A", "FG3A", "POSS"} & set(payload["stat_columns"])
+
+
+class FakePublicationReader:
+    """A reader whose snapshot is a sentinel the seams can be asked about."""
+
+    def __init__(self, snapshot_value="snapshot-1"):
+        self.snapshot_value = snapshot_value
+        self.calls = []
+
+    def snapshot(self, stream_keys, *, season, projection_only_keys=None):
+        self.calls.append((tuple(stream_keys), season, projection_only_keys))
+        return self.snapshot_value
+
+
+def test_one_publication_snapshot_is_resolved_and_given_to_every_seam(
+    targets, backtest
+):
+    created = _create(targets)
+    logs = FakeLogs(rows=(_row(LEBRON),))
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+    reader = FakePublicationReader()
+
+    backtest(created["id"], logs=logs, diets=diets, publication_reader=reader)
+
+    # One snapshot for the request, not one per seam, so the Diet and the game
+    # logs cannot come from two Publication generations.
+    assert len(reader.calls) == 1
+    stream_keys, season, projection_only = reader.calls[0]
+    assert season == SEASON
+    assert "player_game_logs" in stream_keys
+    # The season-wide game-log payload is never shipped: both game-log reads
+    # resolve their rows from the projection's own indexes.
+    assert projection_only == frozenset({"player_game_logs"})
+    # Both game-log reads and the Diet read all receive it.
+    assert logs.snapshots == ["snapshot-1", "snapshot-1"]
+    assert diets.snapshots == ["snapshot-1"]
+
+
+class LegacySnapshotReader:
+    """An older reader: ``read_snapshot``, and no projection narrowing."""
+
+    def __init__(self):
+        self.calls = []
+
+    def read_snapshot(self, stream_keys, *, season):
+        self.calls.append((tuple(stream_keys), season))
+        return "legacy-snapshot"
+
+
+def test_a_reader_without_projection_narrowing_still_scopes_the_read(
+    targets, backtest
+):
+    created = _create(targets)
+    logs = FakeLogs(rows=(_row(LEBRON),))
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+    reader = LegacySnapshotReader()
+
+    payload = backtest(
+        created["id"], logs=logs, diets=diets, publication_reader=reader
+    )
+
+    # It cannot be asked to skip the payload, but it can still be asked for
+    # one generation, and every seam is given it.
+    assert [season for _keys, season in reader.calls] == [SEASON]
+    assert logs.snapshots == ["legacy-snapshot", "legacy-snapshot"]
+    assert diets.snapshots == ["legacy-snapshot"]
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+
+
+def test_a_reader_offering_no_snapshot_at_all_reads_the_durable_tables(
+    targets, backtest
+):
+    created = _create(targets)
+    logs = FakeLogs(rows=(_row(LEBRON),))
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+
+    payload = backtest(
+        created["id"],
+        logs=logs,
+        diets=diets,
+        publication_reader=SimpleNamespace(snapshot=None),
+    )
+
+    # No generation to pin, so the seams read their own durable tables. The
+    # response is still composed; it is the cost that differs.
+    assert logs.snapshots == [None, None]
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+
+
+def test_a_deployment_with_no_diet_service_reports_no_players(targets, backtest):
+    created = _create(targets)
+    logs = FakeLogs(rows=(_row(LEBRON),))
+
+    payload = backtest(created["id"], logs=logs, diets=None)
+
+    # No stored Diet means no share for any slice, so nobody fits. The columns
+    # still describe what the Target asks for.
+    assert payload["players"] == []
+    assert payload["stat_columns"] == CORNER_THREE_COLUMNS
+
+
+def test_a_playoff_game_is_not_read_against_a_regular_season_average(
+    targets, backtest
+):
+    created = _create(targets)
+    logs = FakeLogs(
+        rows=(
+            _row(LEBRON, game_id="0042500101", season_type="Playoffs", points=41),
+            _row(LEBRON, game_id="0022500584"),
+        )
+    )
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+
+    payload = backtest(created["id"], logs=logs, diets=diets)
+
+    assert [game["game_id"] for game in payload["players"][0]["games"]] == [
+        "0022500584"
+    ]
+
+
+def test_a_playoff_only_opponent_history_lists_nobody(targets, backtest):
+    created = _create(targets)
+    logs = FakeLogs(
+        rows=(_row(LEBRON, game_id="0042500101", season_type="Playoffs"),)
+    )
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+
+    payload = backtest(created["id"], logs=logs, diets=diets)
+
+    assert payload["players"] == []
+    assert diets.calls == []
+
+
+def test_identity_follows_the_most_recent_game_against_this_opponent(
+    targets, backtest
+):
+    created = _create(targets)
+    logs = FakeLogs(
+        rows=(
+            _row(LEBRON, game_id="0022500584", game_date=date(2026, 1, 16)),
+            # The same player, earlier, for the team that traded him.
+            _row(
+                LEBRON,
+                game_id="0022500120",
+                game_date=date(2025, 11, 3),
+                team_id=BOS,
+                team_tricode="BOS",
+            ),
+        )
+    )
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+
+    player = backtest(created["id"], logs=logs, diets=diets)["players"][0]
+
+    assert (player["team_id"], player["tricode"]) == (LAL, "LAL")
+    # Each game still reports the team he suited up for that night.
+    assert [game["matchup"] for game in player["games"]] == [
+        "LAL vs. OKC",
+        "BOS vs. OKC",
+    ]
+
+
+def test_an_incomplete_diet_partition_does_not_fit(targets, backtest):
+    created = _create(targets)
+    logs = FakeLogs(rows=(_row(LEBRON),))
+    # A passing Corner 3 share, but the Base is missing a slice, so the stored
+    # Diet is not a usable partition and the Matchup would not score it.
+    partial = _zone_diet(0.42, 0.2)
+    del partial["Mid-Range"]
+    diets = FakeDiets(zones={LEBRON: partial})
+
+    payload = backtest(created["id"], logs=logs, diets=diets)
+
+    assert payload["players"] == []
 
 
 def test_nobody_having_faced_the_opponent_is_an_empty_player_list(

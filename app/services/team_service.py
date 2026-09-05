@@ -16,7 +16,7 @@ from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.nba_teams import (
-    NBA_TEAM_ID_TO_TRICODE,
+    NBA_TEAM_TRICODE_TO_ID,
     canonical_nba_team_abbreviation,
 )
 from app.domain.team_matchup_taxonomy import (
@@ -69,10 +69,6 @@ _ASSIST_FIELDS: dict[str, str] = {
 
 #: The one display name the panel sends that the team catalog does not carry.
 _TEAM_NAME_ALIASES: dict[str, str] = {"LA Clippers": "Los Angeles Clippers"}
-
-_TRICODE_TO_TEAM_ID: dict[str, int] = {
-    tricode: team_id for team_id, tricode in NBA_TEAM_ID_TO_TRICODE.items()
-}
 
 #: A rate no team in the league has: every field it would place is omitted.
 _NO_RATE_COLUMN = LeagueMetricColumn(
@@ -132,7 +128,7 @@ def _resolve_team_id(team_name) -> int | None:
     name = _TEAM_NAME_ALIASES.get(name, name)
     for entry in teams.get_teams():
         if entry["full_name"] == name:
-            return _TRICODE_TO_TEAM_ID.get(
+            return NBA_TEAM_TRICODE_TO_ID.get(
                 canonical_nba_team_abbreviation(entry["abbreviation"])
             )
     return None

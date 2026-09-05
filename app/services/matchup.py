@@ -369,6 +369,32 @@ class _PlayerDiet:
         )
 
 
+def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
+    """The Stat Categories one Defense Sheet row bears on.
+
+    The single mapping from a (Base, slice, stat) identity to the markets it
+    is evidence for.  A shot zone's markets depend on the slice as well as the
+    statistic -- only a three-point zone's makes bear on 3PM -- so the zone
+    cases are stated before the statistic table.  Public because the Defense
+    Sheet is not the only reader: a Target backtest picks its stat columns
+    from this same mapping, and a second copy could disagree with the
+    ``markets`` a row advertises.
+    """
+
+    if base == "shot_zones":
+        if slice_key in _TWO_POINT_SHOT_ZONES:
+            if stat_key == "FGA":
+                return ("FGA", "FG2A")
+            if stat_key == "FGM":
+                return ("PTS",)
+        if slice_key in _THREE_POINT_SHOT_ZONES:
+            if stat_key == "FGA":
+                return ("FGA", "FG3A")
+            if stat_key == "FGM":
+                return ("PTS", "3PM")
+    return _STAT_MARKETS.get(stat_key, ())
+
+
 def observed_diet_share(
     base: str, facts: Sequence[StoredPlayerDietFact]
 ) -> float | None:
@@ -1134,7 +1160,7 @@ class MatchupService:
                 {
                     "key": cls._metric_key(base, slice_key, stat_key),
                     "label": cls._metric_label(base, slice_key, stat_key),
-                    "markets": list(cls._markets(base, slice_key, stat_key)),
+                    "markets": list(slice_markets(base, slice_key, stat_key)),
                     **{
                         window_name: cls._team_window_value(
                             metric_indexes[window_name],
@@ -1994,21 +2020,6 @@ class MatchupService:
         return slice_key
 
     @staticmethod
-    def _markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
-        if base == "shot_zones":
-            if slice_key in _TWO_POINT_SHOT_ZONES:
-                if stat_key == "FGA":
-                    return ("FGA", "FG2A")
-                if stat_key == "FGM":
-                    return ("PTS",)
-            if slice_key in _THREE_POINT_SHOT_ZONES:
-                if stat_key == "FGA":
-                    return ("FGA", "FG3A")
-                if stat_key == "FGM":
-                    return ("PTS", "3PM")
-        return _STAT_MARKETS.get(stat_key, ())
-
-    @staticmethod
     def _event_team(event: Mapping[str, Any], team_id: int) -> Mapping[str, Any]:
         for side in ("away_team", "home_team"):
             team = event.get(side)
@@ -2163,42 +2174,6 @@ class MatchupService:
         return round(float(value), _WIRE_PRECISION)
 
 
-#: The stat key each Diet Base states an *outcome* in.  A Base publishes a
-#: Defense Sheet row per stat key, but only some of those rows are things a
-#: player produced: a shot zone has an FGM row and an FGA row, and only FGM is
-#: production.  Attempt and possession rows (``FGA``, ``FG2A``, ``FG3A``,
-#: ``POSS``) are deliberately absent, so a backtest column is always something
-#: that happened rather than something that was tried.  Assist locations name
-#: the slice as their own stat key, so they are read from the slice rather
-#: than listed here.
-_BASE_OUTCOME_STAT_KEYS = {
-    "play_types": ("PTS",),
-    "shot_types": ("FG2M", "FG3M"),
-    "shot_zones": ("FGM",),
-}
-
-
-def qualifier_slice_outcome_markets(base: str, slice_key: str) -> tuple[str, ...]:
-    """The Stat Categories a Diet slice's outcome rows map to.
-
-    The one mapping from a Qualifier's slice to the box-score columns that
-    stand in for it, restricted to the rows that state an outcome: ``Corner
-    3`` is points and threes, ``Transition`` is points and the point combos,
-    and neither carries the attempts its own Defense Sheet row also reports.
-
-    The mapping itself is ``MatchupService._markets``, so a column here can
-    never disagree with the ``markets`` a Defense Sheet row advertises for the
-    same slice; what this narrows is which of that slice's rows are asked.
-    """
-
-    markets: list[str] = []
-    for stat_key in _BASE_OUTCOME_STAT_KEYS.get(base, (slice_key,)):
-        for market in MatchupService._markets(base, slice_key, stat_key):
-            if market not in markets:
-                markets.append(market)
-    return tuple(markets)
-
-
 __all__ = [
     "CURRENT_MODE",
     "DEFENSE_BASES",
@@ -2207,5 +2182,5 @@ __all__ = [
     "MatchupService",
     "diet_evidence_thin",
     "observed_diet_share",
-    "qualifier_slice_outcome_markets",
+    "slice_markets",
 ]
