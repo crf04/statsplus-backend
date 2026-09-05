@@ -1239,6 +1239,11 @@ averages no longer include a `PLUS_MINUS` cell, and response rows carry no
 contract so the durable PBP per-game path (whose upstream boxscore seam exposes
 no plus/minus) is database-first without fabricating evidence.
 
+One specific opponent (#243): `opponent_tricode` names a single opponent by NBA
+tricode, so a caller can read a player's games against one team without ranking
+opponents. Its value must be one of the 30 canonical NBA tricodes; anything else
+joins the malformed values of the #9 note and returns a `400` `invalid_input`.
+
 ### Contract and migration note (#9)
 
 - Filters are validated into one typed `GameLogQuery` before the service runs.
@@ -1265,6 +1270,7 @@ Query parameters:
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings |
 | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
+| `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
 | `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
@@ -2746,6 +2752,21 @@ Ranking convention:
 
 - `rank_filter[]=5` means top 5 defenses for the selected filter.
 - `rank_filter[]=-8` means bottom 8 defenses for the selected filter.
+
+### One Specific Opponent
+
+`opponent_tricode` names a single opponent by NBA tricode instead of ranking
+opponents, so `opponent_tricode=OKC` returns only the player's games against
+Oklahoma City for the selected `season_filter`:
+
+```text
+opponent_tricode=OKC
+```
+
+Whitespace and letter case are normalized (` okc ` is `OKC`); any value that is
+not one of the 30 NBA tricodes returns `400` `invalid_input`. It combines with
+every other game-log filter, including the rank-based opponent filters above,
+as a conjunction.
 
 ### Self Filters
 
