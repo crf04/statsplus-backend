@@ -274,7 +274,7 @@ def preview_services(dependencies):
     """Stub the preview and run the real validator, as ARCHITECTURE.md asks."""
 
     dependencies.user_service.validate_target_draft = Mock(
-        side_effect=UserService.validate_target_draft
+        side_effect=UserService(db_engine=Mock(), settings=RuntimeSettings()).validate_target_draft
     )
     dependencies.target_preview_service = Mock(name="target_preview_service")
     # Echo the validated draft, so a dropped field is visible on the wire.
@@ -302,7 +302,7 @@ def test_the_preview_route_returns_the_drafts_backtest_and_today(
     )
 
     assert response.status_code == 200
-    validated = {**DRAFT, "note": "Leaks corner threes"}
+    validated = {**DRAFT, "note": "Leaks corner threes", "conditions": None}
     assert response.get_json() == {
         "success": True,
         **PREVIEWED,

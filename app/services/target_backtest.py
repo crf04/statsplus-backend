@@ -66,6 +66,7 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_values import player_game_log_focal_line
 from app.services.statistic_catalog import StatisticCatalog
+from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 
 _WIRE_PRECISION = 6
@@ -150,6 +151,8 @@ class PlayerLogReader(Protocol):
         publication_snapshot: Any | None = None,
     ) -> Sequence[PlayerGameLogRecord]: ...
 
+    def list_player_rows(self, season: str, player_id: int, *, publication_snapshot: Any | None = None) -> Sequence[PlayerGameLogRecord]: ...
+
     def get_player_summaries(
         self,
         season: str,
@@ -230,7 +233,24 @@ class TargetBacktestService:
             if publication_snapshot is _OWN
             else publication_snapshot
         )
-        players = self._players(target, qualifiers, markets, season, snapshot)
+        opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
+        rows = tuple(record for record in call_with_read_scope(
+            self.player_logs.list_opponent_rows, season, opponent_team_id,
+            publication_snapshot=snapshot,
+        ) if record.season_type == REGULAR_SEASON_TYPE)
+        conditions = target.get("conditions")
+        defender = conditions.get("defender") if conditions else None
+        defender_minutes = {}
+        if defender:
+            defender_minutes = {
+                row.game_id: row.minutes for row in call_with_read_scope(
+                    self.player_logs.list_player_rows, season, defender["player_id"],
+                    publication_snapshot=snapshot,
+                ) if row.team_id == opponent_team_id and row.season_type == REGULAR_SEASON_TYPE
+            }
+        kept = tuple(row for row in rows if date_is_kept(conditions, row.game_date)
+                     and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0))))
+        players = self._players(target, qualifiers, markets, season, snapshot, kept)
         return {
             "target": dict(target),
             "season": season,
@@ -238,6 +258,7 @@ class TargetBacktestService:
             "stat_columns": list(markets),
             "summary": self._summary(players, markets),
             "players": players,
+            "games_considered": {"played": len({row.game_id for row in rows}), "kept": len({row.game_id for row in kept})},
         }
 
     @classmethod
@@ -331,15 +352,10 @@ class TargetBacktestService:
         markets: Sequence[str],
         season: str,
         snapshot: Any | None,
+        records: Sequence[PlayerGameLogRecord],
     ) -> list[dict[str, Any]]:
-        opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {}
-        for record in call_with_read_scope(
-            self.player_logs.list_opponent_rows,
-            season,
-            opponent_team_id,
-            publication_snapshot=snapshot,
-        ):
+        for record in records:
             # A playoff line is not evidence against a Regular Season average,
             # which is the baseline every column below is read against.
             if record.season_type != REGULAR_SEASON_TYPE:

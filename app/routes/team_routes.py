@@ -4,7 +4,7 @@ from ..errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
-from ..utils.auth import require_auth_optional
+from ..utils.auth import require_auth_optional, require_auth
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -36,3 +36,10 @@ def get_team_stats():
 def get_teams():
     teams = team_service.get_all_teams()
     return jsonify(teams)
+
+
+@team_bp.route('/<tricode>/season-minutes', methods=['GET'])
+@require_auth
+@route_error_boundary('Failed to retrieve season minutes.')
+def get_season_minutes(tricode):
+    return jsonify(CurrentAppService('target_season_minutes').get(tricode))

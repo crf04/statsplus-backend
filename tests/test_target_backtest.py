@@ -1008,3 +1008,127 @@ def test_the_backtest_route_refuses_an_unauthenticated_caller(
     assert response.status_code == 401
     assert response.get_json()["error"]["code"] == "authentication_required"
     backtest_service.backtest.assert_not_called()
+
+
+def test_date_conditions_are_saved_cleared_and_preserve_unedited_fields(targets):
+    conditions = {'defender': None, 'from': '2026-01-01', 'to': '2026-02-01'}
+    created = targets.create_target(OWNER, opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
+    assert created['conditions'] == conditions
+    edited = targets.update_target(OWNER, created['id'], changes={'note': 'Keep window'})
+    assert edited['conditions'] == conditions
+    assert targets.get_target(OWNER, created['id'])['conditions'] == conditions
+    assert targets.update_target(OWNER, created['id'], changes={'conditions': None})['conditions'] is None
+
+
+@pytest.mark.parametrize(('comparator', 'minutes', 'expected'), [('under', 20, ['sat']), ('at_least', 20, ['played']), ('under', 0, []), ('at_least', 0, ['played', 'sat'])])
+def test_backtest_conditions_include_absence_as_zero_and_bound_dates(targets, build_backtest, comparator, minutes, expected):
+    conditions = {'defender': {'player_id': 99, 'comparator': comparator, 'minutes': minutes}, 'from': '2026-01-01', 'to': '2026-01-31'}
+    logs = FakeLogs(rows=[
+        _row(LEBRON, game_id='played', game_date=date(2026, 1, 31)),
+        _row(LEBRON, game_id='sat', game_date=date(2026, 1, 1)),
+        _row(LEBRON, game_id='outside', game_date=date(2025, 12, 31)),
+    ])
+    logs.list_player_rows = lambda season, player_id, **kwargs: (
+        _row(99, game_id='played', game_date=date(2026, 1, 31), team_id=OKC, opponent_team_id=LAL, minutes=20),
+    )
+    service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}))
+    target = {'opponent': 'OKC', 'qualifiers': [CORNER_THREE], 'conditions': conditions}
+    payload = service.backtest_target(target)
+    assert payload['games_considered'] == {'played': 3, 'kept': len(expected)}
+    assert [game['game_id'] for player in payload['players'] for game in player['games']] == expected
+
+
+@pytest.mark.parametrize('conditions', [
+    {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 49}},
+    {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 1.5}},
+    {'defender': {'player_id': 99, 'comparator': 'over', 'minutes': 20}},
+    {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 20}},
+    {'from': '2026-02-01', 'to': '2026-01-01'},
+    {'from': '20260101'},
+])
+def test_invalid_conditions_are_refused_for_create_update_and_draft(targets, conditions):
+    from app.errors import InvalidInputError
+    created = _create(targets)
+    for action in (
+        lambda: targets.create_target(OWNER, opponent='BOS', qualifiers=[CORNER_THREE], conditions=conditions),
+        lambda: targets.update_target(OWNER, created['id'], changes={'conditions': conditions}),
+        lambda: targets.validate_target_draft(opponent='BOS', qualifiers=[CORNER_THREE], conditions=conditions),
+    ):
+        with pytest.raises(InvalidInputError):
+            action()
+
+
+def test_identical_saved_and_draft_conditions_have_identical_evidence(targets, build_backtest):
+    conditions = {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 20}, 'from': None, 'to': None}
+    logs = FakeLogs(rows=[_row(LEBRON)])
+    logs.list_player_rows = lambda *args, **kwargs: (_row(99, game_id='other', team_id=OKC, opponent_team_id=LAL),)
+    targets.player_logs = logs
+    created = targets.create_target(OWNER, opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
+    draft = targets.validate_target_draft(opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
+    service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}))
+    saved, preview = service.backtest(OWNER, created['id']), service.backtest_target(draft)
+    assert saved['players'] == preview['players']
+    assert saved['summary'] == preview['summary']
+    assert saved['games_considered'] == {'kept': 1, 'played': 1}
+    assert targets.list_targets(OWNER)[0]['conditions'] == conditions
+
+
+def test_season_minutes_roster_groups_players_and_orders_by_average(backtest_engine, backtest_settings):
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+    logs = SimpleNamespace(list_team_rows=lambda *args, **kwargs: (
+        _row(1, name='Starter', minutes=30), _row(1, name='Starter', game_id='two', minutes=20),
+        _row(2, name='Reserve', minutes=10),
+        _row(3, name='Playoffs only', season_type='Playoffs', minutes=40),
+    ))
+    payload = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('okc')
+    assert payload == {'season': SEASON, 'players': [
+        {'player_id': 1, 'name': 'Starter', 'games_played': 2, 'average_minutes': 25.0},
+        {'player_id': 2, 'name': 'Reserve', 'games_played': 1, 'average_minutes': 10.0},
+    ]}
+
+
+def test_season_minutes_route(client, authenticate, dependencies):
+    authenticate()
+    assert client.get('/api/teams/OKC/season-minutes').status_code == 401
+    dependencies.target_season_minutes_service = Mock()
+    dependencies.target_season_minutes_service.get.return_value = {'season': SEASON, 'players': []}
+    response = client.get('/api/teams/OKC/season-minutes', headers=authenticate())
+    assert response.status_code == 200
+    assert response.json == {'season': SEASON, 'players': []}
+
+
+@pytest.mark.parametrize('path', ['/api/user/targets', '/api/user/targets/preview'])
+def test_conditions_cross_create_and_preview_http_seams(client, authenticate, dependencies, path):
+    conditions = {'defender': None, 'from': '2026-01-01', 'to': None}
+    draft = {'opponent': 'OKC', 'qualifiers': [CORNER_THREE], 'conditions': conditions}
+    dependencies.user_service.create_target = Mock(return_value=draft)
+    dependencies.user_service.validate_target_draft = Mock(return_value=draft)
+    dependencies.target_preview_service = Mock()
+    dependencies.target_preview_service.preview.return_value = {'target': draft, 'players': [], 'summary': {}, 'games_considered': {'kept': 0, 'played': 1}}
+    response = client.post(path, json=draft, headers=authenticate())
+    assert response.status_code in (200, 201)
+    assert response.json['target']['conditions'] == conditions
+    method = dependencies.user_service.validate_target_draft if path.endswith('preview') else dependencies.user_service.create_target
+    assert method.call_args.kwargs['conditions'] == conditions
+
+
+@pytest.mark.parametrize(('method', 'path', 'service_method'), [('post', '/api/user/targets', 'create_target'), ('patch', '/api/user/targets/7', 'update_target'), ('post', '/api/user/targets/preview', 'validate_target_draft')])
+def test_invalid_conditions_return_standard_http_errors(client, authenticate, dependencies, method, path, service_method):
+    from app.errors import InvalidInputError
+    setattr(dependencies.user_service, service_method, Mock(side_effect=InvalidInputError('Invalid Conditions.')))
+    response = getattr(client, method)(path, json={'conditions': {'from': 'wrong'}}, headers=authenticate())
+    assert response.status_code == 400
+    assert response.json['error'] == {'code': 'invalid_input', 'message': 'Invalid Conditions.'}
+
+
+def test_season_minutes_reads_only_the_requested_teams_stored_rows(backtest_engine, backtest_settings):
+    from datetime import timedelta
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+    logs = PlayerGameLogRepository(backtest_engine, statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON, stats_surface_max_age=timedelta(hours=30), serve_stale=True)
+    logs.publish(SEASON, [_row(99, name='Defender', team_id=OKC, team_tricode='OKC', opponent_team_id=LAL, opponent_team_tricode='LAL', minutes=21), _row(LEBRON)],
+        retrieved_at=datetime(2026, 1, 1, tzinfo=timezone.utc), source_provider='nba_stats', source_row_count=2)
+    result = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('OKC')
+    assert result['players'] == [{'player_id': 99, 'name': 'Defender', 'games_played': 1, 'average_minutes': 21.0}]
+    assert TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('BOS')['players'] == []

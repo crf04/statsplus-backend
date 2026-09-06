@@ -3192,3 +3192,38 @@ latest Diet observation timestamp, or `null` without observations. The read
 uses one Publication snapshot and the Matchup's baseline calculation; it
 makes no provider calls. The immutable published facts supply the cached
 source; no separate time-based response cache can outlive that generation.
+
+### Target Conditions and Opponent Roster Minutes
+
+Target create, PATCH, and preview accept nullable `conditions`:
+`{"defender":{"player_id":99,"comparator":"under","minutes":20},"from":"2026-01-01","to":null}`.
+Each field may be null; omitted fields within the object become null. The
+whole omitted field is preserved by PATCH, and explicit null clears it.
+List, resolve, backtest, and preview echo the canonical object, including null
+for older Targets. The opponent remains fixed on PATCH.
+
+Defender ids must occur on that opponent's Regular Season game logs for the
+current season. Comparators are `under` (strict less than) and `at_least`
+(inclusive); minutes must be an integer 0–48. Dates are ISO `YYYY-MM-DD`,
+inclusive, and start must not follow end. Invalid input returns
+`400 invalid_input` in the standard envelope.
+
+Backtest and preview apply Conditions to the opponent's Regular Season games
+before judging players. A defender absent from a game for this team contributes
+zero minutes, including after a trade. Both reads add
+`games_considered: {kept, played}` counting distinct opponent games, independent
+of how many players fit. A saved Target and identical draft share evaluation.
+Resolve uses the Slate Date and the Matchup's stored availability evidence:
+listed Out means zero minutes under the same comparator; unknown availability
+passes the defender Condition. A game failing Conditions has no Fits; its game
+identity is still shown. Thus `under 0` excludes an Out defender and
+`at_least 0` includes him.
+
+`GET /api/teams/<tricode>/season-minutes` requires Firebase bearer auth and
+returns `{season, players:[{player_id,name,games_played,average_minutes}]}`.
+The roster comes from the team's Regular Season game-time identity rows,
+including players who have since left, ordered by average minutes descending
+then player id. An empty season returns `players: []`; unknown team returns
+`400 invalid_input`; unauthenticated calls return `401 authentication_required`.
+It reads the same immutable player-game-log publication as the Backtest and
+makes no provider calls.

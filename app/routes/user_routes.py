@@ -345,7 +345,8 @@ def create_target():
         firebase_uid,
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
-        note=data.get('note')
+        note=data.get('note'),
+        **({'conditions': data['conditions']} if 'conditions' in data else {}),
     )
     return jsonify({'success': True, 'target': created}), 201
 
@@ -393,7 +394,8 @@ def preview_target():
     draft = user_service.validate_target_draft(
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
-        note=data.get('note')
+        note=data.get('note'),
+        **({'conditions': data['conditions']} if 'conditions' in data else {}),
     )
     return jsonify({'success': True, **target_preview_service.preview(draft)})
 

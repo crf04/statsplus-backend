@@ -25,6 +25,7 @@ from app.models.saved_filter_set import (
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.services.target_conditions import validate_conditions
 from app.models.target import (
     TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
@@ -250,10 +251,11 @@ class UserService:
     using SQLAlchemy ORM.
     """
     
-    def __init__(self, db_engine=None, settings: RuntimeSettings | None = None):
+    def __init__(self, db_engine=None, settings: RuntimeSettings | None = None, *, player_logs=None):
         """Initialize the service with the active app's engine and settings."""
         self.settings = settings or get_runtime_settings()
         self.engine = db_engine or get_engine(self.settings)
+        self.player_logs = player_logs
 
     def _get_session(self):
         """Create a session bound to this service's app-scoped engine."""
@@ -772,18 +774,43 @@ class UserService:
         finally:
             session.close()
 
-    @staticmethod
+    def _validated_conditions(self, value, opponent):
+        conditions = validate_conditions(value)
+        if conditions and conditions['defender']:
+            from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+            from app.services.player_game_log_repository import PlayerGameLogRepository
+            from app.domain.freshness import time_window_timedelta
+            from app.services.statistic_catalog import StatisticCatalog
+            logs = self.player_logs or PlayerGameLogRepository(
+                self.engine, statistic_catalog=StatisticCatalog.load_default(),
+                stats_surface_season=self.settings.nba.current_season,
+                stats_surface_max_age=time_window_timedelta(
+                    self.settings.catalog.player_game_log_max_age_hours, unit_seconds=3600,
+                    field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+                ),
+                serve_stale=True,
+            )
+            defender = conditions['defender']
+            rows = logs.list_player_rows(self.settings.nba.current_season, defender['player_id'])
+            if not any(row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
+                       and row.season_type == 'Regular Season' for row in rows):
+                raise InvalidInputError("The defender must appear in the opponent's season game logs.")
+        return conditions
+
     def validate_target_draft(
+        self,
         *,
         opponent: Any,
         qualifiers: Any,
         note: Any = None,
+        conditions: Any = None,
     ) -> Dict[str, Any]:
         """Validate an unsaved target and return it as the list would show it.
 
         The same rules ``create_target`` applies before it writes, and the
         same item shape ``list_targets`` returns, minus the ``id`` and
-        timestamps a stored row would carry.  Nothing is read or written: the
+        timestamps a stored row would carry. Defender membership reads stored
+        game logs; nothing is written. The
         per-account cap and the duplicate rule are conflicts between a write
         and the rows already held, and a draft is not a write.
         """
@@ -795,6 +822,7 @@ class UserService:
             'title': derive_target_title(validated_opponent, validated_qualifiers),
             'note': _validated_target_note(note),
             'qualifiers': validated_qualifiers,
+            'conditions': self._validated_conditions(conditions, validated_opponent),
         }
 
     def create_target(
@@ -804,12 +832,14 @@ class UserService:
         opponent: Any,
         qualifiers: Any,
         note: Any = None,
+        conditions: Any = None,
     ) -> Dict[str, Any]:
         """Create a target for the caller and return the new item."""
 
         validated_opponent = _validated_target_opponent(opponent)
         validated_qualifiers = _validated_target_qualifiers(qualifiers)
         validated_note = _validated_target_note(note)
+        validated_conditions = self._validated_conditions(conditions, validated_opponent)
         signature = target_qualifier_signature(validated_qualifiers)
 
         session = self._get_session()
@@ -837,6 +867,7 @@ class UserService:
                 firebase_uid=firebase_uid,
                 opponent=validated_opponent,
                 note=validated_note,
+                conditions=validated_conditions,
                 qualifier_signature=signature,
                 created_at=now,
                 updated_at=now,
@@ -865,7 +896,7 @@ class UserService:
     ) -> Dict[str, Any]:
         """Edit one of the caller's targets and return the updated item.
 
-        Only the Qualifiers and the note are editable.  A target's opponent is
+        Qualifiers, note, and Conditions are editable. A target's opponent is
         fixed: aiming the same criteria at another team is a different target,
         so any ``opponent`` key in ``changes`` is ignored.  Absent keys mean
         unchanged, which is why ``note`` is read by presence rather than by
@@ -876,11 +907,11 @@ class UserService:
             raise InvalidInputError("No target changes were provided.")
 
         editable = {
-            key: changes[key] for key in ("qualifiers", "note") if key in changes
+            key: changes[key] for key in ("qualifiers", "note", "conditions") if key in changes
         }
         if not editable:
             raise InvalidInputError(
-                "A target update must change its qualifiers or its note."
+                "A target update must change its qualifiers, note, or conditions."
             )
 
         validated_qualifiers = (
@@ -918,6 +949,8 @@ class UserService:
                 ]
             if "note" in editable:
                 target.note = validated_note
+            if "conditions" in editable:
+                target.conditions = self._validated_conditions(editable["conditions"], opponent)
             target.updated_at = datetime.now(timezone.utc)
 
             self._commit_unique_target(

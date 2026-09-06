@@ -18,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
 )
 from sqlalchemy.orm import relationship
@@ -132,6 +133,7 @@ class Target(Base):
         nullable=True,
         comment="Optional user note; never part of the derived title",
     )
+    conditions = Column(JSON, nullable=True)
     qualifier_signature = Column(
         String(TARGET_QUALIFIER_SIGNATURE_MAX_LENGTH),
         nullable=False,
@@ -196,6 +198,7 @@ class Target(Base):
             'opponent': self.opponent,
             'title': self.title,
             'note': self.note,
+            'conditions': self.conditions,
             'qualifiers': [
                 qualifier.to_dict() for qualifier in self.qualifiers
             ],

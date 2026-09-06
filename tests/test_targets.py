@@ -233,6 +233,7 @@ def test_a_target_round_trips_through_the_list(targets):
     )
 
     assert set(created) == {
+        "conditions",
         "id",
         "opponent",
         "title",
@@ -640,6 +641,7 @@ def test_a_draft_validates_to_the_listed_shape_without_an_id_or_timestamps(targe
     )
 
     assert draft == {
+        "conditions": None,
         "opponent": "OKC",
         "title": "OKC vs Corner 3 ≥ 40%",
         "note": "Leaks corner threes",

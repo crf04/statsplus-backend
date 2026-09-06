@@ -1113,6 +1113,36 @@ class PlayerGameLogRepository:
             connection=connection,
         )
 
+    def list_team_rows(self, season: str, team_id: int, *, publication_snapshot=None):
+        """Read a team's game-time roster from the same immutable log rows."""
+        season = validate_canonical_season(season)
+        if publication_snapshot is not None:
+            read = publication_snapshot.read("player_game_logs")
+            if getattr(read, "projection_ready", False):
+                if read.publication_id is None:
+                    return ()
+                table = PublicationPlayerGameLog.__table__
+                games = select(table.c.game_id).where(
+                    table.c.publication_id == read.publication_id,
+                    table.c.opponent_team_id == team_id,
+                )
+                return self._decode_projection(select(table.c.row_payload).where(
+                    table.c.publication_id == read.publication_id,
+                    table.c.game_id.in_(games), table.c.opponent_team_id != team_id,
+                ).order_by(table.c.game_date.desc(), table.c.game_id.desc()), season=season)
+        published = self._publication_rows(season, publication_snapshot=publication_snapshot)
+        if published is not None:
+            return tuple(sorted((row for row in published if row.team_id == team_id),
+                                key=lambda row: (row.game_date, row.game_id), reverse=True))
+        if not self._season_is_readable(season):
+            return ()
+        table = PlayerGameLog.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(self._published_rows_statement().where(
+                table.c.season == season, table.c.team_id == team_id,
+            ).order_by(table.c.game_date.desc(), table.c.game_id.desc())).mappings()
+            return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
     def list_opponent_rows(
         self,
         season: str,
