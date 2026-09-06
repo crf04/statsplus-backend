@@ -41,7 +41,8 @@ def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
         volume_unit={'play_types': 'possessions', 'assist_locations': 'assists'}.get(base, 'field_goal_attempts'),
         provider={'play_types': 'nba_synergy', 'assist_locations': 'pbp_stats'}.get(base, 'nba_stats'),
     ) for base, slices in PLAYER_DIET_QUALIFIER_SLICES.items()
-        for slice_key in slices for player, share in [(1, 0.2), (2, 0.4)]]
+        for index, slice_key in enumerate(slices)
+        for player, share in [(1, 0.1 + index * 0.01), (2, 0.3 + index * 0.01)]]
     diets.publish('2025-26', facts, [
         PlayerDietObservation(base=base, status='available', unavailable_reason=None)
         for base in PLAYER_DIET_QUALIFIER_SLICES
@@ -54,9 +55,10 @@ def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
     assert set(payload['shares']) == set(PLAYER_DIET_QUALIFIER_SLICES)
     for base, slices in PLAYER_DIET_QUALIFIER_SLICES.items():
         assert set(payload['shares'][base]) == set(slices)
-        for slice_key in slices:
-            assert payload['shares'][base][slice_key] == 0.3
-            assert round(matchup_read.baselines[(base, slice_key)].league_average_share, 6) == 0.3
+        for index, slice_key in enumerate(slices):
+            expected = [0.2, 0.21, 0.22, 0.23, 0.24, 0.25, 0.26, 0.27, 0.28, 0.29][index]
+            assert payload['shares'][base][slice_key] == expected
+            assert round(matchup_read.baselines[(base, slice_key)].league_average_share, 6) == expected
     engine.dispose()
 
 
