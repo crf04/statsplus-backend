@@ -12,6 +12,7 @@ create route's own rather than a stub's restatement of them.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import Mock
 
 import pytest
@@ -23,6 +24,7 @@ from app.config.settings import (
     RuntimeSettings,
 )
 from app.errors import InvalidInputError, ProviderUnavailableError
+from app.services.injury_snapshot_repository import StoredInjurySnapshot
 from app.services.matchup import MATCHUP_PUBLICATION_STREAM_KEYS
 from app.services.matchup_injuries import (
     MatchupInjuryService,
@@ -153,13 +155,72 @@ def test_an_idle_draft_still_reads_one_generation_and_no_matchup():
     assert matchups.calls == []
 
 
-def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot():
-    """Stale or missing injury evidence must not start collection here."""
+#: The only slice the matchup doubles store for LeBron, so a draft he fits.
+RIM_LIGHT = {
+    "opponent": "BOS",
+    "title": "BOS vs Restricted area ≤ 30%",
+    "note": None,
+    "qualifiers": [
+        {
+            "base": "shot_zones",
+            "slice_key": "Restricted Area",
+            "comparator": "at_or_below",
+            "threshold": 0.3,
+        }
+    ],
+}
+
+
+def _stored_out(retrieved_at):
+    """A stored injury override listing LeBron as Out for the doubles' game."""
+
+    return StoredInjurySnapshot(
+        normalized_entries=(
+            {
+                "entry_id": "rotowire:6504",
+                "source_player_id": "6504",
+                "source_player_name": "LeBron James",
+                "canonical_player_id": 2544,
+                "team_id": matchup_doubles.LAL,
+                "tricode": "LAL",
+                "canonical_status": "Out",
+                "raw_status": "Out",
+                "reason": "Ankle",
+                "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+            },
+        ),
+        retrieved_at=retrieved_at,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected_fit_count", "live_path_refreshes"),
+    [
+        pytest.param(None, 1, True, id="nothing-stored"),
+        pytest.param(
+            _stored_out(matchup_doubles.NOW - timedelta(minutes=1)), 0, False,
+            id="fresh-stored-out",
+        ),
+        pytest.param(
+            _stored_out(matchup_doubles.NOW - timedelta(minutes=10)), 0, True,
+            id="stale-stored-out",
+        ),
+    ],
+)
+def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot(
+    stored, expected_fit_count, live_path_refreshes
+):
+    """Stored injuries count; stale or missing ones must not start collection.
+
+    A stored Out entry removes its participant from tonight's fit count
+    whether the override is fresh or stale, exactly as the Matchup would show
+    it, while the provider and the snapshot table are never touched.
+    """
 
     provider = Mock(name="rotowire")
     provider.get_snapshot.side_effect = ProviderUnavailableError("rotowire down")
     repository = Mock(name="injury_snapshots")
-    repository.get.return_value = None
+    repository.get.return_value = stored
     repository.get_latest_source.return_value = None
     injuries = MatchupInjuryService(
         provider=provider,
@@ -188,16 +249,17 @@ def test_a_preview_never_reaches_the_injury_provider_or_writes_a_snapshot():
         reader=None,
         slate=slate,
         injuries=StoredMatchupInjuryReader(injuries),
-    ).preview({**DRAFT, "opponent": "BOS", "title": "BOS vs Corner 3 ≥ 40%"})
+    ).preview(RIM_LIGHT)
 
     assert payload["today"]["game"]["game_id"] == matchup_doubles.GAME_ID
+    assert payload["today"]["fit_count"] == expected_fit_count
     provider.get_snapshot.assert_not_called()
     repository.publish.assert_not_called()
     repository.replace_from_source.assert_not_called()
-    # The Matchup route's own read does refresh on the same evidence, so the
-    # shared path is what this test would have caught.
+    # The Matchup route's own read refreshes on the same evidence whenever the
+    # override is not fresh, so the shared path is what this test would catch.
     matchups.get_matchup(game_id=matchup_doubles.GAME_ID)
-    provider.get_snapshot.assert_called_once()
+    assert provider.get_snapshot.call_count == (1 if live_path_refreshes else 0)
 
 
 # --- routes ----------------------------------------------------------------
@@ -297,9 +359,8 @@ def test_the_preview_route_refuses_an_unusable_draft_before_reading_anything(
     response = _preview(client, headers, body)
 
     assert response.status_code == 400
-    assert response.get_json()["error"] == {
-        "code": "invalid_input",
-        "message": message,
+    assert response.get_json() == {
+        "error": {"code": "invalid_input", "message": message}
     }
     preview_services.target_preview_service.preview.assert_not_called()
 
@@ -377,7 +438,10 @@ def test_a_slate_refusal_from_the_preview_keeps_its_own_error_envelope(
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"] == {
-        "code": "invalid_input",
-        "message": "The slate date must use YYYY-MM-DD.",
+    # The whole body: the error envelope alone, never ``success`` beside it.
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "The slate date must use YYYY-MM-DD.",
+        }
     }
