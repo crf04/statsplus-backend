@@ -163,6 +163,9 @@ class FakeLogs:
         self.snapshots.append(publication_snapshot)
         return self.rows
 
+    def list_player_rows(self, season, player_id, *, publication_snapshot=None):
+        return tuple(row for row in self.rows if row.player_id == player_id)
+
     def get_player_summaries(self, season, player_ids, *, publication_snapshot=None):
         player_ids = tuple(player_ids)
         self.summary_calls.append((season, player_ids))
@@ -364,7 +367,12 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(
     assert payload["season"] == SEASON
     assert "box-score" in payload["proxy"]
     assert payload["stat_columns"] == CORNER_THREE_COLUMNS
-    assert payload["players"] == [
+    legacy_players = [{key: value for key, value in player.items() if key not in ("season_totals", "season_games")}
+                      for player in payload["players"]]
+    for player in legacy_players:
+        player["games"] = [{key: value for key, value in game.items() if key != "line"}
+                           for game in player["games"]]
+    assert legacy_players == [
         {
             "canonical_id": LEBRON,
             "name": "LeBron James",
@@ -1132,3 +1140,84 @@ def test_season_minutes_reads_only_the_requested_teams_stored_rows(backtest_engi
     result = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('OKC')
     assert result['players'] == [{'player_id': 99, 'name': 'Defender', 'games_played': 1, 'average_minutes': 21.0}]
     assert TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('BOS')['players'] == []
+
+
+def test_box_lines_and_totals_include_the_whole_regular_season(targets, build_backtest):
+    from dataclasses import replace
+    opponent = replace(_row(LEBRON), free_throws_made=2, free_throws_attempted=3, steals=1, blocks=2, turnovers=3, offensive_rebounds=2, defensive_rebounds=6, personal_fouls=4)
+    other = replace(opponent, game_id='other', opponent_team_id=BOS, points=20, minutes=26)
+    playoff = replace(opponent, game_id='playoff', season_type='Playoffs', points=99)
+    logs = FakeLogs(rows=[opponent])
+    logs.list_player_rows = lambda *args, **kwargs: (opponent, other, playoff)
+    service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}))
+    player = service.backtest_target({'opponent': 'OKC', 'qualifiers': [CORNER_THREE]})['players'][0]
+    assert player['games'][0]['line'] == {
+        'points': 30, 'rebounds': 8, 'assists': 9, 'field_goals_made': 12, 'field_goals_attempted': 20,
+        'threes_made': 4, 'threes_attempted': 8, 'free_throws_made': 2, 'free_throws_attempted': 3,
+        'steals': 1, 'blocks': 2, 'turnovers': 3, 'offensive_rebounds': 2, 'defensive_rebounds': 6, 'fouls': 4, 'minutes': 34,
+    }
+    assert player['season_games'] == 2
+    assert player['season_totals'] == {
+        'points': 50, 'rebounds': 16, 'assists': 18, 'field_goals_made': 24, 'field_goals_attempted': 40,
+        'threes_made': 8, 'threes_attempted': 16, 'free_throws_made': 4, 'free_throws_attempted': 6,
+        'steals': 2, 'blocks': 4, 'turnovers': 6, 'offensive_rebounds': 4, 'defensive_rebounds': 12, 'fouls': 8, 'minutes': 60,
+    }
+    assert player['games'][0]['stats'] == {'PTS': 30, '3PM': 4}
+    assert player['season_averages'] == {'PTS': 25, '3PM': 2}
+
+
+def test_stat_preferences_save_independently_from_conditions_and_criteria(targets):
+    preferences = {'columns': ['PTS/36', 'TS%'], 'graded_by': 'TS%'}
+    created = targets.create_target(OWNER, opponent='OKC', qualifiers=[CORNER_THREE], stat_preferences=preferences, conditions={'from': '2026-01-01'})
+    assert created['stat_preferences'] == preferences
+    updated = targets.update_target(OWNER, created['id'], changes={'stat_preferences': {'columns': ['SB'], 'graded_by': 'SB'}})
+    assert updated['conditions'] == created['conditions']
+    assert updated['qualifiers'] == created['qualifiers']
+    assert updated['stat_preferences'] == {'columns': ['SB'], 'graded_by': 'SB'}
+    assert targets.update_target(OWNER, created['id'], changes={'note': 'New note'})['stat_preferences'] == updated['stat_preferences']
+    assert targets.list_targets(OWNER)[0]['stat_preferences'] == updated['stat_preferences']
+    assert targets.validate_target_draft(opponent='OKC', qualifiers=[CORNER_THREE], stat_preferences=preferences)['stat_preferences'] == preferences
+    assert targets.update_target(OWNER, created['id'], changes={'stat_preferences': None})['stat_preferences'] is None
+
+
+@pytest.mark.parametrize('preferences', [
+    {}, {'columns': [], 'graded_by': 'PTS'}, {'columns': ['NOPE'], 'graded_by': 'NOPE'},
+    {'columns': ['PTS'], 'graded_by': 'REB'}, {'columns': ['pts/36'], 'graded_by': 'pts/36'},
+    {'columns': 'PTS', 'graded_by': 'PTS'}, {'columns': [False], 'graded_by': False},
+])
+def test_invalid_stat_preferences_are_refused_everywhere(targets, preferences):
+    from app.errors import InvalidInputError
+    created = _create(targets)
+    for action in (
+        lambda: targets.create_target(OWNER, opponent='BOS', qualifiers=[CORNER_THREE], stat_preferences=preferences),
+        lambda: targets.update_target(OWNER, created['id'], changes={'stat_preferences': preferences}),
+        lambda: targets.validate_target_draft(opponent='BOS', qualifiers=[CORNER_THREE], stat_preferences=preferences),
+    ):
+        with pytest.raises(InvalidInputError):
+            action()
+
+
+@pytest.mark.parametrize('key', 'PTS REB AST 3PM 3PA FGM FGA FTM FTA STL BLK TOV OREB DREB PF MIN PA PR RA PRA SB PTS/36 REB/36 AST/36 3PM/36 3PA/36 FGA/36 FTA/36 STL/36 BLK/36 TOV/36 PRA/36 PR/36 PA/36 FG% 3P% TS% PTS/FGA'.split())
+def test_every_spec_stat_key_is_accepted_by_draft_validation(targets, key):
+    preferences = {'columns': [key], 'graded_by': key}
+    assert targets.validate_target_draft(opponent='OKC', qualifiers=[CORNER_THREE], stat_preferences=preferences)['stat_preferences'] == preferences
+
+
+@pytest.mark.parametrize('path', ['/api/user/targets', '/api/user/targets/preview', '/api/user/targets/7'])
+def test_stat_preferences_cross_the_http_seam(client, authenticate, dependencies, path):
+    preferences = {'columns': ['PTS/36', 'FG%'], 'graded_by': 'PTS/36'}
+    body = {'opponent': 'OKC', 'qualifiers': [CORNER_THREE], 'stat_preferences': preferences}
+    dependencies.user_service.create_target = Mock(return_value=body)
+    dependencies.user_service.update_target = Mock(return_value=body)
+    dependencies.user_service.validate_target_draft = Mock(return_value=body)
+    dependencies.target_preview_service = Mock()
+    dependencies.target_preview_service.preview.return_value = {'target': body}
+    method = client.patch if path.endswith('/7') else client.post
+    response = method(path, json=body, headers=authenticate())
+    assert response.status_code in (200, 201)
+    assert response.json['target']['stat_preferences'] == preferences
+    if path.endswith('/7'):
+        assert dependencies.user_service.update_target.call_args.kwargs['changes']['stat_preferences'] == preferences
+    else:
+        seam = dependencies.user_service.validate_target_draft if path.endswith('preview') else dependencies.user_service.create_target
+        assert seam.call_args.kwargs['stat_preferences'] == preferences

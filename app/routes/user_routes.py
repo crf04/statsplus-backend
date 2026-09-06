@@ -346,7 +346,7 @@ def create_target():
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
         note=data.get('note'),
-        **({'conditions': data['conditions']} if 'conditions' in data else {}),
+        **({key: data[key] for key in ('conditions', 'stat_preferences') if key in data}),
     )
     return jsonify({'success': True, 'target': created}), 201
 
@@ -395,7 +395,7 @@ def preview_target():
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
         note=data.get('note'),
-        **({'conditions': data['conditions']} if 'conditions' in data else {}),
+        **({key: data[key] for key in ('conditions', 'stat_preferences') if key in data}),
     )
     return jsonify({'success': True, **target_preview_service.preview(draft)})
 

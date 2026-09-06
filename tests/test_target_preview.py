@@ -302,7 +302,7 @@ def test_the_preview_route_returns_the_drafts_backtest_and_today(
     )
 
     assert response.status_code == 200
-    validated = {**DRAFT, "note": "Leaks corner threes", "conditions": None}
+    validated = {**DRAFT, "note": "Leaks corner threes", "conditions": None, "stat_preferences": None}
     assert response.get_json() == {
         "success": True,
         **PREVIEWED,

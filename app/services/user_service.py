@@ -25,6 +25,7 @@ from app.models.saved_filter_set import (
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.domain.target_statistics import validate_stat_preferences
 from app.services.target_conditions import validate_conditions
 from app.models.target import (
     TARGET_COMPARATORS,
@@ -804,6 +805,7 @@ class UserService:
         qualifiers: Any,
         note: Any = None,
         conditions: Any = None,
+        stat_preferences: Any = None,
     ) -> Dict[str, Any]:
         """Validate an unsaved target and return it as the list would show it.
 
@@ -823,6 +825,7 @@ class UserService:
             'note': _validated_target_note(note),
             'qualifiers': validated_qualifiers,
             'conditions': self._validated_conditions(conditions, validated_opponent),
+            'stat_preferences': validate_stat_preferences(stat_preferences),
         }
 
     def create_target(
@@ -833,6 +836,7 @@ class UserService:
         qualifiers: Any,
         note: Any = None,
         conditions: Any = None,
+        stat_preferences: Any = None,
     ) -> Dict[str, Any]:
         """Create a target for the caller and return the new item."""
 
@@ -840,6 +844,7 @@ class UserService:
         validated_qualifiers = _validated_target_qualifiers(qualifiers)
         validated_note = _validated_target_note(note)
         validated_conditions = self._validated_conditions(conditions, validated_opponent)
+        validated_preferences = validate_stat_preferences(stat_preferences)
         signature = target_qualifier_signature(validated_qualifiers)
 
         session = self._get_session()
@@ -868,6 +873,7 @@ class UserService:
                 opponent=validated_opponent,
                 note=validated_note,
                 conditions=validated_conditions,
+                stat_preferences=validated_preferences,
                 qualifier_signature=signature,
                 created_at=now,
                 updated_at=now,
@@ -907,7 +913,7 @@ class UserService:
             raise InvalidInputError("No target changes were provided.")
 
         editable = {
-            key: changes[key] for key in ("qualifiers", "note", "conditions") if key in changes
+            key: changes[key] for key in ("qualifiers", "note", "conditions", "stat_preferences") if key in changes
         }
         if not editable:
             raise InvalidInputError(
@@ -951,6 +957,8 @@ class UserService:
                 target.note = validated_note
             if "conditions" in editable:
                 target.conditions = self._validated_conditions(editable["conditions"], opponent)
+            if "stat_preferences" in editable:
+                target.stat_preferences = validate_stat_preferences(editable["stat_preferences"])
             target.updated_at = datetime.now(timezone.utc)
 
             self._commit_unique_target(

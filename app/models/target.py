@@ -134,6 +134,7 @@ class Target(Base):
         comment="Optional user note; never part of the derived title",
     )
     conditions = Column(JSON, nullable=True)
+    stat_preferences = Column(JSON, nullable=True)
     qualifier_signature = Column(
         String(TARGET_QUALIFIER_SIGNATURE_MAX_LENGTH),
         nullable=False,
@@ -199,6 +200,7 @@ class Target(Base):
             'title': self.title,
             'note': self.note,
             'conditions': self.conditions,
+            'stat_preferences': self.stat_preferences,
             'qualifiers': [
                 qualifier.to_dict() for qualifier in self.qualifiers
             ],

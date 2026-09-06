@@ -3172,6 +3172,32 @@ The frontend endpoint catalogue and deterministic fixture are owned by the
 linked frontend issues crf04/statsplus-frontend#101 (baselines) and #102
 (Conditions and roster minutes), under crf04/statsplus#59.
 
+### Target Stat Preferences and Complete Box Lines
+
+Create, PATCH, and preview accept nullable `stat_preferences`:
+`{"columns":["PTS/36","TS%"],"graded_by":"PTS/36"}`. Columns must be a
+non-empty list from [the shared catalogue](contracts/target-stat-catalogue.json)
+and the grading key must occur in the columns; invalid values return
+`400 invalid_input`. Duplicate columns normalize to their first occurrence.
+The exact uppercase keys use `/36` for per-36; `SB` denotes steals plus blocks.
+List, resolve, backtest, and preview echo preferences, or null for legacy
+Targets. PATCH preserves omitted fields, so changing preferences leaves
+Qualifiers, Conditions, and note intact; explicit null clears preferences.
+The client owns deriving combinations, per-36, and efficiency.
+
+Backtest and preview add a `line` to every `players[].games[]`, containing
+`points`, `rebounds`, `assists`, `field_goals_made`, `field_goals_attempted`,
+`threes_made`, `threes_attempted`, `free_throws_made`, `free_throws_attempted`,
+`steals`, `blocks`, `turnovers`, `offensive_rebounds`, `defensive_rebounds`,
+`fouls`, and `minutes`. Each player carries `season_totals` with those same
+fields summed over **all** their Regular Season log rows, across opponents
+and teams, from the same publication snapshot. `season_games` counts those
+same rows so the client can derive non-proxy per-game averages; a zero count
+has no average. Conditions do not narrow these baseline totals.
+Existing `stats`, `season_averages`, `stat_columns`, and `summary` retain their
+proxy meanings unchanged. The shared catalogue mirror and fixture are aligned
+with crf04/statsplus-frontend#103 by the coordination contract gate.
+
 ## Filtering Reference
 
 ### Opponent Filters

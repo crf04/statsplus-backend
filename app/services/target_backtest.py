@@ -70,6 +70,15 @@ from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 
 _WIRE_PRECISION = 6
+_BOX_FIELDS = {
+    'points': 'points', 'rebounds': 'rebounds', 'assists': 'assists',
+    'field_goals_made': 'field_goals_made', 'field_goals_attempted': 'field_goals_attempted',
+    'threes_made': 'three_pointers_made', 'threes_attempted': 'three_pointers_attempted',
+    'free_throws_made': 'free_throws_made', 'free_throws_attempted': 'free_throws_attempted',
+    'steals': 'steals', 'blocks': 'blocks', 'turnovers': 'turnovers',
+    'offensive_rebounds': 'offensive_rebounds', 'defensive_rebounds': 'defensive_rebounds',
+    'fouls': 'personal_fouls', 'minutes': 'minutes',
+}
 
 #: Every stream this read composes.  The Diet and the game logs are resolved
 #: from one snapshot so a response cannot mix generations.
@@ -405,6 +414,10 @@ class TargetBacktestService:
                     shares,
                     summaries[player_id],
                     markets,
+                    tuple(row for row in call_with_read_scope(
+                        self.player_logs.list_player_rows, season, player_id,
+                        publication_snapshot=snapshot,
+                    ) if row.season_type == REGULAR_SEASON_TYPE),
                 )
             )
         # The Matchup's own ordering, so the two Target surfaces read the same
@@ -484,6 +497,7 @@ class TargetBacktestService:
         shares: Sequence[Mapping[str, Any]],
         summary: PlayerSeasonLogSummary,
         markets: Sequence[str],
+        season_rows: Sequence[PlayerGameLogRecord],
     ) -> dict[str, Any]:
         """Shape one qualifying player against the games they have played.
 
@@ -504,14 +518,22 @@ class TargetBacktestService:
             "tricode": str(newest.team_tricode),
             "season_scoring": self._number_or_none(per_game.get("PTS")),
             "shares": list(shares),
+            "season_games": len(season_rows),
+            "season_totals": {
+                field: self._number(sum(getattr(row, attr) for row in season_rows))
+                for field, attr in _BOX_FIELDS.items()
+            },
             "season_averages": {
                 market: self._number_or_none(per_game.get(market))
                 for market in markets
             },
             "games": [
-                player_game_log_focal_line(
-                    record, markets, self._statistics, precision=_WIRE_PRECISION
-                )
+                {
+                    **player_game_log_focal_line(
+                        record, markets, self._statistics, precision=_WIRE_PRECISION
+                    ),
+                    "line": {field: self._number(getattr(record, attr)) for field, attr in _BOX_FIELDS.items()},
+                }
                 for record in rows
             ],
         }
