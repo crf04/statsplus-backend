@@ -29,7 +29,7 @@ def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
     from app.migrations import run_migrations
     from app.services.player_diet import PlayerDietRepository, PlayerDietFact, PlayerDietObservation
     from app.services.diet_baselines import DietBaselinesService
-    from app.config.settings import RuntimeSettings
+    from app.config.settings import RuntimeSettings, NBASeasonSettings
 
     engine = create_engine(f'sqlite:///{tmp_path / "baselines.db"}')
     run_migrations(engine)
@@ -47,7 +47,7 @@ def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
         PlayerDietObservation(base=base, status='available', unavailable_reason=None)
         for base in PLAYER_DIET_QUALIFIER_SLICES
     ], retrieved_at=now)
-    service = DietBaselinesService(player_diets=diets, settings=RuntimeSettings())
+    service = DietBaselinesService(player_diets=diets, settings=RuntimeSettings(nba=NBASeasonSettings(current_season="2025-26")))
     payload = service.get()
     matchup_read = diets.get_for_players('2025-26', [1])
     assert payload['season'] == '2025-26'
@@ -66,7 +66,7 @@ def test_baselines_capture_one_snapshot_and_preserve_missing_shares():
     from types import SimpleNamespace
     from app.services.diet_baselines import DietBaselinesService
     from app.services.player_diet import PlayerDietResult
-    from app.config.settings import RuntimeSettings
+    from app.config.settings import RuntimeSettings, NBASeasonSettings
 
     snapshot = object()
     reader = Mock(snapshot=Mock(return_value=snapshot))
@@ -78,7 +78,7 @@ def test_baselines_capture_one_snapshot_and_preserve_missing_shares():
 
     result = DietBaselinesService(
         player_diets=SimpleNamespace(get_for_players=read),
-        publication_reader=reader, settings=RuntimeSettings(),
+        publication_reader=reader, settings=RuntimeSettings(nba=NBASeasonSettings(current_season="2025-26")),
     ).get()
     assert calls == [snapshot]
     reader.snapshot.assert_called_once()
