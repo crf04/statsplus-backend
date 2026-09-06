@@ -80,6 +80,13 @@ _PUBLICATION_STREAM_KEYS = (
 #: reads resolve their own rows from the projection's opponent and player
 #: indexes.
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+#: The same two facts for a caller capturing one generation to share with
+#: another read (#253).
+BACKTEST_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
+BACKTEST_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
+#: "Resolve your own": ``backtest_target`` captures a snapshot itself unless
+#: the caller hands it one.
+_OWN = object()
 
 #: The stat key each Diet Base states an *outcome* in.  A Base publishes a
 #: Defense Sheet row per stat key, but only some of those rows are things a
@@ -195,7 +202,12 @@ class TargetBacktestService:
 
         return self.backtest_target(self.targets.get_target(firebase_uid, target_id))
 
-    def backtest_target(self, target: Mapping[str, Any]) -> dict[str, Any]:
+    def backtest_target(
+        self,
+        target: Mapping[str, Any],
+        *,
+        publication_snapshot: Any = _OWN,
+    ) -> dict[str, Any]:
         """Return one Target mapping with its season to date.
 
         The mapping is the item ``list_targets`` returns, or a Draft Target
@@ -203,6 +215,9 @@ class TargetBacktestService:
         draft comes back as a draft.  Nothing here reads the caller's stored
         Targets, which is what lets the Lab evaluate a Target that does not
         exist yet exactly as the detail evaluates one that does.
+
+        A caller composing this read alongside another passes the generation
+        it already holds as ``publication_snapshot``; none is captured then.
         """
 
         season = self.settings.nba.current_season
@@ -210,7 +225,11 @@ class TargetBacktestService:
         markets = self._stat_columns(qualifiers)
         # One snapshot for the whole response: the Diet a player ate and the
         # games they played have to come from the same generation of evidence.
-        snapshot = self._publication_snapshot(season)
+        snapshot = (
+            self._publication_snapshot(season)
+            if publication_snapshot is _OWN
+            else publication_snapshot
+        )
         players = self._players(target, qualifiers, markets, season, snapshot)
         return {
             "target": dict(target),

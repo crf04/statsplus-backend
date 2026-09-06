@@ -532,6 +532,23 @@ def test_a_draft_reads_no_stored_target_and_resolves_one_snapshot(
     assert seams["logs"].snapshots == ["snapshot-1", "snapshot-1"]
 
 
+def test_a_draft_backtested_over_a_given_snapshot_captures_none_of_its_own(
+    build_backtest,
+):
+    seams = _two_games()
+    reader = FakePublicationReader()
+
+    payload = build_backtest(**seams, publication_reader=reader).backtest_target(
+        DRAFT, publication_snapshot="preview-snapshot"
+    )
+
+    # The caller's generation is the whole read; the reader is never asked.
+    assert reader.calls == []
+    assert seams["logs"].snapshots == ["preview-snapshot", "preview-snapshot"]
+    assert seams["diets"].snapshots == ["preview-snapshot"]
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+
+
 def test_the_opponents_games_are_read_league_wide_for_the_current_season(
     targets, backtest
 ):

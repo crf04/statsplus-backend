@@ -2924,6 +2924,10 @@ all -- the demo database, which has no Diet schema -- since no player has a
 share for any slice there and so nobody fits. That is an accurate empty list
 rather than a suppressed one; no Diet evidence exists to be withheld.
 
+`401 authentication_required` for an unauthenticated caller.
+`404 resource_not_found` for an id that does not exist or belongs to another
+account -- foreign ids are never reported as `403`.
+
 #### Preview a Draft Target
 
 ```http
@@ -3068,14 +3072,17 @@ no date parameter, and the evaluation is season to date.
   and likewise when the game's participants are unavailable, since resolve
   lists nobody then either.
 
-The request makes no NBA, PBP, or DFS call: it composes the Backtest's seams
-and, for `today`, the Slate and that one game's Matchup. `401
-authentication_required` for an unauthenticated caller; the league-wide scan
-is not an open resource. Previews are neither cached nor rate limited.
+The request makes no NBA, PBP, or DFS call and writes nothing. It composes the
+Backtest's seams and, for `today`, the Slate and that one game's Matchup, all
+from **one** Publication snapshot -- the season's evidence and tonight's fit
+count cannot come from two generations. The Matchup is composed with the
+injury report **as stored**: where [Get Matchup](#get-matchup) would refresh a
+stale or missing report from the provider and publish a snapshot, a preview
+serves what is stored or reports the section unavailable, so previewing at
+any rate starts no collection. `401 authentication_required` for an
+unauthenticated caller; the league-wide scan is not an open resource. Previews
+are neither cached nor rate limited.
 
-`401 authentication_required` for an unauthenticated caller.
-`404 resource_not_found` for an id that does not exist or belongs to another
-account -- foreign ids are never reported as `403`.
 
 
 ## Filtering Reference

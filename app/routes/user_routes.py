@@ -27,6 +27,7 @@ user_bp = Blueprint('users', __name__)
 user_service = CurrentAppService("user")
 target_resolution_service = CurrentAppService("target_resolution")
 target_backtest_service = CurrentAppService("target_backtest")
+target_preview_service = CurrentAppService("target_preview")
 
 @user_bp.route('/profile', methods=['GET'])
 @require_auth
@@ -394,12 +395,7 @@ def preview_target():
         qualifiers=data.get('qualifiers'),
         note=data.get('note')
     )
-    previewed = target_backtest_service.backtest_target(draft)
-    return jsonify({
-        'success': True,
-        **previewed,
-        'today': target_resolution_service.today(draft)
-    })
+    return jsonify({'success': True, **target_preview_service.preview(draft)})
 
 @user_bp.route('/targets/<int:target_id>/backtest', methods=['GET'])
 @require_auth

@@ -2088,7 +2088,25 @@ derives the title without touching the database, and returns that shape minus
 applied there -- both compare a write against held rows, and a draft is not a
 write.
 
-The route composes the three, in that order, so an unusable body is refused
+`TargetPreviewService` composes the two reads and owns the two promises a
+preview makes that neither read makes alone. *One generation:* run alone, each
+read resolves its own Publication snapshot, and a publication advancing between
+them would pair season evidence from one generation with tonight's count from
+another. The preview captures one snapshot over the union of both reads'
+streams (`PREVIEW_PUBLICATION_STREAM_KEYS`), narrowed to the projection only
+where both reads narrow, and hands it to both -- `backtest_target` takes it as
+`publication_snapshot`, and `today` takes a `matchups` reader that composes the
+game's Matchup from it through `MatchupService.get_matchup_from_snapshot`, a
+compose entry that captures no snapshot of its own and leaves `get_matchup`
+unchanged. *No provider, no write:* the Matchup route may refresh injuries from
+the provider and publish a snapshot when the stored override is stale, and
+`resolve` (#245) inherits that behaviour through `get_matchup` -- deliberately
+out of scope here, as its contract is the Matchup's. A preview instead composes
+its Matchup with `StoredMatchupInjuryReader`, which answers `get_injuries`
+through `MatchupInjuryService.get_stored_injuries` and never refreshes, the
+same stored-only read the Slate already makes.
+
+The route validates, then calls `preview`, so an unusable body is refused
 before any scan runs. `summary` is computed by the backtest itself rather than
 by each reader, and is therefore present on the saved Backtest too; the Lab
 and the detail cannot disagree about the mean signed difference or the

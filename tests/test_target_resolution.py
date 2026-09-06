@@ -1326,6 +1326,24 @@ def test_today_counts_nobody_when_the_pool_is_unavailable(today):
     assert fired["fit_count"] == 0
 
 
+def test_today_reads_the_game_through_a_callers_matchup_reader_when_given_one():
+    own = FakeMatchups()
+    given = FakeMatchups(
+        {GAME_ID: _matchup(players=[_player(2, "Rim Runner", shot_zones=_zone_diet(0.1, 0.5))])}
+    )
+    service = TargetResolutionService(
+        targets=SimpleNamespace(), slates=FakeSlate(), matchups=own
+    )
+
+    fired = service.today(DRAFT, matchups=given)
+
+    # The preview holds one Publication generation and reads this game's
+    # Matchup from it; the service's own reader is not consulted.
+    assert own.calls == []
+    assert given.calls == [GAME_ID]
+    assert fired["fit_count"] == 0
+
+
 # --- routes ----------------------------------------------------------------
 
 

@@ -91,11 +91,18 @@ class TargetResolutionService:
         live: list[dict[str, Any]] = []
         idle: list[dict[str, Any]] = []
         for target in self.targets.list_targets(firebase_uid):
-            resolved = self._resolve_target(target, games, read_matchups)
+            resolved = self._resolve_target(
+                target, games, read_matchups, matchups=self.matchups
+            )
             (idle if resolved["game"] is None else live).append(resolved)
         return {"slate_date": slate["slate_date"], "targets": live + idle}
 
-    def today(self, target: Mapping[str, Any]) -> dict[str, Any] | None:
+    def today(
+        self,
+        target: Mapping[str, Any],
+        *,
+        matchups: MatchupReader | None = None,
+    ) -> dict[str, Any] | None:
         """Whether one Target mapping fires on the current Slate Date.
 
         The Lab's one line for a Draft Target: ``None`` when the opponent is
@@ -104,11 +111,18 @@ class TargetResolutionService:
         same rule -- thin players included, as ``resolve`` includes them.
         Nothing here reads the caller's stored Targets, so the mapping need
         not be one.
+
+        A caller holding one Publication generation for a whole response
+        passes ``matchups`` that composes the game's Matchup from it; the
+        service's own reader is not consulted then.
         """
 
         slate = self.slates.get_slate(None)
         resolved = self._resolve_target(
-            target, self._games_by_tricode(slate["games"]), {}
+            target,
+            self._games_by_tricode(slate["games"]),
+            {},
+            matchups=self.matchups if matchups is None else matchups,
         )
         if resolved["game"] is None:
             return None
@@ -119,6 +133,8 @@ class TargetResolutionService:
         target: Mapping[str, Any],
         games: Mapping[str, tuple[Mapping[str, Any], str, str]],
         read_matchups: dict[str, Mapping[str, Any]],
+        *,
+        matchups: MatchupReader,
     ) -> dict[str, Any]:
         """Resolve one Target against an indexed Slate, reading each game once.
 
@@ -132,7 +148,7 @@ class TargetResolutionService:
         game, opponent_side, filtered_side = scheduled
         game_id = game["game_id"]
         if game_id not in read_matchups:
-            read_matchups[game_id] = self.matchups.get_matchup(game_id=game_id)
+            read_matchups[game_id] = matchups.get_matchup(game_id=game_id)
         return self._live(
             target, game, opponent_side, filtered_side, read_matchups[game_id]
         )
