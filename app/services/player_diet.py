@@ -464,16 +464,16 @@ class PlayerDietRepository:
                     .mappings()
                     .all()
                 )
-                # The baseline population is the whole stored season fact
-                # set for the Base, not just the requested players, so it is
-                # queried separately from the delivered rows above.
-                baseline_rows = (
-                    connection.execute(
-                        select(fact_table).where(fact_table.c.season == season)
-                    )
-                    .mappings()
-                    .all()
+            # The baseline population is the whole stored season fact
+            # set for the Base, not just the requested players, so it is
+            # queried separately from the delivered rows above.
+            baseline_rows = (
+                connection.execute(
+                    select(fact_table).where(fact_table.c.season == season)
                 )
+                .mappings()
+                .all()
+            )
             observation_rows = (
                 connection.execute(
                     select(observation_table)

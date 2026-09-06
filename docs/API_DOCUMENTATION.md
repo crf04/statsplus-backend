@@ -3180,3 +3180,15 @@ list entries and are applied sequentially.
   production seams with no network. Live provider-contract tests in
   `tests/live/` are marked `live` and excluded from the default gate; opt in
   with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
+
+### League Diet Baselines
+
+`GET /api/diet/baselines` requires Firebase bearer authentication (otherwise
+`401 authentication_required` in the standard error envelope). It returns
+`{season, captured_at, shares: {<base>: {<slice_key>: share}}}`. Every Qualifier
+Base and slice is present. Shares are 0–1, or `null` when the Matchup cannot
+establish a league baseline from the stored population. `captured_at` is the
+latest Diet observation timestamp, or `null` without observations. The read
+uses one Publication snapshot and the Matchup's baseline calculation; it
+makes no provider calls. The immutable published facts supply the cached
+source; no separate time-based response cache can outlive that generation.

@@ -73,6 +73,7 @@ class ApplicationDependencies:
     target_resolution_service: Any | None = None
     target_backtest_service: Any | None = None
     target_preview_service: Any | None = None
+    diet_baselines_service: Any | None = None
 
 
 def build_dependencies(
@@ -129,6 +130,7 @@ def build_dependencies(
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.matchup_injuries import StoredMatchupInjuryReader
+    from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
     from app.services.target_resolution import TargetResolutionService
@@ -736,6 +738,10 @@ def build_dependencies(
         target_resolution_service=target_resolution_service,
         target_backtest_service=target_backtest_service,
         target_preview_service=target_preview_service,
+        diet_baselines_service=DietBaselinesService(
+            player_diets=(player_diet_service.repository if player_diet_service else None),
+            settings=settings, publication_reader=publication_reader,
+        ),
     )
 
 
