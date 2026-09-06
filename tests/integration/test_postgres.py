@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.models import Base
 
@@ -1538,3 +1539,405 @@ def test_the_configured_match_window_governs_the_recheck_on_postgres(
     assert repository.get_mapping("underdog", "ud-1").mapping_state == (
         "mapping_conflict"
     )
+
+
+# --- atomic publication repair groups (#230) --------------------------------
+
+
+def _repair_group_engine(postgres_url):
+    from app.migrations import run_migrations
+
+    engine = create_engine(postgres_url)
+    Base.metadata.drop_all(engine)
+    # ``schema_migrations`` is not part of ``Base.metadata``, so dropping the
+    # model tables alone leaves the applied-version ledger behind.  A later
+    # ``run_migrations`` would then believe the head was already applied and
+    # create nothing.  Drop the ledger too so this really is a from-scratch
+    # migration run against the shared integration database.
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+    run_migrations(engine)
+    return engine
+
+
+@pytest.fixture
+def repair_group_engine(postgres_url):
+    engine = _repair_group_engine(postgres_url)
+    yield engine
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _seed_group_prerequisites(engine, *, manifest_id="manifest-1"):
+    """Insert the manifest and publication a repair group is declared against."""
+    from app.models.collection_control import (
+        CatalogPublication,
+        CollectionManifest,
+        PublicationVersion,
+    )
+
+    moment = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="catalog-1", season="2025-26", catalog_type="event",
+            cutoff=moment, version="v1", checksum="c" * 64,
+            payload="{}", complete=True, published_at=moment,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id=manifest_id, season="2025-26", cutoff=moment,
+            collect_before=moment + timedelta(hours=1),
+            accepted_versions="[1, 2]", scopes="[]",
+            checksum=f"{manifest_id}-checksum",
+            event_catalog_publication_id="catalog-1",
+            event_catalog_checksum="c" * 64,
+            status="active", created_at=moment,
+        ))
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="publication-1",
+            stream_key="exact_shot_zones_opponent_season",
+            season="2025-26", cutoff=moment, version=1, status="active",
+            checksum="a" * 64, payload="{}", created_at=moment, fence=1,
+        ))
+    return moment
+
+
+def test_repair_group_ddl_applies_to_postgres(repair_group_engine):
+    """Migration 049's tables, constraints, and indexes must build on Postgres."""
+    with repair_group_engine.connect() as connection:
+        group_columns = connection.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'publication_repair_groups'"
+        )).scalars().all()
+        member_columns = connection.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'publication_repair_group_members'"
+        )).scalars().all()
+        constraints = connection.execute(text(
+            "SELECT conname FROM pg_constraint WHERE conrelid IN ("
+            "'publication_repair_groups'::regclass, "
+            "'publication_repair_group_members'::regclass)"
+        )).scalars().all()
+
+    assert set(group_columns) == {
+        "group_id", "manifest_id", "season", "cutoff", "reason", "checksum",
+        "created_at", "promoted_at",
+    }
+    assert set(member_columns) == {
+        "group_id", "stream_key", "expected_publication_id", "expected_fence",
+        "created_at",
+    }
+    assert {"ck_repair_group_reason", "ck_repair_group_member_fence"} <= set(constraints)
+
+
+def test_postgres_enforces_one_repair_group_per_manifest(repair_group_engine):
+    from app.models.collection_control import PublicationRepairGroup
+
+    moment = _seed_group_prerequisites(repair_group_engine)
+    rows = [{
+        "group_id": f"group-{index}", "manifest_id": "manifest-1",
+        "season": "2025-26", "cutoff": moment, "reason": "broken per48",
+        "checksum": "d" * 64, "created_at": moment,
+    } for index in (1, 2)]
+
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(rows[0]))
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationRepairGroup.__table__.insert().values(rows[1]))
+
+
+def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
+    repair_group_engine,
+):
+    from app.models.collection_control import (
+        PublicationRepairGroup,
+        PublicationRepairGroupMember,
+    )
+
+    moment = _seed_group_prerequisites(repair_group_engine)
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationRepairGroup.__table__.insert().values(
+                group_id="group-blank", manifest_id="manifest-1",
+                season="2025-26", cutoff=moment, reason="",
+                checksum="d" * 64, created_at=moment,
+            ))
+
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(
+            group_id="group-1", manifest_id="manifest-1", season="2025-26",
+            cutoff=moment, reason="broken per48", checksum="d" * 64,
+            created_at=moment,
+        ))
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationRepairGroupMember.__table__.insert().values(
+                group_id="group-1",
+                stream_key="exact_shot_zones_opponent_season",
+                expected_publication_id="publication-1",
+                expected_fence=-1, created_at=moment,
+            ))
+
+
+def test_postgres_refuses_to_drop_a_publication_a_repair_group_guards(
+    repair_group_engine,
+):
+    """The declared rollback target must survive until the group is resolved."""
+    from app.models.collection_control import (
+        PublicationRepairGroup,
+        PublicationRepairGroupMember,
+        PublicationVersion,
+    )
+
+    moment = _seed_group_prerequisites(repair_group_engine)
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.insert().values(
+            group_id="group-1", manifest_id="manifest-1", season="2025-26",
+            cutoff=moment, reason="broken per48", checksum="d" * 64,
+            created_at=moment,
+        ))
+        connection.execute(PublicationRepairGroupMember.__table__.insert().values(
+            group_id="group-1",
+            stream_key="exact_shot_zones_opponent_season",
+            expected_publication_id="publication-1",
+            expected_fence=1, created_at=moment,
+        ))
+
+    with pytest.raises(IntegrityError):
+        with repair_group_engine.begin() as connection:
+            connection.execute(PublicationVersion.__table__.delete().where(
+                PublicationVersion.publication_id == "publication-1"
+            ))
+
+    # Removing the group releases its members with it.
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationRepairGroup.__table__.delete().where(
+            PublicationRepairGroup.group_id == "group-1"
+        ))
+    with repair_group_engine.connect() as connection:
+        assert connection.execute(
+            select(PublicationRepairGroupMember.__table__)
+        ).all() == []
+
+
+@pytest.fixture
+def promotion(postgres_url, monkeypatch):
+    """The grouped-repair scenario, built against a real Postgres database."""
+    from tests.services.test_publication_repair_promotion import (
+        build_repair_environment,
+    )
+
+    engine = _repair_group_engine(postgres_url)
+    yield build_repair_environment(engine, monkeypatch)
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _promotion_state(engine):
+    from app.models.collection_control import PublicationPointer, PublicationVersion
+
+    with engine.connect() as connection:
+        pointers = {
+            row.stream_key: (row.active_publication_id,
+                             row.previous_publication_id, int(row.fence))
+            for row in connection.execute(select(PublicationPointer))
+        }
+        statuses = {
+            row.publication_id: row.status
+            for row in connection.execute(select(PublicationVersion))
+        }
+    return pointers, statuses
+
+
+def test_grouped_promotion_commits_as_one_transaction_on_postgres(promotion):
+    from app.models.collection_control import AuditEvent, PublicationRepairGroup
+    from tests.services.test_publication_repair_promotion import (
+        L15_ZONES,
+        SEASON_ZONES,
+    )
+
+    engine = promotion["engine"]
+    before, _ = _promotion_state(engine)
+
+    promotion["operations"].promote_repair_group(
+        promotion["manifest"].manifest_id,
+        actor="operator@example.com",
+        reason="replace the broken opponent zone pair",
+    )
+
+    after, statuses = _promotion_state(engine)
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        active, previous, fence = after[stream_key]
+        assert active != before[stream_key][0]
+        assert fence == before[stream_key][2] + 1
+        assert previous is None
+        displaced = promotion["displaced"][stream_key].publication_id
+        assert statuses[displaced] == "superseded"
+
+    with engine.connect() as connection:
+        audits = connection.execute(select(AuditEvent).where(
+            AuditEvent.action == "publication.repair_group.promote"
+        )).all()
+        group = connection.execute(select(PublicationRepairGroup)).one()
+    assert len(audits) == 1
+    assert group.promoted_at is not None
+
+
+def test_an_advance_after_the_declaration_fences_the_group_on_postgres(promotion):
+    """The declared guard fences a member that moved since it was declared.
+
+    This is the sequential case -- the advance has already committed. Lock
+    contention between two simultaneous transactions is covered separately by
+    ``test_a_held_pointer_lock_blocks_the_promotion_on_postgres``.
+    """
+    from app.services.collection_control import ControlPlaneError
+    from tests.services.test_publication_repair_promotion import (
+        L15_ZONES,
+        REPAIR_CUTOFF,
+        SEASON,
+    )
+
+    engine = promotion["engine"]
+    # A member advanced after the declaration: its rollback target is no
+    # longer the one the operator agreed to discard.
+    promotion["publications"].compose(
+        L15_ZONES, season=SEASON, cutoff=REPAIR_CUTOFF,
+        payload=None, expected_fence=promotion["displaced"][L15_ZONES].fence,
+        manifest_id=promotion["manifest"].manifest_id,
+    )
+    before, statuses = _promotion_state(engine)
+
+    with pytest.raises(ControlPlaneError, match="repair_group_guard_stale"):
+        promotion["operations"].promote_repair_group(
+            promotion["manifest"].manifest_id,
+            actor="operator", reason="repair the pair",
+        )
+
+    assert _promotion_state(engine) == (before, statuses)
+
+
+def test_a_held_pointer_lock_blocks_the_promotion_on_postgres(promotion, postgres_url):
+    """A second live transaction holding a member pointer stalls the promotion.
+
+    Phase 1 takes ``SELECT ... FOR UPDATE`` on every member before composing
+    anything, so a pointer already locked elsewhere must make the promotion
+    wait rather than read a row someone else is about to move. The promoting
+    connection gets a short ``lock_timeout`` so that wait surfaces as an error
+    instead of hanging the suite; without the row lock there would be nothing
+    to wait on and the promotion would simply succeed.
+    """
+    from sqlalchemy import event
+    from sqlalchemy.exc import DBAPIError
+
+    from app.services.collection_control import (
+        CollectionOperationsService,
+        PublicationService,
+    )
+    from tests.services.test_publication_repair_promotion import SEASON_ZONES
+
+    engine = promotion["engine"]
+    fenced = create_engine(postgres_url)
+
+    @event.listens_for(fenced, "connect")
+    def _bound_lock_wait(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("SET SESSION lock_timeout = '1500ms'")
+        cursor.close()
+        dbapi_connection.commit()
+
+    source = promotion["publications"]
+    operations = CollectionOperationsService(
+        fenced,
+        publication_service=PublicationService(
+            fenced, clock=source.clock,
+            l15_expectation_resolver=source.l15_expectation_resolver,
+        ),
+        clock=source.clock,
+    )
+    before, statuses = _promotion_state(engine)
+
+    # Members are locked in stream-key order, so holding the *second* one lets
+    # the promotion get past its first lock before it stalls.
+    holder = engine.connect()
+    holding = holder.begin()
+    try:
+        holder.execute(
+            text(
+                "SELECT 1 FROM publication_pointers "
+                "WHERE stream_key = :stream_key FOR UPDATE"
+            ),
+            {"stream_key": SEASON_ZONES},
+        ).all()
+        with pytest.raises(DBAPIError):
+            operations.promote_repair_group(
+                promotion["manifest"].manifest_id,
+                actor="operator", reason="repair the pair",
+            )
+    finally:
+        holding.rollback()
+        holder.close()
+
+    assert _promotion_state(engine) == (before, statuses)
+
+    # Once the contending transaction lets go, the identical promotion runs.
+    operations.promote_repair_group(
+        promotion["manifest"].manifest_id, actor="operator", reason="repair the pair",
+    )
+    after, _ = _promotion_state(engine)
+    assert after[SEASON_ZONES][0] != before[SEASON_ZONES][0]
+    assert after[SEASON_ZONES][1] is None
+    fenced.dispose()
+
+
+def test_a_failed_promotion_rolls_back_and_can_be_retried_on_postgres(
+    promotion, monkeypatch,
+):
+    from app.models.collection_control import AuditEvent, PublicationRepairGroup
+    from app.services.collection_control import ControlPlaneError
+    from tests.services.test_publication_repair_promotion import (
+        L15_ZONES,
+        SEASON_ZONES,
+    )
+
+    engine = promotion["engine"]
+    before, statuses = _promotion_state(engine)
+    publications = promotion["publications"]
+    advance = publications._compose_active_in_session
+    calls = {"count": 0}
+
+    def fail_after_the_first_pointer_moves(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise ControlPlaneError("injected_repair_failure")
+        return advance(*args, **kwargs)
+
+    monkeypatch.setattr(
+        publications, "_compose_active_in_session",
+        fail_after_the_first_pointer_moves,
+    )
+    with pytest.raises(ControlPlaneError, match="injected_repair_failure"):
+        promotion["operations"].promote_repair_group(
+            promotion["manifest"].manifest_id,
+            actor="operator", reason="repair the pair",
+        )
+
+    # Postgres rolls the first member's advance back with everything else.
+    assert _promotion_state(engine) == (before, statuses)
+    with engine.connect() as connection:
+        assert connection.execute(select(AuditEvent).where(
+            AuditEvent.action == "publication.repair_group.promote"
+        )).all() == []
+        assert connection.execute(
+            select(PublicationRepairGroup)
+        ).one().promoted_at is None
+
+    # The declaration survives the failure, so the operator can retry it.
+    monkeypatch.setattr(publications, "_compose_active_in_session", advance)
+    promotion["operations"].promote_repair_group(
+        promotion["manifest"].manifest_id,
+        actor="operator", reason="repair the pair",
+    )
+    after, _ = _promotion_state(engine)
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        assert after[stream_key][0] != before[stream_key][0]
+        assert after[stream_key][1] is None

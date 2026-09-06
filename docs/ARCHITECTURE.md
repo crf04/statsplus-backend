@@ -3877,9 +3877,34 @@ an idempotent receipt; a conflicting checksum is rejected. Publication
 advancement increments a per-stream database fence, preserving the prior
 active version for rollback and rejecting stale composition workers. Accepted
 observations enqueue a deduplicated composition job immediately, while
-`reconcile_pending` is the scheduled backstop. Composition derives its gate
+`reconcile_pending` is the scheduled backstop. Every governed opponent
+surface -- play types, shot types, and shot zones -- collects integer Totals
+beside the window's authoritative minutes and publishes
+`total * 48 / minutes` at full precision; no provider per-mode rate is
+published unchanged. Opponent shot zones additionally reconcile exactly
+against an independent opponent TeamStats read for the identical window (five
+canonical zones plus Backcourt equal the opponent total; the combined Corner 3
+equals its left and right sides), are refetched as a pair once on a first
+mismatch, and are re-validated centrally from the immutable observation before
+composition. See [RESIDENTIAL_COLLECTOR.md](RESIDENTIAL_COLLECTOR.md). Composition derives its gate
 from registered required observations plus league/Base completeness evidence;
-a caller-provided `complete` flag alone cannot advance a pointer. Production
+a caller-provided `complete` flag alone cannot advance a pointer. A manifest
+may additionally declare one immutable atomic repair group: the set of streams
+whose replacement must land together because their existing rollback targets
+are the defect being repaired. The declaration is bound into the manifest
+checksum, is stored as normalized group/member rows, and holds its members'
+composition jobs `queued` instead of promoting them independently -- the
+worker skips them and `compose_from_observations` refuses them with
+`grouped_repair_pending`. Collector reads see the group filtered to the
+surfaces they already hold and never its pointer guards. The operator
+promotion is one transaction in two phases: every member pointer is locked in
+stream-key order and rechecked against its declared active identity and fence,
+every replacement is composed and validated, and only then does any pointer
+advance. Success clears each member's `previous_publication_id`, so the
+defect it displaced can never be rolled back to, and records one audit naming
+the discarded identities; any failure rolls pointers, version status, jobs,
+and that audit back together. See
+[PUBLICATION_REPAIR_GROUPS.md](PUBLICATION_REPAIR_GROUPS.md). Production
 requires `COLLECTOR_SIGNING_SECRET`; only non-production credential-free runs
 may use a process-local key.
 

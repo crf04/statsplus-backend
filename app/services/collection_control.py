@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -78,6 +78,8 @@ from app.models.collection_control import (
     PublicationStream,
     PublicationVersion,
     PublicationObservation,
+    PublicationRepairGroup,
+    PublicationRepairGroupMember,
     CompositionJob,
     CollectionCycle,
     AuditEvent,
@@ -112,6 +114,9 @@ MAX_ENVELOPE_BYTES = 10 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 2 * 1024 * 1024
 MAX_SCOPE_COUNT = 512
 MAX_SCOPE_BYTES = 32 * 1024
+MIN_REPAIR_GROUP_MEMBERS = 2
+MAX_REPAIR_GROUP_MEMBERS = 8
+MAX_REPAIR_GROUP_REASON = 255
 OBSERVATION_RETENTION_DAYS = 30
 ATHLETE_REUSE_DAYS = 7
 MAX_PAYLOAD_VALUES = 100_000
@@ -302,7 +307,8 @@ def _collector_scope_descriptors(
                             if window == "l15" and l15_date_from_by_team is not None
                             else None
                         ), "date_to": date_to,
-                        "per_mode": "Per48", "value_mode": "per48"}
+                        "per_mode": "Totals",
+                        "value_mode": "totals_with_minutes"}
             if opponent_shots and window in shot_stream_windows:
                 descriptors.extend({"scope": opponent_shots, "parameters": {
                     **governed, "general_range": category,
@@ -459,6 +465,62 @@ class _ProviderWindowUnavailable(ValueError):
     """Expected provider limitation that must not authorize a publication."""
 
 
+def _assert_zone_reconciliation(document: Mapping[str, Any]) -> None:
+    """Repeat the opponent-zone reconciliation against the recorded evidence.
+
+    The collector already refused inconsistent evidence, but a collector's
+    success is a claim, not proof.  This is the central boundary: it reads the
+    immutable observation and re-derives the same integer identities, so an
+    obsolete or tampered-with collector cannot publish the broken rate scale.
+    """
+
+    reconciliation = document.get("reconciliation")
+    if not isinstance(reconciliation, Mapping):
+        raise ValueError("publication zone reconciliation missing")
+    totals = reconciliation.get("opponent_totals")
+    backcourt = reconciliation.get("Backcourt")
+    if not isinstance(totals, Mapping) or not isinstance(backcourt, Mapping):
+        raise ValueError("publication zone reconciliation missing")
+    zone_values: dict[str, dict[str, float]] = {}
+    for record in document.get("records") or ():
+        if not isinstance(record, Mapping):
+            raise ValueError("publication observation row malformed")
+        zone_values[str(record.get("slice_key", record.get("category", "")))] = {
+            key: record[key] for key in ("FGM", "FGA") if key in record
+        }
+    if set(zone_values) != set(SHOT_ZONE_SLICES):
+        raise ValueError("publication zone reconciliation incomplete")
+    for stat_key in ("FGM", "FGA"):
+        try:
+            observed = sum(
+                float(zone_values[zone][stat_key]) for zone in SHOT_ZONE_SLICES
+            ) + float(backcourt[stat_key])
+            expected = float(totals[stat_key])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("publication zone reconciliation invalid") from error
+        if not math.isfinite(observed) or observed != expected:
+            raise ValueError("publication zone reconciliation mismatch")
+    # The collector requires the Corner 3 split, so central validation must
+    # require it too.  Making it conditional here would let an observation
+    # that simply omits the sides skip the identity centrally -- exactly the
+    # tampering this boundary exists to catch.
+    sides = ("Left Corner 3", "Right Corner 3")
+    if not all(isinstance(reconciliation.get(side), Mapping) for side in sides):
+        raise ValueError("publication zone reconciliation missing")
+    for stat_key in ("FGM", "FGA"):
+        try:
+            split = sum(
+                float(reconciliation[side][stat_key]) for side in sides
+            )
+            combined = float(zone_values["Corner 3"][stat_key])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError(
+                "publication zone reconciliation invalid"
+            ) from error
+        if split != combined:
+            raise ValueError("publication zone reconciliation mismatch")
+
+
 def _compose_nba_observation_payload(
     session: Session,
     *,
@@ -552,12 +614,10 @@ def _compose_nba_observation_payload(
                 scoped_team_id = int(scoped_team_id)
             except (TypeError, ValueError, OverflowError) as error:
                 raise ValueError("publication scope team invalid") from error
-        expected_value_mode = (
-            "totals_with_minutes"
-            if base in {"play_types", "shot_types"}
-            else "per48"
-        )
-        if scope.get("value_mode") != expected_value_mode:
+        # Every governed opponent base publishes a rate derived here from
+        # Totals and the window's authoritative minutes.  An observation still
+        # labelled with the provider's own rate scale cannot authorize one.
+        if scope.get("value_mode") != "totals_with_minutes":
             raise ValueError("publication value mode unverified")
         if base == "play_types":
             # Synergy's Season endpoint has no DateTo/as-of input.  Its totals
@@ -592,6 +652,8 @@ def _compose_nba_observation_payload(
         records = document.get("records")
         if not isinstance(records, list):
             raise ValueError("publication observation rows missing")
+        if base == "shot_zones":
+            _assert_zone_reconciliation(document)
         sources.append({
             "observation_id": observation.observation_id,
             "checksum": observation.checksum,
@@ -618,7 +680,7 @@ def _compose_nba_observation_payload(
                     or int(games_played) != len(expected_game_ids_by_team[team_id])
                 ):
                     raise ValueError("publication games played mismatch")
-            if base in {"play_types", "shot_types"}:
+            if base in {"play_types", "shot_types", "shot_zones"}:
                 minutes = record.get("minutes")
                 if isinstance(minutes, bool):
                     raise ValueError("publication minutes invalid")
@@ -664,8 +726,6 @@ def _compose_nba_observation_payload(
             "per48": {
                 metric: (
                     values[team_id][metric] * 48.0 / minutes_by_team[team_id]
-                    if base in {"play_types", "shot_types"}
-                    else values[team_id][metric]
                 )
                 for metric in sorted(expected_metrics)
             },
@@ -967,6 +1027,39 @@ class ControlPlaneError(ValueError):
         self.reason = reason
         self.retry_after_seconds = retry_after_seconds
         super().__init__(message or reason)
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicationCandidate:
+    """One derived, validated replacement that has not yet been published."""
+
+    encoded: str
+    payload: Any
+    provenance_ids: set[str]
+    authority: Any | None
+
+
+@dataclass(frozen=True, slots=True)
+class RepairGroupPromotion:
+    """The result of promoting one atomic repair group."""
+
+    group_id: str
+    manifest_id: str
+    reason: str
+    discarded: tuple[Mapping[str, Any], ...]
+    published: tuple[Mapping[str, Any], ...]
+
+    @property
+    def audit_details(self) -> dict[str, Any]:
+        """The operator-facing record of exactly what this repair discarded."""
+
+        return {
+            "repair_group_id": self.group_id,
+            "manifest_id": self.manifest_id,
+            "repair_reason": self.reason,
+            "discarded_publications": [dict(item) for item in self.discarded],
+            "published_publications": [dict(item) for item in self.published],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2062,6 +2155,9 @@ class CollectionControlService(_SessionService):
                         "scope_descriptors": scope_descriptors,
                         "checksum": manifest.checksum,
                         "status": manifest.status,
+                        "repair_group": _collector_repair_group_view(
+                            session, manifest, authorized_scopes,
+                        ),
                     })
                     if len(visible_manifests) >= bounded:
                         break
@@ -2182,8 +2278,12 @@ class CollectionControlService(_SessionService):
 
     def create_manifest(self, season: str, *, cutoff: datetime, scopes: Iterable[str],
                         collect_before: datetime, accepted_versions: Iterable[int] = (1, 2),
-                        required_athlete_ids: Iterable[str] = ()) -> CollectionManifest:
+                        required_athlete_ids: Iterable[str] = (),
+                        repair_group: Mapping[str, Any] | None = None) -> CollectionManifest:
         now = _aware(self.clock())
+        declaration = (
+            _normalize_repair_group(repair_group) if repair_group is not None else None
+        )
         cutoff, collect_before = _aware(cutoff), _aware(collect_before)
         if cutoff > collect_before or collect_before <= now:
             raise ControlPlaneError("invalid_manifest_window")
@@ -2262,6 +2362,11 @@ class CollectionControlService(_SessionService):
                     "accepted_versions": versions, "scopes": scope_list,
                     "event_catalog_publication_id": event.publication_id,
                     "event_catalog_checksum": event.checksum}
+        if declaration is not None:
+            # The group is part of manifest integrity, not a mutable sidecar:
+            # the same scopes with and without a repair group are different
+            # manifests and must not collide on the checksum uniqueness rule.
+            material["repair_group"] = declaration
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
             from app.services.matchup_authority import (
@@ -2299,6 +2404,11 @@ class CollectionControlService(_SessionService):
                 event_catalog_checksum=bound_event.checksum,
                 status="active", created_at=now)
             session.add(row)
+            if declaration is not None:
+                session.flush()
+                _bind_repair_group(
+                    session, manifest=row, declaration=declaration, now=now,
+                )
             for old in prior:
                 old.superseded_by = row.manifest_id
         return row
@@ -2318,6 +2428,9 @@ class CollectionControlService(_SessionService):
                 if not authorized_scopes:
                     raise ControlPlaneError("scope_denied")
                 row._authorized_scopes = sorted(authorized_scopes)
+                row._repair_group = _collector_repair_group_view(
+                    session, row, authorized_scopes,
+                )
                 row._scope_descriptors = _collector_scope_descriptors(
                     authorized_scopes,
                     row.cutoff,
@@ -2334,6 +2447,63 @@ class CollectionControlService(_SessionService):
                     ),
                 )
             return row
+
+    def repair_group_state(self, manifest_id: str) -> dict[str, Any] | None:
+        """Operator view of one manifest's repair group and its guards.
+
+        ``promotable`` reports only that every declared guard still matches
+        the live pointer.  Evidence completeness is re-checked by the grouped
+        promotion itself; a promotable group is one that has not been
+        invalidated by a publication moving after the declaration.
+        """
+
+        with self.session() as session:
+            if session.get(CollectionManifest, manifest_id) is None:
+                raise ControlPlaneError("manifest_not_found")
+            found = _repair_group_rows(session, manifest_id)
+            if found is None:
+                return None
+            group, members = found
+            promoted = group.promoted_at is not None
+            member_states: list[dict[str, Any]] = []
+            stale: list[str] = []
+            for member in members:
+                pointer = session.get(PublicationPointer, member.stream_key)
+                active_publication_id = (
+                    pointer.active_publication_id if pointer is not None else None
+                )
+                fence = int(pointer.fence) if pointer is not None else 0
+                guard_satisfied = (
+                    active_publication_id == member.expected_publication_id
+                    and fence == int(member.expected_fence)
+                )
+                if not guard_satisfied:
+                    stale.append(member.stream_key)
+                member_states.append({
+                    "stream_key": member.stream_key,
+                    "expected_publication_id": member.expected_publication_id,
+                    "expected_fence": int(member.expected_fence),
+                    "active_publication_id": active_publication_id,
+                    "fence": fence,
+                    "guard_satisfied": guard_satisfied,
+                })
+            return {
+                "group_id": group.group_id,
+                "manifest_id": group.manifest_id,
+                "season": group.season,
+                "cutoff": _iso(group.cutoff),
+                "reason": group.reason,
+                "checksum": group.checksum,
+                "members": member_states,
+                "stale_members": sorted(stale),
+                "promoted_at": _iso(group.promoted_at),
+                "promotable": not promoted and not stale,
+                "state": (
+                    "promoted" if promoted
+                    else "guard_stale" if stale
+                    else "waiting_for_grouped_execution"
+                ),
+            }
 
     def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
                    session: Session | None = None) -> CollectionCycle:
@@ -3635,6 +3805,120 @@ class PublicationService(_SessionService):
                 count += 1
             return count
 
+    def _prepare_publication_candidate(
+        self, session: Session, *, stream_key: str, season: str,
+        cutoff: datetime, payload: Any, manifest_id: str | None = None,
+        ledger_provenance: Mapping[str, str | None] | None = None,
+    ) -> _PublicationCandidate:
+        """Derive and validate one replacement without touching any pointer.
+
+        Preparation is separated from advancement so a grouped repair can
+        prove every member composes and validates before the first pointer
+        moves.  It reads evidence and governance only.
+        """
+
+        encoded = _json(payload)
+        stream = session.get(PublicationStream, stream_key)
+        if stream is None or not stream.enabled:
+            raise ControlPlaneError("stream_unavailable")
+        provenance_ids = (
+            self._assert_ledger_provenance(
+                session,
+                season=season,
+                cutoff=_aware(cutoff),
+                provenance=ledger_provenance,
+                manifest_id=manifest_id,
+            )
+            if ledger_provenance is not None
+            else self._assert_completeness(
+                session, stream, season=season, cutoff=_aware(cutoff),
+                manifest_id=manifest_id,
+            )
+        )
+        expected_game_ids_by_team = None
+        expected_l15_date_from_by_team = None
+        authority = None
+        if stream_key in NBA_PUBLICATION_STREAM_KEYS:
+            try:
+                authority = resolve_publication_authority(
+                    session,
+                    season=season,
+                    cutoff=_aware(cutoff),
+                    manifest_id=manifest_id,
+                )
+            except PublicationGovernanceUnavailable as error:
+                raise ControlPlaneError(
+                    "publication_governance_unavailable"
+                ) from error
+            if _requires_team_window_expectation(stream_key):
+                try:
+                    expected_game_ids_by_team = resolve_governed_team_game_ids(
+                        self.l15_expectation_resolver,
+                        season,
+                        _aware(cutoff),
+                        window=("l15" if stream_key.endswith("_l15") else "season"),
+                        manifest_id=authority.manifest_id,
+                        event_catalog_publication_id=(
+                            authority.event_catalog_publication_id
+                        ),
+                        event_catalog_checksum=authority.event_catalog_checksum,
+                    )
+                except PublicationGovernanceUnavailable as error:
+                    raise ControlPlaneError(
+                        "publication_governance_unavailable"
+                    ) from error
+            if stream_key.endswith("_l15") and provenance_ids:
+                try:
+                    expected_l15_date_from_by_team = (
+                        resolve_governed_l15_date_from_by_team(
+                            self.l15_expectation_resolver,
+                            season,
+                            _aware(cutoff),
+                            manifest_id=authority.manifest_id,
+                            event_catalog_publication_id=(
+                                authority.event_catalog_publication_id
+                            ),
+                            event_catalog_checksum=authority.event_catalog_checksum,
+                        )
+                    )
+                except PublicationGovernanceUnavailable as error:
+                    raise ControlPlaneError(
+                        "publication_governance_unavailable"
+                    ) from error
+            try:
+                derived_payload = _compose_nba_observation_payload(
+                    session,
+                    stream=stream,
+                    stream_key=stream_key,
+                    season=season,
+                    cutoff=_aware(cutoff),
+                    manifest_id=authority.manifest_id,
+                    provenance_ids=provenance_ids,
+                    expected_game_ids_by_team=expected_game_ids_by_team or {},
+                    expected_l15_date_from_by_team=expected_l15_date_from_by_team,
+                )
+            except _ProviderWindowUnavailable as error:
+                raise ControlPlaneError(str(error)) from error
+            except ValueError as error:
+                raise ControlPlaneError("publication_candidate_invalid") from error
+            if payload is not None and not hmac.compare_digest(
+                canonical_publication_json(payload),
+                canonical_publication_json(derived_payload),
+            ):
+                raise ControlPlaneError("publication_candidate_invalid")
+            payload = derived_payload
+            encoded = _json(payload)
+            _validate_activation_candidate_payload(
+                stream_key,
+                encoded,
+                season=season,
+                expected_game_ids_by_team=expected_game_ids_by_team,
+            )
+        return _PublicationCandidate(
+            encoded=encoded, payload=payload,
+            provenance_ids=provenance_ids, authority=authority,
+        )
+
     def compose(self, stream_key: str, *, season: str, cutoff: datetime, payload: Any,
                 expected_fence: int | None = None, reason: str | None = None,
                 manifest_id: str | None = None,
@@ -3642,111 +3926,19 @@ class PublicationService(_SessionService):
                 session: Session | None = None,
                 _pointer_expectation: tuple[int, str | None] | None = None,
     ) -> PublicationVersion:
-        encoded = _json(payload)
         now = self.clock()
         with self._session_scope(session) as session:
-            stream = session.get(PublicationStream, stream_key)
-            if stream is None or not stream.enabled:
-                raise ControlPlaneError("stream_unavailable")
-            provenance_ids = (
-                self._assert_ledger_provenance(
-                    session,
-                    season=season,
-                    cutoff=_aware(cutoff),
-                    provenance=ledger_provenance,
-                    manifest_id=manifest_id,
-                )
-                if ledger_provenance is not None
-                else self._assert_completeness(
-                    session, stream, season=season, cutoff=_aware(cutoff),
-                    manifest_id=manifest_id,
-                )
+            candidate = self._prepare_publication_candidate(
+                session, stream_key=stream_key, season=season, cutoff=cutoff,
+                payload=payload, manifest_id=manifest_id,
+                ledger_provenance=ledger_provenance,
             )
-            expected_game_ids_by_team = None
-            expected_l15_date_from_by_team = None
-            authority = None
-            if stream_key in NBA_PUBLICATION_STREAM_KEYS:
-                try:
-                    authority = resolve_publication_authority(
-                        session,
-                        season=season,
-                        cutoff=_aware(cutoff),
-                        manifest_id=manifest_id,
-                    )
-                except PublicationGovernanceUnavailable as error:
-                    raise ControlPlaneError(
-                        "publication_governance_unavailable"
-                    ) from error
-                if _requires_team_window_expectation(stream_key):
-                    try:
-                        expected_game_ids_by_team = resolve_governed_team_game_ids(
-                            self.l15_expectation_resolver,
-                            season,
-                            _aware(cutoff),
-                            window=("l15" if stream_key.endswith("_l15") else "season"),
-                            manifest_id=authority.manifest_id,
-                            event_catalog_publication_id=(
-                                authority.event_catalog_publication_id
-                            ),
-                            event_catalog_checksum=authority.event_catalog_checksum,
-                        )
-                    except PublicationGovernanceUnavailable as error:
-                        raise ControlPlaneError(
-                            "publication_governance_unavailable"
-                        ) from error
-                if stream_key.endswith("_l15") and provenance_ids:
-                    try:
-                        expected_l15_date_from_by_team = (
-                            resolve_governed_l15_date_from_by_team(
-                                self.l15_expectation_resolver,
-                                season,
-                                _aware(cutoff),
-                                manifest_id=authority.manifest_id,
-                                event_catalog_publication_id=(
-                                    authority.event_catalog_publication_id
-                                ),
-                                event_catalog_checksum=authority.event_catalog_checksum,
-                            )
-                        )
-                    except PublicationGovernanceUnavailable as error:
-                        raise ControlPlaneError(
-                            "publication_governance_unavailable"
-                        ) from error
-                try:
-                    derived_payload = _compose_nba_observation_payload(
-                        session,
-                        stream=stream,
-                        stream_key=stream_key,
-                        season=season,
-                        cutoff=_aware(cutoff),
-                        manifest_id=authority.manifest_id,
-                        provenance_ids=provenance_ids,
-                        expected_game_ids_by_team=expected_game_ids_by_team or {},
-                        expected_l15_date_from_by_team=expected_l15_date_from_by_team,
-                    )
-                except _ProviderWindowUnavailable as error:
-                    raise ControlPlaneError(str(error)) from error
-                except ValueError as error:
-                    raise ControlPlaneError("publication_candidate_invalid") from error
-                if payload is not None and not hmac.compare_digest(
-                    canonical_publication_json(payload),
-                    canonical_publication_json(derived_payload),
-                ):
-                    raise ControlPlaneError("publication_candidate_invalid")
-                payload = derived_payload
-                encoded = _json(payload)
-                _validate_activation_candidate_payload(
-                    stream_key,
-                    encoded,
-                    season=season,
-                    expected_game_ids_by_team=expected_game_ids_by_team,
-                )
             return self._compose_active_in_session(
                 session, stream_key=stream_key, season=season, cutoff=cutoff,
-                encoded=encoded, payload=payload, expected_fence=expected_fence,
-                reason=reason, provenance_ids=provenance_ids, now=now,
-                provenance=ledger_provenance,
-                authority=authority,
+                encoded=candidate.encoded, payload=candidate.payload,
+                expected_fence=expected_fence, reason=reason,
+                provenance_ids=candidate.provenance_ids, now=now,
+                provenance=ledger_provenance, authority=candidate.authority,
                 _pointer_expectation=_pointer_expectation,
             )
 
@@ -3759,8 +3951,16 @@ class PublicationService(_SessionService):
         derive_expected_fence_from_lock: bool = False,
         corrected_provenance: Mapping[str, str] | None = None,
         authority=None,
+        discard_rollback_target: bool = False,
         _pointer_expectation: tuple[int, str | None] | None = None,
     ) -> PublicationVersion:
+        """Advance one stream's fenced pointer to a prepared replacement.
+
+        ``discard_rollback_target`` is the repair-group case: the displaced
+        version is the defect, so it must not become the stream's rollback
+        target and an identical payload must not short-circuit the advance.
+        """
+
         stream = session.get(PublicationStream, stream_key)
         if stream is None or not stream.enabled:
             raise ControlPlaneError("stream_unavailable")
@@ -3772,7 +3972,10 @@ class PublicationService(_SessionService):
         )
         if derive_expected_fence_from_lock:
             expected_fence = pointer.fence if pointer is not None else 0
-        if pointer is not None and pointer.active_publication_id:
+        if (
+            not discard_rollback_target
+            and pointer is not None and pointer.active_publication_id
+        ):
             current = session.get(PublicationVersion, pointer.active_publication_id)
             if (
                 current is not None and current.season == season
@@ -3869,7 +4072,7 @@ class PublicationService(_SessionService):
         for previous in stale_versions:
             previous.status = "superseded"
         pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = (
-            old, publication.publication_id, now
+            None if discard_rollback_target else old, publication.publication_id, now
         )
         self._invalidate_corrected_ledger_versions(
             session,
@@ -4428,6 +4631,11 @@ class PublicationService(_SessionService):
         if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
             raise ControlPlaneError("stream_unsupported")
         with self._session_scope(session) as session:
+            # A declared group owns its members' promotion.  Refusing here --
+            # not only in the worker that skips grouped jobs -- keeps every
+            # caller of the independent path from advancing half a group.
+            if stream_key in repair_group_member_streams(session, manifest_id):
+                raise ControlPlaneError("grouped_repair_pending")
             pointer_expectation = self._read_pointer_expectation(
                 session, stream_key,
             )
@@ -4436,6 +4644,121 @@ class PublicationService(_SessionService):
                 manifest_id=manifest_id, session=session,
                 _pointer_expectation=pointer_expectation,
             )
+
+    def promote_repair_group(
+        self, manifest_id: str, *, session: Session | None = None,
+    ) -> RepairGroupPromotion:
+        """Publish every member of one declared repair group, or nothing.
+
+        The whole operation is one transaction.  Members are locked and
+        guarded, then every replacement is composed and validated, and only
+        then does any pointer move.  A failure at any point -- missing
+        evidence, a stale guard, a validation or composition error, or a
+        failure between two pointer updates -- leaves the complete prior
+        publication state untouched.
+        """
+
+        now = self.clock()
+        with self._session_scope(session) as session:
+            found = _repair_group_rows(session, manifest_id)
+            if found is None:
+                raise ControlPlaneError("repair_group_not_found")
+            group, members = found
+            if group.promoted_at is not None:
+                raise ControlPlaneError("repair_group_already_promoted")
+            # The group row carries a foreign key to the manifest, so the
+            # row always exists; what matters is that it is still the season's
+            # authority.  A superseded manifest's catalog binding no longer
+            # governs, so its declaration must not discard anything.
+            manifest = session.get(CollectionManifest, manifest_id)
+            if manifest.status != "active":
+                raise ControlPlaneError("repair_group_manifest_inactive")
+            cutoff = _aware(manifest.cutoff)
+
+            # Phase 1 -- lock, guard, compose, and validate every member.
+            # Members are ordered by stream key so concurrent operators take
+            # the same locks in the same order.
+            prepared: list[tuple[Any, _PublicationCandidate]] = []
+            for member in members:
+                pointer = session.scalar(
+                    select(PublicationPointer)
+                    .where(PublicationPointer.stream_key == member.stream_key)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    pointer is None
+                    or pointer.active_publication_id != member.expected_publication_id
+                    or int(pointer.fence) != int(member.expected_fence)
+                ):
+                    raise ControlPlaneError("repair_group_guard_stale")
+                prepared.append((member, self._prepare_publication_candidate(
+                    session, stream_key=member.stream_key, season=group.season,
+                    cutoff=cutoff, payload=None, manifest_id=manifest_id,
+                )))
+
+            # Phase 2 -- advance every pointer against the guard just proven.
+            discarded: list[dict[str, Any]] = []
+            published: list[dict[str, Any]] = []
+            for member, candidate in prepared:
+                displaced = session.get(
+                    PublicationVersion, member.expected_publication_id,
+                )
+                publication = self._compose_active_in_session(
+                    session, stream_key=member.stream_key, season=group.season,
+                    cutoff=cutoff, encoded=candidate.encoded,
+                    payload=candidate.payload,
+                    expected_fence=int(member.expected_fence),
+                    reason=group.reason,
+                    provenance_ids=candidate.provenance_ids, now=now,
+                    authority=candidate.authority,
+                    discard_rollback_target=True,
+                )
+                # The displaced version can predate this cutoff, so the
+                # same-cutoff supersede inside the advance does not reach it.
+                if displaced is not None:
+                    displaced.status = "superseded"
+                    discarded.append({
+                        "stream_key": member.stream_key,
+                        "publication_id": displaced.publication_id,
+                        # The version's own fence, not the declared guard.
+                        # The two agree here -- the guard just matched -- but
+                        # the audit should name what it discarded, not what it
+                        # was compared against.
+                        "fence": int(displaced.fence),
+                        "cutoff": _iso(displaced.cutoff),
+                    })
+                published.append({
+                    "stream_key": member.stream_key,
+                    "publication_id": publication.publication_id,
+                    "fence": int(publication.fence),
+                })
+
+            # Settling the held jobs is load-bearing, not tidying.  Stamping
+            # ``promoted_at`` below releases the group, so a member left
+            # ``queued`` would be claimed by the very next worker pass and
+            # composed again -- and that ordinary advance would set
+            # ``previous_publication_id`` to the publication this repair just
+            # made active, handing back the rollback target the repair exists
+            # to destroy.
+            session.execute(update(CompositionJob).where(
+                CompositionJob.manifest_id == manifest_id,
+                CompositionJob.stream_key.in_(
+                    [member.stream_key for member in members]
+                ),
+            ).values(
+                status="succeeded", updated_at=now,
+                claimed_generation=None, last_error=None,
+            ))
+            group.promoted_at = now
+            session.flush()
+        return RepairGroupPromotion(
+            group_id=group.group_id,
+            manifest_id=manifest_id,
+            reason=group.reason,
+            discarded=tuple(discarded),
+            published=tuple(published),
+        )
 
     @staticmethod
     def _read_pointer_expectation(
@@ -4823,8 +5146,15 @@ class CollectionOperationsService(_SessionService):
 
     def _run_operator(self, *, actor: str, action: str, resource: str, reason: str,
                       mutation: Callable[[Session], Any],
-                      details: Mapping[str, Any] = ()) -> OperatorActionResult:
-        """Run state change, audit, and durable job in one DB transaction."""
+                      details: Mapping[str, Any] = (),
+                      details_from_result: Callable[[Any], Mapping[str, Any]] | None = None,
+                      ) -> OperatorActionResult:
+        """Run state change, audit, and durable job in one DB transaction.
+
+        ``details_from_result`` lets an action whose evidence is only known
+        under the transaction -- such as the exact publications a repair
+        discarded -- record it in the same single audit event.
+        """
 
         actor, action, resource, reason = self._validate_reason(actor, action, resource, reason)
         now = self.clock()
@@ -4838,10 +5168,13 @@ class CollectionOperationsService(_SessionService):
             changed = mutation(session)
             job.status = "succeeded"
             job.completed_at = self.clock()
+            resolved = dict(details)
+            if details_from_result is not None:
+                resolved.update(details_from_result(changed))
             audit = AuditEvent(
                 event_id=_uuid(), actor=actor, action=action, resource=resource,
                 reason=reason,
-                details=_json({**dict(details), "operator_job_id": job.job_id}),
+                details=_json({**resolved, "operator_job_id": job.job_id}),
                 created_at=now,
             )
             session.add(audit)
@@ -4990,6 +5323,21 @@ class CollectionOperationsService(_SessionService):
             mutation=lambda session: self.collection_control.open_cycle(
                 manifest_id, session=session
             ),
+        )
+
+    def promote_repair_group(self, manifest_id: str, *, actor: str,
+                             reason: str) -> OperatorActionResult:
+        """Publish one declared repair group as a single audited change."""
+
+        if self.publication_service is None:
+            raise ControlPlaneError("control_plane_unavailable")
+        return self._run_operator(
+            actor=actor, action="publication.repair_group.promote",
+            resource=manifest_id, reason=reason,
+            mutation=lambda session: self.publication_service.promote_repair_group(
+                manifest_id, session=session
+            ),
+            details_from_result=lambda promotion: promotion.audit_details,
         )
 
     def scoped_repair(self, stream_key: str, *, season: str, cutoff: datetime,
@@ -5663,6 +6011,177 @@ def _manifest_streams(session: Session, manifest: CollectionManifest) -> list[Pu
     return selected
 
 
+def _normalize_repair_group(value: Any) -> dict[str, Any]:
+    """Validate one operator repair-group declaration into canonical form.
+
+    This is the structural gate only: it rejects a malformed, duplicated,
+    unknown, or unschedulable member without touching the database.  Identity,
+    season, cutoff, and pointer guards need the manifest transaction and are
+    checked by ``_bind_repair_group``.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {"reason", "members"}:
+        raise ControlPlaneError("invalid_repair_group")
+    reason = str(value.get("reason") or "").strip()
+    if not reason or len(reason) > MAX_REPAIR_GROUP_REASON:
+        raise ControlPlaneError("repair_group_reason_required")
+    raw_members = value.get("members")
+    if isinstance(raw_members, (str, bytes)) or not isinstance(raw_members, Sequence):
+        raise ControlPlaneError("invalid_repair_group")
+    members: dict[str, dict[str, Any]] = {}
+    for entry in raw_members:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "stream_key", "expected_publication_id", "expected_fence",
+        }:
+            raise ControlPlaneError("invalid_repair_group_member")
+        stream_key = str(entry["stream_key"]).strip()
+        if stream_key in members:
+            raise ControlPlaneError("duplicate_repair_group_member")
+        definition = _surface_definition(stream_key)
+        if (
+            stream_key not in NBA_PUBLICATION_STREAM_KEYS
+            or definition is None
+            or definition.stream_key != stream_key
+            or definition.strategy == "never_schedule"
+        ):
+            raise ControlPlaneError("unknown_repair_group_member")
+        publication_id = str(entry["expected_publication_id"]).strip()
+        fence = entry["expected_fence"]
+        if (
+            not publication_id
+            or isinstance(fence, bool)
+            or not isinstance(fence, int)
+            or fence < 0
+        ):
+            raise ControlPlaneError("invalid_repair_group_member")
+        members[stream_key] = {
+            "stream_key": stream_key,
+            "expected_publication_id": publication_id,
+            "expected_fence": int(fence),
+        }
+    if not MIN_REPAIR_GROUP_MEMBERS <= len(members) <= MAX_REPAIR_GROUP_MEMBERS:
+        raise ControlPlaneError("invalid_repair_group_membership")
+    return {"reason": reason, "members": [members[key] for key in sorted(members)]}
+
+
+def _bind_repair_group(
+    session: Session, *, manifest: CollectionManifest,
+    declaration: Mapping[str, Any], now: datetime,
+) -> PublicationRepairGroup:
+    """Persist a validated declaration against live publication identities.
+
+    Every member must name a real publication of this manifest's season on one
+    shared prior cutoff.  A member the manifest does not collect for, or whose
+    named publication belongs to another stream, season, or cutoff, is
+    rejected here so the manifest never becomes active around an unusable
+    group.
+    """
+
+    manifest_scopes = set(json.loads(manifest.scopes))
+    manifest_cutoff = _aware(manifest.cutoff)
+    member_cutoffs: set[datetime] = set()
+    members = list(declaration["members"])
+    for member in members:
+        stream_key = member["stream_key"]
+        if stream_key not in manifest_scopes:
+            raise ControlPlaneError("ineligible_repair_group_member")
+        if session.get(PublicationStream, stream_key) is None:
+            raise ControlPlaneError("unknown_repair_group_member")
+        publication = session.get(
+            PublicationVersion, member["expected_publication_id"],
+        )
+        if publication is None or publication.stream_key != stream_key:
+            raise ControlPlaneError("unknown_repair_group_member")
+        if publication.season != manifest.season:
+            raise ControlPlaneError("cross_season_repair_group_member")
+        member_cutoffs.add(_aware(publication.cutoff))
+    # The displaced pair is one snapshot.  Members drawn from different
+    # cutoffs, or from a cutoff this manifest has already moved past, do not
+    # describe a state that can be replaced atomically.
+    if len(member_cutoffs) != 1 or max(member_cutoffs) > manifest_cutoff:
+        raise ControlPlaneError("cross_cutoff_repair_group_member")
+    group = PublicationRepairGroup(
+        group_id=_uuid(),
+        manifest_id=manifest.manifest_id,
+        season=manifest.season,
+        cutoff=manifest_cutoff,
+        reason=declaration["reason"],
+        checksum=_checksum(_json(declaration)),
+        created_at=now,
+    )
+    session.add(group)
+    for member in members:
+        session.add(PublicationRepairGroupMember(
+            group_id=group.group_id,
+            stream_key=member["stream_key"],
+            expected_publication_id=member["expected_publication_id"],
+            expected_fence=member["expected_fence"],
+            created_at=now,
+        ))
+    return group
+
+
+def _repair_group_rows(
+    session: Session, manifest_id: str | None,
+) -> tuple[PublicationRepairGroup, list[PublicationRepairGroupMember]] | None:
+    """Read the declared repair group bound to one manifest, if any."""
+
+    if not manifest_id:
+        return None
+    group = session.scalar(select(PublicationRepairGroup).where(
+        PublicationRepairGroup.manifest_id == manifest_id
+    ))
+    if group is None:
+        return None
+    members = list(session.scalars(select(PublicationRepairGroupMember).where(
+        PublicationRepairGroupMember.group_id == group.group_id
+    ).order_by(PublicationRepairGroupMember.stream_key)))
+    return group, members
+
+
+def repair_group_member_streams(session: Session, manifest_id: str | None) -> frozenset[str]:
+    """The stream keys currently held for grouped promotion.
+
+    A promoted group has already consumed its declaration, so its members
+    return to ordinary independent publication.
+    """
+
+    found = _repair_group_rows(session, manifest_id)
+    if found is None or found[0].promoted_at is not None:
+        return frozenset()
+    return frozenset(member.stream_key for member in found[1])
+
+
+def _collector_repair_group_view(
+    session: Session, manifest: CollectionManifest, authorized_scopes: Iterable[str],
+) -> dict[str, Any] | None:
+    """Render the group for a collector without widening its permissions.
+
+    A collector sees only the members it is already authorized to collect, and
+    never the operator pointer guards: expected publication identities and
+    fences are control-plane state that no collector scope grants.
+    """
+
+    found = _repair_group_rows(session, manifest.manifest_id)
+    if found is None:
+        return None
+    group, members = found
+    authorized = set(authorized_scopes)
+    visible = [
+        member.stream_key for member in members
+        if member.stream_key in authorized
+    ]
+    if not visible:
+        return None
+    return {
+        "group_id": group.group_id,
+        "reason": group.reason,
+        "checksum": group.checksum,
+        "members": visible,
+        "execution": "promoted" if group.promoted_at is not None else "grouped",
+    }
+
+
 def _find_observation_ids(value: Any) -> set[str]:
     found: set[str] = set()
     if isinstance(value, dict):
@@ -5881,11 +6400,7 @@ def _validate_opponent_window_scope(
     endpoint_window = scope.get("endpoint_window")
     expected_last_n = 15 if window == "l15" else 0 if window == "season" else None
     expected_date_to = slate_date_for_instant(cutoff).strftime("%m/%d/%Y")
-    expected_value_mode = (
-        "totals_with_minutes"
-        if observation_type == "shot_types_opponent"
-        else "per48"
-    )
+    expected_value_mode = "totals_with_minutes"
     try:
         team_id = int(scope.get("team_id"))
     except (TypeError, ValueError, OverflowError):

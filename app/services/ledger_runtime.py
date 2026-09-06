@@ -33,7 +33,11 @@ from app.services.ledger_materialization import LedgerCorrectionQueue
 from app.services.ledger_materialization import LedgerMaterializationUnavailable
 from app.services.ledger_derivations import LedgerDerivationUnavailable
 from app.services.ledger_lineage import LedgerLineage
-from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.collection_control import (
+    ControlPlaneError,
+    PublicationService,
+    repair_group_member_streams,
+)
 from app.services.team_matchup_publications import (
     NBA_PUBLICATION_STREAM_KEYS,
     PublicationGovernanceUnavailable,
@@ -660,6 +664,18 @@ class LedgerRuntime:
                         CompositionJob.created_at,
                         CompositionJob.job_id,
                     )).all()
+                    # A member of a declared repair group is promoted only by
+                    # the grouped operation.  Leave its job queued rather than
+                    # claiming it here: claiming without promoting would strand
+                    # the row in ``running`` and a partial group would be worse.
+                    grouped_streams = repair_group_member_streams(
+                        session, manifest_id,
+                    )
+                    if grouped_streams:
+                        rows = [
+                            row for row in rows
+                            if str(row.stream_key) not in grouped_streams
+                        ]
                     if not rows:
                         continue
                     slice_jobs = tuple(
