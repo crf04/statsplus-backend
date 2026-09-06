@@ -22,19 +22,6 @@ def _safe_url_path(url):
     return url.split("?", 1)[0] if url else "unknown"
 
 
-def log_retry_attempt(retry_state):
-    """Callback function to log retry attempts without exposing query strings.
-
-    Args:
-        retry_state: Retry state object containing attempt information
-    """
-    attempt_number = retry_state.attempt_number
-    url = _safe_url_path(getattr(retry_state, "url", "unknown"))
-
-    if attempt_number > 1:
-        logger.warning("NBA API retry attempt #%d for %s", attempt_number - 1, url)
-
-
 class RetryWithLogging(Retry):
     """Custom Retry class that counts retries for provider telemetry."""
 

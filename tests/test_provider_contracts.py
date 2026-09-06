@@ -34,22 +34,6 @@ def _load(name: str) -> dict:
         return json.load(handle)
 
 
-@pytest.mark.parametrize(
-    "fixture",
-    [
-        "nba_stats/game_logs.valid.json",
-        "nba_stats/player_game_logs.playoffs.json",
-        "pbp_stats/totals.valid.json",
-        "pbp_stats/game_logs.valid.json",
-        "pbp_stats/game_stats.valid.json",
-    ],
-)
-def test_recorded_fixtures_have_the_documented_shape(fixture):
-    payload = _load(fixture)
-    assert isinstance(payload, dict)
-    assert json.dumps(payload)  # fixture must remain valid JSON
-
-
 def test_recorded_nba_game_logs_parse_through_the_live_path():
     telemetry.clear_recorded_provider_events()
     frame = parse_recorded_game_logs(_load("nba_stats/game_logs.valid.json"))

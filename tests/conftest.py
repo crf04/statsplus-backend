@@ -37,40 +37,6 @@ def mock_db_engine():
     mock_engine.connect.return_value.__exit__ = Mock(return_value=None)
     return mock_engine
 
-@pytest.fixture
-def mock_game_service(mock_db_engine, mock_redis_client):
-    """Mock GameService for testing"""
-    from app.services.game_service import GameService
-    service = GameService(mock_db_engine, mock_redis_client)
-    return service
-
-@pytest.fixture
-def sample_player_data():
-    """Sample player data for testing"""
-    return {
-        'player_name': 'LeBron James',
-        'season': '2024-25',
-        'game_logs': [
-            {'GAME_DATE': '2024-01-15', 'PTS': 25, 'REB': 8, 'AST': 7},
-            {'GAME_DATE': '2024-01-17', 'PTS': 30, 'REB': 6, 'AST': 9}
-        ]
-    }
-
-@pytest.fixture
-def sample_filter_params():
-    """Sample filter parameters for testing"""
-    return {
-        'season_filter': '2024-25',
-        'teams_against': ['LAL'],
-        'rank_filter': [5],
-        'date_filter': '2024-01-01',
-        'location_filter': 'Both',
-        'minutes_filter': [20, 48],
-        'players_on': [],
-        'players_off': [],
-        'self_filters': []
-    }
-
 @pytest.fixture(autouse=True)
 def setup_logging():
     """Setup logging for tests"""

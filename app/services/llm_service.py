@@ -7,15 +7,13 @@ query processing with proper error handling, retry logic, and configuration.
 
 import os
 import json
-import asyncio
 from typing import Optional, Dict, Any, List
 import logging
-from openai import OpenAI, AsyncOpenAI
+from openai import OpenAI
 from openai.types.chat import ChatCompletion
 from dotenv import load_dotenv
 
 from app.config.settings import LLMSettings, RuntimeSettings, get_runtime_settings
-from ..services.nl_query.parser import QueryComponents
 
 
 # Load environment variables
@@ -81,9 +79,8 @@ class LLMService:
         if not self.config.validate():
             raise LLMError("Invalid LLM configuration")
         
-        # Initialize OpenAI clients
+        # Initialize the OpenAI client
         self.client = OpenAI(api_key=self.config.api_key)
-        self.async_client = AsyncOpenAI(api_key=self.config.api_key)
         
         self.engine = engine
         self.player_aliases: Dict[str, str] = {}
@@ -269,105 +266,6 @@ Focus on accuracy and provide confidence scores for each extracted component."""
                 "error": str(e),
                 "content": None
             }
-    
-    async def query_llm_async(self, user_query: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Async version of query_llm for better performance.
-        
-        Args:
-            user_query: The user's natural language query
-            system_prompt: Optional custom system prompt
-            
-        Returns:
-            Dict containing the LLM response and metadata
-        """
-        if system_prompt is None:
-            system_prompt = self._build_system_prompt()
-        
-        try:
-            for attempt in range(self.config.max_retries):
-                try:
-                    response = await self.async_client.chat.completions.create(
-                        model=self.config.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_query}
-                        ],
-                        timeout=self.config.timeout,
-                        **self._completion_options(),
-                    )
-                    
-                    content = response.choices[0].message.content
-                    
-                    try:
-                        parsed_content = json.loads(content)
-                    except json.JSONDecodeError:
-                        parsed_content = {"raw_response": content, "parsing_error": True}
-                    
-                    return {
-                        "success": True,
-                        "content": parsed_content,
-                        "raw_response": content,
-                        "usage": response.usage.model_dump() if response.usage else None,
-                        "model": response.model,
-                        "attempt": attempt + 1
-                    }
-                    
-                except Exception as e:
-                    logger.warning(f"Async LLM attempt {attempt + 1} failed: {e}")
-                    if attempt == self.config.max_retries - 1:
-                        raise
-                    await asyncio.sleep(2 ** attempt)
-            
-        except Exception as e:
-            logger.error(f"Async LLM query failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "content": None
-            }
-    
-    def parse_query(self, query: str) -> Optional[QueryComponents]:
-        """
-        Parse a query into QueryComponents using the LLM.
-        
-        Args:
-            query: The natural language query to parse
-            
-        Returns:
-            QueryComponents object or None if parsing failed
-        """
-        result = self.query_llm(query)
-        
-        if not result["success"]:
-            logger.error(f"LLM parsing failed for query: {query}")
-            return None
-        
-        content = result["content"]
-        if isinstance(content, dict) and "parsing_error" not in content:
-            try:
-                # Convert LLM response to QueryComponents
-                # Note: You may need to adjust field mappings based on your QueryComponents structure
-                return QueryComponents(
-                    player_name=content.get("player_name"),
-                    team_name=content.get("team_name"),
-                    game_count=content.get("game_count"),
-                    date_range=content.get("date_range"),
-                    opponent_filters=content.get("opponent_filters", []),
-                    location=content.get("location"),
-                    minutes_filter=tuple(content["minutes_filter"]) if content.get("minutes_filter") else None,
-                    self_filters=content.get("self_filters", []),
-                    players_on=content.get("players_on", []),
-                    players_off=content.get("players_off", []),
-                    intent=content.get("intent"),
-                    confidence=content.get("confidence", 0.0),
-                    raw_query=query
-                )
-            except Exception as e:
-                logger.error(f"Failed to convert LLM response to QueryComponents: {e}")
-                return None
-        
-        return None
     
     def test_queries(self, queries: List[str]) -> List[Dict[str, Any]]:
         """

@@ -1885,40 +1885,6 @@ class BaseQueryParser:
         
         return True
 
-    def _extract_multiple_players(self, text: str) -> List[str]:
-        """
-        Extract multiple player names from a text fragment, splitting on common conjunctions and separators.
-        Args:
-            text (str): The text fragment containing one or more player names.
-        Returns:
-            List[str]: List of canonical player names found in the fragment.
-        Implementation details:
-            - Splits on 'and', ',', '&', '+'.
-            - Uses _extract_single_player_name for each part.
-        """
-        if not text or len(text.strip()) < 2:
-            return []
-        separators = [
-            r'\s+and\s+',
-            r'\s*,\s*',
-            r'\s*&\s*',
-            r'\s*\+\s*',
-        ]
-        parts = [text]
-        for separator in separators:
-            new_parts = []
-            for part in parts:
-                new_parts.extend(re.split(separator, part, flags=re.IGNORECASE))
-            parts = new_parts
-        player_names = []
-        for part in parts:
-            part = part.strip()
-            if part:
-                player_name = self._extract_single_player_name(part, context="players_on_off")
-                if player_name:
-                    player_names.append(player_name)
-        return player_names
-    
     def _classify_intent(self, query: str, components: QueryComponents) -> Optional[str]:
         """
         Classify the intent of the query (game logs, player profile, team stats).

@@ -94,12 +94,6 @@ def _check_pbp_stats_connectivity(provider=None):
     return health_service.check_pbp_api()
 
 
-def _check_database_connection():
-    """Compatibility helper delegating to the injected health service."""
-
-    return health_service.check_database()
-
-
 __all__ = [
     "database_healthcheck",
     "detailed_health",

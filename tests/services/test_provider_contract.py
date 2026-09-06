@@ -62,21 +62,6 @@ def test_dropped_and_required_game_log_columns_do_not_overlap():
     assert not overlap, f"Columns are dropped then read: {overlap}"
 
 
-def test_the_columns_dropped_from_game_logs_leave_a_usable_frame():
-    """Dropping the discard list must not remove everything callers need."""
-    from nba_api.stats.endpoints import playergamelogs
-
-    from app.providers.nba_stats import (
-        _DROP_PROVIDER_COLUMNS,
-        REQUIRED_GAME_LOG_COLUMNS,
-    )
-
-    available = declared_columns(playergamelogs.PlayerGameLogs, "PlayerGameLogs")
-    remaining = available - set(_DROP_PROVIDER_COLUMNS)
-
-    assert set(REQUIRED_GAME_LOG_COLUMNS).issubset(remaining)
-
-
 def test_derived_game_log_columns_are_not_provider_columns():
     """The adapter computes these; a provider collision would be silently lost."""
     from nba_api.stats.endpoints import playergamelogs

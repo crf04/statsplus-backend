@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 import dateparser
 from dateutil.relativedelta import relativedelta
-from app.config.settings import RuntimeSettings, current_nba_season, get_runtime_settings
+from app.config.settings import RuntimeSettings, get_runtime_settings
 
 
 class NBADateParser:
@@ -35,10 +35,6 @@ class NBADateParser:
             "playoff start": "2025-04-19",
             "season start": "2024-10-22",           # Regular season opener Oct 22 :contentReference[oaicite:3]{index=3}
         }
-    
-    def _get_current_nba_season(self) -> str:
-        """Get current NBA season in YYYY-YY format."""
-        return current_nba_season()
     
     def parse_date_from_query(self, query: str) -> Optional[str]:
         """
