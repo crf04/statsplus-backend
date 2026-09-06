@@ -2083,8 +2083,11 @@ current Slate Date through the same `_resolve_target` step `resolve` runs per
 stored Target, and reduces the result to `{game, fit_count}` or `None`. The
 mapping either read accepts is the item `list_targets` emits, which is why
 `UserService.validate_target_draft` exists: it runs the create validators and
-derives the title without touching the database, and returns that shape minus
-`id` and timestamps. The cap and the duplicate rule are deliberately not
+derives the title and returns that shape minus `id` and timestamps. A
+defender Condition also verifies membership through the injected stored
+player-game-log reader; this validation writes nothing. Membership validation
+runs before the preview captures its evidence snapshot, so it is not part of
+the atomic generation shared by the Backtest and tonight's evidence. The cap and the duplicate rule are deliberately not
 applied there -- both compare a write against held rows, and a draft is not a
 write.
 
