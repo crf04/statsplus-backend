@@ -1269,3 +1269,48 @@ def test_invalid_stat_preferences_retain_the_http_error_contract(client, authent
     response = getattr(client, method)(path, json={'stat_preferences': {'columns': ['BAD'], 'graded_by': 'BAD'}}, headers=authenticate())
     assert response.status_code == 400
     assert response.json['error'] == {'code': 'invalid_input', 'message': 'Unknown stat key.'}
+
+
+@pytest.mark.parametrize("use_publication", [False, True])
+def test_box_totals_use_real_batch_publication_rows_for_each_players_regular_season(backtest_engine, targets, backtest_settings, use_publication):
+    from dataclasses import asdict, replace
+    from datetime import timedelta
+    from app.services.collection_control import PublicationService
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    publications = PublicationService(backtest_engine, clock=lambda: now)
+    publications.register_stream('player_game_logs', provider='ledger', owner='railway',
+        required_observations=(), publication_strategy='replace', enabled=True, freshness_rule='cutoff_current')
+    rows = [
+        _row(LEBRON, points=30, minutes=30),
+        _row(LEBRON, game_id='0022500002', opponent_team_id=BOS, points=10, minutes=20),
+        _row(TATUM, points=40, minutes=35),
+        _row(TATUM, game_id='0022500003', opponent_team_id=BOS, points=5, minutes=15),
+        _row(LEBRON, game_id='0042500001', season_type='Playoffs', points=99),
+        _row(EMBIID, opponent_team_id=BOS, points=88),
+        replace(_row(LEBRON, points=77), season='2024-25', game_id='0022400001'),
+    ]
+    publications.compose('player_game_logs', season=SEASON, cutoff=now,
+        payload={'rows': [{**asdict(row), 'game_date': row.game_date.isoformat()} for row in rows if row.season == SEASON and row.season_type == 'Regular Season']})
+    reader = DatabaseFirstPublicationReader(backtest_engine, clock=lambda: now) if use_publication else None
+    logs = PlayerGameLogRepository(backtest_engine, statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON, stats_surface_max_age=timedelta(hours=30), publication_reader=reader, serve_stale=True)
+    if not use_publication:
+        logs.publish(SEASON, rows[:-1], retrieved_at=now, source_provider="nba_stats", source_row_count=len(rows)-1)
+        logs.publish("2024-25", rows[-1:], retrieved_at=now, source_provider="nba_stats", source_row_count=1)
+    service = TargetBacktestService(targets=targets, player_logs=logs,
+        player_diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2), TATUM: _zone_diet(0.45, 0.2)}),
+        statistic_catalog=StatisticCatalog.load_default(), publication_reader=reader,
+        settings=backtest_settings.model_copy(update={'matchup_scores': MatchupScoreSettings(min_games=1)}))
+    players = service.backtest_target({'opponent': 'OKC', 'qualifiers': [CORNER_THREE]})['players']
+    by_id = {player['canonical_id']: player for player in players}
+    assert set(by_id) == {LEBRON, TATUM}
+    assert by_id[LEBRON]['season_games'] == 2
+    assert by_id[LEBRON]['season_totals']['points'] == 40
+    assert by_id[LEBRON]['season_totals']['minutes'] == 50
+    assert by_id[LEBRON]['season_averages']['PTS'] == 20
+    assert by_id[TATUM]['season_games'] == 2
+    assert by_id[TATUM]['season_totals']['points'] == 45
+    assert by_id[TATUM]['season_averages']['PTS'] == 22.5
