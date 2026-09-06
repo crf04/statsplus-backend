@@ -384,7 +384,22 @@ class ResidentialCollector:
                 failures.append(safe_code(str(error), fallback="provider_unavailable"))
             except (ProviderContractError, OutboxFull) as error:
                 code = "outbox_full" if isinstance(error, OutboxFull) else getattr(error, "reason", str(error))
-                failures.append(safe_code(code, fallback="provider_schema_changed"))
+                reason = safe_code(code, fallback="provider_schema_changed")
+                failures.append(reason)
+                # A reconciliation failure that survived its paired refetch is
+                # a real provider defect.  Its bounded diagnostics are what
+                # make it actionable, so record them rather than collapsing
+                # the error to a bare reason code.
+                diagnostics = getattr(error, "diagnostics", None)
+                if isinstance(diagnostics, Mapping):
+                    detail = " ".join(
+                        f"{key}={value}"
+                        for key, value in sorted(diagnostics.items())
+                    )
+                    self.status.record(reason, scope=scope)
+                    # The in-memory status dies with the process, so the
+                    # rotating log is where an operator actually reads this.
+                    log_status(self.logger, reason, scope=scope, detail=detail)
             except Exception as error:
                 failures.append(safe_code(type(error).__name__, fallback="provider_failure"))
         return attempted, spooled, tuple(skipped), tuple(failures), transient

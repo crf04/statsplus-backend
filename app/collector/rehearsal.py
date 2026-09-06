@@ -66,18 +66,29 @@ class SanitizedFixtureProvider:
 
     def fetch_opponent_shooting_zone(self, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
         self._record("opponent_zone", date_from=date_from, **parameters)
+        # Integer Totals that reconcile: four zones at 1/2, a 1+1 / 2+2
+        # corner, and Backcourt carrying the remainder up to the opponent's
+        # own field-goal totals.
         return [{
             "team_id": parameters["team_id"],
             "GP": 15 if parameters.get("last_n_games") == 15 else 82,
+            "MIN": 725 if parameters.get("last_n_games") == 15 else 3960,
             **{
-                f"{zone}_{stat}": 1
+                f"{zone}_OPP_FGM": 1
                 for zone in SHOT_ZONES if zone != "Corner 3"
-                for stat in ("OPP_FGM", "OPP_FGA")
             },
-            "Left Corner 3_OPP_FGM": 0.5,
-            "Left Corner 3_OPP_FGA": 0.5,
-            "Right Corner 3_OPP_FGM": 0.5,
-            "Right Corner 3_OPP_FGA": 0.5,
+            **{
+                f"{zone}_OPP_FGA": 2
+                for zone in SHOT_ZONES if zone != "Corner 3"
+            },
+            "Left Corner 3_OPP_FGM": 1,
+            "Left Corner 3_OPP_FGA": 2,
+            "Right Corner 3_OPP_FGM": 1,
+            "Right Corner 3_OPP_FGA": 2,
+            "Backcourt_OPP_FGM": 0,
+            "Backcourt_OPP_FGA": 1,
+            "OPP_TOTAL_FGM": 6,
+            "OPP_TOTAL_FGA": 13,
         }]
 
     @staticmethod

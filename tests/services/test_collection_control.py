@@ -2625,3 +2625,80 @@ def test_discovery_exposes_the_group_without_widening_collector_permissions(repa
     assert env["control"].get_manifest(
         ordinary.manifest_id, claims=both,
     )._repair_group is None
+
+
+# --- the central reconciliation boundary (#233) -----------------------------
+
+def _zone_document(**overrides):
+    """One accepted opponent-zone observation payload, as the collector writes it."""
+
+    zones = {
+        "Restricted Area": {"FGM": 902, "FGA": 1504},
+        "In The Paint (Non-RA)": {"FGM": 380, "FGA": 905},
+        "Mid-Range": {"FGM": 322, "FGA": 780},
+        "Corner 3": {"FGM": 260, "FGA": 668},
+        "Above the Break 3": {"FGM": 742, "FGA": 2075},
+    }
+    document = {
+        "base": "shot_zones",
+        "records": [
+            {
+                "team_id": 1610612738, "base": "shot_zones",
+                "category": zone, "slice_key": zone,
+                "games_played": 82, "minutes": 3946, **values,
+            }
+            for zone, values in zones.items()
+        ],
+        "reconciliation": {
+            "opponent_totals": {"FGM": 2608, "FGA": 5965},
+            "Backcourt": {"FGM": 2, "FGA": 33},
+            "Left Corner 3": {"FGM": 129, "FGA": 331},
+            "Right Corner 3": {"FGM": 131, "FGA": 337},
+        },
+    }
+    document.update(overrides)
+    return document
+
+
+def test_central_reconciliation_refuses_evidence_the_collector_would_have():
+    """The backend re-derives the identities; it does not trust the upload.
+
+    A collector's success is a claim.  These payloads are exactly what a
+    tampered-with or obsolete collector could upload, and each must be refused
+    by the central boundary on its own.
+    """
+
+    from app.services.collection_control import _assert_zone_reconciliation
+
+    # The coherent document passes.
+    _assert_zone_reconciliation(_zone_document())
+
+    # Zones that no longer add up to the independent opponent total.
+    broken = _zone_document()
+    broken["records"][0]["FGA"] = 1503
+    with pytest.raises(ValueError, match="zone reconciliation mismatch"):
+        _assert_zone_reconciliation(broken)
+
+    # A combined corner that disagrees with its own sides.
+    drifted = _zone_document()
+    drifted["reconciliation"]["Left Corner 3"]["FGM"] = 130
+    with pytest.raises(ValueError, match="zone reconciliation mismatch"):
+        _assert_zone_reconciliation(drifted)
+
+    # Evidence stripped out entirely cannot buy a pass.  Omitting the corner
+    # sides must fail rather than skip the identity they prove.
+    for missing in ("reconciliation", "opponent_totals", "Backcourt",
+                    "Left Corner 3"):
+        stripped = _zone_document()
+        if missing == "reconciliation":
+            stripped.pop("reconciliation")
+        else:
+            stripped["reconciliation"].pop(missing)
+        with pytest.raises(ValueError, match="zone reconciliation missing"):
+            _assert_zone_reconciliation(stripped)
+
+    # A short zone set is not a licence to reconcile a subset.
+    short = _zone_document()
+    short["records"] = short["records"][:4]
+    with pytest.raises(ValueError, match="zone reconciliation incomplete"):
+        _assert_zone_reconciliation(short)
