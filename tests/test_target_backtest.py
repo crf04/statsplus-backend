@@ -186,6 +186,8 @@ class FakeLogs:
                     per_minute={},
                 ),
                 last_ten_minutes=(34.0,),
+                rate_rows=tuple(row for row in getattr(self, 'season_rows', self.rows)
+                                if row.player_id == player_id and row.season_type == 'Regular Season'),
             )
             for player_id in player_ids
         }
@@ -1150,15 +1152,26 @@ def test_box_lines_and_totals_include_the_whole_regular_season(targets, build_ba
     opponent = replace(_row(LEBRON), free_throws_made=2, free_throws_attempted=3, steals=1, blocks=2, turnovers=3, offensive_rebounds=2, defensive_rebounds=6, personal_fouls=4)
     other = replace(opponent, game_id='other', opponent_team_id=BOS, points=20, minutes=26)
     playoff = replace(opponent, game_id='playoff', season_type='Playoffs', points=99)
-    logs = FakeLogs(rows=[opponent])
-    logs.list_player_rows = lambda *args, **kwargs: (opponent, other, playoff)
-    service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}))
-    player = service.backtest_target({'opponent': 'OKC', 'qualifiers': [CORNER_THREE]})['players'][0]
+    second = replace(opponent, player_id=TATUM, points=40)
+    second_other = replace(other, player_id=TATUM, points=5)
+    logs = FakeLogs(rows=[opponent, second])
+    logs.season_rows = (opponent, other, playoff, second, second_other)
+    logs.list_player_rows = Mock(side_effect=AssertionError("Season rows must be read in one batch."))
+    service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2), TATUM: _zone_diet(0.45, 0.2)}))
+    snapshot = object()
+    players = service.backtest_target({'opponent': 'OKC', 'qualifiers': [CORNER_THREE]}, publication_snapshot=snapshot)['players']
+    player = players[0]
+    assert players[1]['canonical_id'] == TATUM
+    assert players[1]['season_totals']['points'] == 45
+    assert players[1]['season_games'] == 2
+    assert logs.snapshots == [snapshot, snapshot]
     assert player['games'][0]['line'] == {
         'points': 30, 'rebounds': 8, 'assists': 9, 'field_goals_made': 12, 'field_goals_attempted': 20,
         'threes_made': 4, 'threes_attempted': 8, 'free_throws_made': 2, 'free_throws_attempted': 3,
         'steals': 1, 'blocks': 2, 'turnovers': 3, 'offensive_rebounds': 2, 'defensive_rebounds': 6, 'fouls': 4, 'minutes': 34,
     }
+    assert logs.summary_calls == [(SEASON, (LEBRON, TATUM))]
+    logs.list_player_rows.assert_not_called()
     assert player['season_games'] == 2
     assert player['season_totals'] == {
         'points': 50, 'rebounds': 16, 'assists': 18, 'field_goals_made': 24, 'field_goals_attempted': 40,
@@ -1247,3 +1260,12 @@ def test_roster_reads_the_immutable_publication_instead_of_legacy_rows(backtest_
         stats_surface_season=SEASON, stats_surface_max_age=timedelta(hours=30), publication_reader=reader)
     payload = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings, publication_reader=reader).get('OKC')
     assert payload['players'] == [{'player_id': 99, 'name': 'Published defender', 'games_played': 1, 'average_minutes': 27.0}]
+
+
+@pytest.mark.parametrize(('method', 'path', 'seam'), [('post', '/api/user/targets', 'create_target'), ('patch', '/api/user/targets/7', 'update_target'), ('post', '/api/user/targets/preview', 'validate_target_draft')])
+def test_invalid_stat_preferences_retain_the_http_error_contract(client, authenticate, dependencies, method, path, seam):
+    from app.errors import InvalidInputError
+    setattr(dependencies.user_service, seam, Mock(side_effect=InvalidInputError('Unknown stat key.')))
+    response = getattr(client, method)(path, json={'stat_preferences': {'columns': ['BAD'], 'graded_by': 'BAD'}}, headers=authenticate())
+    assert response.status_code == 400
+    assert response.json['error'] == {'code': 'invalid_input', 'message': 'Unknown stat key.'}

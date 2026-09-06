@@ -414,10 +414,7 @@ class TargetBacktestService:
                     shares,
                     summaries[player_id],
                     markets,
-                    tuple(row for row in call_with_read_scope(
-                        self.player_logs.list_player_rows, season, player_id,
-                        publication_snapshot=snapshot,
-                    ) if row.season_type == REGULAR_SEASON_TYPE),
+                    summaries[player_id].rate_rows,
                 )
             )
         # The Matchup's own ordering, so the two Target surfaces read the same

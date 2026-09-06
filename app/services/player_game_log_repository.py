@@ -145,6 +145,8 @@ class PlayerSeasonLogSummary:
     player_id: int
     season_rate: PlayerSeasonRate | None
     last_ten_minutes: tuple[float, ...]
+    # The same filtered evidence used by season_rate, retained for full box totals.
+    rate_rows: tuple[PlayerGameLogRecord, ...] = ()
 
 
 class PlayerGameLogRepository:
@@ -1046,6 +1048,8 @@ class PlayerGameLogRepository:
                         or row.season_type == rate_season_type
                     ),
                 ),
+                rate_rows=tuple(row for row in rows_by_player[player_id]
+                                if rate_season_type is None or row.season_type == rate_season_type),
                 last_ten_minutes=tuple(
                     row.minutes for row in rows_by_player[player_id][-10:]
                 ),
