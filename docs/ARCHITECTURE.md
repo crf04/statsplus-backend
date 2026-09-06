@@ -2071,6 +2071,47 @@ The backtest is a separate route from resolution deliberately: the league-wide
 game-log scan runs only when a reader expands one Target, so the Slate's own
 read stays the cost of one Slate plus the Matchups its Targets name.
 
+### Target preview (#253)
+
+The Lab previews a Draft Target -- one no row holds -- and owes it the same
+numbers a saved Target gets, so neither read grew a second evaluator. Each
+gained an entry that takes a Target *mapping* instead of an id or an account:
+`TargetBacktestService.backtest_target(target)` is the whole backtest, and
+`backtest(uid, id)` is now `get_target` followed by it;
+`TargetResolutionService.today(target)` resolves one mapping against the
+current Slate Date through the same `_resolve_target` step `resolve` runs per
+stored Target, and reduces the result to `{game, fit_count}` or `None`. The
+mapping either read accepts is the item `list_targets` emits, which is why
+`UserService.validate_target_draft` exists: it runs the create validators and
+derives the title without touching the database, and returns that shape minus
+`id` and timestamps. The cap and the duplicate rule are deliberately not
+applied there -- both compare a write against held rows, and a draft is not a
+write.
+
+`TargetPreviewService` composes the two reads and owns the two promises a
+preview makes that neither read makes alone. *One generation:* run alone, each
+read resolves its own Publication snapshot, and a publication advancing between
+them would pair season evidence from one generation with tonight's count from
+another. The preview captures one snapshot over the union of both reads'
+streams (`PREVIEW_PUBLICATION_STREAM_KEYS`), narrowed to the projection only
+where both reads narrow, and hands it to both -- `backtest_target` takes it as
+`publication_snapshot`, and `today` takes a `matchups` reader that composes the
+game's Matchup from it through `MatchupService.get_matchup_from_snapshot`, a
+compose entry that captures no snapshot of its own and leaves `get_matchup`
+unchanged. *No provider, no write:* the Matchup route may refresh injuries from
+the provider and publish a snapshot when the stored override is stale, and
+`resolve` (#245) inherits that behaviour through `get_matchup` -- deliberately
+out of scope here, as its contract is the Matchup's. A preview instead composes
+its Matchup with `StoredMatchupInjuryReader`, which answers `get_injuries`
+through `MatchupInjuryService.get_stored_injuries` and never refreshes, the
+same stored-only read the Slate already makes.
+
+The route validates, then calls `preview`, so an unusable body is refused
+before any scan runs. `summary` is computed by the backtest itself rather than
+by each reader, and is therefore present on the saved Backtest too; the Lab
+and the detail cannot disagree about the mean signed difference or the
+over-average share because neither computes it.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

@@ -303,15 +303,13 @@ def targets(backtest_engine, backtest_settings):
 
 
 @pytest.fixture
-def backtest(targets, backtest_settings):
+def build_backtest(targets, backtest_settings):
     """Build the backtest over the caller's real Targets and fake seams."""
 
     unset = object()
 
-    def _backtest(
-        target_id, *, logs=None, diets=unset, uid=OWNER, publication_reader=None
-    ):
-        service = TargetBacktestService(
+    def _service(*, logs=None, diets=unset, publication_reader=None):
+        return TargetBacktestService(
             targets=targets,
             player_logs=logs if logs is not None else FakeLogs(),
             player_diets=FakeDiets() if diets is unset else diets,
@@ -319,7 +317,16 @@ def backtest(targets, backtest_settings):
             settings=backtest_settings,
             publication_reader=publication_reader,
         )
-        return service.backtest(uid, target_id)
+
+    return _service
+
+
+@pytest.fixture
+def backtest(build_backtest):
+    """Backtest one of the caller's saved Targets by id."""
+
+    def _backtest(target_id, *, uid=OWNER, **seams):
+        return build_backtest(**seams).backtest(uid, target_id)
 
     return _backtest
 
@@ -391,6 +398,155 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(
             ],
         }
     ]
+
+
+def test_the_summary_reads_every_listed_game_against_its_players_season_rate(
+    targets, backtest
+):
+    created = _create(targets)
+    logs = FakeLogs(
+        rows=(
+            _row(LEBRON, game_id="0022500584", points=30, three_pointers_made=4),
+            _row(
+                LEBRON,
+                game_id="0022500120",
+                game_date=date(2025, 11, 3),
+                points=22,
+                three_pointers_made=2,
+            ),
+            _row(
+                TATUM,
+                name="Jayson Tatum",
+                team_id=BOS,
+                team_tricode="BOS",
+                game_id="0022500300",
+                game_date=date(2025, 12, 1),
+                points=27,
+                three_pointers_made=1,
+            ),
+        ),
+        scoring={LEBRON: 25.0, TATUM: 27.0},
+    )
+    diets = FakeDiets(
+        zones={LEBRON: _zone_diet(0.42, 0.2), TATUM: _zone_diet(0.5, 0.2)}
+    )
+
+    payload = backtest(created["id"], logs=logs, diets=diets)
+
+    # PTS: (30-25) + (22-25) + (27-27) = 2 over three games, two of them at or
+    # above the average.  3PM: (4-2) + (2-2) + (1-2) = 1 over the same three;
+    # the game exactly on the average counts as over it, the one below does
+    # not.
+    assert payload["summary"] == {
+        "players": 2,
+        "games": 3,
+        "columns": {
+            "PTS": {"mean_difference": 0.666667, "over_average_share": 0.666667},
+            "3PM": {"mean_difference": 0.333333, "over_average_share": 0.666667},
+        },
+    }
+
+
+def test_an_empty_backtest_summarises_nobody_and_leaves_every_column_blank(
+    targets, backtest
+):
+    created = _create(targets)
+
+    payload = backtest(created["id"], logs=FakeLogs())
+
+    assert payload["players"] == []
+    assert payload["summary"] == {
+        "players": 0,
+        "games": 0,
+        "columns": {
+            "PTS": {"mean_difference": None, "over_average_share": None},
+            "3PM": {"mean_difference": None, "over_average_share": None},
+        },
+    }
+
+
+#: An unsaved Target as ``UserService.validate_target_draft`` shapes it: the
+#: listed item without an id or timestamps.
+DRAFT = {
+    "opponent": "OKC",
+    "title": "OKC vs Corner 3 ≥ 40%",
+    "note": None,
+    "qualifiers": [CORNER_THREE],
+}
+
+
+def _two_games():
+    return dict(
+        logs=FakeLogs(
+            rows=(
+                _row(LEBRON, game_id="0022500584", game_date=date(2026, 1, 16)),
+                _row(
+                    LEBRON,
+                    game_id="0022500120",
+                    game_date=date(2025, 11, 3),
+                    is_home=False,
+                    points=22,
+                    three_pointers_made=2,
+                ),
+            )
+        ),
+        diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}),
+    )
+
+
+def test_a_draft_backtests_exactly_as_a_saved_target_with_the_same_qualifiers(
+    targets, build_backtest
+):
+    created = _create(targets)
+
+    saved = build_backtest(**_two_games()).backtest(OWNER, created["id"])
+    draft = build_backtest(**_two_games()).backtest_target(DRAFT)
+
+    # The draft is echoed as given: derived title, no id, no timestamps.
+    assert draft["target"] == DRAFT
+    assert set(draft) == set(saved)
+    for key in ("season", "proxy", "stat_columns", "summary", "players"):
+        assert draft[key] == saved[key]
+    assert draft["summary"]["games"] == 2
+
+
+def test_a_draft_reads_no_stored_target_and_resolves_one_snapshot(
+    backtest_settings,
+):
+    reader = FakePublicationReader()
+    seams = _two_games()
+    service = TargetBacktestService(
+        # Nothing to read a Target from: a draft has not been stored anywhere.
+        targets=SimpleNamespace(),
+        player_logs=seams["logs"],
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        publication_reader=reader,
+    )
+
+    payload = service.backtest_target(DRAFT)
+
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+    assert len(reader.calls) == 1
+    assert seams["logs"].snapshots == ["snapshot-1", "snapshot-1"]
+
+
+def test_a_draft_backtested_over_a_given_snapshot_captures_none_of_its_own(
+    build_backtest,
+):
+    seams = _two_games()
+    reader = FakePublicationReader()
+
+    payload = build_backtest(**seams, publication_reader=reader).backtest_target(
+        DRAFT, publication_snapshot="preview-snapshot"
+    )
+
+    # The caller's generation is the whole read; the reader is never asked.
+    assert reader.calls == []
+    assert seams["logs"].snapshots == ["preview-snapshot", "preview-snapshot"]
+    assert seams["diets"].snapshots == ["preview-snapshot"]
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
 
 
 def test_the_opponents_games_are_read_league_wide_for_the_current_season(
@@ -777,6 +933,14 @@ BACKTESTED = {
     "season": SEASON,
     "proxy": "Outcomes are box-score proxies.",
     "stat_columns": CORNER_THREE_COLUMNS,
+    "summary": {
+        "players": 0,
+        "games": 0,
+        "columns": {
+            "PTS": {"mean_difference": None, "over_average_share": None},
+            "3PM": {"mean_difference": None, "over_average_share": None},
+        },
+    },
     "players": [],
 }
 

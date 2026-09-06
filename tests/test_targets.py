@@ -631,6 +631,101 @@ def test_a_note_at_the_length_limit_is_accepted(targets):
     assert created["note"] == note
 
 
+# --- service: draft validation ---------------------------------------------
+
+
+def test_a_draft_validates_to_the_listed_shape_without_an_id_or_timestamps(targets):
+    draft = targets.validate_target_draft(
+        opponent="okc", qualifiers=[CORNER_THREE], note="  Leaks corner threes  "
+    )
+
+    assert draft == {
+        "opponent": "OKC",
+        "title": "OKC vs Corner 3 ≥ 40%",
+        "note": "Leaks corner threes",
+        "qualifiers": [CORNER_THREE],
+    }
+    assert targets.list_targets(OWNER) == []
+
+
+def test_a_draft_reads_exactly_as_the_target_it_would_save(targets):
+    draft = targets.validate_target_draft(
+        opponent="OKC", qualifiers=[TRANSITION, CORNER_THREE], note="Why"
+    )
+    created = targets.create_target(
+        OWNER, opponent="OKC", qualifiers=[TRANSITION, CORNER_THREE], note="Why"
+    )
+
+    assert draft == {key: created[key] for key in draft}
+    assert set(created) - set(draft) == {"id", "created_at", "updated_at"}
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            {"opponent": "XXX", "qualifiers": [CORNER_THREE]},
+            "A target needs one NBA team as its opponent.",
+        ),
+        (
+            {"opponent": "OKC", "qualifiers": []},
+            "A target needs at least one qualifier.",
+        ),
+        (
+            {"opponent": "OKC", "qualifiers": [{**CORNER_THREE, "threshold": 1.01}]},
+            "A qualifier needs a known diet base, a slice of that base, a "
+            "comparator of at_or_above or at_or_below, and a threshold share "
+            "between 0 and 1.",
+        ),
+        (
+            {"opponent": "OKC", "qualifiers": [{**CORNER_THREE, "base": "moods"}]},
+            "A qualifier needs a known diet base, a slice of that base, a "
+            "comparator of at_or_above or at_or_below, and a threshold share "
+            "between 0 and 1.",
+        ),
+        (
+            {"opponent": "OKC", "qualifiers": [CORNER_THREE, CORNER_THREE]},
+            "A target cannot repeat the same qualifier.",
+        ),
+        (
+            {"opponent": "OKC", "qualifiers": [CORNER_THREE], "note": 42},
+            "A target note must be text.",
+        ),
+    ],
+)
+def test_an_unusable_draft_is_refused_with_the_create_message(targets, body, message):
+    with pytest.raises(InvalidInputError) as refused:
+        targets.validate_target_draft(**body)
+
+    assert refused.value.public_message == message
+
+
+def test_a_draft_over_the_qualifier_limit_is_refused(targets):
+    too_many = [
+        {**CORNER_THREE, "threshold": round(0.1 + index * 0.01, 2)}
+        for index in range(TARGET_QUALIFIER_LIMIT + 1)
+    ]
+
+    with pytest.raises(InvalidInputError):
+        targets.validate_target_draft(opponent="OKC", qualifiers=too_many)
+
+
+def test_a_draft_is_validated_over_the_cap_and_against_a_duplicate(
+    targets, target_engine
+):
+    """A draft is not a write, so neither write-time conflict applies."""
+
+    _seed(target_engine, OWNER, TARGET_LIMIT)
+    created = targets.list_targets(OWNER)[0]
+
+    draft = targets.validate_target_draft(
+        opponent=created["opponent"], qualifiers=created["qualifiers"]
+    )
+
+    assert draft["title"] == created["title"]
+    assert len(targets.list_targets(OWNER)) == TARGET_LIMIT
+
+
 # --- service: update -------------------------------------------------------
 
 

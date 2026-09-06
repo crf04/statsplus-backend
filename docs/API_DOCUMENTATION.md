@@ -2441,6 +2441,7 @@ PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 GET    /api/user/targets/<id>/backtest
+POST   /api/user/targets/preview
 ```
 
 `GET` returns the caller's items newest-first:
@@ -2832,6 +2833,14 @@ own. The request makes no NBA, PBP, or DFS call.
   "season": "2025-26",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
   "stat_columns": ["PTS", "3PM"],
+  "summary": {
+    "players": 1,
+    "games": 2,
+    "columns": {
+      "PTS": {"mean_difference": 1.0, "over_average_share": 0.5},
+      "3PM": {"mean_difference": 1.0, "over_average_share": 1.0}
+    }
+  },
   "players": [
     {
       "canonical_id": 2544,
@@ -2896,6 +2905,23 @@ publishes (`FGA`, `FG2A`, `FG3A`, `POSS`) never become columns:
 | `shot_types` | `FG2M`, `FG3M` | `Catch and Shoot` -> `PTS`, `3PM` |
 | `assist_locations` | the slice itself | `Corner3Assists` -> `AST`, `PA`, `RA`, `PRA` |
 
+`summary` reduces every game listed below to one line per stat column, so the
+number that moves when a threshold moves is one glance away and the saved
+detail and the [Lab](#preview-a-draft-target) show the same figure:
+
+- `players` and `games` count the listed players and the games listed under
+  them. A game two listed players both played counts once per player, since
+  each row is one player's evidence.
+- `columns` has one entry per `stat_columns` entry, in the same order.
+  `mean_difference` is the mean of (game stat − that player's
+  `season_averages` value) over every listed game, and `over_average_share`
+  is the share of those games **at or above** the average -- a game exactly
+  on the average counts, as both comparators are inclusive. Above, LeBron's
+  30 and 22 against a 25.0 average give `(5 − 3) / 2 = 1.0` and one game of
+  two over; his 4 and 2 threes against 2.0 give `1.0` and both games over.
+- Both values are `null` when no game is listed: no evidence is not a
+  difference of zero.
+
 `players` holds the qualifying players in the Matchup's own order -- Season
 scoring descending, canonical id breaking ties.
 
@@ -2937,6 +2963,162 @@ rather than a suppressed one; no Diet evidence exists to be withheld.
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another
 account -- foreign ids are never reported as `403`.
+
+#### Preview a Draft Target
+
+```http
+POST /api/user/targets/preview
+Authorization: Bearer <firebase-id-token>
+Content-Type: application/json
+
+{
+  "opponent": "OKC",
+  "qualifiers": [
+    {
+      "base": "shot_zones",
+      "slice_key": "Corner 3",
+      "comparator": "at_or_above",
+      "threshold": 0.4
+    }
+  ],
+  "note": "Leaks corner threes"
+}
+```
+
+Evaluates a **Draft Target** -- one the caller has not saved, and may never
+save -- exactly as the saved reads would. The body is the `POST
+/api/user/targets` body and is validated by the same rules, with the same
+`400 invalid_input` messages, but nothing is stored, and neither the
+per-account cap of 50 nor the duplicate rule applies: both are conflicts
+between a write and the rows already held, and a preview is not a write. The
+account's Targets are unchanged after any number of previews.
+
+The response is the [Backtest](#backtest-one-target-over-the-season-to-date)
+shape for the draft plus `today`:
+
+```json
+{
+  "success": true,
+  "target": {
+    "opponent": "OKC",
+    "title": "OKC vs Corner 3 ≥ 40%",
+    "note": "Leaks corner threes",
+    "qualifiers": [
+      {
+        "base": "shot_zones",
+        "slice_key": "Corner 3",
+        "comparator": "at_or_above",
+        "threshold": 0.4
+      }
+    ]
+  },
+  "season": "2025-26",
+  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
+  "stat_columns": ["PTS", "3PM"],
+  "summary": {
+    "players": 1,
+    "games": 2,
+    "columns": {
+      "PTS": {"mean_difference": 1.0, "over_average_share": 0.5},
+      "3PM": {"mean_difference": 1.0, "over_average_share": 1.0}
+    }
+  },
+  "players": [
+    {
+      "canonical_id": 2544,
+      "name": "LeBron James",
+      "team_id": 1610612747,
+      "tricode": "LAL",
+      "season_scoring": 25.0,
+      "shares": [
+        {
+          "base": "shot_zones",
+          "slice_key": "Corner 3",
+          "share": 0.42,
+          "league_average_share": 0.2
+        }
+      ],
+      "season_averages": {"PTS": 25.0, "3PM": 2.0},
+      "games": [
+        {
+          "game_id": "0022500584",
+          "game_date": "2026-01-16",
+          "matchup": "LAL vs. OKC",
+          "minutes": 34.0,
+          "stats": {"PTS": 30.0, "3PM": 4.0}
+        },
+        {
+          "game_id": "0022500120",
+          "game_date": "2025-11-03",
+          "matchup": "LAL @ OKC",
+          "minutes": 34.0,
+          "stats": {"PTS": 22.0, "3PM": 2.0}
+        }
+      ]
+    }
+  ],
+  "today": {
+    "game": {
+      "game_id": "0022500584",
+      "scheduled_at": "2026-01-17T00:30:00+00:00",
+      "status": { "state": "scheduled", "label": "Scheduled" },
+      "opponent": {
+        "team_id": 1610612760,
+        "tricode": "OKC",
+        "name": "Oklahoma City Thunder"
+      },
+      "opposing_team": {
+        "team_id": 1610612747,
+        "tricode": "LAL",
+        "name": "Los Angeles Lakers"
+      },
+      "away": {
+        "team_id": 1610612747,
+        "tricode": "LAL",
+        "name": "Los Angeles Lakers"
+      },
+      "home": {
+        "team_id": 1610612760,
+        "tricode": "OKC",
+        "name": "Oklahoma City Thunder"
+      }
+    },
+    "fit_count": 1
+  }
+}
+```
+
+`target` echoes the validated draft as `GET /api/user/targets` would list it
+-- canonical tricode, derived title, trimmed note -- with no `id`,
+`created_at`, or `updated_at`, because there is no row. `season`, `proxy`,
+`stat_columns`, `summary`, and `players` are exactly what the saved Backtest
+returns for a Target with the same opponent and Qualifiers: the same
+league-wide scan, the same thin exclusion, the same one Publication snapshot.
+Saving the draft and expanding its Backtest shows the same numbers.
+
+`today` says whether the draft fires on the **current** ET Slate Date; there is
+no date parameter, and the evaluation is season to date.
+
+- `null` when the opponent has no game today.
+- Otherwise `game` is the resolve response's game object, and `fit_count` is
+  the number of opposing participants meeting every Qualifier by the
+  [Resolve](#resolve-every-target-against-one-slate-date) rule -- inclusive
+  comparators, an absent share never fits, and a thin player is **counted**,
+  as resolve lists them. It is `0` with a non-null `game` when nobody fits,
+  and likewise when the game's participants are unavailable, since resolve
+  lists nobody then either.
+
+The request makes no NBA, PBP, or DFS call and writes nothing. It composes the
+Backtest's seams and, for `today`, the Slate and that one game's Matchup, all
+from **one** Publication snapshot -- the season's evidence and tonight's fit
+count cannot come from two generations. The Matchup is composed with the
+injury report **as stored**: where [Get Matchup](#get-matchup) would refresh a
+stale or missing report from the provider and publish a snapshot, a preview
+serves what is stored or reports the section unavailable, so previewing at
+any rate starts no collection. `401 authentication_required` for an
+unauthenticated caller; the league-wide scan is not an open resource. Previews
+are neither cached nor rate limited.
+
 
 
 ## Filtering Reference
