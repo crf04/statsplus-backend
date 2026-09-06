@@ -215,6 +215,13 @@ _PUBLICATION_STREAM_KEYS = (
     *sorted(frozenset().union(*TEAM_MATCHUP_PUBLICATION_STREAM_KEYS.values())),
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+#: The streams one Matchup composes, and the narrowing it applies, for a
+#: caller that captures one generation to share with another read (#253).
+MATCHUP_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
+MATCHUP_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
+#: "Use the service's own": the compose path resolves its snapshot and reads
+#: its injuries itself unless a caller hands it either.
+_OWN = object()
 
 
 class EventCatalogReader(Protocol):
@@ -522,16 +529,45 @@ class MatchupService:
                 game_id=game_id, connection=connection, session=session
             )
 
+    def get_matchup_from_snapshot(
+        self,
+        *,
+        game_id: str,
+        publication_snapshot: Any | None,
+        injuries: MatchupInjuryReader | None,
+    ) -> dict[str, Any]:
+        """Compose one Matchup over a generation the caller already holds.
+
+        The same document ``get_matchup`` serves, except that no snapshot is
+        captured here -- the caller's is the whole read, so a response that
+        pairs this Matchup with another read from the same generation cannot
+        mix two -- and injuries are read through the caller's reader rather
+        than the service's own, so a caller promising no provider call can
+        hand in one that never refreshes.
+        """
+
+        with request_read_scope(self._engine) as (connection, session):
+            return self._compose_matchup(
+                game_id=game_id,
+                connection=connection,
+                session=session,
+                publication_snapshot=publication_snapshot,
+                injuries=injuries,
+            )
+
     def _compose_matchup(
         self,
         *,
         game_id: str,
         connection: Connection | None,
         session: Session | None,
+        publication_snapshot: Any = _OWN,
+        injuries: Any = _OWN,
     ) -> dict[str, Any]:
         season = self.settings.nba.current_season
         observed_at = assume_utc(self._clock())
-        publication_snapshot = self._publication_snapshot(season, session=session)
+        if publication_snapshot is _OWN:
+            publication_snapshot = self._publication_snapshot(season, session=session)
         event = self._event(season, game_id, connection=connection)
         schedule_freshness = self._schedule_freshness(
             season, observed_at=observed_at, connection=connection
@@ -553,7 +589,12 @@ class MatchupService:
         pool_players = tuple(
             player for player in pool.players if player.team_id in team_ids
         )
-        injury_result = self._injuries(event, season, pool_players)
+        injury_result = self._injuries(
+            event,
+            season,
+            pool_players,
+            reader=self.injuries if injuries is _OWN else injuries,
+        )
         # The backend declares the mode so no client ever infers it from tip
         # dates, empty arrays, or freshness markers.
         historical = is_historical_matchup(event, pool_players)
@@ -976,18 +1017,20 @@ class MatchupService:
             },
         }
 
+    @staticmethod
     def _injuries(
-        self,
         event: Mapping[str, Any],
         season: str,
         pool_players: Sequence[PoolPlayer],
+        *,
+        reader: MatchupInjuryReader | None,
     ) -> MatchupInjuryResult:
-        if self.injuries is not None:
+        if reader is not None:
             # Database-first applies to governed statistical facts.  Injury
             # Reports retain their existing live/snapshot contract, including
             # the provider path used before this migration. Statistical
             # activation does not change the Injury Reports contract.
-            return self.injuries.get_injuries(
+            return reader.get_injuries(
                 event=event,
                 season=season,
                 pool_players=pool_players,
@@ -2179,6 +2222,8 @@ __all__ = [
     "DEFENSE_BASES",
     "DEFENSIVE_COLUMNS",
     "HISTORICAL_MODE",
+    "MATCHUP_PROJECTION_ONLY_STREAM_KEYS",
+    "MATCHUP_PUBLICATION_STREAM_KEYS",
     "MatchupService",
     "diet_evidence_thin",
     "observed_diet_share",

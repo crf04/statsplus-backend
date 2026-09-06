@@ -72,6 +72,7 @@ class ApplicationDependencies:
     projection_collection_coordinator: Any | None = None
     target_resolution_service: Any | None = None
     target_backtest_service: Any | None = None
+    target_preview_service: Any | None = None
 
 
 def build_dependencies(
@@ -127,7 +128,9 @@ def build_dependencies(
     from app.services.team_service import TeamService
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
+    from app.services.matchup_injuries import StoredMatchupInjuryReader
     from app.services.target_backtest import TargetBacktestService
+    from app.services.target_preview import TargetPreviewService
     from app.services.target_resolution import TargetResolutionService
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
@@ -671,6 +674,17 @@ def build_dependencies(
         settings=settings,
         publication_reader=publication_reader,
     )
+    # A preview composes the two Target reads from one Publication snapshot
+    # and reads injuries stored-only: the Matchup route may refresh them from
+    # the provider, but a preview promises no provider call and no write.
+    target_preview_service = TargetPreviewService(
+        backtests=target_backtest_service,
+        resolutions=target_resolution_service,
+        matchups=matchup_service,
+        injuries=StoredMatchupInjuryReader(matchup_injury_service),
+        settings=settings,
+        publication_reader=publication_reader,
+    )
 
     return ApplicationDependencies(
         settings=settings,
@@ -721,6 +735,7 @@ def build_dependencies(
         projection_collection_coordinator=projection_collection_coordinator,
         target_resolution_service=target_resolution_service,
         target_backtest_service=target_backtest_service,
+        target_preview_service=target_preview_service,
     )
 
 

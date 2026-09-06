@@ -28,6 +28,7 @@ from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.models.target import (
     TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
+    derive_target_title,
     target_qualifier_part,
     target_qualifier_signature,
 )
@@ -770,6 +771,31 @@ class UserService:
             return self._owned_target(session, firebase_uid, target_id).to_dict()
         finally:
             session.close()
+
+    @staticmethod
+    def validate_target_draft(
+        *,
+        opponent: Any,
+        qualifiers: Any,
+        note: Any = None,
+    ) -> Dict[str, Any]:
+        """Validate an unsaved target and return it as the list would show it.
+
+        The same rules ``create_target`` applies before it writes, and the
+        same item shape ``list_targets`` returns, minus the ``id`` and
+        timestamps a stored row would carry.  Nothing is read or written: the
+        per-account cap and the duplicate rule are conflicts between a write
+        and the rows already held, and a draft is not a write.
+        """
+
+        validated_opponent = _validated_target_opponent(opponent)
+        validated_qualifiers = _validated_target_qualifiers(qualifiers)
+        return {
+            'opponent': validated_opponent,
+            'title': derive_target_title(validated_opponent, validated_qualifiers),
+            'note': _validated_target_note(note),
+            'qualifiers': validated_qualifiers,
+        }
 
     def create_target(
         self,

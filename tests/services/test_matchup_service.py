@@ -1363,6 +1363,57 @@ def _published_matchup_service(tmp_path, rows):
     return engine, service, publication
 
 
+def test_a_matchup_composed_over_a_given_snapshot_is_the_matchup_get_matchup_serves(
+    tmp_path,
+):
+    """A caller holding one generation gets the same document, from it (#253)."""
+
+    from unittest.mock import Mock
+
+    from app.services.matchup import (
+        MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+        MATCHUP_PUBLICATION_STREAM_KEYS,
+    )
+
+    _engine, service, _publication = _published_matchup_service(
+        tmp_path, [_log_row(game_id=GAME_ID, game_date="2026-01-14", points=31, minutes=34.0)]
+    )
+    expected = service.get_matchup(game_id=GAME_ID)
+    reader = service.publication_reader
+    given = reader.snapshot(
+        MATCHUP_PUBLICATION_STREAM_KEYS,
+        season=SEASON,
+        projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+    )
+    service.publication_reader = Mock(wraps=reader)
+
+    payload = service.get_matchup_from_snapshot(
+        game_id=GAME_ID, publication_snapshot=given, injuries=service.injuries
+    )
+
+    # No second generation is captured: the given one is the whole read, and
+    # the document is the one ``get_matchup`` composes from that generation.
+    service.publication_reader.snapshot.assert_not_called()
+    assert payload == expected
+
+    # The injury reader is the caller's, not the service's own (``None`` here).
+    injury_block = {
+        "status": "fresh",
+        "retrieved_at": RETRIEVED_AT.isoformat(),
+        "entries": [],
+        "unavailable_reason": None,
+        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+    }
+    injuries = RecordedInjuries(MatchupInjuryResult(injury_block, frozenset(), {}))
+    overridden = service.get_matchup_from_snapshot(
+        game_id=GAME_ID, publication_snapshot=given, injuries=injuries
+    )
+    assert injuries.calls[0][0:2] == (GAME_ID, SEASON)
+    assert overridden["injuries"] == injury_block
+    assert overridden["experience"]["sections"]["injuries"]["status"] == "available"
+    assert service.get_matchup(game_id=GAME_ID)["injuries"] == expected["injuries"]
+
+
 def test_matchup_reads_player_logs_through_the_indexed_projection(tmp_path):
     """The matchup generation never ships the season-wide game-log payload."""
 

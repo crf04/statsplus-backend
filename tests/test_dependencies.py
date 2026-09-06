@@ -748,6 +748,39 @@ def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
     )
 
 
+def test_target_preview_reuses_both_target_reads_and_never_refreshes_injuries(
+    monkeypatch,
+):
+    """A preview adds no seam and no provider path of its own (#253)."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.services.matchup_injuries import StoredMatchupInjuryReader
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+        )
+    )
+
+    preview = dependencies.target_preview_service
+    assert preview.backtests is dependencies.target_backtest_service
+    assert preview.resolutions is dependencies.target_resolution_service
+    assert preview.matchups is dependencies.matchup_service
+    assert preview.publication_reader is dependencies.publication_reader
+    # The Matchup route may refresh injuries from the provider; a preview
+    # reads only what is already stored.
+    assert isinstance(preview.injuries, StoredMatchupInjuryReader)
+    assert preview.injuries.service is dependencies.matchup_service.injuries
+
+
 def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatch):
     """Resolution adds no seam of its own, so it adds no provider load (#245)."""
 

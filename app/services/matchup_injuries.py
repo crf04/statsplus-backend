@@ -396,6 +396,31 @@ class MatchupInjuryService:
     def _team_abbreviation(value: Any) -> str:
         return canonical_nba_team_abbreviation(value)
 
+class StoredMatchupInjuryReader:
+    """Serve the injury surface from what is stored, never refreshing it.
+
+    ``MatchupInjuryService.get_injuries`` may reach the provider and publish a
+    snapshot when the stored override is stale or missing; that is the Matchup
+    route's contract.  A read that promises no provider call and no write --
+    a Target preview -- takes this reader instead, which answers the same
+    ``get_injuries`` question through ``get_stored_injuries`` alone.
+    """
+
+    def __init__(self, service: MatchupInjuryService) -> None:
+        self.service = service
+
+    def get_injuries(
+        self,
+        *,
+        event: Mapping[str, Any],
+        season: str,
+        pool_players: Sequence[Any],
+    ) -> MatchupInjuryResult:
+        return self.service.get_stored_injuries(
+            event=event, season=season, pool_players=pool_players
+        )
+
+
 __all__ = [
     "INJURY_SOURCE",
     "INJURY_SOURCE_URL",
@@ -403,5 +428,6 @@ __all__ = [
     "INJURY_STALE_SERVE_SECONDS",
     "MatchupInjuryResult",
     "MatchupInjuryService",
+    "StoredMatchupInjuryReader",
     "unavailable_injury_result",
 ]
