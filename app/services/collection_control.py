@@ -78,6 +78,8 @@ from app.models.collection_control import (
     PublicationStream,
     PublicationVersion,
     PublicationObservation,
+    PublicationRepairGroup,
+    PublicationRepairGroupMember,
     CompositionJob,
     CollectionCycle,
     AuditEvent,
@@ -112,6 +114,9 @@ MAX_ENVELOPE_BYTES = 10 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 2 * 1024 * 1024
 MAX_SCOPE_COUNT = 512
 MAX_SCOPE_BYTES = 32 * 1024
+MIN_REPAIR_GROUP_MEMBERS = 2
+MAX_REPAIR_GROUP_MEMBERS = 8
+MAX_REPAIR_GROUP_REASON = 255
 OBSERVATION_RETENTION_DAYS = 30
 ATHLETE_REUSE_DAYS = 7
 MAX_PAYLOAD_VALUES = 100_000
@@ -2062,6 +2067,9 @@ class CollectionControlService(_SessionService):
                         "scope_descriptors": scope_descriptors,
                         "checksum": manifest.checksum,
                         "status": manifest.status,
+                        "repair_group": _collector_repair_group_view(
+                            session, manifest, authorized_scopes,
+                        ),
                     })
                     if len(visible_manifests) >= bounded:
                         break
@@ -2182,8 +2190,12 @@ class CollectionControlService(_SessionService):
 
     def create_manifest(self, season: str, *, cutoff: datetime, scopes: Iterable[str],
                         collect_before: datetime, accepted_versions: Iterable[int] = (1, 2),
-                        required_athlete_ids: Iterable[str] = ()) -> CollectionManifest:
+                        required_athlete_ids: Iterable[str] = (),
+                        repair_group: Mapping[str, Any] | None = None) -> CollectionManifest:
         now = _aware(self.clock())
+        declaration = (
+            _normalize_repair_group(repair_group) if repair_group is not None else None
+        )
         cutoff, collect_before = _aware(cutoff), _aware(collect_before)
         if cutoff > collect_before or collect_before <= now:
             raise ControlPlaneError("invalid_manifest_window")
@@ -2262,6 +2274,11 @@ class CollectionControlService(_SessionService):
                     "accepted_versions": versions, "scopes": scope_list,
                     "event_catalog_publication_id": event.publication_id,
                     "event_catalog_checksum": event.checksum}
+        if declaration is not None:
+            # The group is part of manifest integrity, not a mutable sidecar:
+            # the same scopes with and without a repair group are different
+            # manifests and must not collide on the checksum uniqueness rule.
+            material["repair_group"] = declaration
         digest = _checksum(_json(material))
         with self.session() as session, session.begin():
             from app.services.matchup_authority import (
@@ -2299,6 +2316,11 @@ class CollectionControlService(_SessionService):
                 event_catalog_checksum=bound_event.checksum,
                 status="active", created_at=now)
             session.add(row)
+            if declaration is not None:
+                session.flush()
+                _bind_repair_group(
+                    session, manifest=row, declaration=declaration, now=now,
+                )
             for old in prior:
                 old.superseded_by = row.manifest_id
         return row
@@ -2318,6 +2340,9 @@ class CollectionControlService(_SessionService):
                 if not authorized_scopes:
                     raise ControlPlaneError("scope_denied")
                 row._authorized_scopes = sorted(authorized_scopes)
+                row._repair_group = _collector_repair_group_view(
+                    session, row, authorized_scopes,
+                )
                 row._scope_descriptors = _collector_scope_descriptors(
                     authorized_scopes,
                     row.cutoff,
@@ -2334,6 +2359,57 @@ class CollectionControlService(_SessionService):
                     ),
                 )
             return row
+
+    def repair_group_state(self, manifest_id: str) -> dict[str, Any] | None:
+        """Operator view of one manifest's repair group and its guards.
+
+        ``promotable`` reports only that every declared guard still matches
+        the live pointer.  Evidence completeness is re-checked by the grouped
+        promotion itself; a promotable group is one that has not been
+        invalidated by a publication moving after the declaration.
+        """
+
+        with self.session() as session:
+            if session.get(CollectionManifest, manifest_id) is None:
+                raise ControlPlaneError("manifest_not_found")
+            found = _repair_group_rows(session, manifest_id)
+            if found is None:
+                return None
+            group, members = found
+            member_states: list[dict[str, Any]] = []
+            stale: list[str] = []
+            for member in members:
+                pointer = session.get(PublicationPointer, member.stream_key)
+                active_publication_id = (
+                    pointer.active_publication_id if pointer is not None else None
+                )
+                fence = int(pointer.fence) if pointer is not None else 0
+                guard_satisfied = (
+                    active_publication_id == member.expected_publication_id
+                    and fence == int(member.expected_fence)
+                )
+                if not guard_satisfied:
+                    stale.append(member.stream_key)
+                member_states.append({
+                    "stream_key": member.stream_key,
+                    "expected_publication_id": member.expected_publication_id,
+                    "expected_fence": int(member.expected_fence),
+                    "active_publication_id": active_publication_id,
+                    "fence": fence,
+                    "guard_satisfied": guard_satisfied,
+                })
+            return {
+                "group_id": group.group_id,
+                "manifest_id": group.manifest_id,
+                "season": group.season,
+                "cutoff": _iso(group.cutoff),
+                "reason": group.reason,
+                "checksum": group.checksum,
+                "members": member_states,
+                "stale_members": sorted(stale),
+                "promotable": not stale,
+                "state": "guard_stale" if stale else "waiting_for_grouped_execution",
+            }
 
     def open_cycle(self, manifest_id: str, *, completed_game_count: int | None = None,
                    session: Session | None = None) -> CollectionCycle:
@@ -4428,6 +4504,11 @@ class PublicationService(_SessionService):
         if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
             raise ControlPlaneError("stream_unsupported")
         with self._session_scope(session) as session:
+            # A declared group owns its members' promotion.  Refusing here --
+            # not only in the worker that skips grouped jobs -- keeps every
+            # caller of the independent path from advancing half a group.
+            if stream_key in repair_group_member_streams(session, manifest_id):
+                raise ControlPlaneError("grouped_repair_pending")
             pointer_expectation = self._read_pointer_expectation(
                 session, stream_key,
             )
@@ -5661,6 +5742,171 @@ def _manifest_streams(session: Session, manifest: CollectionManifest) -> list[Pu
         if scopes.intersection(registry_scopes):
             selected.append(stream)
     return selected
+
+
+def _normalize_repair_group(value: Any) -> dict[str, Any]:
+    """Validate one operator repair-group declaration into canonical form.
+
+    This is the structural gate only: it rejects a malformed, duplicated,
+    unknown, or unschedulable member without touching the database.  Identity,
+    season, cutoff, and pointer guards need the manifest transaction and are
+    checked by ``_bind_repair_group``.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {"reason", "members"}:
+        raise ControlPlaneError("invalid_repair_group")
+    reason = str(value.get("reason") or "").strip()
+    if not reason or len(reason) > MAX_REPAIR_GROUP_REASON:
+        raise ControlPlaneError("repair_group_reason_required")
+    raw_members = value.get("members")
+    if isinstance(raw_members, (str, bytes)) or not isinstance(raw_members, Sequence):
+        raise ControlPlaneError("invalid_repair_group")
+    members: dict[str, dict[str, Any]] = {}
+    for entry in raw_members:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "stream_key", "expected_publication_id", "expected_fence",
+        }:
+            raise ControlPlaneError("invalid_repair_group_member")
+        stream_key = str(entry["stream_key"]).strip()
+        if stream_key in members:
+            raise ControlPlaneError("duplicate_repair_group_member")
+        definition = _surface_definition(stream_key)
+        if (
+            stream_key not in NBA_PUBLICATION_STREAM_KEYS
+            or definition is None
+            or definition.stream_key != stream_key
+            or definition.strategy == "never_schedule"
+        ):
+            raise ControlPlaneError("unknown_repair_group_member")
+        publication_id = str(entry["expected_publication_id"]).strip()
+        fence = entry["expected_fence"]
+        if (
+            not publication_id
+            or isinstance(fence, bool)
+            or not isinstance(fence, int)
+            or fence < 0
+        ):
+            raise ControlPlaneError("invalid_repair_group_member")
+        members[stream_key] = {
+            "stream_key": stream_key,
+            "expected_publication_id": publication_id,
+            "expected_fence": int(fence),
+        }
+    if not MIN_REPAIR_GROUP_MEMBERS <= len(members) <= MAX_REPAIR_GROUP_MEMBERS:
+        raise ControlPlaneError("invalid_repair_group_membership")
+    return {"reason": reason, "members": [members[key] for key in sorted(members)]}
+
+
+def _bind_repair_group(
+    session: Session, *, manifest: CollectionManifest,
+    declaration: Mapping[str, Any], now: datetime,
+) -> PublicationRepairGroup:
+    """Persist a validated declaration against live publication identities.
+
+    Every member must name a real publication of this manifest's season on one
+    shared prior cutoff.  A member the manifest does not collect for, or whose
+    named publication belongs to another stream, season, or cutoff, is
+    rejected here so the manifest never becomes active around an unusable
+    group.
+    """
+
+    manifest_scopes = set(json.loads(manifest.scopes))
+    manifest_cutoff = _aware(manifest.cutoff)
+    member_cutoffs: set[datetime] = set()
+    members = list(declaration["members"])
+    for member in members:
+        stream_key = member["stream_key"]
+        if stream_key not in manifest_scopes:
+            raise ControlPlaneError("ineligible_repair_group_member")
+        if session.get(PublicationStream, stream_key) is None:
+            raise ControlPlaneError("unknown_repair_group_member")
+        publication = session.get(
+            PublicationVersion, member["expected_publication_id"],
+        )
+        if publication is None or publication.stream_key != stream_key:
+            raise ControlPlaneError("unknown_repair_group_member")
+        if publication.season != manifest.season:
+            raise ControlPlaneError("cross_season_repair_group_member")
+        member_cutoffs.add(_aware(publication.cutoff))
+    # The displaced pair is one snapshot.  Members drawn from different
+    # cutoffs, or from a cutoff this manifest has already moved past, do not
+    # describe a state that can be replaced atomically.
+    if len(member_cutoffs) != 1 or max(member_cutoffs) > manifest_cutoff:
+        raise ControlPlaneError("cross_cutoff_repair_group_member")
+    group = PublicationRepairGroup(
+        group_id=_uuid(),
+        manifest_id=manifest.manifest_id,
+        season=manifest.season,
+        cutoff=manifest_cutoff,
+        reason=declaration["reason"],
+        checksum=_checksum(_json(declaration)),
+        created_at=now,
+    )
+    session.add(group)
+    for member in members:
+        session.add(PublicationRepairGroupMember(
+            group_id=group.group_id,
+            stream_key=member["stream_key"],
+            expected_publication_id=member["expected_publication_id"],
+            expected_fence=member["expected_fence"],
+            created_at=now,
+        ))
+    return group
+
+
+def _repair_group_rows(
+    session: Session, manifest_id: str | None,
+) -> tuple[PublicationRepairGroup, list[PublicationRepairGroupMember]] | None:
+    """Read the declared repair group bound to one manifest, if any."""
+
+    if not manifest_id:
+        return None
+    group = session.scalar(select(PublicationRepairGroup).where(
+        PublicationRepairGroup.manifest_id == manifest_id
+    ))
+    if group is None:
+        return None
+    members = list(session.scalars(select(PublicationRepairGroupMember).where(
+        PublicationRepairGroupMember.group_id == group.group_id
+    ).order_by(PublicationRepairGroupMember.stream_key)))
+    return group, members
+
+
+def repair_group_member_streams(session: Session, manifest_id: str | None) -> frozenset[str]:
+    """The stream keys that may only ever be promoted as one group."""
+
+    found = _repair_group_rows(session, manifest_id)
+    return frozenset(member.stream_key for member in found[1]) if found else frozenset()
+
+
+def _collector_repair_group_view(
+    session: Session, manifest: CollectionManifest, authorized_scopes: Iterable[str],
+) -> dict[str, Any] | None:
+    """Render the group for a collector without widening its permissions.
+
+    A collector sees only the members it is already authorized to collect, and
+    never the operator pointer guards: expected publication identities and
+    fences are control-plane state that no collector scope grants.
+    """
+
+    found = _repair_group_rows(session, manifest.manifest_id)
+    if found is None:
+        return None
+    group, members = found
+    authorized = set(authorized_scopes)
+    visible = [
+        member.stream_key for member in members
+        if member.stream_key in authorized
+    ]
+    if not visible:
+        return None
+    return {
+        "group_id": group.group_id,
+        "reason": group.reason,
+        "checksum": group.checksum,
+        "members": visible,
+        "execution": "grouped",
+    }
 
 
 def _find_observation_ids(value: Any) -> set[str]:

@@ -99,6 +99,7 @@ def _control_error(error: Exception) -> AppError:
         "stale_composition", "expected_fence_required", "cycle_immutable",
         "cycle_exists", "observation_id_conflict", "mixed_manifest", "reconciliation_already_resolved",
         "composition_not_retryable", "rollback_unavailable", "stale_lease",
+        "grouped_repair_pending",
         # A rebuild that lost a race with durable state, or a per-stream
         # request that would split a coupled family.
         "stale_publication_family", "rebuild_lease_held",
@@ -440,6 +441,7 @@ def get_manifest(manifest_id: str):
         "accepted_versions": __import__("json").loads(manifest.accepted_versions),
         "scopes": getattr(manifest, "_authorized_scopes", __import__("json").loads(manifest.scopes)),
         "scope_descriptors": getattr(manifest, "_scope_descriptors", []),
+        "repair_group": getattr(manifest, "_repair_group", None),
         "checksum": manifest.checksum,
     })
 

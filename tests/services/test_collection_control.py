@@ -22,6 +22,8 @@ from app.models.collection_control import (
     PublicationPointer,
     PublicationVersion,
     PublicationObservation,
+    PublicationRepairGroup,
+    PublicationRepairGroupMember,
     PublicationStream,
     ReconciliationItem,
 )
@@ -668,11 +670,10 @@ def test_pending_parity_blocks_ledger_stream_activation(control_db, monkeypatch)
         )
 
 
-@pytest.fixture
-def control_db(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
-    run_migrations(engine)
-    now = datetime(2026, 8, 12, tzinfo=UTC)
+def _seed_governed_catalog_evidence(engine, *, now=None):
+    """Seed the governed schedule and roster a catalog publication is checked against."""
+
+    now = now or datetime(2026, 8, 12, tzinfo=UTC)
     team_ids = sorted(NBA_TEAM_IDS)
     with engine.begin() as connection:
         for index in range(15):
@@ -693,6 +694,13 @@ def control_db(tmp_path):
             published_at=now,
         ))
     return engine
+
+
+@pytest.fixture
+def control_db(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'control.sqlite3'}")
+    run_migrations(engine)
+    return _seed_governed_catalog_evidence(engine)
 
 
 def test_collector_tokens_are_scoped_expiring_and_one_time_when_consumed(control_db):
@@ -2243,3 +2251,354 @@ def test_bound_nba_stream_still_requires_a_candidate_to_activate(control_db):
             "synergy_play_types_opponent_season",
             actor="operator", reason="re-enable a bound stream",
         )
+
+
+# --- atomic publication repair groups (#230) --------------------------------
+
+SEASON_ZONES = "exact_shot_zones_opponent_season"
+L15_ZONES = "exact_shot_zones_opponent_l15"
+# The Last-15 window resolves its endpoint boundaries from the governed
+# ledger, so a manifest that collects it also freezes that scope.
+ZONE_REPAIR_SCOPES = (SEASON_ZONES, L15_ZONES, "canonical_game_ledger")
+
+
+def _prepare_catalogs(control, *, cutoff):
+    control.activate_season("2025-26", actor="operator")
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(
+            request.request_id, _catalog_payload(kind), version=f"{kind}-v1",
+        )
+
+
+def _seed_active_publication(engine, *, stream_key, cutoff, fence=1,
+                             season="2025-26"):
+    """Insert a displaced-but-active publication and its pointer directly.
+
+    Composing one through the service would require a full evidence cycle;
+    the repair group only reads the durable pointer identity, so seeding the
+    exact rows keeps the test offline and credential-free.
+    """
+
+    publication_id = f"pub-{stream_key}-{fence}-{season}-{cutoff.date()}"
+    with engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id=publication_id,
+            stream_key=stream_key,
+            season=season,
+            cutoff=cutoff,
+            version=fence,
+            status="active",
+            checksum="a" * 64,
+            payload=json.dumps({"rows": []}),
+            created_at=cutoff,
+            fence=fence,
+        ))
+        connection.execute(PublicationPointer.__table__.delete().where(
+            PublicationPointer.stream_key == stream_key
+        ))
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key=stream_key,
+            active_publication_id=publication_id,
+            previous_publication_id=None,
+            fence=fence,
+            updated_at=cutoff,
+        ))
+    return publication_id
+
+
+def _zone_repair_declaration(season_publication_id, l15_publication_id):
+    return {
+        "reason": "Opponent zone Totals were published from the broken Per48 mode.",
+        "members": [
+            {
+                "stream_key": SEASON_ZONES,
+                "expected_publication_id": season_publication_id,
+                "expected_fence": 1,
+            },
+            {
+                "stream_key": L15_ZONES,
+                "expected_publication_id": l15_publication_id,
+                "expected_fence": 1,
+            },
+        ],
+    }
+
+
+@pytest.fixture
+def repair_group_env(control_db):
+    """An active season, registered streams, and a displaced opponent-zone pair."""
+
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 11, tzinfo=UTC)
+    control = CollectionControlService(control_db, clock=lambda: now)
+    PublicationService(control_db, clock=lambda: now).register_default_streams()
+    _prepare_catalogs(control, cutoff=cutoff)
+    season_publication = _seed_active_publication(
+        control_db, stream_key=SEASON_ZONES, cutoff=cutoff,
+    )
+    l15_publication = _seed_active_publication(
+        control_db, stream_key=L15_ZONES, cutoff=cutoff,
+    )
+    return {
+        "engine": control_db,
+        "control": control,
+        "now": now,
+        "cutoff": cutoff,
+        "declaration": _zone_repair_declaration(season_publication, l15_publication),
+        "season_publication_id": season_publication,
+        "l15_publication_id": l15_publication,
+    }
+
+
+def _create_grouped_manifest(env, *, declaration=None, scopes=ZONE_REPAIR_SCOPES):
+    return env["control"].create_manifest(
+        "2025-26",
+        cutoff=env["cutoff"],
+        scopes=list(scopes),
+        collect_before=env["now"] + timedelta(hours=1),
+        repair_group=env["declaration"] if declaration is None else declaration,
+    )
+
+
+def test_manifest_records_an_immutable_repair_group_bound_to_its_integrity(repair_group_env):
+    env = repair_group_env
+    manifest = _create_grouped_manifest(env)
+
+    with env["engine"].begin() as connection:
+        group = connection.execute(select(PublicationRepairGroup)).one()
+        members = connection.execute(select(PublicationRepairGroupMember).order_by(
+            PublicationRepairGroupMember.stream_key
+        )).all()
+
+    assert group.manifest_id == manifest.manifest_id
+    assert group.season == "2025-26"
+    assert group.reason.startswith("Opponent zone Totals")
+    assert [member.stream_key for member in members] == [L15_ZONES, SEASON_ZONES]
+    assert {member.expected_fence for member in members} == {1}
+    assert {member.expected_publication_id for member in members} == {
+        env["season_publication_id"], env["l15_publication_id"],
+    }
+
+    # The same scopes without a group are a different manifest: the group is
+    # part of manifest integrity, not an interchangeable sidecar.
+    ungrouped = env["control"].create_manifest(
+        "2025-26",
+        cutoff=env["cutoff"],
+        scopes=list(ZONE_REPAIR_SCOPES),
+        collect_before=env["now"] + timedelta(hours=1),
+    )
+    assert ungrouped.checksum != manifest.checksum
+
+
+def test_repair_group_rejects_ineligible_members_before_the_manifest_activates(repair_group_env):
+    env = repair_group_env
+    season_id, l15_id = env["season_publication_id"], env["l15_publication_id"]
+
+    def declaration(members, reason="Opponent zone Totals are wrong."):
+        return {"reason": reason, "members": members}
+
+    cases = [
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+        ]), "invalid_repair_group_membership"),
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+        ]), "duplicate_repair_group_member"),
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+            {"stream_key": "not_a_stream", "expected_publication_id": l15_id,
+             "expected_fence": 1},
+        ]), "unknown_repair_group_member"),
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+            {"stream_key": "synergy_play_types_opponent_l15",
+             "expected_publication_id": l15_id, "expected_fence": 1},
+        ]), "unknown_repair_group_member"),
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+            {"stream_key": L15_ZONES, "expected_publication_id": "absent",
+             "expected_fence": 1},
+        ]), "unknown_repair_group_member"),
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+            {"stream_key": L15_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+        ]), "unknown_repair_group_member"),
+        (declaration(env["declaration"]["members"], reason="   "),
+         "repair_group_reason_required"),
+        (declaration([
+            {"stream_key": SEASON_ZONES, "expected_publication_id": season_id,
+             "expected_fence": 1},
+            {"stream_key": L15_ZONES, "expected_publication_id": l15_id,
+             "expected_fence": -1},
+        ]), "invalid_repair_group_member"),
+    ]
+    for candidate, reason in cases:
+        with pytest.raises(ControlPlaneError, match=reason):
+            _create_grouped_manifest(env, declaration=candidate)
+
+    # A member the manifest does not collect for cannot be repaired by it.
+    with pytest.raises(ControlPlaneError, match="ineligible_repair_group_member"):
+        _create_grouped_manifest(env, scopes=[SEASON_ZONES])
+
+    with env["engine"].begin() as connection:
+        assert connection.execute(select(PublicationRepairGroup)).all() == []
+        assert connection.execute(select(CollectionManifest)).all() == []
+
+
+def test_repair_group_rejects_cross_season_and_cross_cutoff_members(repair_group_env):
+    env = repair_group_env
+    other_season = _seed_active_publication(
+        env["engine"], stream_key=L15_ZONES, cutoff=env["cutoff"],
+        season="2024-25",
+    )
+    with pytest.raises(ControlPlaneError, match="cross_season_repair_group_member"):
+        _create_grouped_manifest(env, declaration=_zone_repair_declaration(
+            env["season_publication_id"], other_season,
+        ))
+
+    later = _seed_active_publication(
+        env["engine"], stream_key=L15_ZONES,
+        cutoff=env["cutoff"] + timedelta(days=2),
+    )
+    with pytest.raises(ControlPlaneError, match="cross_cutoff_repair_group_member"):
+        _create_grouped_manifest(env, declaration=_zone_repair_declaration(
+            env["season_publication_id"], later,
+        ))
+
+
+def test_a_stale_guard_prevents_the_group_from_becoming_promotable(repair_group_env):
+    env = repair_group_env
+    manifest = _create_grouped_manifest(env)
+
+    state = env["control"].repair_group_state(manifest.manifest_id)
+    assert state["promotable"] is True
+    assert state["state"] == "waiting_for_grouped_execution"
+    assert state["stale_members"] == []
+    assert {member["stream_key"] for member in state["members"]} == {
+        SEASON_ZONES, L15_ZONES,
+    }
+
+    # A publication that moved after the declaration invalidates the guard:
+    # its rollback target is no longer the one the operator agreed to discard.
+    with env["engine"].begin() as connection:
+        connection.execute(PublicationPointer.__table__.update().where(
+            PublicationPointer.stream_key == L15_ZONES
+        ).values(fence=9))
+
+    state = env["control"].repair_group_state(manifest.manifest_id)
+    assert state["promotable"] is False
+    assert state["state"] == "guard_stale"
+    assert state["stale_members"] == [L15_ZONES]
+
+
+def test_repair_group_state_is_absent_for_ordinary_manifests(repair_group_env):
+    env = repair_group_env
+    manifest = env["control"].create_manifest(
+        "2025-26",
+        cutoff=env["cutoff"],
+        scopes=list(ZONE_REPAIR_SCOPES),
+        collect_before=env["now"] + timedelta(hours=1),
+    )
+    assert env["control"].repair_group_state(manifest.manifest_id) is None
+    with pytest.raises(ControlPlaneError, match="manifest_not_found"):
+        env["control"].repair_group_state("absent")
+
+
+def test_grouped_members_wait_instead_of_promoting_independently(repair_group_env):
+    env = repair_group_env
+    manifest = _create_grouped_manifest(env)
+    publications = PublicationService(env["engine"], clock=lambda: env["now"])
+
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        with pytest.raises(ControlPlaneError, match="grouped_repair_pending"):
+            publications.compose_from_observations(
+                stream_key,
+                season="2025-26",
+                cutoff=env["cutoff"],
+                manifest_id=manifest.manifest_id,
+            )
+
+    # An unrelated manifest keeps the ordinary independent behavior: it fails
+    # on its own missing evidence, not on a group that does not contain it.
+    ordinary = env["control"].create_manifest(
+        "2025-26",
+        cutoff=env["cutoff"],
+        scopes=list(ZONE_REPAIR_SCOPES),
+        collect_before=env["now"] + timedelta(hours=1),
+    )
+    with pytest.raises(ControlPlaneError) as failure:
+        publications.compose_from_observations(
+            SEASON_ZONES,
+            season="2025-26",
+            cutoff=env["cutoff"],
+            manifest_id=ordinary.manifest_id,
+        )
+    assert failure.value.reason != "grouped_repair_pending"
+
+
+def _zone_collector_claims(engine, *, now, label, surfaces):
+    tokens = CollectorTokenService(
+        engine, environment="testing", signing_secret="test", clock=lambda: now,
+    )
+    identity = tokens.create_identity(
+        label, scopes=["poll"], owner="residential_collector",
+        providers=["nba"], surfaces=list(surfaces),
+    )
+    return tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["poll"],
+    ))
+
+
+def test_discovery_exposes_the_group_without_widening_collector_permissions(repair_group_env):
+    env = repair_group_env
+    manifest = _create_grouped_manifest(env)
+    both = _zone_collector_claims(
+        env["engine"], now=env["now"], label="both",
+        surfaces=[SEASON_ZONES, L15_ZONES],
+    )
+
+    discovered = env["control"].discover(claims=both)
+    visible = next(
+        item for item in discovered["manifests"]
+        if item["manifest_id"] == manifest.manifest_id
+    )
+    group = visible["repair_group"]
+    assert group["members"] == [L15_ZONES, SEASON_ZONES]
+    assert group["execution"] == "grouped"
+    assert group["reason"].startswith("Opponent zone Totals")
+    # Pointer guards are operator control-plane state.  No collector scope
+    # grants them, so discovery must not carry them.
+    assert "expected_publication_id" not in json.dumps(group)
+    assert "expected_fence" not in json.dumps(group)
+
+    # The same group, read the same way, from the single-manifest contract.
+    read = env["control"].get_manifest(manifest.manifest_id, claims=both)
+    assert read._repair_group == group
+
+    # A collector authorized for only one member never learns the group is
+    # wider than the surfaces it already holds.
+    season_only = _zone_collector_claims(
+        env["engine"], now=env["now"], label="season-only", surfaces=[SEASON_ZONES],
+    )
+    partial = env["control"].get_manifest(manifest.manifest_id, claims=season_only)
+    assert partial._repair_group["members"] == [SEASON_ZONES]
+
+    ordinary = env["control"].create_manifest(
+        "2025-26",
+        cutoff=env["cutoff"],
+        scopes=list(ZONE_REPAIR_SCOPES),
+        collect_before=env["now"] + timedelta(hours=1),
+    )
+    assert env["control"].get_manifest(
+        ordinary.manifest_id, claims=both,
+    )._repair_group is None

@@ -34,7 +34,19 @@ from app.services.team_matchup_repository import (
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
 )
+from app.services.collection_control import (
+    CollectionControlService,
+    PublicationService,
+)
 from tests.services.test_ledger_derivations import _league_games
+from tests.services.test_collection_control import (
+    L15_ZONES,
+    SEASON_ZONES,
+    _catalog_payload,
+    _seed_governed_catalog_evidence,
+    _seed_active_publication,
+    _zone_repair_declaration,
+)
 
 
 def _catalog_events(games, cutoff):
@@ -1366,3 +1378,71 @@ def test_refresh_rejects_expired_scope_and_version_before_backfill(tmp_path):
     assert backfill.kwargs["manifest_id"] == "manifest"
     assert backfill.kwargs["manifest_scope"] == "canonical_game_ledger"
     assert backfill.kwargs["collect_before"] == now + timedelta(hours=1)
+
+
+def test_grouped_repair_jobs_stay_queued_and_unclaimed_by_the_worker(tmp_path):
+    """A declared repair group is promoted by the grouped operation only.
+
+    The worker must not claim a member: claiming without promoting would
+    strand the row in ``running`` and could advance half a group.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'grouped.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    _seed_governed_catalog_evidence(engine, now=now)
+    control = CollectionControlService(engine, clock=lambda: now)
+    PublicationService(engine, clock=lambda: now).register_default_streams()
+    control.activate_season("2025-26", actor="operator")
+    for kind in ("event", "athlete"):
+        request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
+        control.publish_catalog(
+            request.request_id, _catalog_payload(kind), version=f"{kind}-v1",
+        )
+    expected = {
+        stream_key: _seed_active_publication(
+            engine, stream_key=stream_key, cutoff=cutoff,
+        )
+        for stream_key in (SEASON_ZONES, L15_ZONES)
+    }
+    manifest = control.create_manifest(
+        "2025-26",
+        cutoff=cutoff,
+        scopes=[SEASON_ZONES, L15_ZONES],
+        collect_before=now + timedelta(hours=1),
+        repair_group=_zone_repair_declaration(
+            expected[SEASON_ZONES], expected[L15_ZONES],
+        ),
+    )
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert(), [{
+            "job_id": stream_key, "stream_key": stream_key,
+            "manifest_id": manifest.manifest_id, "season": "2025-26",
+            "cutoff": cutoff, "status": "queued", "attempts": 0,
+            "created_at": cutoff, "updated_at": cutoff,
+        } for stream_key in (SEASON_ZONES, L15_ZONES)])
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            raise AssertionError("A grouped slice must not reach composition governance")
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=SimpleNamespace(engine=engine),
+        materialization=SimpleNamespace(publication_service=None),
+        governance=Governance(),
+        clock=lambda: now,
+    )
+
+    assert runtime.compose_queued("2025-26") == 0
+
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(
+                select(CompositionJob.__table__)
+            ).mappings()
+        }
+    assert {row["status"] for row in jobs.values()} == {"queued"}
+    assert {row["claimed_generation"] for row in jobs.values()} == {None}
