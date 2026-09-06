@@ -158,10 +158,9 @@ def test_every_remaining_mention_of_a_retired_table_is_accounted_for():
     * It is a **per-file** substring allow-list.  A new SQL read added inside a
       file that is already allowed -- another query in ``ledger_parity.py``,
       say -- does not fail this test.  Only a new *file* does.
-    * It cannot see a **dynamic** reader.  ``database_utils.fetch_data_from_table``
-      and ``PlayerService._fetch_data_from_table`` take a table name as an
-      argument, so a caller that passes a retired name through a variable never
-      spells it in the source and is invisible here.
+    * It cannot see a **dynamic** reader.  ``PlayerService._fetch_data_from_table``
+      takes a table name as an argument, so a caller that passes a retired name
+      through a variable never spells it in the source and is invisible here.
 
     The behavioural fences above are what actually stop a write, and the
     dropped storage is what actually stops a read; this test records the

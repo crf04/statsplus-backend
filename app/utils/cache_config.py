@@ -107,15 +107,3 @@ def is_cache_enabled(settings: RuntimeSettings | None = None) -> bool:
     """
     runtime_settings = settings or get_runtime_settings()
     return runtime_settings.cache.enabled
-
-def get_ttl_for_cache_type(cache_type: str) -> int:
-    """
-    Get TTL (time-to-live) for a specific cache type.
-    
-    Args:
-        cache_type: Type of cache data
-        
-    Returns:
-        int: TTL in seconds
-    """
-    return CACHE_TTLS.get(cache_type, CACHE_TTLS['intraday_computed'])

@@ -123,7 +123,7 @@ over is frozen, not superseded.
 | `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | n/a | player zone-shooting profile |
 | `processed_player_assists` | `player_assist_locations` | no | not collected by `update_database` (#231) | yes — superseded | none |
 | `pbp_player_stats` | `player_assist_locations` | no | not collected by `update_database` (#231) | n/a (retired refresh input) | none |
-| `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables, `database_utils` |
+| `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables |
 
 No **frozen** row remains: the Team Profile read cutover (crf04/statsplus#45)
 moved `GET /api/teams/stats` onto the Season publications, so its Traditional,
