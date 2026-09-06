@@ -2071,6 +2071,29 @@ The backtest is a separate route from resolution deliberately: the league-wide
 game-log scan runs only when a reader expands one Target, so the Slate's own
 read stays the cost of one Slate plus the Matchups its Targets name.
 
+### Target preview (#253)
+
+The Lab previews a Draft Target -- one no row holds -- and owes it the same
+numbers a saved Target gets, so neither read grew a second evaluator. Each
+gained an entry that takes a Target *mapping* instead of an id or an account:
+`TargetBacktestService.backtest_target(target)` is the whole backtest, and
+`backtest(uid, id)` is now `get_target` followed by it;
+`TargetResolutionService.today(target)` resolves one mapping against the
+current Slate Date through the same `_resolve_target` step `resolve` runs per
+stored Target, and reduces the result to `{game, fit_count}` or `None`. The
+mapping either read accepts is the item `list_targets` emits, which is why
+`UserService.validate_target_draft` exists: it runs the create validators and
+derives the title without touching the database, and returns that shape minus
+`id` and timestamps. The cap and the duplicate rule are deliberately not
+applied there -- both compare a write against held rows, and a draft is not a
+write.
+
+The route composes the three, in that order, so an unusable body is refused
+before any scan runs. `summary` is computed by the backtest itself rather than
+by each reader, and is therefore present on the saved Backtest too; the Lab
+and the detail cannot disagree about the mean signed difference or the
+over-average share because neither computes it.
+
 ### Database-first Matchups activation (#87)
 
 `DatabaseFirstPublicationReader` is the read-side authority for the first

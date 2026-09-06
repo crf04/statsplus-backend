@@ -91,20 +91,51 @@ class TargetResolutionService:
         live: list[dict[str, Any]] = []
         idle: list[dict[str, Any]] = []
         for target in self.targets.list_targets(firebase_uid):
-            scheduled = games.get(target["opponent"])
-            if scheduled is None:
-                idle.append(self._idle(target))
-                continue
-            game, opponent_side, filtered_side = scheduled
-            game_id = game["game_id"]
-            if game_id not in read_matchups:
-                read_matchups[game_id] = self.matchups.get_matchup(game_id=game_id)
-            live.append(
-                self._live(
-                    target, game, opponent_side, filtered_side, read_matchups[game_id]
-                )
-            )
+            resolved = self._resolve_target(target, games, read_matchups)
+            (idle if resolved["game"] is None else live).append(resolved)
         return {"slate_date": slate["slate_date"], "targets": live + idle}
+
+    def today(self, target: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Whether one Target mapping fires on the current Slate Date.
+
+        The Lab's one line for a Draft Target: ``None`` when the opponent is
+        idle today, else the game as ``resolve`` reports it and ``fit_count``,
+        the number of opposing participants meeting every Qualifier by the
+        same rule -- thin players included, as ``resolve`` includes them.
+        Nothing here reads the caller's stored Targets, so the mapping need
+        not be one.
+        """
+
+        slate = self.slates.get_slate(None)
+        resolved = self._resolve_target(
+            target, self._games_by_tricode(slate["games"]), {}
+        )
+        if resolved["game"] is None:
+            return None
+        return {"game": resolved["game"], "fit_count": len(resolved["players"])}
+
+    def _resolve_target(
+        self,
+        target: Mapping[str, Any],
+        games: Mapping[str, tuple[Mapping[str, Any], str, str]],
+        read_matchups: dict[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Resolve one Target against an indexed Slate, reading each game once.
+
+        ``read_matchups`` is the request's cache: a game already read for an
+        earlier Target is not read again for this one.
+        """
+
+        scheduled = games.get(target["opponent"])
+        if scheduled is None:
+            return self._idle(target)
+        game, opponent_side, filtered_side = scheduled
+        game_id = game["game_id"]
+        if game_id not in read_matchups:
+            read_matchups[game_id] = self.matchups.get_matchup(game_id=game_id)
+        return self._live(
+            target, game, opponent_side, filtered_side, read_matchups[game_id]
+        )
 
     @staticmethod
     def _games_by_tricode(

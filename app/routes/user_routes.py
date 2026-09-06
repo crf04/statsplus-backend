@@ -370,6 +370,37 @@ def resolve_targets():
     )
     return jsonify({'success': True, **resolved})
 
+@user_bp.route('/targets/preview', methods=['POST'])
+@require_auth
+@route_error_boundary("Failed to preview the target.")
+def preview_target():
+    """
+    Preview a Draft Target: its season to date, and whether it fires today.
+
+    Expected JSON body: the same as creating a Target.  It is validated by the
+    same rules, but nothing is stored and neither the per-account cap nor the
+    duplicate rule applies, so the Lab can evaluate a Target the caller has
+    not saved and may never save.
+
+    Returns:
+        JSON response with the backtest for the draft (its ``target`` carries
+        the derived title and no id) and ``today``: ``null`` when the opponent
+        is idle on the current slate date, else the game and the fit count
+    """
+    data = _target_body()
+
+    draft = user_service.validate_target_draft(
+        opponent=data.get('opponent'),
+        qualifiers=data.get('qualifiers'),
+        note=data.get('note')
+    )
+    previewed = target_backtest_service.backtest_target(draft)
+    return jsonify({
+        'success': True,
+        **previewed,
+        'today': target_resolution_service.today(draft)
+    })
+
 @user_bp.route('/targets/<int:target_id>/backtest', methods=['GET'])
 @require_auth
 @route_error_boundary("Failed to backtest the target.")

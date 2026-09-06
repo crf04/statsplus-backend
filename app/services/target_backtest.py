@@ -193,22 +193,75 @@ class TargetBacktestService:
         existence of another account's Target is not observable here.
         """
 
-        target = self.targets.get_target(firebase_uid, target_id)
+        return self.backtest_target(self.targets.get_target(firebase_uid, target_id))
+
+    def backtest_target(self, target: Mapping[str, Any]) -> dict[str, Any]:
+        """Return one Target mapping with its season to date.
+
+        The mapping is the item ``list_targets`` returns, or a Draft Target
+        validated into that shape without an id; it is echoed as given, so a
+        draft comes back as a draft.  Nothing here reads the caller's stored
+        Targets, which is what lets the Lab evaluate a Target that does not
+        exist yet exactly as the detail evaluates one that does.
+        """
+
         season = self.settings.nba.current_season
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
         # One snapshot for the whole response: the Diet a player ate and the
         # games they played have to come from the same generation of evidence.
         snapshot = self._publication_snapshot(season)
+        players = self._players(target, qualifiers, markets, season, snapshot)
         return {
             "target": dict(target),
             "season": season,
             "proxy": PROXY_NOTE,
             "stat_columns": list(markets),
-            "players": self._players(
-                target, qualifiers, markets, season, snapshot
-            ),
+            "summary": self._summary(players, markets),
+            "players": players,
         }
+
+    @classmethod
+    def _summary(
+        cls,
+        players: Sequence[Mapping[str, Any]],
+        markets: Sequence[str],
+    ) -> dict[str, Any]:
+        """Reduce every listed game to one line per stat column.
+
+        ``mean_difference`` is the mean of (game stat - that player's season
+        average) over every game listed under every player, and
+        ``over_average_share`` the share of those games at or above the
+        average -- on the average counts, as both comparators are inclusive.
+        Both are ``None`` when no game is listed: no evidence is not a
+        difference of zero.  Computed here rather than by each reader so the
+        Lab and the saved detail show the same numbers.
+        """
+
+        lines = [
+            (player["season_averages"], game["stats"])
+            for player in players
+            for game in player["games"]
+        ]
+        columns = {}
+        for market in markets:
+            differences = [stats[market] - averages[market] for averages, stats in lines]
+            columns[market] = {
+                "mean_difference": (
+                    cls._number(sum(differences) / len(differences))
+                    if differences
+                    else None
+                ),
+                "over_average_share": (
+                    cls._number(
+                        sum(1 for difference in differences if difference >= 0)
+                        / len(differences)
+                    )
+                    if differences
+                    else None
+                ),
+            }
+        return {"players": len(players), "games": len(lines), "columns": columns}
 
     def _publication_snapshot(self, season: str):
         """Resolve this request's immutable Publication generation, if any.

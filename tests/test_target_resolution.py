@@ -1200,6 +1200,132 @@ def test_an_opponent_playing_away_resolves_against_the_home_pool(targets, resolv
     assert resolved["players"] == []
 
 
+# --- today: one draft against the current Slate Date -----------------------
+
+
+#: An unsaved Target as ``UserService.validate_target_draft`` shapes it.
+DRAFT = {
+    "opponent": "OKC",
+    "title": "OKC vs Corner 3 ≥ 40%",
+    "note": None,
+    "qualifiers": [CORNER_THREE],
+}
+
+
+@pytest.fixture
+def today():
+    """Ask whether one draft fires today, with no stored Targets to read."""
+
+    def _today(draft=DRAFT, *, slate=None, matchups=None):
+        service = TargetResolutionService(
+            # A draft is stored nowhere, so there is no Target reader to ask.
+            targets=SimpleNamespace(),
+            slates=slate or FakeSlate(),
+            matchups=matchups or FakeMatchups(),
+        )
+        return service.today(draft)
+
+    return _today
+
+
+def test_today_names_the_game_and_counts_the_fits_for_a_live_draft(
+    targets, resolve, today
+):
+    slate = FakeSlate()
+
+    fired = today(slate=slate)
+
+    # Today is the Slate's current date, never a requested one.
+    assert slate.calls == [None]
+    assert fired == {
+        "game": {
+            "game_id": GAME_ID,
+            "scheduled_at": TIP_OFF,
+            "status": {"state": "scheduled", "label": "Scheduled"},
+            "opponent": {
+                "team_id": OKC,
+                "tricode": "OKC",
+                "name": "Oklahoma City Thunder",
+            },
+            "opposing_team": {
+                "team_id": LAL,
+                "tricode": "LAL",
+                "name": "Los Angeles Lakers",
+            },
+            "away": {
+                "team_id": LAL,
+                "tricode": "LAL",
+                "name": "Los Angeles Lakers",
+            },
+            "home": {
+                "team_id": OKC,
+                "tricode": "OKC",
+                "name": "Oklahoma City Thunder",
+            },
+        },
+        "fit_count": 1,
+    }
+    # The same game and the same count a saved Target with these Qualifiers
+    # resolves to.
+    _create(targets)
+    saved = resolve()["targets"][0]
+    assert fired["game"] == saved["game"]
+    assert fired["fit_count"] == len(saved["players"])
+
+
+def test_today_is_none_for_an_idle_draft(today):
+    assert today({**DRAFT, "opponent": "MIA"}) is None
+
+
+def test_today_counts_a_thin_fit_as_resolve_does(today):
+    matchups = FakeMatchups(
+        {
+            GAME_ID: _matchup(
+                players=[
+                    _player(
+                        1,
+                        "Thin",
+                        shot_zones=_zone_diet(0.4, 0.2),
+                        diet_thin={"shot_zones": True},
+                    ),
+                    _player(2, "Solid", shot_zones=_zone_diet(0.4, 0.2)),
+                    _player(3, "Rim Runner", shot_zones=_zone_diet(0.1, 0.5)),
+                    _player(
+                        4,
+                        "Thunder",
+                        team_id=OKC,
+                        tricode="OKC",
+                        shot_zones=_zone_diet(0.45, 0.2),
+                    ),
+                ]
+            )
+        }
+    )
+
+    assert today(matchups=matchups)["fit_count"] == 2
+
+
+def test_today_counts_nobody_when_the_pool_is_unavailable(today):
+    matchups = FakeMatchups(
+        {
+            GAME_ID: _matchup(
+                players=[],
+                participants={
+                    "status": "unavailable",
+                    "source": "player_pool",
+                    "context": None,
+                    "unavailable_reason": "player_pool_unavailable",
+                },
+            )
+        }
+    )
+
+    fired = today(matchups=matchups)
+
+    assert fired["game"]["game_id"] == GAME_ID
+    assert fired["fit_count"] == 0
+
+
 # --- routes ----------------------------------------------------------------
 
 
