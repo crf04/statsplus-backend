@@ -423,7 +423,7 @@ def backtest_target(target_id):
 @route_error_boundary("Failed to update the target.")
 def update_target(target_id):
     """
-    Edit the Qualifiers and/or the note of one of the caller's Targets.
+    Edit a caller's Qualifiers, note, Conditions, or stat preferences.
 
     Expected JSON body, with either key or both:
         {

@@ -18,7 +18,7 @@ from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
-from app.errors import ConflictError, InvalidInputError, ResourceNotFoundError
+from app.errors import ConflictError, InvalidConfigurationError, InvalidInputError, ResourceNotFoundError
 from app.models import get_session, SavedFilterSet, Target, TargetQualifier, User
 from app.models.saved_filter_set import (
     SAVED_FILTER_SET_NAME_MAX_LENGTH,
@@ -779,20 +779,10 @@ class UserService:
         conditions = validate_conditions(value)
         if conditions and conditions['defender']:
             from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
-            from app.services.player_game_log_repository import PlayerGameLogRepository
-            from app.domain.freshness import time_window_timedelta
-            from app.services.statistic_catalog import StatisticCatalog
-            logs = self.player_logs or PlayerGameLogRepository(
-                self.engine, statistic_catalog=StatisticCatalog.load_default(),
-                stats_surface_season=self.settings.nba.current_season,
-                stats_surface_max_age=time_window_timedelta(
-                    self.settings.catalog.player_game_log_max_age_hours, unit_seconds=3600,
-                    field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
-                ),
-                serve_stale=True,
-            )
+            if self.player_logs is None:
+                raise InvalidConfigurationError("Target defender validation is unavailable.")
             defender = conditions['defender']
-            rows = logs.list_player_rows(self.settings.nba.current_season, defender['player_id'])
+            rows = self.player_logs.list_player_rows(self.settings.nba.current_season, defender['player_id'])
             if not any(row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
                        and row.season_type == 'Regular Season' for row in rows):
                 raise InvalidInputError("The defender must appear in the opponent's season game logs.")
