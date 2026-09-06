@@ -1050,12 +1050,15 @@ def test_backtest_conditions_include_absence_as_zero_and_bound_dates(targets, bu
     {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 49}},
     {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 1.5}},
     {'defender': {'player_id': 99, 'comparator': 'over', 'minutes': 20}},
-    {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 20}},
+    {'defender': {'player_id': 100, 'comparator': 'under', 'minutes': 20}},
     {'from': '2026-02-01', 'to': '2026-01-01'},
     {'from': '20260101'},
 ])
 def test_invalid_conditions_are_refused_for_create_update_and_draft(targets, conditions):
     from app.errors import InvalidInputError
+    targets.player_logs = SimpleNamespace(list_player_rows=lambda season, player_id: (
+        _row(99, team_id=OKC), _row(99, team_id=BOS),
+    ) if player_id == 99 else ())
     created = _create(targets)
     for action in (
         lambda: targets.create_target(OWNER, opponent='BOS', qualifiers=[CORNER_THREE], conditions=conditions),
@@ -1067,7 +1070,7 @@ def test_invalid_conditions_are_refused_for_create_update_and_draft(targets, con
 
 
 def test_identical_saved_and_draft_conditions_have_identical_evidence(targets, build_backtest):
-    conditions = {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 20}, 'from': None, 'to': None}
+    conditions = {'defender': {'player_id': 99, 'comparator': 'at_least', 'minutes': 20}, 'from': None, 'to': None}
     logs = FakeLogs(rows=[_row(LEBRON)])
     logs.list_player_rows = lambda *args, **kwargs: (_row(99, game_id='other', team_id=OKC, opponent_team_id=LAL),)
     targets.player_logs = logs
@@ -1077,7 +1080,7 @@ def test_identical_saved_and_draft_conditions_have_identical_evidence(targets, b
     saved, preview = service.backtest(OWNER, created['id']), service.backtest_target(draft)
     assert saved['players'] == preview['players']
     assert saved['summary'] == preview['summary']
-    assert saved['games_considered'] == {'kept': 1, 'played': 1}
+    assert saved['games_considered'] == {'kept': 0, 'played': 1}
     assert targets.list_targets(OWNER)[0]['conditions'] == conditions
 
 
@@ -1221,3 +1224,26 @@ def test_stat_preferences_cross_the_http_seam(client, authenticate, dependencies
     else:
         seam = dependencies.user_service.validate_target_draft if path.endswith('preview') else dependencies.user_service.create_target
         assert seam.call_args.kwargs['stat_preferences'] == preferences
+
+
+def test_roster_reads_the_immutable_publication_instead_of_legacy_rows(backtest_engine, backtest_settings):
+    from dataclasses import asdict
+    from datetime import timedelta
+    from app.services.collection_control import PublicationService
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    publications = PublicationService(backtest_engine, clock=lambda: now)
+    publications.register_stream('player_game_logs', provider='ledger', owner='railway',
+        required_observations=(), publication_strategy='replace', enabled=True, freshness_rule='cutoff_current')
+    rows = [_row(99, name='Published defender', team_id=OKC, team_tricode='OKC', opponent_team_id=LAL, opponent_team_tricode='LAL', minutes=27),
+            _row(LEBRON), _row(123, game_id='unrelated', team_id=BOS, opponent_team_id=LAL)]
+    publications.compose('player_game_logs', season=SEASON, cutoff=now,
+        payload={'rows': [{**asdict(row), 'game_date': row.game_date.isoformat()} for row in rows]})
+    reader = DatabaseFirstPublicationReader(backtest_engine, clock=lambda: now)
+    logs = PlayerGameLogRepository(backtest_engine, statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON, stats_surface_max_age=timedelta(hours=30), publication_reader=reader)
+    payload = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings, publication_reader=reader).get('OKC')
+    assert payload['players'] == [{'player_id': 99, 'name': 'Published defender', 'games_played': 1, 'average_minutes': 27.0}]

@@ -2536,8 +2536,9 @@ this table is both the accepted `slice_key` vocabulary and how each key reads:
 | `assist_locations` | `ShortMidRangeAssists` | Short mid assists |
 | `assist_locations` | `LongMidRangeAssists` | Long mid assists |
 
-Update semantics: an absent key means unchanged, and `"note": null` clears the
-note. `opponent` is fixed -- aiming the same Qualifiers at another team is a
+Update semantics: an absent key means unchanged; explicit null clears
+`note`, `conditions`, or `stat_preferences`. Conditions and stat preferences
+may be updated independently of Qualifiers. `opponent` is fixed -- aiming the same Qualifiers at another team is a
 different Target -- and is ignored if submitted.
 
 Validation and conflicts:
@@ -2546,7 +2547,9 @@ Validation and conflicts:
   missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
   unknown base or slice, a comparator outside the two accepted values, a
   threshold outside 0-1, a note over 280 characters, and a `PATCH` body that
-  changes neither the Qualifiers nor the note.
+  changes none of Qualifiers, note, Conditions, or stat preferences. Invalid
+  Conditions and stat preferences also return `400 invalid_input`; their
+  schemas and validation are documented below.
 - `404 resource_not_found` for an id that does not exist or belongs to another
   account. Foreign ids are never reported as `403`.
 - `409 operation_conflict` when the account already aims the same Qualifier set
