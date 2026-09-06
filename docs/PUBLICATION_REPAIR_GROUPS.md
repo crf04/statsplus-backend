@@ -270,3 +270,37 @@ One `AuditEvent` records the whole repair, with
 details naming the group, its declared reason, every discarded publication
 identity and fence, and every publication that replaced them. It commits with
 the pointer changes or not at all.
+
+## Running the 2025-26 opponent-zone repair
+
+The repair this machinery was built for. Order matters: the known-wrong data
+stays live until the last step, so keep the window short.
+
+1. **Deploy the backend** only when an operator is ready to follow through.
+   Deploying alone changes nothing a user sees.
+2. **Record the current identities.** For both
+   `exact_shot_zones_opponent_season` and `exact_shot_zones_opponent_l15`,
+   note the active publication id and pointer fence. These become the group's
+   guards; if either moves before promotion the repair refuses rather than
+   discarding something the operator did not agree to discard.
+3. **Create the manifest with the group**, naming both streams, both
+   identities and fences, and a reason. The declaration is immutable.
+4. **Collect both windows** from the residential collector. Evidence arrives
+   independently; neither member composes on its own.
+5. **Promote.**
+   `POST /api/admin/collection/manifests/<id>/repair-group/promote`. Both
+   replacements validate and both pointers advance in one transaction, or
+   nothing changes.
+6. **Verify the data.** Boston's Restricted Area opponent FGA should read
+   about 18.3 per 48, not 137.1. Check **all 30 teams in both windows** -- a
+   plausible sample can conceal a league-wide ranking defect, because the
+   Per48 distortion was team-specific.
+7. **Verify the product.** Matchups and Team Profile keep their existing
+   payload shape, so a corrected value, a corrected rank, and a corrected
+   league-relative comparison are what should change. No frontend deployment
+   is involved.
+
+After step 5 both streams report `rollback_unavailable` until a later valid
+publication establishes a trustworthy previous version. That is the intended
+outcome: the versions the repair displaced are the defective ones, and routine
+recovery must not be able to restore them.
