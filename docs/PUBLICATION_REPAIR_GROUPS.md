@@ -87,9 +87,10 @@ goes live around a group that could not be executed:
 
 ### Operator
 
-`CollectionControlService.repair_group_state(manifest_id)` returns `None` for
-an ordinary manifest, and otherwise the full declaration beside live pointer
-state:
+`GET /api/admin/collection/manifests/<manifest_id>/repair-group`, backed by
+`CollectionControlService.repair_group_state(manifest_id)`, returns the full
+declaration beside live pointer state. An ordinary manifest has no group, and
+the route answers `404` with detail `repair_group_not_found`:
 
 ```json
 {
@@ -110,18 +111,25 @@ state:
     }
   ],
   "stale_members": [],
+  "promoted_at": null,
   "promotable": true,
   "state": "waiting_for_grouped_execution"
 }
 ```
 
-`promotable` reports only that every declared guard still matches the live
-pointer. If any member's active publication or fence has moved since the
-declaration, `state` becomes `guard_stale`, `promotable` becomes `false`, and
-the group cannot enter a promotable state: the rollback target the operator
-agreed to discard is no longer the one that would actually be discarded.
-Evidence completeness is a separate, later gate re-checked by the grouped
-promotion itself.
+`state` is one of exactly three values:
+
+| `state` | `promotable` | Meaning |
+| --- | --- | --- |
+| `waiting_for_grouped_execution` | `true` | Every declared guard still matches the live pointer. |
+| `guard_stale` | `false` | At least one member's active publication or fence moved after the declaration; `stale_members` names them. |
+| `promoted` | `false` | The declaration was consumed by a successful promotion; `promoted_at` is set. |
+
+`promotable` reports only that the group has not been promoted and that every
+declared guard still matches the live pointer. A stale guard means the
+rollback target the operator agreed to discard is no longer the one that would
+actually be discarded. Evidence completeness is a separate, later gate
+re-checked by the grouped promotion itself.
 
 ### Collector
 
@@ -139,11 +147,15 @@ object, or `null`:
 }
 ```
 
+`execution` is `"grouped"` while the declaration is still waiting, and
+`"promoted"` once a successful promotion has consumed it -- at which point the
+members publish independently again. Those are the only two values.
+
 This deliberately does **not** widen collector permissions:
 
 - `members` is filtered to the surfaces the caller's owner/provider/surface
   binding already authorizes. A collector authorized for only one member sees
-  only that member, and the group is omitted entirely if it authorizes none.
+  only that member, and `repair_group` is `null` if it authorizes none.
 - Expected publication identities and pointer fences are never included. They
   are operator control-plane state and no collector scope grants them.
 
@@ -160,8 +172,101 @@ It is then held rather than promoted:
   stranding in `running`, and their `claimed_generation` stays `NULL`.
 - `PublicationService.compose_from_observations` refuses a grouped member with
   `grouped_repair_pending` (HTTP `409 operation_conflict`). The refusal lives
-  at the choke point, not only in the worker, so no caller of the independent
-  path can advance half a group.
+  at the choke point and not only in the worker, so the scheduled path cannot
+  advance half a group.
+
+This covers the scheduled composition path, which is the one that would
+otherwise promote a member on its own. It is not a lock on the pointer. An
+explicit operator action that advances a stream by another route -- notably
+`POST /api/admin/collection/streams/<stream_key>/activate`, which promotes a
+candidate directly -- still moves the pointer. That does not half-repair the
+group silently: the member's guard no longer matches its declaration, so
+`repair_group_state` reports `guard_stale` and the promotion refuses with
+`repair_group_guard_stale` rather than discarding a rollback target the
+operator never agreed to discard.
 
 Manifests without a declared group, and unrelated composition jobs on the same
 cutoff, keep their existing independent behavior.
+
+## Promoting the group
+
+Once every member has complete evidence for the manifest's season and cutoff,
+an operator promotes the whole group as one change:
+
+```http
+POST /api/admin/collection/manifests/<manifest_id>/repair-group/promote
+{"reason": "replace the broken opponent zone pair"}
+```
+
+```json
+{
+  "job_id": "…",
+  "repair_group_id": "…",
+  "manifest_id": "…",
+  "discarded_publications": [
+    {"stream_key": "exact_shot_zones_opponent_season",
+     "publication_id": "…", "fence": 7, "cutoff": "2026-08-10T00:00:00+00:00"}
+  ],
+  "published_publications": [
+    {"stream_key": "exact_shot_zones_opponent_season",
+     "publication_id": "…", "fence": 8}
+  ]
+}
+```
+
+The whole operation is one database transaction, in two phases:
+
+1. **Prove.** Every member's pointer is locked (`SELECT … FOR UPDATE`, in
+   stream-key order so concurrent operators queue rather than deadlock) and
+   its declared active publication identity *and* fence are rechecked against
+   the live row. Then every replacement is composed from accepted evidence and
+   validated. Nothing has been written yet.
+2. **Publish.** Only after all members pass does any pointer move. Each member
+   advances its fence to its new active publication, the displaced version is
+   marked `superseded`, and the pointer's `previous_publication_id` is set to
+   `NULL`.
+
+The held composition jobs are marked `succeeded` and the group records
+`promoted_at`, which releases its members: later cutoffs publish
+independently again, and the group cannot be promoted twice
+(`repair_group_already_promoted`).
+
+### Why the rollback target is cleared
+
+An ordinary publication leaves the version it displaced as the stream's
+rollback target. A repair must not: the displaced version *is* the defect, and
+rolling back to it would silently restore the bug the repair just removed.
+
+So after a successful repair, `POST /api/admin/collection/streams/<stream_key>/rollback`
+returns `409 operation_conflict` with detail `rollback_unavailable`. That is
+the intended state, not a failure. Rollback becomes available again for a
+stream as soon as a later ordinary publication establishes a previous version
+that is actually trustworthy.
+
+### Exceptional behavior
+
+Every one of these leaves the complete prior publication state untouched --
+active pointers, previous pointers, version status, the composition jobs, the
+group's `promoted_at`, and the operator audit all roll back together:
+
+| Reason | Meaning |
+| --- | --- |
+| `repair_group_not_found` | The manifest declares no group (`404`). |
+| `repair_group_already_promoted` | The declaration was already consumed (`409`). |
+| `repair_group_guard_stale` | A member's active publication or fence moved after the declaration (`409`). |
+| `repair_group_manifest_inactive` | The declaring manifest was superseded by a later one, so its catalog binding no longer governs (`409`). Passing `collect_before` is *not* this state -- a promotion happens after collection closes, so an active manifest past its collection deadline still promotes. |
+| `incomplete_publication`, `base_incomplete` | A member has no, or partial, evidence for this season and cutoff. |
+| `publication_candidate_invalid` | A member's replacement failed validation. |
+| any composition or infrastructure failure | Including a failure between two members' pointer updates. |
+
+A failed grouped repair is confined to its own transaction: unrelated
+publication work on the same cutoff still completes. The declaration survives
+a failure, so the operator can fix the cause and retry the same promotion.
+
+### The audit
+
+One `AuditEvent` records the whole repair, with
+`action = publication.repair_group.promote`, the operator's reason, and
+details naming the group, its declared reason, every discarded publication
+identity and fence, and every publication that replaced them. It commits with
+the pointer changes or not at all.
