@@ -466,8 +466,10 @@ def _stat_rows(
             (("fga", "FGA"), "attempts"),
             (("fg2m", "FG2M"), "FG2M"),
             (("fg2a", "FG2A"), "FG2A"),
+            (("fg2a_frequency", "FG2A_FREQUENCY"), "FG2A_FREQUENCY"),
             (("fg3m", "FG3M"), "FG3M"),
             (("fg3a", "FG3A"), "FG3A"),
+            (("fg3a_frequency", "FG3A_FREQUENCY"), "FG3A_FREQUENCY"),
             (("poss", "POSS"), "POSS"),
             (("pts", "PTS"), "PTS"),
             (("min", "MIN", "minutes"), "minutes"),
@@ -526,16 +528,59 @@ def normalize_synergy_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
 ) -> NormalizedObservation:
+    """Retain player/team Synergy source rows without merging denominators.
+
+    Possessions are independent of shot attempts. Sparse/rounded provider
+    shares remain untouched for the governed source aggregation to assess.
+    """
     scope = dict(scope or {"window": "season", "phase": "Regular Season"})
     if scope.get("window") != "season":
         raise ProviderContractError("provider_window_unsupported")
+    if scope.get("phase", "Regular Season") != "Regular Season":
+        raise ProviderContractError("cross_phase_observation")
+    if (scope.get("subject", "player") != "player"
+            or scope.get("type_grouping", "Offensive") != "Offensive"
+            or scope.get("value_mode", "totals") != "totals"):
+        raise ProviderContractError("provider_schema_changed")
+    scope.update(subject="player", phase="Regular Season", type_grouping="Offensive", value_mode="totals")
     requested = scope.get("play_type")
-    required = (str(requested),) if requested is not None else None
-    return _stat_rows(
-        response, categories=PLAY_TYPES, category_names=("category", "play_type", "PLAY_TYPE"),
-        observation_type="synergy_play_types", scope=scope, season=season,
-        cutoff=cutoff, endpoint="synergy", required_identity=("player_id",),
-        required_categories=required,
+    required = (str(requested),) if requested is not None else PLAY_TYPES
+    if not set(required) <= set(PLAY_TYPES):
+        raise ProviderContractError("provider_category_changed")
+    records = []
+    seen = set()
+    present = set()
+    for row in _records(response):
+        player_id = _positive_id(_number(_required(row, "player_id"), integer=True))
+        team_id = _positive_id(_number(_required(row, "team_id"), integer=True))
+        category = _text(_required(row, "category", "play_type"))
+        if category not in required:
+            raise ProviderContractError("provider_category_changed")
+        if _value(row, "type_grouping", default="Offensive") != "Offensive":
+            raise ProviderContractError("provider_schema_changed")
+        identity = (player_id, team_id, category)
+        if identity in seen:
+            raise ProviderContractError("duplicate_identity")
+        seen.add(identity)
+        present.add(category)
+        games = _number(_required(row, "games_played", "GP"), integer=True)
+        possessions = _number(_required(row, "possessions", "POSS"))
+        share = _number(_required(row, "possession_share", "POSS_PCT"))
+        if games <= 0 or share > 1:
+            raise ProviderContractError("value_invariant_failed")
+        records.append({"player_id": player_id, "team_id": team_id,
+                        "games_played": games, "possessions": possessions,
+                        "possession_share": share, "category": category})
+    records.sort(key=lambda row: (row["player_id"], row["team_id"], row["category"]))
+    complete = set(required) <= present
+    return NormalizedObservation(
+        observation_type="synergy_play_types", scope=scope, season=_canonical_season(season),
+        cutoff=_timestamp(cutoff),
+        payload={"base": "play_types", "records": records,
+                 "coverage": {"categories": sorted(present), "required_categories": list(required),
+                              "complete": complete, "scope": dict(scope)}},
+        provenance=_provenance(endpoint="synergy", scope=scope, records=len(records)),
+        complete=complete,
     )
 
 

@@ -946,6 +946,78 @@ def test_nba_only_projection_uses_eastern_slate_date_after_utc_rollover(tmp_path
     assert matchup.as_of == slate_date
 
 
+def test_compose_queued_composes_the_player_shot_type_stream_without_matchups(
+    tmp_path,
+):
+    # The player Diet stream is composed from observations by the same worker
+    # that drains the opponent streams, but it is not a matchup surface, so
+    # its success alone must not re-derive the matchup read models.
+    engine = create_engine(f"sqlite:///{tmp_path / 'player-diet-route.sqlite3'}")
+    run_migrations(engine)
+    cutoff = datetime(2025, 11, 3, 4, 30, tzinfo=timezone.utc)
+    repository = CanonicalGameLedgerRepository(engine)
+    repository.replace_games_atomic(_league_games())
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="player-shot-types",
+            stream_key="grouped_shot_types",
+            manifest_id="bound-manifest",
+            season="2025-26",
+            cutoff=cutoff,
+            status="queued",
+            attempts=0,
+            created_at=cutoff,
+            updated_at=cutoff,
+            generation=1,
+            claimed_generation=None,
+        ))
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, governed_cutoff, frozenset(), frozenset(), {},
+            )
+
+    composed = []
+
+    class Publication:
+        def session(self):
+            return sessionmaker(bind=engine, expire_on_commit=False)()
+
+        def compose_from_observations(self, stream_key, **kwargs):
+            composed.append(stream_key)
+            return object()
+
+    class Matchup:
+        def __init__(self):
+            self.refreshed = 0
+
+        def refresh_publication_surfaces(self, *args, **kwargs):
+            self.refreshed += 1
+
+    matchup = Matchup()
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=None,
+        governance=Governance(),
+        matchup_materialization=matchup,
+        publication_service=Publication(),
+        clock=lambda: cutoff + timedelta(hours=1),
+    )
+
+    assert runtime.compose_queued("2025-26") == 1
+    assert composed == ["grouped_shot_types"]
+    assert matchup.refreshed == 0
+    with engine.begin() as connection:
+        status = connection.execute(select(
+            CompositionJob.__table__.c.status
+        ).where(
+            CompositionJob.__table__.c.job_id == "player-shot-types"
+        )).scalar_one()
+    assert status == "succeeded"
+
+
 def test_compose_queued_player_only_retry_does_not_issue_matchup_authority(
     tmp_path,
 ):

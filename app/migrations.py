@@ -2144,6 +2144,34 @@ def _add_repair_group_promotion(connection: Connection) -> None:
     ))
 
 
+def _add_target_conditions(connection: Connection) -> None:
+    columns = {column["name"] for column in inspect(connection).get_columns("targets")}
+    if "conditions" not in columns:
+        connection.execute(text("ALTER TABLE targets ADD COLUMN conditions JSON"))
+
+
+def _add_target_stat_preferences(connection: Connection) -> None:
+    columns = {column["name"] for column in inspect(connection).get_columns("targets")}
+    if "stat_preferences" not in columns:
+        connection.execute(text("ALTER TABLE targets ADD COLUMN stat_preferences JSON"))
+
+
+def _add_player_diet_shooting_detail(connection: Connection) -> None:
+    """Retain the shot-type made/attempted split beside the Diet fact."""
+
+    table = "player_diet_facts"
+    if not inspect(connection).has_table(table):
+        return
+    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+    if "shooting_detail" in existing:
+        return
+    preparer = connection.dialect.identifier_preparer
+    connection.execute(text(
+        f"ALTER TABLE {preparer.quote(table)} ADD COLUMN "
+        f"{preparer.quote('shooting_detail')} TEXT"
+    ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2271,6 +2299,15 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         52,
         "052_repair_group_promotion",
         _add_repair_group_promotion,
+    ),
+    Migration(53, "053_target_conditions", _add_target_conditions),
+    Migration(54, "054_target_stat_preferences", _add_target_stat_preferences),
+
+
+    Migration(
+        55,
+        "055_player_diet_shooting_detail",
+        _add_player_diet_shooting_detail,
     ),
 )
 

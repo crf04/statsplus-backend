@@ -16,6 +16,7 @@ from app.services.database_first_activation import (
     DatabaseOnlyProviderGuard,
     LegacyWriteFence,
     PublicationPayloadError,
+    decode_player_diet,
     decode_player_game_logs,
 )
 from app.services.database_first_benchmark import benchmark_matchup_reads
@@ -1334,3 +1335,120 @@ def test_snapshot_projection_stream_without_projected_rows_fails_closed(tmp_path
     assert read.status == "unavailable"
     assert read.unavailable_reason == "publication_projection_missing"
     assert read.available is False
+
+
+def _shot_type_publication_row(**overrides):
+    row = {
+        "player_id": 1642851,
+        "slice_key": "catch_and_shoot",
+        "share": 0.475,
+        "volume": 515.0,
+        "games_played": 81,
+        "volume_unit": "field_goal_attempts",
+        "provider": "nba_stats",
+        "shooting": {
+            "makes": 222.0,
+            "two_point_makes": 13.0,
+            "two_point_attempts": 22.0,
+            "two_point_share": 0.02,
+            "three_point_makes": 209.0,
+            "three_point_attempts": 493.0,
+            "three_point_share": 0.455,
+        },
+    }
+    row.update(overrides)
+    return row
+
+
+def test_decoded_shot_type_publication_carries_the_shooting_split():
+    decoded = decode_player_diet(
+        {"rows": [_shot_type_publication_row()]},
+        base="shot_types",
+        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+    )
+
+    assert decoded[0].shooting.two_point_attempts == 22.0
+    assert decoded[0].shooting.three_point_share == 0.455
+
+
+@pytest.mark.parametrize(
+    "shooting",
+    (
+        None,
+        {"makes": 222.0},
+        {
+            "makes": 222.0,
+            "two_point_makes": 13.0,
+            "two_point_attempts": 22.0,
+            "two_point_share": 0.02,
+            "three_point_makes": 209.0,
+            "three_point_attempts": 493.0,
+            "three_point_share": "0.455",
+        },
+    ),
+)
+def test_shot_type_publication_without_a_usable_split_still_decodes(shooting):
+    """A partial split is no evidence, not a reason to reject the stream."""
+
+    decoded = decode_player_diet(
+        {"rows": [_shot_type_publication_row(shooting=shooting)]},
+        base="shot_types",
+        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+    )
+
+    assert decoded[0].share == 0.475
+    assert decoded[0].shooting is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("three_point_makes", 5.0),
+        ("two_point_makes", 900.0),
+        ("three_point_share", 1.2),
+        ("two_point_share", 4.0),
+    ),
+)
+def test_shot_type_publication_with_an_impossible_split_decodes_unavailable(
+    field, value
+):
+    """One rule, both doors.
+
+    The refresh path refuses makes above attempts and a share above one, so
+    an immutable publication carrying the same values must not reach the
+    Shooting Type tab as a percentage over 100 either.
+    """
+
+    from app.services.player_diet import shot_type_shooting_violation
+
+    shooting = dict(_shot_type_publication_row()["shooting"])
+    shooting["three_point_attempts"] = 2.0
+    shooting[field] = value
+    assert shot_type_shooting_violation(shooting) is not None
+
+    decoded = decode_player_diet(
+        {"rows": [_shot_type_publication_row(shooting=shooting)]},
+        base="shot_types",
+        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+    )
+
+    assert decoded[0].share == 0.475
+    assert decoded[0].shooting is None
+
+
+def test_non_shot_type_publication_never_carries_a_shooting_split():
+    decoded = decode_player_diet(
+        {
+            "rows": [
+                _shot_type_publication_row(
+                    slice_key="Transition",
+                    volume_unit="possessions",
+                    provider="nba_synergy",
+                )
+            ]
+        },
+        base="play_types",
+        retrieved_at=datetime(2026, 1, 6, tzinfo=timezone.utc),
+    )
+
+    assert decoded[0].shooting is None

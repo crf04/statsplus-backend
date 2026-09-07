@@ -18,6 +18,7 @@ from app.services.player_diet import (
     PlayerDietObservation,
     PlayerDietRepository,
     PlayerDietService,
+    ShotTypeShooting,
     compute_player_diet_baselines,
 )
 
@@ -55,6 +56,8 @@ class RecordedNBAPlayerDiets:
         self.malformed_play_type = None
         self.fail_shot_zones = False
         self.duplicate_shot_type_rows = False
+        self.shot_type_shooting_split = True
+        self.shot_type_split_overrides = {}
         self.stint_player_id = None
         self.stint_play_type = "Isolation"
         self.stints = ()
@@ -104,6 +107,16 @@ class RecordedNBAPlayerDiets:
             "FGA_FREQUENCY": self.shot_share,
             "FGA": 100,
         }
+        if self.shot_type_shooting_split:
+            row |= {
+                "FGM": 45,
+                "FG2M": 30,
+                "FG2A": 60,
+                "FG2A_FREQUENCY": 0.15,
+                "FG3M": 15,
+                "FG3A": 40,
+                "FG3A_FREQUENCY": 0.10,
+            } | self.shot_type_split_overrides
         return pd.DataFrame([row, row] if self.duplicate_shot_type_rows else [row])
 
     def fetch_player_shooting_zone(self, **kwargs):
@@ -288,6 +301,83 @@ def test_refresh_publishes_four_raw_season_bases_and_bulk_reads_them(tmp_path):
     )
     assert (restricted.share, restricted.volume) == (0.4, 40)
     assert restricted.retrieved_at == NOW
+
+
+def test_refresh_retains_the_shot_type_made_and_attempted_split(tmp_path):
+    service, _, _ = _service(tmp_path)
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    shot_types = [
+        fact for fact in result.players[2544] if fact.base == "shot_types"
+    ]
+    assert len(shot_types) == 3
+    for fact in shot_types:
+        # Round-tripped through the stored column, not held in memory.
+        assert fact.shooting == ShotTypeShooting(
+            makes=45.0,
+            two_point_makes=30.0,
+            two_point_attempts=60.0,
+            two_point_share=0.15,
+            three_point_makes=15.0,
+            three_point_attempts=40.0,
+            three_point_share=0.10,
+        )
+    assert all(
+        fact.shooting is None
+        for fact in result.players[2544]
+        if fact.base != "shot_types"
+    )
+
+
+def test_shot_type_facts_publish_without_a_split_the_provider_omits(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    nba.shot_type_shooting_split = False
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    shot_types = [
+        fact for fact in result.players[2544] if fact.base == "shot_types"
+    ]
+    # The split is extra evidence on the same row: losing it degrades the
+    # Shooting Type profile without failing the whole Base.
+    assert len(shot_types) == 3
+    assert all(fact.shooting is None for fact in shot_types)
+    assert {
+        item.status for item in result.observations if item.base == "shot_types"
+    } == {"available"}
+
+
+def test_a_nonfinite_split_component_degrades_only_the_split(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    nba.shot_type_split_overrides = {"FG3A_FREQUENCY": float("nan")}
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    shot_types = [
+        fact for fact in result.players[2544] if fact.base == "shot_types"
+    ]
+    assert len(shot_types) == 3
+    assert all(fact.share == 0.25 for fact in shot_types)
+    assert all(fact.shooting is None for fact in shot_types)
+
+
+def test_a_changed_shooting_split_alone_republishes_the_shot_type_base(tmp_path):
+    service, nba, _ = _service(tmp_path)
+    service.refresh("2025-26")
+    nba.shot_type_shooting_split = False
+
+    service.refresh("2025-26")
+    result = service.get_for_players("2025-26", [2544])
+
+    assert all(
+        fact.shooting is None
+        for fact in result.players[2544]
+        if fact.base == "shot_types"
+    )
 
 
 def test_duplicate_provider_identity_degrades_only_its_base(tmp_path):

@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, and most `/api/user/*` routes.
+- Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -1311,21 +1311,52 @@ Query parameters:
 - `category` is required by the service. Supported values include `Playtypes`, `assists`, `Archetype`, `Shooting Type`, and `Zone Shooting`.
 - `opp_team` is used by `Archetype`.
 
-For `Playtypes` and `assists`, player names are matched against the
-current-season Athlete Catalog without regard to case, punctuation, or
-diacritics. The other categories retain their historical name lookup.
+For `Playtypes`, `assists`, and `Shooting Type`, player names are matched
+against the current-season Athlete Catalog without regard to case,
+punctuation, or diacritics. `Archetype` and `Zone Shooting` retain their
+historical name lookup.
 `Playtypes` keeps the historical object shape while its `<PlayType>%` values
 are durable Synergy possession shares multiplied by 100; its player name and
 team are the current canonical catalog values. `assists` keeps its historical
 one-element array shape and derives two-point, three-point, and `+` values from
 durable assist-location facts and Player Diet league baselines. Missing
-play-type slices are returned as zero. The assist object retains its fixed key
+play-type slices are returned as zero. Playtype profiles use the shared Synergy
+partition validator: totals above 1.005 (the provider rounding allowance),
+unknown or duplicate slices, and invalid shares report a missing profile rather
+than displaying or rescaling invalid evidence. Sparse valid shares remain raw.
+The legacy Diet refresh excludes a player's playtype facts when differing
+stint game counts also produce an invalid partition; other players and Bases
+remain available. Existing aggregates lack the original team-stint denominators,
+so this quarantine does not repair source numbers; restoring affected players
+requires source evidence with consistent season denominators. The assist object retains its fixed key
 set, using JSON `null` for a missing location, a total requiring a missing
 location, or a `+` value whose complete league baseline is unavailable; those
-states are never represented by a synthetic zero. Neither durable category
-calls an upstream provider at request time. On the
+states are never represented by a synthetic zero. On the
 bundled demo database these two durable-only categories report a missing player;
 they never fall back to `player_play_types` or `processed_player_assists`.
+
+`Shooting Type` keeps its historical array shape, one object per shot type
+labelled `C&S`, `Pullup`, or `<10 Ft`, carrying `SHOT_TYPE`, `FGA_FREQUENCY`,
+`FGM`, `FGA`, `FG_PCT`, `FG2A_FREQUENCY`, `FG2M`, `FG2A`, `FG2_PCT`,
+`FG3A_FREQUENCY`, `FG3M`, `FG3A`, and `FG3_PCT`. Counts are per game,
+frequencies and percentages are fractions, and every value is projected from
+the durable `shot_types` Player Diet Base: the stored season totals divided by
+that fact's own games played, and the percentages from its stored makes and
+attempts. A shot type whose made/attempted split was never observed is omitted
+rather than reported with an invented two- and three-point division, so the
+category can return `[]`.
+
+`Archetype` returns the same array of per-36 cluster game logs it always has,
+now read from the governed `player_game_logs` publication rather than from an
+upstream provider. Membership is the selected player's `player_clusters`
+cluster, including the selected player, and only regular-season rows against
+`opp_team` are compared. Every column on the tab is a percentage difference
+against a season baseline, so a comparison row whose baseline is zero or
+missing has no answer to report and is omitted; with no comparable rows the
+category returns `[]`. Every returned cell is a number, never `null`.
+
+No player profile category calls an upstream provider at request time; the
+service holds no provider client at all.
 
 Example:
 
@@ -2536,8 +2567,9 @@ this table is both the accepted `slice_key` vocabulary and how each key reads:
 | `assist_locations` | `ShortMidRangeAssists` | Short mid assists |
 | `assist_locations` | `LongMidRangeAssists` | Long mid assists |
 
-Update semantics: an absent key means unchanged, and `"note": null` clears the
-note. `opponent` is fixed -- aiming the same Qualifiers at another team is a
+Update semantics: an absent key means unchanged; explicit null clears
+`note`, `conditions`, or `stat_preferences`. Conditions and stat preferences
+may be updated independently of Qualifiers. `opponent` is fixed -- aiming the same Qualifiers at another team is a
 different Target -- and is ignored if submitted.
 
 Validation and conflicts:
@@ -2546,7 +2578,9 @@ Validation and conflicts:
   missing `qualifiers` list, more than 10 Qualifiers, a repeated Qualifier, an
   unknown base or slice, a comparator outside the two accepted values, a
   threshold outside 0-1, a note over 280 characters, and a `PATCH` body that
-  changes neither the Qualifiers nor the note.
+  changes none of Qualifiers, note, Conditions, or stat preferences. Invalid
+  Conditions and stat preferences also return `400 invalid_input`; their
+  schemas and validation are documented below.
 - `404 resource_not_found` for an id that does not exist or belongs to another
   account. Foreign ids are never reported as `403`.
 - `409 operation_conflict` when the account already aims the same Qualifier set
@@ -3120,6 +3154,83 @@ unauthenticated caller; the league-wide scan is not an open resource. Previews
 are neither cached nor rate limited.
 
 
+
+### League Diet Baselines
+
+`GET /api/diet/baselines` requires Firebase bearer authentication (otherwise
+`401 authentication_required` in the standard error envelope). It returns
+`{season, captured_at, shares: {<base>: {<slice_key>: share}}}`. Every Qualifier
+Base and slice is present. Shares are 0–1, or `null` when the Matchup cannot
+establish a league baseline from the stored population. `captured_at` is the
+latest Diet observation timestamp, or `null` without observations. The read
+uses one Publication snapshot and the Matchup's baseline calculation; it
+makes no provider calls. The immutable published facts supply the cached
+source; no separate time-based response cache can outlive that generation.
+
+### Target Conditions and Opponent Roster Minutes
+
+Target create, PATCH, and preview accept nullable `conditions`:
+`{"defender":{"player_id":99,"comparator":"under","minutes":20},"from":"2026-01-01","to":null}`.
+Each field may be null; omitted fields within the object become null. The
+whole omitted field is preserved by PATCH, and explicit null clears it.
+List, resolve, backtest, and preview echo the canonical object, including null
+for older Targets. The opponent remains fixed on PATCH.
+
+Defender ids must occur on that opponent's Regular Season game logs for the
+current season. Comparators are `under` (strict less than) and `at_least`
+(inclusive); minutes must be an integer 0–48. Dates are ISO `YYYY-MM-DD`,
+inclusive, and start must not follow end. Invalid input returns
+`400 invalid_input` in the standard envelope.
+
+Backtest and preview apply Conditions to the opponent's Regular Season games
+before judging players. A defender absent from a game for this team contributes
+zero minutes, including after a trade. Both reads add
+`games_considered: {kept, played}` counting distinct opponent games, independent
+of how many players fit. A saved Target and identical draft share evaluation.
+Resolve uses the Slate Date and the Matchup's stored availability evidence:
+listed Out means zero minutes under the same comparator; unknown availability
+passes the defender Condition. A game failing Conditions has no Fits; its game
+identity is still shown. Thus `under 0` excludes an Out defender and
+`at_least 0` includes him.
+
+`GET /api/teams/<tricode>/season-minutes` requires Firebase bearer auth and
+returns `{season, players:[{player_id,name,games_played,average_minutes}]}`.
+The roster comes from the team's Regular Season game-time identity rows,
+including players who have since left, ordered by average minutes descending
+then player id. An empty season returns `players: []`; unknown team returns
+`400 invalid_input`; unauthenticated calls return `401 authentication_required`.
+It reads the same immutable player-game-log publication as the Backtest and
+makes no provider calls.
+
+The frontend endpoint catalogue and deterministic fixture are owned by the
+linked frontend issues crf04/statsplus-frontend#101 (baselines) and #102
+(Conditions and roster minutes), under crf04/statsplus#59.
+
+### Target Stat Preferences and Complete Box Lines
+
+Create, PATCH, and preview accept nullable `stat_preferences`:
+`{"columns":["PTS/36","TS%"],"graded_by":"PTS/36"}`. Columns must be a
+non-empty list from [the shared catalogue](contracts/target-stat-catalogue.json)
+and the grading key must occur in the columns; invalid values return
+`400 invalid_input`. Duplicate columns normalize to their first occurrence.
+The exact uppercase keys use `/36` for per-36; `SB` denotes steals plus blocks.
+List, resolve, backtest, and preview echo preferences, or null for legacy
+Targets. PATCH preserves omitted fields, so changing preferences leaves
+Qualifiers, Conditions, and note intact; explicit null clears preferences.
+The client owns deriving combinations, per-36, and efficiency.
+
+Backtest and preview add a `line` to every `players[].games[]`, containing
+`points`, `rebounds`, `assists`, `field_goals_made`, `field_goals_attempted`,
+`threes_made`, `threes_attempted`, `free_throws_made`, `free_throws_attempted`,
+`steals`, `blocks`, `turnovers`, `offensive_rebounds`, `defensive_rebounds`,
+`fouls`, and `minutes`. Each player carries `season_totals` with those same
+fields summed over **all** their Regular Season log rows, across opponents
+and teams, from the same publication snapshot. `season_games` counts those
+same rows so the client can derive non-proxy per-game averages; a zero count
+has no average. Conditions do not narrow these baseline totals.
+Existing `stats`, `season_averages`, `stat_columns`, and `summary` retain their
+proxy meanings unchanged. The shared catalogue mirror and fixture are aligned
+with crf04/statsplus-frontend#103 by the coordination contract gate.
 
 ## Filtering Reference
 

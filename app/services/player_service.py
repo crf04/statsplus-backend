@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import logging
 import requests
@@ -12,8 +13,10 @@ from ..errors import (
     ResourceNotFoundError,
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
-from app.models.catalogs import PLAY_TYPES
-from app.providers.nba_stats import NBAStatsAdapter, NBAStatsProvider
+from app.domain.nba_events import REGULAR_SEASON_TYPE
+from app.domain.play_type_matchup import complete_play_type_shares
+from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
+from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.athlete_resolver import CanonicalAthlete, normalize_athlete_name
 from app.services.player_diet import PlayerDietResult
 from app.services.progress import RefreshProgress
@@ -83,7 +86,39 @@ _TWO_POINT_ASSIST_SLICES = (
     "LongMidRangeAssists",
 )
 _THREE_POINT_ASSIST_SLICES = ("Arc3Assists", "Corner3Assists")
-_DURABLE_PROFILE_CATEGORIES = frozenset(("Playtypes", "assists"))
+_DURABLE_PROFILE_CATEGORIES = frozenset(("Playtypes", "assists", "Shooting Type"))
+
+#: How each stored shot-type slice reads in the Shooting Type profile.  The
+#: keys are the slice vocabulary the Diet publishes; the values are the labels
+#: the tab has always shown and the client still keys its columns on.
+_SHOT_TYPE_PROFILE_LABELS = {
+    "Catch and Shoot": "C&S",
+    "Pullups": "Pullup",
+    "Less Than 10 ft": "<10 Ft",
+}
+
+#: The per-36 columns the Archetype tab compares against a player's season.
+_ARCHETYPE_RATE_COLUMNS = (
+    "FGM", "FGA", "FG3M", "FG3A", "FTM", "FTA", "PTS", "TOV",
+)
+
+
+def _per_game(total: float, games_played: int) -> float:
+    """One season total on the tab's per-game scale."""
+
+    return round(float(total) / games_played, 1)
+
+
+def _fraction(value: float) -> float:
+    """One provider frequency, kept on the tab's fraction scale."""
+
+    return round(float(value), 3)
+
+
+def _made_rate(makes: float, attempts: float) -> float:
+    """A shooting percentage, which is zero when nothing was attempted."""
+
+    return round(float(makes) / attempts, 3) if attempts else 0.0
 
 
 class PlayerService:
@@ -92,16 +127,18 @@ class PlayerService:
         db_engine,
         profile_reader: PlayerProfileReader,
         settings: RuntimeSettings | None = None,
-        nba_stats_provider: NBAStatsProvider | None = None,
         publication_reader=None,
+        game_logs=None,
     ):
         if profile_reader is None:
             raise TypeError("player profile reader is required")
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
-        self.nba_stats = nba_stats_provider or NBAStatsAdapter(settings=self.settings)
         self.publication_reader = publication_reader
         self.profile_reader = profile_reader
+        # The stored game-log repository, which owns no provider client.  The
+        # profile read path therefore cannot reach NBA Stats at all.
+        self.game_logs = game_logs
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -154,7 +191,7 @@ class PlayerService:
                 "Archetype": lambda: self._get_archetype_gamelogs(
                     player_name, opp_team
                 ),
-                "Shooting Type": lambda: self._get_shooting_type(player_name),
+                "Shooting Type": lambda: self._get_shooting_type(player_id),
                 "Zone Shooting": lambda: self._get_player_zone_shooting(player_name),
             }
             handler = handlers.get(category)
@@ -206,21 +243,19 @@ class PlayerService:
         self, player_id: int, canonical_name: str, team_abbreviation: str | None
     ):
         _, facts = self._durable_profile_result(player_id)
-        facts_by_slice = {
-            fact.slice_key: fact
+        shares = complete_play_type_shares(
+            (fact.slice_key, fact.share)
             for fact in facts
             if fact.base == "play_types"
-        }
-        if not facts_by_slice:
+        )
+        if shares is None:
             raise ResourceNotFoundError("The requested player profile was not found.")
         return {
             "PLAYER_NAME": canonical_name,
             "TEAM_ABBREVIATION": team_abbreviation,
             **{
-                f"{play_type}%": float(
-                    facts_by_slice[play_type].share * 100
-                )
-                if play_type in facts_by_slice
+                f"{play_type}%": float(shares[play_type] * 100)
+                if play_type in shares
                 else 0
                 for play_type in PLAY_TYPES
             },
@@ -344,64 +379,146 @@ class PlayerService:
         df = self._fetch_data_from_table('player_shooting_zones')
         return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
 
-    def _get_shooting_type(self, player_name):
-        """Get player shooting type data"""
-        player_team = self._fetch_data_from_table('player_team_table')
-        team_id = player_team[player_team['Player'] == player_name]['Team_ID'].values[0]
-        df = self.nba_stats.fetch_player_shot_chart(
-            self.get_player_id(player_name),
-            int(team_id),
-        )
-        df['SHOT_TYPE'].replace({'Less than 10 ft': '<10 Ft'}, inplace=True)
-        df['SHOT_TYPE'].replace({'Pull Ups': 'Pullup'}, inplace=True)
-        df['SHOT_TYPE'].replace({'Catch and Shoot': 'C&S'}, inplace=True)
-        df.fillna(0, inplace=True)
-        return df.to_dict(orient='records')
-    
+    def _get_shooting_type(self, player_id: int):
+        """Render the Shooting Type tab from stored player Diet facts.
+
+        The stored facts carry season Totals, while the tab has always shown
+        per-game counts, so each count is divided by the fact's own games
+        played.  A slice whose made/attempted split was never observed is
+        omitted rather than shown with invented two- and three-point values.
+        """
+
+        _, facts = self._durable_profile_result(player_id)
+        facts_by_slice = {
+            SHOT_TYPE_STORED_TO_DISPLAY.get(fact.slice_key, fact.slice_key): fact
+            for fact in facts
+            if fact.base == "shot_types"
+        }
+        rows = []
+        for shooting_type in SHOOTING_TYPES:
+            fact = facts_by_slice.get(shooting_type)
+            if fact is None or fact.shooting is None:
+                continue
+            shooting = fact.shooting
+            games = fact.games_played
+            rows.append({
+                "SHOT_TYPE": _SHOT_TYPE_PROFILE_LABELS[shooting_type],
+                "FGA_FREQUENCY": _fraction(fact.share),
+                "FGM": _per_game(shooting.makes, games),
+                "FGA": _per_game(fact.volume, games),
+                "FG_PCT": _made_rate(shooting.makes, fact.volume),
+                "FG2A_FREQUENCY": _fraction(shooting.two_point_share),
+                "FG2M": _per_game(shooting.two_point_makes, games),
+                "FG2A": _per_game(shooting.two_point_attempts, games),
+                "FG2_PCT": _made_rate(
+                    shooting.two_point_makes, shooting.two_point_attempts
+                ),
+                "FG3A_FREQUENCY": _fraction(shooting.three_point_share),
+                "FG3M": _per_game(shooting.three_point_makes, games),
+                "FG3A": _per_game(shooting.three_point_attempts, games),
+                "FG3_PCT": _made_rate(
+                    shooting.three_point_makes, shooting.three_point_attempts
+                ),
+            })
+        return rows
+
     def _get_archetype_gamelogs(self, player_name, opp_team):
         """Get archetype gamelogs for player against specific team"""
         try:
             # Get player's cluster members
             player_ids = self._get_archetype_players_from_player(player_name)
-            
-            
+
             # Get team ID
             team_dict = pd.DataFrame(self._get_teams())
             team_id = team_dict.loc[team_dict['full_name'] == opp_team, 'id'].values[0]
-            
-            # Get normalized cluster game logs through the app-owned provider.
-            gl = self.nba_stats.get_archetype_game_logs(
-                player_ids=player_ids,
-                opponent_team_id=int(team_id),
-                season=self.settings.nba.current_season,
-            )
 
-            # The provider applies the cluster-member filter at its seam.
-            gl = gl[['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', 
-                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']]
-            
+            gl = self._archetype_frame(player_ids, int(team_id))
+            if gl.empty:
+                return []
+
             per36_df = self._per36_frame()
-            
+
             # Calculate per 36minute stats
-            for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
+            for col in _ARCHETYPE_RATE_COLUMNS:
                 gl[f'{col}/36MIN'] = (gl[col] / gl['MIN']) * 36
-            
+
             logger.debug("Archetype game logs rows: %s", len(gl))
             merged_df = gl.merge(per36_df, left_on="PLAYER_ID", right_on="PLAYER_ID", suffixes=('', '_season'))
+            # Every column on this tab is a percentage difference against a
+            # season baseline, so a row whose baseline is zero or missing has
+            # no comparison to make.  It is omitted rather than published with
+            # an unreportable cell: the client renders every returned row as a
+            # number, so a null would read as "no change" and an infinity is
+            # not JSON.  A player with no usable baseline yields no rows.
+            usable = merged_df[
+                [f'{col}_season' for col in _ARCHETYPE_RATE_COLUMNS]
+            ].apply(pd.to_numeric, errors='coerce')
+            merged_df = merged_df[
+                ((usable > 0) & np.isfinite(usable)).all(axis=1)
+            ].copy()
+            if merged_df.empty:
+                return []
             #get percentage diff between game and season
-            for col in ['FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV']:
-                merged_df[f'{col}/36MIN_DIFF'] = (merged_df[f'{col}/36MIN'] - merged_df[f'{col}_season']) / merged_df[f'{col}_season']
-            
-            merged_df = merged_df[['PLAYER_NAME', 'GAME_DATE', 'MIN', 
-                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV','FGM/36MIN', 'FGA/36MIN', 'FG3M/36MIN', 'FG3A/36MIN', 
-                               'FTM/36MIN', 'FTA/36MIN', 'PTS/36MIN', 
-                               'FGM/36MIN_DIFF', 'FGA/36MIN_DIFF', 'FG3M/36MIN_DIFF', 'FG3A/36MIN_DIFF', 
+            for col in _ARCHETYPE_RATE_COLUMNS:
+                season = merged_df[f'{col}_season']
+                merged_df[f'{col}/36MIN_DIFF'] = (
+                    merged_df[f'{col}/36MIN'] - season
+                ) / season
+
+            merged_df = merged_df[['PLAYER_NAME', 'GAME_DATE', 'MIN',
+                    'FGM', 'FGA', 'FG3M', 'FG3A', 'FTM', 'FTA', 'PTS', 'TOV','FGM/36MIN', 'FGA/36MIN', 'FG3M/36MIN', 'FG3A/36MIN',
+                               'FTM/36MIN', 'FTA/36MIN', 'PTS/36MIN',
+                               'FGM/36MIN_DIFF', 'FGA/36MIN_DIFF', 'FG3M/36MIN_DIFF', 'FG3A/36MIN_DIFF',
                                'FTM/36MIN_DIFF', 'FTA/36MIN_DIFF', 'PTS/36MIN_DIFF', 'TOV/36MIN_DIFF']]
 
             return merged_df.to_dict(orient='records')
         except Exception as e:
             logger.error("Error getting archetype gamelogs: %s", e)
             return []
+
+    def _archetype_frame(self, player_ids, opponent_team_id: int):
+        """Read the cluster's stored regular-season rows against one opponent.
+
+        The rows come from the governed player game-log publication through
+        the same indexed opponent projection the matchup cards read, so the
+        tab observes exactly the facts the rest of the app does.
+        """
+
+        columns = ['PLAYER_NAME', 'PLAYER_ID', 'GAME_DATE', 'MIN', *_ARCHETYPE_RATE_COLUMNS]
+        if not player_ids or self.game_logs is None:
+            return pd.DataFrame(columns=columns)
+        season = self.settings.nba.current_season
+        records = self.game_logs.list_archetype_rows(
+            season,
+            player_ids,
+            opponent_team_id,
+            publication_snapshot=self.game_logs.read_publication_snapshot(season),
+        )
+        return pd.DataFrame(
+            [
+                {
+                    'PLAYER_NAME': record.player_name,
+                    'PLAYER_ID': record.player_id,
+                    # The tab has always shown a date string and whole
+                    # minutes; the stored facts are typed, so both are
+                    # rendered back to that contract here.
+                    'GAME_DATE': record.game_date.isoformat(),
+                    'MIN': int(round(record.minutes)),
+                    'FGM': record.field_goals_made,
+                    'FGA': record.field_goals_attempted,
+                    'FG3M': record.three_pointers_made,
+                    'FG3A': record.three_pointers_attempted,
+                    'FTM': record.free_throws_made,
+                    'FTA': record.free_throws_attempted,
+                    'PTS': record.points,
+                    'TOV': record.turnovers,
+                }
+                for record in records
+                if record.season_type == REGULAR_SEASON_TYPE
+                and round(record.minutes) > 0
+            ],
+            columns=columns,
+        )
 
     def _per36_frame(self):
         """Read active per-36 facts from the immutable publication first."""
@@ -481,16 +598,6 @@ class PlayerService:
         )
         progress.complete()
         return True
-
-    def get_player_id(self, player_name):
-        """Get player ID from database"""
-        try:
-            df = self._fetch_data_from_table('player_information')
-            player = df[df['full_name'] == player_name]
-            return player['id'].values[0]
-        except Exception as e:
-            logger.error("Error getting player ID: %s", e)
-            return None
 
     def _fetch_data_from_table(self, table_name):
         """Helper method to fetch data from database table"""

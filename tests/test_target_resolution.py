@@ -1808,3 +1808,28 @@ def test_resolution_reports_the_real_matchups_own_defense_sheet(targets, parity)
     # BOS hosts, and BOS is what this Target aims at.
     assert resolved["game"]["home"] == resolved["game"]["opponent"]
     assert resolved["game"]["away"] == resolved["game"]["opposing_team"]
+
+
+@pytest.mark.parametrize(('comparator', 'minutes', 'out', 'expected'), [('under', 20, True, 1), ('at_least', 20, True, 0), ('under', 0, True, 0), ('at_least', 0, True, 1), ('at_least', 20, False, 1)])
+def test_defender_conditions_read_tonights_out_evidence(targets, resolve, comparator, minutes, out, expected):
+    created = _create(targets)
+    original_list = targets.list_targets
+    def listed(uid):
+        rows = original_list(uid)
+        rows[0]['conditions'] = {'defender': {'player_id': 99, 'comparator': comparator, 'minutes': minutes}, 'from': None, 'to': None}
+        return rows
+    targets.list_targets = listed
+    game = _game()
+    matchup = _matchup(game=game)
+    matchup['injuries'] = {'teams': [{'team_id': OKC, 'entries': [{'canonical_player_id': 99, 'canonical_status': 'Out' if out else 'Questionable'}]}]}
+    result = resolve(slate=FakeSlate(games=[game]), matchups=FakeMatchups({game['game_id']: matchup}))
+    assert result['targets'][0]['target']['id'] == created['id']
+    assert len(result['targets'][0]['players']) == expected
+
+
+@pytest.mark.parametrize(('start', 'end', 'count'), [(SLATE_DATE, SLATE_DATE, 1), ('2099-01-01', None, 0), (None, '2000-01-01', 0)])
+def test_resolve_date_conditions_are_inclusive(targets, resolve, start, end, count):
+    created = _create(targets)
+    targets.update_target(OWNER, created['id'], changes={'conditions': {'from': start, 'to': end}})
+    result = resolve()
+    assert len(result['targets'][0]['players']) == count
