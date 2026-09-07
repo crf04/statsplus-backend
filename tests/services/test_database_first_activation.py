@@ -391,7 +391,7 @@ def test_split_season_stream_fences_both_legacy_opponent_writers(tmp_path, monke
     )
     frame = pd.DataFrame([{"TEAM_NAME": "LAL", "OPP_PTS": 1}])
     _seed_legacy_tables(engine, ("general_opponent_stats", "player_information"))
-    monkeypatch.setattr(data_service, "_collect_all_frames", lambda: {
+    monkeypatch.setattr(data_service, "_collect_all_frames", lambda table_names=None: {
         "general_opponent_stats": pd.DataFrame([{"value": "new"}]),
         "player_information": pd.DataFrame([{"value": "new"}]),
     })
@@ -459,7 +459,7 @@ def test_production_activation_refreshes_every_unfenced_table(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda: {
+        lambda table_names=None: {
             table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
         },
     )
@@ -501,6 +501,86 @@ def test_production_activation_refreshes_every_unfenced_table(
     } == set(_RETIRED_TABLES)
 
 
+def test_fenced_tables_are_refused_before_their_provider_is_called(
+    tmp_path, monkeypatch
+):
+    """A refused table costs no upstream request.
+
+    Hosted Railway egress cannot reach stats.nba.com, so discarding a fenced
+    frame after fetching it is not enough: the fetch itself has to not happen.
+    """
+
+    import pandas as pd
+
+    engine = _db(tmp_path)
+    _register_production_streams(engine)
+    tables = _FENCED_TABLES + _STILL_REFRESHED_TABLES
+    _seed_legacy_tables(engine, tables)
+    data_service = _activation_data_service(engine, completed_at=NOW)
+
+    collected = []
+
+    def _recording_collector(table_name):
+        def build():
+            collected.append(table_name)
+            return pd.DataFrame([{"value": "new"}])
+
+        return build
+
+    monkeypatch.setattr(
+        data_service,
+        "_frame_collectors",
+        lambda: {
+            table_name: _recording_collector(table_name) for table_name in tables
+        },
+    )
+
+    assert data_service.update_all_data() is True
+
+    assert sorted(collected) == sorted(_STILL_REFRESHED_TABLES)
+    assert _table_values(engine, tables) == {
+        **{table_name: "old" for table_name in _FENCED_TABLES},
+        **{table_name: "new" for table_name in _STILL_REFRESHED_TABLES},
+    }
+
+
+def test_every_table_fenced_makes_no_provider_call_and_publishes_nothing(
+    tmp_path, monkeypatch
+):
+    """The all-fenced refresh still succeeds, and still calls no provider."""
+
+    import pandas as pd
+
+    engine = _db(tmp_path)
+    _register_production_streams(engine)
+    _seed_legacy_tables(engine, _FENCED_TABLES)
+    data_service = _activation_data_service(engine, completed_at=NOW)
+
+    collected = []
+
+    def _recording_collector(table_name):
+        def build():
+            collected.append(table_name)
+            return pd.DataFrame([{"value": "new"}])
+
+        return build
+
+    monkeypatch.setattr(
+        data_service,
+        "_frame_collectors",
+        lambda: {
+            table_name: _recording_collector(table_name)
+            for table_name in _FENCED_TABLES
+        },
+    )
+
+    assert data_service.update_all_data() is True
+    assert collected == []
+    assert _table_values(engine, _FENCED_TABLES) == {
+        table_name: "old" for table_name in _FENCED_TABLES
+    }
+
+
 def test_retired_frame_is_refused_by_the_partition_before_the_publisher(
     tmp_path, monkeypatch
 ):
@@ -515,7 +595,7 @@ def test_retired_frame_is_refused_by_the_partition_before_the_publisher(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda: {
+        lambda table_names=None: {
             table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
         },
     )
@@ -553,7 +633,7 @@ def test_refusing_every_frame_succeeds_without_publishing_or_freshness(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda: {
+        lambda table_names=None: {
             table_name: pd.DataFrame([{"value": "new"}])
             for table_name in _FENCED_TABLES
         },
@@ -594,7 +674,7 @@ def test_refusal_is_recognized_by_reason_not_by_rendered_message(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda: {
+        lambda table_names=None: {
             table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
         },
     )
@@ -621,7 +701,7 @@ def test_activation_between_partition_and_swap_rolls_the_publication_back(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda: {
+        lambda table_names=None: {
             table_name: pd.DataFrame([{"value": "new"}]) for table_name in tables
         },
     )
@@ -662,7 +742,7 @@ def test_unavailable_fence_stream_still_aborts_the_whole_refresh(
     monkeypatch.setattr(
         data_service,
         "_collect_all_frames",
-        lambda: {
+        lambda table_names=None: {
             "player_per36_stats": pd.DataFrame([{"value": "new"}]),
             "player_information": pd.DataFrame([{"value": "new"}]),
         },

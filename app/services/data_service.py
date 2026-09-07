@@ -7,9 +7,9 @@ Then the collected frames are published together through
 :class:`AtomicTablePublisher`, which swaps the whole set inside one
 transaction and preserves the previous tables if anything fails.
 
-A table whose database-first stream is activated is refused before that
-publication rather than inside it, so one fenced table cannot abort the
-refresh of the tables that are still their readers' only source.
+A table whose database-first stream is activated is refused before its own
+collector runs, so one fenced table cannot abort the refresh of the tables
+that are still their readers' only source and costs no provider call either.
 """
 
 import logging
@@ -92,11 +92,12 @@ class DataService:
         progress_callback: Callable | None = None,
         publication_fence: PublicationFence | None = None,
     ):
-        """Fetch every provider frame, then publish the unfenced set atomically.
+        """Fetch the unfenced provider frames, then publish them atomically.
 
         Provider and transformation failures happen before any table is
         touched, so an interrupted refresh leaves the previous tables intact.
-        Tables whose stream is activated are refused and skipped; the refresh
+        Tables whose stream is activated are refused before their provider is
+        called, so an activated stream costs no upstream request; the refresh
         succeeds as long as the tables it did publish were published.
         """
         progress = RefreshProgress(progress_callback)
@@ -130,12 +131,12 @@ class DataService:
                     if stream_key is not None:
                         checker(stream_key, connection=connection)
             if not frames:
-                # Every collected table is fenced.  Nothing failed and a
+                # Every refreshable table is fenced.  Nothing failed and a
                 # retry cannot change that, so the refresh succeeds; stats
                 # freshness stays untouched because no table was published.
                 logger.warning(
-                    "Stats refresh published no tables: every collected table "
-                    "is fenced by an activated publication stream"
+                    "Stats refresh published no tables: every refreshable "
+                    "table is fenced by an activated publication stream"
                 )
             self.publisher.publish(
                 frames,
@@ -150,8 +151,8 @@ class DataService:
             logger.error("Error updating database: %s", error)
             return False
 
-    def _refuse_activation_fenced_frames(self, frames):
-        """Return only the frames this refresh may still publish.
+    def _refuses_table(self, table_name) -> bool:
+        """Report whether this refresh must skip one table entirely.
 
         A retired ranking table is refused first and unconditionally: #199
         dropped its storage, so a revived collector must never reach the
@@ -163,49 +164,60 @@ class DataService:
         whole refresh closed.
         """
 
+        if table_name in RETIRED_LEGACY_RANKING_TABLES:
+            # Unconditional, and ahead of the activation check: the storage is
+            # dropped, so a revived collector must never reach the publisher
+            # even where no write fence is configured.
+            logger.warning(
+                "%s: refusing to refresh %s; the table is retired",
+                RETIRED_TABLE_REFUSED,
+                table_name,
+                extra={
+                    "table": table_name,
+                    "reason": RETIRED_TABLE_REFUSED,
+                },
+            )
+            return True
         checker = getattr(self.write_fence, "assert_writable", None)
-        publishable = {}
-        for table_name, frame in frames.items():
-            if table_name in RETIRED_LEGACY_RANKING_TABLES:
-                # Unconditional, and ahead of the activation check: the
-                # storage is dropped, so a revived collector must never reach
-                # the publisher even where no write fence is configured.
-                logger.warning(
-                    "%s: refusing to refresh %s; the table is retired",
-                    RETIRED_TABLE_REFUSED,
-                    table_name,
-                    extra={
-                        "table": table_name,
-                        "reason": RETIRED_TABLE_REFUSED,
-                    },
-                )
-                continue
-            stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
-            if stream_key is None or not callable(checker):
-                publishable[table_name] = frame
-                continue
-            try:
-                checker(stream_key)
-            except ControlPlaneError as error:
-                # Compare the stable reason, not the rendered message: a
-                # refusal carrying human text must not read as an unreadable
-                # control plane and abort the whole refresh.
-                if error.reason != LEGACY_WRITE_FENCED:
-                    raise
-                logger.warning(
-                    "%s: refusing to refresh %s; stream %s is activated",
-                    LEGACY_WRITE_FENCED,
-                    table_name,
-                    stream_key,
-                    extra={
-                        "table": table_name,
-                        "stream": stream_key,
-                        "reason": LEGACY_WRITE_FENCED,
-                    },
-                )
-            else:
-                publishable[table_name] = frame
-        return publishable
+        stream_key = _ACTIVATION_FENCED_TABLE_STREAMS.get(table_name)
+        if stream_key is None or not callable(checker):
+            return False
+        try:
+            checker(stream_key)
+        except ControlPlaneError as error:
+            # Compare the stable reason, not the rendered message: a refusal
+            # carrying human text must not read as an unreadable control plane
+            # and abort the whole refresh.
+            if error.reason != LEGACY_WRITE_FENCED:
+                raise
+            logger.warning(
+                "%s: refusing to refresh %s; stream %s is activated",
+                LEGACY_WRITE_FENCED,
+                table_name,
+                stream_key,
+                extra={
+                    "table": table_name,
+                    "stream": stream_key,
+                    "reason": LEGACY_WRITE_FENCED,
+                },
+            )
+            return True
+        return False
+
+    def _refuse_activation_fenced_frames(self, frames):
+        """Return only the frames this refresh may still publish.
+
+        Collection already refused everything it could decide from a table
+        name, so in production this pass sees only survivors.  It stays because
+        it costs no provider call and still catches an activation that landed
+        while those survivors were being fetched.
+        """
+
+        return {
+            table_name: frame
+            for table_name, frame in frames.items()
+            if not self._refuses_table(table_name)
+        }
 
     # The methods below retain the original single-table service surface for
     # callers that still run one refresh component at a time.  The job-backed
@@ -389,18 +401,34 @@ class DataService:
         teams_df = pts_pivot.merge(gp_per_team, on="TEAM_NAME")
         return teams_df.to_dict(orient="records")
 
-    def _collect_all_frames(self):
-        """Gather every refreshable table without touching the live tables."""
-        frames = {
-            "player_information": self._collect_player_information(),
-            "player_per36_stats": self._fetch_player_per36_stats(),
-        }
-        frames["opp_shooting_zone"] = self._collect_opp_shooting_zone()
-        frames["player_play_types"] = self._collect_playtypes_frame()
-        frames["player_shooting_zones"] = self._collect_player_zone()
+    def _frame_collectors(self):
+        """Map every refreshable table to the callable that builds its frame."""
 
-        frames["pbp_opponent_stats"] = self._collect_pbp_frame("opponent")
-        return frames
+        return {
+            "player_information": self._collect_player_information,
+            "player_per36_stats": self._fetch_player_per36_stats,
+            "opp_shooting_zone": self._collect_opp_shooting_zone,
+            "player_play_types": self._collect_playtypes_frame,
+            "player_shooting_zones": self._collect_player_zone,
+            "pbp_opponent_stats": lambda: self._collect_pbp_frame("opponent"),
+        }
+
+    def _collect_all_frames(self):
+        """Gather every table this refresh still owns, without touching live tables.
+
+        The activation fence is a statement about a table, not about a frame,
+        so it is settled from the table name before that table's collector
+        runs.  That is what keeps a refused table from costing an upstream
+        request: hosted Railway egress cannot reach stats.nba.com, and a table
+        this refresh no longer owns is exactly one whose provider it must stop
+        calling.
+        """
+
+        return {
+            table_name: build()
+            for table_name, build in self._frame_collectors().items()
+            if not self._refuses_table(table_name)
+        }
 
     def _collect_player_information(self):
         """Build the active-player frame without writing to any table."""
