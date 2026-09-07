@@ -66,7 +66,11 @@ from app.services.player_game_log_repository import (
 )
 from app.services.player_game_log_values import player_game_log_focal_line
 from app.services.statistic_catalog import StatisticCatalog
-from app.services.target_conditions import date_is_kept, minutes_are_kept
+from app.services.target_conditions import (
+    date_is_kept,
+    minutes_are_kept,
+    player_minutes_are_kept,
+)
 
 
 _WIRE_PRECISION = 6
@@ -249,6 +253,7 @@ class TargetBacktestService:
         ) if record.season_type == REGULAR_SEASON_TYPE)
         conditions = target.get("conditions")
         defender = conditions.get("defender") if conditions else None
+        player_minutes = conditions.get("player_minutes") if conditions else None
         defender_minutes = {}
         if defender:
             defender_minutes = {
@@ -259,7 +264,15 @@ class TargetBacktestService:
             }
         kept = tuple(row for row in rows if date_is_kept(conditions, row.game_date)
                      and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0))))
-        players = self._players(target, qualifiers, markets, season, snapshot, kept)
+        players = self._players(
+            target,
+            qualifiers,
+            markets,
+            season,
+            snapshot,
+            kept,
+            player_minutes=player_minutes,
+        )
         return {
             "target": dict(target),
             "season": season,
@@ -362,12 +375,19 @@ class TargetBacktestService:
         season: str,
         snapshot: Any | None,
         records: Sequence[PlayerGameLogRecord],
+        *,
+        player_minutes: int | None = None,
     ) -> list[dict[str, Any]]:
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {}
         for record in records:
             # A playoff line is not evidence against a Regular Season average,
             # which is the baseline every column below is read against.
             if record.season_type != REGULAR_SEASON_TYPE:
+                continue
+            if (
+                player_minutes is not None
+                and not player_minutes_are_kept(record.minutes, player_minutes)
+            ):
                 continue
             rows_by_player.setdefault(int(record.player_id), []).append(record)
         if not rows_by_player:

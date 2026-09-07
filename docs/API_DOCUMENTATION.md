@@ -3170,11 +3170,16 @@ source; no separate time-based response cache can outlive that generation.
 ### Target Conditions and Opponent Roster Minutes
 
 Target create, PATCH, and preview accept nullable `conditions`:
-`{"defender":{"player_id":99,"comparator":"under","minutes":20},"from":"2026-01-01","to":null}`.
-Each field may be null; omitted fields within the object become null. The
-whole omitted field is preserved by PATCH, and explicit null clears it.
-List, resolve, backtest, and preview echo the canonical object, including null
-for older Targets. The opponent remains fixed on PATCH.
+`{"defender":{"player_id":99,"comparator":"under","minutes":20},"from":"2026-01-01","to":null,"player_minutes":10}`.
+Each field may be null; omitted fields within the object are disabled. The
+optional `player_minutes` field is an integer from 0 through 48 and is applied
+with a strict greater-than comparison to each qualifying player's individual
+game minutes. On PATCH, omitting the whole `conditions` field preserves the
+existing object; submitting a `conditions` object replaces it. Omitted fields
+within that object become null, so omitting `player_minutes` clears an existing
+threshold; explicit null also clears it. List, resolve, backtest, and preview
+echo the canonical object; legacy condition objects without the field remain
+valid. The opponent remains fixed on PATCH.
 
 Defender ids must occur on that opponent's Regular Season game logs for the
 current season. Comparators are `under` (strict less than) and `at_least`
@@ -3187,6 +3192,15 @@ before judging players. A defender absent from a game for this team contributes
 zero minutes, including after a trade. Both reads add
 `games_considered: {kept, played}` counting distinct opponent games, independent
 of how many players fit. A saved Target and identical draft share evaluation.
+When `player_minutes` is enabled, date and defender conditions still choose the
+opponent games first, then each qualifying player's appearances in those games
+are retained only when their minutes are finite and strictly greater than the
+threshold. Players with no retained appearances are removed; `players[].games`,
+the player and game counts, and summaries use the retained appearances.
+Season totals and averages remain over the full Regular Season, while
+`games_considered` remains the distinct opponent-game denominator before this
+individual appearance filter. Resolution does not apply this condition because
+future game minutes are unknown.
 Resolve uses the Slate Date and the Matchup's stored availability evidence:
 listed Out means zero minutes under the same comparator; unknown availability
 passes the defender Condition. A game failing Conditions has no Fits; its game

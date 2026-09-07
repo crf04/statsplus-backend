@@ -382,9 +382,20 @@ def backtest(build_backtest):
     return _backtest
 
 
-def _create(targets, *, uid=OWNER, opponent="OKC", qualifiers=(CORNER_THREE,)):
+def _create(
+    targets,
+    *,
+    uid=OWNER,
+    opponent="OKC",
+    qualifiers=(CORNER_THREE,),
+    conditions=None,
+):
     return targets.create_target(
-        uid, opponent=opponent, qualifiers=list(qualifiers), note=None
+        uid,
+        opponent=opponent,
+        qualifiers=list(qualifiers),
+        note=None,
+        conditions=conditions,
     )
 
 
@@ -1120,12 +1131,139 @@ def test_the_backtest_route_refuses_an_unauthenticated_caller(
 
 def test_date_conditions_are_saved_cleared_and_preserve_unedited_fields(targets):
     conditions = {'defender': None, 'from': '2026-01-01', 'to': '2026-02-01'}
+    expected_conditions = {**conditions, 'player_minutes': None}
     created = targets.create_target(OWNER, opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
-    assert created['conditions'] == conditions
+    assert created['conditions'] == expected_conditions
     edited = targets.update_target(OWNER, created['id'], changes={'note': 'Keep window'})
-    assert edited['conditions'] == conditions
-    assert targets.get_target(OWNER, created['id'])['conditions'] == conditions
+    assert edited['conditions'] == expected_conditions
+    assert targets.get_target(OWNER, created['id'])['conditions'] == expected_conditions
     assert targets.update_target(OWNER, created['id'], changes={'conditions': None})['conditions'] is None
+
+
+def test_player_minutes_filters_appearances_and_preserves_season_baseline(
+    targets, backtest
+):
+    conditions = {'player_minutes': 10}
+    created = _create(targets, conditions=conditions)
+    lebron_rows = (
+        _row(LEBRON, game_id='below', minutes=9.9, points=11),
+        _row(LEBRON, game_id='equal', minutes=10, points=22),
+        _row(LEBRON, game_id='above', minutes=10.1, points=33),
+    )
+    tatum_rows = (
+        _row(
+            TATUM,
+            name='Jayson Tatum',
+            team_id=BOS,
+            team_tricode='BOS',
+            game_id='tatum-equal',
+            minutes=10,
+        ),
+    )
+    logs = FakeLogs(rows=lebron_rows + tatum_rows)
+    logs.season_rows = lebron_rows + tatum_rows + (
+        _row(
+            LEBRON,
+            game_id='other-season-game',
+            opponent_team_id=BOS,
+            opponent_team_tricode='BOS',
+            minutes=30,
+            points=7,
+        ),
+    )
+    diets = FakeDiets(
+        zones={
+            LEBRON: _zone_diet(0.42, 0.2),
+            TATUM: _zone_diet(0.45, 0.2),
+        }
+    )
+
+    payload = backtest(created['id'], logs=logs, diets=diets)
+
+    assert created['conditions'] == {
+        'defender': None,
+        'from': None,
+        'to': None,
+        'player_minutes': 10,
+    }
+    assert payload['games_considered'] == {'played': 4, 'kept': 4}
+    assert [player['canonical_id'] for player in payload['players']] == [LEBRON]
+    player = payload['players'][0]
+    assert [game['game_id'] for game in player['games']] == ['above']
+    assert player['games'][0]['minutes'] == 10.1
+    assert player['season_games'] == 4
+    assert player['season_totals']['points'] == 73
+    assert player['season_averages']['PTS'] == 25.0
+    assert payload['summary'] == {
+        'players': 1,
+        'games': 1,
+        'columns': {
+            'PTS': {'mean_difference': 8.0, 'over_average_share': 1.0},
+            '3PM': {'mean_difference': 2.0, 'over_average_share': 1.0},
+        },
+    }
+
+
+@pytest.mark.parametrize('minutes', [None, float('nan'), float('inf'), float('-inf')])
+def test_player_minutes_excludes_missing_and_nonfinite_appearances(
+    targets, backtest, minutes
+):
+    created = _create(targets, conditions={'player_minutes': 0})
+    logs = FakeLogs(rows=(_row(LEBRON, minutes=minutes),))
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+
+    payload = backtest(created['id'], logs=logs, diets=diets)
+
+    assert payload['players'] == []
+    assert payload['summary']['players'] == 0
+    assert payload['summary']['games'] == 0
+    assert payload['games_considered'] == {'played': 1, 'kept': 1}
+
+
+def test_player_minutes_conditions_round_trip_replace_and_clear(targets):
+    created = _create(targets, conditions={'player_minutes': 10})
+    canonical = {
+        'defender': None,
+        'from': None,
+        'to': None,
+        'player_minutes': 10,
+    }
+    assert created['conditions'] == canonical
+    assert targets.get_target(OWNER, created['id'])['conditions'] == canonical
+    draft = targets.validate_target_draft(
+        opponent='OKC', qualifiers=[CORNER_THREE], conditions={'player_minutes': 10}
+    )
+    assert draft['conditions'] == canonical
+
+    preserved = targets.update_target(
+        OWNER, created['id'], changes={'note': 'Keep this threshold'}
+    )
+    assert preserved['conditions'] == canonical
+
+    replaced = targets.update_target(
+        OWNER,
+        created['id'],
+        changes={'conditions': {'from': '2026-01-01'}},
+    )
+    assert replaced['conditions'] == {
+        'defender': None,
+        'from': '2026-01-01',
+        'to': None,
+        'player_minutes': None,
+    }
+    restored = targets.update_target(
+        OWNER, created['id'], changes={'conditions': {'player_minutes': 10}}
+    )
+    assert restored['conditions'] == canonical
+    cleared = targets.update_target(
+        OWNER, created['id'], changes={'conditions': {'player_minutes': None}}
+    )
+    assert cleared['conditions'] == {
+        'defender': None,
+        'from': None,
+        'to': None,
+        'player_minutes': None,
+    }
 
 
 @pytest.mark.parametrize(('comparator', 'minutes', 'expected'), [('under', 20, ['sat']), ('at_least', 20, ['played']), ('under', 0, []), ('at_least', 0, ['played', 'sat'])])
@@ -1151,6 +1289,11 @@ def test_backtest_conditions_include_absence_as_zero_and_bound_dates(targets, bu
     {'defender': {'player_id': 99, 'comparator': 'under', 'minutes': 1.5}},
     {'defender': {'player_id': 99, 'comparator': 'over', 'minutes': 20}},
     {'defender': {'player_id': 100, 'comparator': 'under', 'minutes': 20}},
+    {'player_minutes': -1},
+    {'player_minutes': 49},
+    {'player_minutes': 10.5},
+    {'player_minutes': True},
+    {'player_minutes': '10'},
     {'from': '2026-02-01', 'to': '2026-01-01'},
     {'from': '20260101'},
 ])
@@ -1181,7 +1324,44 @@ def test_identical_saved_and_draft_conditions_have_identical_evidence(targets, b
     assert saved['players'] == preview['players']
     assert saved['summary'] == preview['summary']
     assert saved['games_considered'] == {'kept': 0, 'played': 1}
-    assert targets.list_targets(OWNER)[0]['conditions'] == conditions
+    assert targets.list_targets(OWNER)[0]['conditions'] == {
+        **conditions,
+        'player_minutes': None,
+    }
+
+
+def test_identical_saved_and_draft_player_minutes_have_identical_evidence(
+    targets, build_backtest
+):
+    conditions = {'player_minutes': 10}
+    logs = FakeLogs(
+        rows=(
+            _row(LEBRON, game_id='above', minutes=10.1),
+            _row(LEBRON, game_id='equal', minutes=10),
+        )
+    )
+    diets = FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)})
+    targets.player_logs = logs
+    created = _create(targets, conditions=conditions)
+    draft = targets.validate_target_draft(
+        opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions
+    )
+    service = build_backtest(logs=logs, diets=diets)
+
+    saved = service.backtest(OWNER, created['id'])
+    preview = service.backtest_target(draft)
+
+    expected_conditions = {
+        'defender': None,
+        'from': None,
+        'to': None,
+        'player_minutes': 10,
+    }
+    assert saved['target']['conditions'] == expected_conditions
+    assert preview['target']['conditions'] == expected_conditions
+    assert saved['players'] == preview['players']
+    assert saved['summary'] == preview['summary']
+    assert saved['games_considered'] == {'kept': 2, 'played': 2}
 
 
 def test_season_minutes_roster_groups_players_and_orders_by_average(backtest_engine, backtest_settings):
@@ -1210,7 +1390,7 @@ def test_season_minutes_route(client, authenticate, dependencies):
 
 @pytest.mark.parametrize('path', ['/api/user/targets', '/api/user/targets/preview'])
 def test_conditions_cross_create_and_preview_http_seams(client, authenticate, dependencies, path):
-    conditions = {'defender': None, 'from': '2026-01-01', 'to': None}
+    conditions = {'defender': None, 'from': '2026-01-01', 'to': None, 'player_minutes': 10}
     draft = {'opponent': 'OKC', 'qualifiers': [CORNER_THREE], 'conditions': conditions}
     dependencies.user_service.create_target = Mock(return_value=draft)
     dependencies.user_service.validate_target_draft = Mock(return_value=draft)
