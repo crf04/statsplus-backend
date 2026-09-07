@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session, defer, sessionmaker
 from app.domain.team_matchup_taxonomy import (
     PLAY_TYPES,
     SHOT_TYPE_SLICES,
+    SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
 )
 from app.domain.publication_integrity import publication_payload_matches_checksum
@@ -346,7 +347,15 @@ def decode_player_diet(
         result.append(PlayerDietFact(
             player_id=player_id,
             base=base,
-            slice_key=slice_key,
+            # Publications retain the provider's stable stored identity.  The
+            # rest of the Diet domain (qualifiers, baselines, and response
+            # facts) uses the display identity, so translate at this read
+            # boundary without changing the immutable payload on disk.
+            slice_key=(
+                SHOT_TYPE_STORED_TO_DISPLAY[slice_key]
+                if base == "shot_types"
+                else slice_key
+            ),
             share=share,
             volume=_strict_float(row["volume"], field="volume", stream_key=stream_key, minimum=0),
             games_played=_strict_int(row["games_played"], field="games_played", stream_key=stream_key, minimum=1),

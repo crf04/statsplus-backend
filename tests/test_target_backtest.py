@@ -27,8 +27,10 @@ from app.config.settings import (
 from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
 from app.models.user import User
+from app.services.database_first_activation import PublicationRead
 from app.services.player_diet import (
     PlayerDietBaseline,
+    PlayerDietRepository,
     PlayerDietResult,
     StoredPlayerDietFact,
 )
@@ -69,6 +71,12 @@ TRANSITION = {
     "slice_key": "Transition",
     "comparator": "at_or_above",
     "threshold": 0.2,
+}
+SHOT_TYPE = {
+    "base": "shot_types",
+    "slice_key": "Catch and Shoot",
+    "comparator": "at_or_above",
+    "threshold": 0.01,
 }
 
 SHOT_ZONES = (
@@ -242,6 +250,44 @@ class FakeDiets:
         )
 
 
+class PublishedShotTypeReader:
+    """A publication reader that leaves player-Diet decoding to the repository."""
+
+    def __init__(self, rows):
+        self.rows = tuple(rows)
+
+    def read_many(self, stream_keys, *, season):
+        reads = {}
+        for stream_key in stream_keys:
+            if stream_key == "grouped_shot_types":
+                reads[stream_key] = PublicationRead(
+                    stream_key=stream_key,
+                    publication_id="published-shot-types",
+                    season=season,
+                    cutoff=None,
+                    version=1,
+                    status="active",
+                    freshness="fresh",
+                    age_seconds=0,
+                    payload={"base": "shot_types", "rows": list(self.rows)},
+                    decoded=None,
+                    retrieved_at=datetime(2026, 1, 16, tzinfo=timezone.utc),
+                )
+            else:
+                reads[stream_key] = PublicationRead(
+                    stream_key=stream_key,
+                    publication_id=None,
+                    season=season,
+                    cutoff=None,
+                    version=None,
+                    status="missing",
+                    freshness="missing",
+                    age_seconds=None,
+                    payload=None,
+                )
+        return reads
+
+
 def _play_type_diet(transition):
     """A Synergy partition clearing the Base's coverage floor."""
 
@@ -406,6 +452,58 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(
                     "stats": {"PTS": 22.0, "3PM": 2.0},
                 },
             ],
+        }
+    ]
+
+
+def test_a_published_shot_type_diet_fits_targets_and_builds_display_baselines(
+    targets, backtest_engine, build_backtest
+):
+    created = _create(targets, qualifiers=(SHOT_TYPE,))
+    logs = FakeLogs(
+        rows=(
+            _row(LEBRON),
+            _row(TATUM, name="Jayson Tatum", team_id=BOS, team_tricode="BOS"),
+        ),
+        scoring={LEBRON: 25.0, TATUM: 27.0},
+    )
+    publication_rows = [
+        {
+            "player_id": player_id,
+            "slice_key": slice_key,
+            "share": share,
+            "volume": 140.0,
+            "games_played": 20,
+            "volume_unit": "field_goal_attempts",
+            "provider": "nba_stats",
+        }
+        for player_id, shares in (
+            (LEBRON, (0.42, 0.33, 0.25)),
+            (TATUM, (0.18, 0.47, 0.35)),
+        )
+        for slice_key, share in zip(
+            ("catch_and_shoot", "pullups", "less_than_10_ft"), shares
+        )
+    ]
+    diets = PlayerDietRepository(
+        backtest_engine,
+        publication_reader=PublishedShotTypeReader(publication_rows),
+    )
+
+    payload = build_backtest(logs=logs, diets=diets).backtest(
+        OWNER, created["id"]
+    )
+
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        TATUM,
+        LEBRON,
+    ]
+    assert payload["players"][0]["shares"] == [
+        {
+            "base": "shot_types",
+            "slice_key": "Catch and Shoot",
+            "share": 0.18,
+            "league_average_share": 0.3,
         }
     ]
 
