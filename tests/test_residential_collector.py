@@ -681,7 +681,7 @@ def test_player_shot_types_compose_through_the_queue_into_the_profile(tmp_path):
     )
     result = diets.get_for_players("2025-26", [2544])
     assert {fact.slice_key for fact in result.players[2544]} == {
-        "catch_and_shoot", "less_than_10_ft", "pullups",
+        "Catch and Shoot", "Less Than 10 ft", "Pullups",
     }
 
     class _Catalog:
