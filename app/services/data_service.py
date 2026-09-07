@@ -402,13 +402,20 @@ class DataService:
         return teams_df.to_dict(orient="records")
 
     def _frame_collectors(self):
-        """Map every refreshable table to the callable that builds its frame."""
+        """Map every table this refresh still owns to the callable that builds it.
+
+        ``player_play_types`` is deliberately absent.  Its only reader was the
+        natural-language parser's player-name list, which now reads the
+        governed athlete catalog, so the nightly no longer pays an NBA Stats
+        request for a table nothing reads.  The on-demand
+        :meth:`process_playstyles` seam still refreshes it for callers that
+        ask.
+        """
 
         return {
             "player_information": self._collect_player_information,
             "player_per36_stats": self._fetch_player_per36_stats,
             "opp_shooting_zone": self._collect_opp_shooting_zone,
-            "player_play_types": self._collect_playtypes_frame,
             "player_shooting_zones": self._collect_player_zone,
             "pbp_opponent_stats": lambda: self._collect_pbp_frame("opponent"),
         }
