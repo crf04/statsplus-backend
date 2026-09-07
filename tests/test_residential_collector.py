@@ -97,7 +97,7 @@ def _roster():
 
 def _stats(category="Transition"):
     return [{
-        "player_id": 1, "category": category, "GP": 1, "POSS": 2,
+        "player_id": 1, "team_id": 1610612737, "category": category, "GP": 1, "POSS": 2, "POSS_PCT": .1,
         "PTS": 3,
     }]
 
