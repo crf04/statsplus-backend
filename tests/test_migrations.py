@@ -260,8 +260,10 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert upgraded.current_version == 52
+    assert upgraded.current_version == 54
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -534,6 +536,8 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -616,6 +620,8 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -830,6 +836,8 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     with engine.connect() as connection:
         rows = {
@@ -1075,6 +1083,8 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (50, "050_create_targets"),
             (51, "051_publication_repair_groups"),
             (52, "052_repair_group_promotion"),
+            (53, "053_target_conditions"),
+            (54, "054_target_stat_preferences"),
         ]
 
 
@@ -1139,6 +1149,8 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1228,6 +1240,8 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1301,6 +1315,8 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1361,7 +1377,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 52
+    assert repaired.current_version == 54
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1413,8 +1429,10 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert upgraded.current_version == 52
+    assert upgraded.current_version == 54
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1499,8 +1517,10 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert upgraded.current_version == 52
+    assert upgraded.current_version == 54
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1586,6 +1606,8 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1653,8 +1675,10 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert upgraded.current_version == 52
+    assert upgraded.current_version == 54
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1759,6 +1783,8 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
 
 
@@ -1801,7 +1827,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 52
+    assert result.current_version == 54
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -2126,6 +2152,8 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -2199,10 +2227,12 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert upgraded.current_version == 52
+    assert upgraded.current_version == 54
     assert repeated.applied == ()
-    assert repeated.current_version == 52
+    assert repeated.current_version == 54
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2285,6 +2315,8 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -2361,8 +2393,10 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert upgraded.current_version == 52
+    assert upgraded.current_version == 54
 
     for table_name in (
         "team_matchup_facts",
@@ -2425,13 +2459,15 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-13:] == [
+    assert history[-15:] == [
         (40, "040_projection_archive"),
         (41, "041_projection_archive_transitions"),
         (42, "042_team_matchup_provider_provenance"),
@@ -2445,6 +2481,8 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (50, "050_create_targets"),
         (51, "051_publication_repair_groups"),
         (52, "052_repair_group_promotion"),
+            (53, "053_target_conditions"),
+            (54, "054_target_stat_preferences"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2454,7 +2492,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 52
+    assert result.current_version == 54
     inspector = inspect(engine)
     columns = {
         column["name"]
@@ -2563,8 +2601,10 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
-    assert applied.current_version == 52
+    assert applied.current_version == 54
     assert repeated.applied == ()
     with engine.connect() as connection:
         row = connection.execute(
@@ -2617,6 +2657,8 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -2704,6 +2746,8 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -2751,13 +2795,15 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
     assert upgraded.applied == (
         "050_create_targets", "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert repeated.applied == ()
 
     inspector = inspect(engine)
     assert {column["name"] for column in inspector.get_columns("targets")} == {
         "id", "firebase_uid", "opponent", "note", "qualifier_signature",
-        "created_at", "updated_at",
+        "created_at", "updated_at", "conditions", "stat_preferences",
     }
     assert {
         column["name"] for column in inspector.get_columns("target_qualifiers")
@@ -2811,6 +2857,8 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
         "050_create_targets",
         "051_publication_repair_groups",
         "052_repair_group_promotion",
+        "053_target_conditions",
+        "054_target_stat_preferences",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)

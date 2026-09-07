@@ -73,6 +73,8 @@ class ApplicationDependencies:
     target_resolution_service: Any | None = None
     target_backtest_service: Any | None = None
     target_preview_service: Any | None = None
+    diet_baselines_service: Any | None = None
+    target_season_minutes_service: Any | None = None
 
 
 def build_dependencies(
@@ -129,6 +131,8 @@ def build_dependencies(
     from app.services.team_matchup_query import TeamMatchupQueryService
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.matchup_injuries import StoredMatchupInjuryReader
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+    from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
     from app.services.target_preview import TargetPreviewService
     from app.services.target_resolution import TargetResolutionService
@@ -648,7 +652,7 @@ def build_dependencies(
         publication_reader=publication_reader,
         engine=engine,
     )
-    user_service = UserService(engine, settings=settings)
+    user_service = UserService(engine, settings=settings, player_logs=player_game_log_repository)
     # Target resolution reads no provider: it composes the same Slate and
     # Matchup documents the slate and matchup routes already serve, so the
     # two surfaces cannot disagree about one game.
@@ -736,6 +740,13 @@ def build_dependencies(
         target_resolution_service=target_resolution_service,
         target_backtest_service=target_backtest_service,
         target_preview_service=target_preview_service,
+        target_season_minutes_service=TargetSeasonMinutesService(
+            player_logs=player_game_log_repository, settings=settings, publication_reader=publication_reader,
+        ),
+        diet_baselines_service=DietBaselinesService(
+            player_diets=(player_diet_service.repository if player_diet_service else None),
+            settings=settings, publication_reader=publication_reader,
+        ),
     )
 
 
