@@ -968,14 +968,25 @@ class BaseQueryParser:
     
     def _load_players(self) -> List[str]:
         """
-        Load all player names from the database.
+        Load every recognisable player name for one season.
+
+        Entity matching wants the widest roster the season knows about, which
+        is the governed athlete catalog rather than any statistical table: a
+        play-type or shooting table only names players who accumulated that
+        statistic, so a legitimate query about anyone else stopped resolving.
+
         Returns:
-            List[str]: List of player full names.
+            List[str]: Distinct player display names.
         """
         try:
             with self.engine.connect() as conn:
-                # Quote column to handle case-sensitive identifier created by pandas/SQLAlchemy on Postgres
-                result = conn.execute(text('SELECT DISTINCT "PLAYER_NAME" FROM player_play_types'))
+                result = conn.execute(
+                    text(
+                        "SELECT DISTINCT display_name FROM athlete_catalog "
+                        "WHERE season = :season AND display_name IS NOT NULL"
+                    ),
+                    {"season": self.settings.nba.current_season},
+                )
                 return [row[0] for row in result.fetchall()]
         except Exception as e:
             logger.warning("Could not load players from database: %s", e)

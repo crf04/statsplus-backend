@@ -218,3 +218,76 @@ def test_player_id_lookup_raises_for_an_unknown_player(service):
 
 def test_player_id_lookup_resolves_a_known_player(service):
     assert service._get_player_id("LeBron James") == 2544
+
+
+def test_the_nightly_refresh_no_longer_collects_player_play_types(
+    service, monkeypatch
+):
+    """The nightly pays no NBA Stats request for a table nothing reads.
+
+    ``player_play_types`` had one reader, the natural-language player-name
+    list, and that now reads the governed athlete catalog.  Dropping it from
+    the collector set is what removes the request, so assert on the collector
+    rather than on the published set.
+    """
+
+    collected = []
+
+    def _record(name, value):
+        def build():
+            collected.append(name)
+            return value
+
+        return build
+
+    for attribute, table_name in (
+        ("_collect_player_information", "player_information"),
+        ("_fetch_player_per36_stats", "player_per36_stats"),
+        ("_collect_opp_shooting_zone", "opp_shooting_zone"),
+        ("_collect_playtypes_frame", "player_play_types"),
+        ("_collect_player_zone", "player_shooting_zones"),
+    ):
+        monkeypatch.setattr(
+            service,
+            attribute,
+            _record(table_name, pd.DataFrame([{"value": "new"}])),
+        )
+    monkeypatch.setattr(
+        service,
+        "_collect_pbp_frame",
+        lambda kind: _record("pbp_opponent_stats", pd.DataFrame([{"v": 1}]))(),
+    )
+    monkeypatch.setattr(service.publisher, "publish", lambda *a, **k: None)
+
+    assert service.update_all_data() is True
+
+    assert "player_play_types" not in collected
+    assert sorted(collected) == sorted(
+        [
+            "player_information",
+            "player_per36_stats",
+            "opp_shooting_zone",
+            "player_shooting_zones",
+            "pbp_opponent_stats",
+        ]
+    )
+
+
+def test_the_on_demand_play_type_seam_still_collects_and_publishes(
+    service, engine, monkeypatch
+):
+    """Removing the table from the nightly does not retire its writer."""
+
+    calls = []
+
+    def _collect():
+        calls.append("collected")
+        return pd.DataFrame([{"PLAYER_NAME": "LeBron James", "TEAM_ABBREVIATION": "LAL"}])
+
+    monkeypatch.setattr(service, "_collect_playtypes_frame", _collect)
+
+    assert service.process_playstyles() is True
+    assert calls == ["collected"]
+    assert read_table(engine, "player_play_types")["PLAYER_NAME"].tolist() == [
+        "LeBron James"
+    ]
