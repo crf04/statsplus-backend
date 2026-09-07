@@ -41,6 +41,7 @@ from app.domain.nba_teams import (
     NBA_TEAM_TRICODES,
     canonical_nba_team_abbreviation,
 )
+from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
 from app.domain.slate_time import slate_date_for_instant
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
@@ -219,7 +220,12 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     {"stream_key": "assist_locations_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     {"stream_key": "assist_locations_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
     {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
-    {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
+    # ``grouped_shot_types`` is the observation type the player shot-type
+    # normalizer and envelope actually emit.  The registration must name it
+    # exactly: ingestion admits only a type the stream requires, and
+    # completeness refuses a stream whose required types were not all
+    # observed, so a near-miss name rejects the real collector twice.
+    {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("grouped_shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "player_assist_locations", "provider": "pbp", "owner": "railway", "scope": "season", "required": ("player_assists",), "schema": (1,), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     # Opponent grouped surfaces are independent publications from their
@@ -731,6 +737,207 @@ def _compose_nba_observation_payload(
             },
         })
     return {"rows": rows, "source_observations": sources}
+
+
+#: One player shot-type record's rich evidence, and where each value is
+#: published.  Every one is required: a slice that cannot answer the Shooting
+#: Type profile's two- and three-point columns must not be published at all
+#: rather than published as a fact the read path would report as unavailable.
+_PLAYER_SHOT_TYPE_SHOOTING_SOURCES: dict[str, str] = {
+    "makes": "makes",
+    "two_point_makes": "FG2M",
+    "two_point_attempts": "FG2A",
+    "two_point_share": "FG2A_FREQUENCY",
+    "three_point_makes": "FG3M",
+    "three_point_attempts": "FG3A",
+    "three_point_share": "FG3A_FREQUENCY",
+}
+
+
+def _player_diet_number(
+    record: Mapping[str, Any], key: str, *, minimum: float = 0.0
+) -> float:
+    """Read one provider number, refusing anything that is not one."""
+
+    if key not in record:
+        raise ValueError("publication observation value missing")
+    raw = record[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError("publication observation value invalid")
+    numeric = float(raw)
+    if not math.isfinite(numeric) or numeric < minimum:
+        raise ValueError("publication observation value invalid")
+    return numeric
+
+
+def _is_player_season_scope(scope: Mapping[str, Any]) -> bool:
+    """Is this observation the player, season, Regular Season evidence?
+
+    The same collector surfaces produce opponent-subject, Last-15, and other
+    phase evidence under the same observation type.  The player Diet has one
+    window and one phase, so anything else is a different fact and is not
+    silently composed into it.
+    """
+
+    phase = str(
+        scope.get("phase", scope.get("season_type", ""))
+    ).strip().casefold()
+    return (
+        str(scope.get("subject", "")).strip().casefold() == "player"
+        and str(scope.get("window", "")).strip().casefold() == "season"
+        and phase == "regular season"
+    )
+
+
+def _compose_player_diet_observation_payload(
+    session: Session,
+    *,
+    stream: PublicationStream,
+    stream_key: str,
+    season: str,
+    cutoff: datetime,
+    manifest_id: str,
+    provenance_ids: set[str],
+) -> dict[str, Any]:
+    """Derive the player shot-type Diet payload from immutable observations.
+
+    This is the player-scoped counterpart of the opponent composer above and
+    obeys the same rule: the payload is re-derived here from the accepted
+    evidence, so a collector's success is never taken as proof.  The Diet has
+    no window, so only the player-subject season Regular Season observations
+    authorize it; the opponent, Playoffs, and l15 evidence the same surfaces
+    collect belongs to other publications and must never compose into this
+    one.
+
+    Completeness is over the categories, not over the players.  Every
+    shot-type category must be present, because a missing category would
+    silently drop a column from the tab.  A player is not required to appear
+    in all three: the provider legitimately omits a player with no attempts
+    of a shot type, and the Diet and profile already report a slice a player
+    does not have as absent rather than as zero.  Each valid
+    ``(player, slice)`` is therefore published on its own.
+    """
+
+    from app.services.player_diet import shot_type_shooting_violation
+
+    base = "shot_types"
+    required_types = set(json.loads(stream.required_observations))
+    expected_slices = set(SHOT_TYPE_DISPLAY_TO_STORED.values())
+    # A retried collection appends a fresh observation for an identity it has
+    # already covered, so the same (type, category) can arrive more than once
+    # under one manifest.  The latest accepted observation per identity wins,
+    # matching the opponent composer.  The scan is ordered by acceptance so
+    # which observation wins never depends on identifier ordering.
+    observations = sorted(
+        (
+            observation
+            for observation_id in sorted(provenance_ids)
+            if (observation := session.get(CollectionObservation, observation_id))
+            is not None
+        ),
+        key=lambda row: (_aware(row.accepted_at), row.observation_id),
+    )
+    latest: dict[tuple, CollectionObservation] = {}
+    for observation in observations:
+        scope_value = _safe_json_mapping(observation.scope)
+        if not _is_player_season_scope(scope_value):
+            continue
+        identity = (
+            observation.observation_type,
+            str(scope_value.get("category", scope_value.get("general_range", ""))),
+        )
+        held = latest.get(identity)
+        if held is None or (
+            _aware(observation.accepted_at), observation.observation_id
+        ) > (_aware(held.accepted_at), held.observation_id):
+            latest[identity] = observation
+    if not latest:
+        raise ValueError("publication observation season evidence missing")
+    observed_categories: set[str] = set()
+    facts: dict[tuple[int, str], dict[str, Any]] = {}
+    sources: list[dict[str, str]] = []
+    for observation in sorted(latest.values(), key=lambda row: row.observation_id):
+        if (
+            observation.manifest_id != manifest_id
+            or observation.season != season
+            or _aware(observation.cutoff) != cutoff
+            or observation.provider != stream.provider
+            or observation.observation_type not in required_types
+        ):
+            raise ValueError("publication observation authority mismatch")
+        try:
+            document = json.loads(observation.payload)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("publication observation malformed") from error
+        if (
+            not isinstance(document, Mapping)
+            or document.get("base") != base
+            or not hmac.compare_digest(
+                _checksum(observation.payload), observation.checksum
+            )
+        ):
+            raise ValueError("publication observation integrity mismatch")
+        records = document.get("records")
+        if not isinstance(records, list):
+            raise ValueError("publication observation rows missing")
+        sources.append({
+            "observation_id": observation.observation_id,
+            "checksum": observation.checksum,
+        })
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise ValueError("publication observation row malformed")
+            try:
+                player_id = int(record["player_id"])
+            except (KeyError, TypeError, ValueError, OverflowError) as error:
+                raise ValueError("publication player identity missing") from error
+            if player_id <= 0:
+                raise ValueError("publication player identity invalid")
+            category = str(record.get("category", record.get("slice_key", ""))).strip()
+            slice_key = SHOT_TYPE_DISPLAY_TO_STORED.get(category)
+            if slice_key is None:
+                raise ValueError("publication observation taxonomy mismatch")
+            observed_categories.add(slice_key)
+            if (player_id, slice_key) in facts:
+                raise ValueError("publication observation taxonomy mismatch")
+            share = _player_diet_number(record, "share")
+            if share > 1:
+                raise ValueError("publication observation value invalid")
+            volume = _player_diet_number(record, "attempts")
+            games_played = _player_diet_number(record, "games_played", minimum=1)
+            if not games_played.is_integer():
+                raise ValueError("publication observation value invalid")
+            shooting = {
+                name: _player_diet_number(record, column)
+                for name, column in _PLAYER_SHOT_TYPE_SHOOTING_SOURCES.items()
+            }
+            # The one shooting-split rule, shared with the refresh path, plus
+            # the one relationship the split alone cannot state: its makes are
+            # a part of this slice's own attempts.
+            if (
+                shot_type_shooting_violation(shooting) is not None
+                or shooting["makes"] > volume
+            ):
+                raise ValueError("publication observation value invalid")
+            facts[(player_id, slice_key)] = {
+                "player_id": player_id,
+                "slice_key": slice_key,
+                "share": share,
+                "volume": volume,
+                "games_played": int(games_played),
+                "volume_unit": "field_goal_attempts",
+                "provider": "nba_stats",
+                "shooting": shooting,
+            }
+    if not facts:
+        raise ValueError("publication observation rows missing")
+    if observed_categories != expected_slices:
+        raise ValueError("publication observation categories incomplete")
+    return {
+        "base": base,
+        "rows": [facts[identity] for identity in sorted(facts)],
+        "source_observations": sources,
+    }
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:
@@ -3914,6 +4121,46 @@ class PublicationService(_SessionService):
                 season=season,
                 expected_game_ids_by_team=expected_game_ids_by_team,
             )
+        elif stream_key in PLAYER_DIET_OBSERVATION_STREAM_KEYS:
+            if not manifest_id:
+                raise ControlPlaneError("publication_governance_unavailable")
+            # The same authority the opponent streams bind, so the player
+            # version records which manifest and Event Catalog authorized it.
+            try:
+                authority = resolve_publication_authority(
+                    session,
+                    season=season,
+                    cutoff=_aware(cutoff),
+                    manifest_id=manifest_id,
+                )
+            except PublicationGovernanceUnavailable as error:
+                raise ControlPlaneError(
+                    "publication_governance_unavailable"
+                ) from error
+            try:
+                derived_payload = _compose_player_diet_observation_payload(
+                    session,
+                    stream=stream,
+                    stream_key=stream_key,
+                    season=season,
+                    cutoff=_aware(cutoff),
+                    manifest_id=authority.manifest_id,
+                    provenance_ids=provenance_ids,
+                )
+            except ValueError as error:
+                raise ControlPlaneError("publication_candidate_invalid") from error
+            # A caller that supplied its own payload must have derived exactly
+            # what the evidence says, byte for byte, or it does not publish.
+            if payload is not None and not hmac.compare_digest(
+                canonical_publication_json(payload),
+                canonical_publication_json(derived_payload),
+            ):
+                raise ControlPlaneError("publication_candidate_invalid")
+            payload = derived_payload
+            encoded = _json(payload)
+            _validate_activation_candidate_payload(
+                stream_key, encoded, season=season,
+            )
         return _PublicationCandidate(
             encoded=encoded, payload=payload,
             provenance_ids=provenance_ids, authority=authority,
@@ -4628,7 +4875,9 @@ class PublicationService(_SessionService):
     ) -> PublicationVersion:
         """Compose a governed NBA publication from its accepted evidence."""
 
-        if stream_key not in NBA_PUBLICATION_STREAM_KEYS:
+        if stream_key not in (
+            NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
+        ):
             raise ControlPlaneError("stream_unsupported")
         with self._session_scope(session) as session:
             # A declared group owns its members' promotion.  Refusing here --

@@ -442,12 +442,30 @@ def build_dependencies(
                 max_concurrency=1,
             )
 
+    from app.domain.freshness import time_window_timedelta
+
+    # Constructed here rather than beside the matchup services because the
+    # player profile read path now reads its Archetype rows from the same
+    # governed publication.
+    player_game_log_repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=statistic_catalog,
+        stats_surface_season=settings.nba.current_season,
+        stats_surface_max_age=time_window_timedelta(
+            settings.catalog.player_game_log_max_age_hours,
+            unit_seconds=3600,
+            field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
+        ),
+        write_fence=write_fence,
+        serve_stale=not demo_database,
+        publication_reader=publication_reader,
+    )
     player_service = PlayerService(
         engine,
         settings=settings,
-        nba_stats_provider=nba_stats_provider,
         publication_reader=publication_reader,
         profile_reader=player_profile_reader,
+        game_logs=player_game_log_repository,
     )
     data_refresh_jobs_service = build_data_refresh_job_service(
         engine,
@@ -572,21 +590,6 @@ def build_dependencies(
         settings=settings,
         player_pool=slate_player_pool,
         injuries=matchup_injury_service,
-    )
-    from app.domain.freshness import time_window_timedelta
-
-    player_game_log_repository = PlayerGameLogRepository(
-        engine,
-        statistic_catalog=statistic_catalog,
-        stats_surface_season=settings.nba.current_season,
-        stats_surface_max_age=time_window_timedelta(
-            settings.catalog.player_game_log_max_age_hours,
-            unit_seconds=3600,
-            field="PLAYER_GAME_LOG_MAX_AGE_HOURS",
-        ),
-        write_fence=write_fence,
-        serve_stale=not demo_database,
-        publication_reader=publication_reader,
     )
     from app.services.game_logs_source import (
         StoredGameLogsSource,

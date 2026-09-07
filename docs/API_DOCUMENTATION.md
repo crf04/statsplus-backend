@@ -1311,21 +1311,52 @@ Query parameters:
 - `category` is required by the service. Supported values include `Playtypes`, `assists`, `Archetype`, `Shooting Type`, and `Zone Shooting`.
 - `opp_team` is used by `Archetype`.
 
-For `Playtypes` and `assists`, player names are matched against the
-current-season Athlete Catalog without regard to case, punctuation, or
-diacritics. The other categories retain their historical name lookup.
+For `Playtypes`, `assists`, and `Shooting Type`, player names are matched
+against the current-season Athlete Catalog without regard to case,
+punctuation, or diacritics. `Archetype` and `Zone Shooting` retain their
+historical name lookup.
 `Playtypes` keeps the historical object shape while its `<PlayType>%` values
 are durable Synergy possession shares multiplied by 100; its player name and
 team are the current canonical catalog values. `assists` keeps its historical
 one-element array shape and derives two-point, three-point, and `+` values from
 durable assist-location facts and Player Diet league baselines. Missing
-play-type slices are returned as zero. The assist object retains its fixed key
+play-type slices are returned as zero. Playtype profiles use the shared Synergy
+partition validator: totals above 1.005 (the provider rounding allowance),
+unknown or duplicate slices, and invalid shares report a missing profile rather
+than displaying or rescaling invalid evidence. Sparse valid shares remain raw.
+The legacy Diet refresh excludes a player's playtype facts when differing
+stint game counts also produce an invalid partition; other players and Bases
+remain available. Existing aggregates lack the original team-stint denominators,
+so this quarantine does not repair source numbers; restoring affected players
+requires source evidence with consistent season denominators. The assist object retains its fixed key
 set, using JSON `null` for a missing location, a total requiring a missing
 location, or a `+` value whose complete league baseline is unavailable; those
-states are never represented by a synthetic zero. Neither durable category
-calls an upstream provider at request time. On the
+states are never represented by a synthetic zero. On the
 bundled demo database these two durable-only categories report a missing player;
 they never fall back to `player_play_types` or `processed_player_assists`.
+
+`Shooting Type` keeps its historical array shape, one object per shot type
+labelled `C&S`, `Pullup`, or `<10 Ft`, carrying `SHOT_TYPE`, `FGA_FREQUENCY`,
+`FGM`, `FGA`, `FG_PCT`, `FG2A_FREQUENCY`, `FG2M`, `FG2A`, `FG2_PCT`,
+`FG3A_FREQUENCY`, `FG3M`, `FG3A`, and `FG3_PCT`. Counts are per game,
+frequencies and percentages are fractions, and every value is projected from
+the durable `shot_types` Player Diet Base: the stored season totals divided by
+that fact's own games played, and the percentages from its stored makes and
+attempts. A shot type whose made/attempted split was never observed is omitted
+rather than reported with an invented two- and three-point division, so the
+category can return `[]`.
+
+`Archetype` returns the same array of per-36 cluster game logs it always has,
+now read from the governed `player_game_logs` publication rather than from an
+upstream provider. Membership is the selected player's `player_clusters`
+cluster, including the selected player, and only regular-season rows against
+`opp_team` are compared. Every column on the tab is a percentage difference
+against a season baseline, so a comparison row whose baseline is zero or
+missing has no answer to report and is omitted; with no comparable rows the
+category returns `[]`. Every returned cell is a number, never `null`.
+
+No player profile category calls an upstream provider at request time; the
+service holds no provider client at all.
 
 Example:
 

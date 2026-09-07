@@ -17,6 +17,7 @@ from app.domain.nba_events import (
     is_completed_non_postponed_event,
 )
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+from app.domain.player_diet_taxonomy import PLAYER_DIET_OBSERVATION_STREAM_KEYS
 from app.domain.slate_time import slate_date_for_instant, slate_day_bounds_utc
 from app.models.collection_control import (
     ActiveSeason,
@@ -44,6 +45,13 @@ from app.services.team_matchup_publications import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The streams whose payload the publication boundary derives from accepted
+#: observations.  Everything else in a slice is composed by ledger
+#: materialization, which has no candidate for these.
+_OBSERVATION_COMPOSED_STREAM_KEYS = (
+    NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -698,11 +706,11 @@ class LedgerRuntime:
                     )
                     nba_jobs = tuple(
                         row for row in slice_jobs
-                        if row["stream_key"] in NBA_PUBLICATION_STREAM_KEYS
+                        if row["stream_key"] in _OBSERVATION_COMPOSED_STREAM_KEYS
                     )
                     ledger_jobs = tuple(
                         row for row in slice_jobs
-                        if row["stream_key"] not in NBA_PUBLICATION_STREAM_KEYS
+                        if row["stream_key"] not in _OBSERVATION_COMPOSED_STREAM_KEYS
                     )
                     active_jobs = ledger_jobs or slice_jobs
                     reason = next(
@@ -873,7 +881,7 @@ class LedgerRuntime:
                             nba_succeeded_streams.add(job["stream_key"])
                     if nba_jobs and not ledger_jobs:
                         if (
-                            nba_succeeded_streams
+                            nba_succeeded_streams & NBA_PUBLICATION_STREAM_KEYS
                             and self.matchup_materialization is not None
                         ):
                             self.matchup_materialization.refresh_publication_surfaces(
@@ -975,7 +983,7 @@ class LedgerRuntime:
                     succeeded = _succeeded_ledger_streams(materialized)
                     cas_failed = False
                     for job in slice_jobs:
-                        if job["stream_key"] in NBA_PUBLICATION_STREAM_KEYS:
+                        if job["stream_key"] in _OBSERVATION_COMPOSED_STREAM_KEYS:
                             success = job["stream_key"] in nba_succeeded_streams
                             failure_reason = nba_failures.get(
                                 job["job_id"],
