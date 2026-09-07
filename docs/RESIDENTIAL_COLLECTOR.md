@@ -248,3 +248,30 @@ jobs use the existing fenced `LedgerRuntime.compose_queued` path. That includes
 already-authorized sibling jobs; it never invokes provider refresh. Idle ticks
 do not construct the application/provider dependency graph. The worker does
 not call NBA endpoints or replace the residential collector.
+
+
+## Governed player Synergy repair
+
+The enabled `synergy_play_types` stream requests all eleven season player
+categories with `P`, `Offensive`, and `Totals`. Each immutable source record
+retains player ID, team ID, games played, possessions, possession share, and
+category. Possessions are distinct from field-goal attempts. Team stints remain
+separate until hosted composition; collection performs no aggregation.
+
+Composition selects the latest accepted observation for each category within
+one manifest, season, provider, and cutoff. All eleven exact Regular Season
+player scopes and their checksums must pass before publishing. For a traded
+player, each team's rounded source shares and possession counts must prove one
+unique integer possession denominator. The player denominator is the sum of
+those proven team totals; per-category games played cannot supply that total.
+Single-team shares remain exactly as supplied. Sparse shares are not rescaled
+to sum to one. Ambiguous or inconsistent players are omitted with deterministic
+`withheld_players` reasons in the internal publication payload. The remaining
+source stays available; omitted players cannot fall back to legacy facts after
+activation. A candidate with no valid rows, missing categories, or malformed
+evidence preserves the last-good publication.
+
+This repair adds no separate recurring scheduler. Once explicitly enabled and
+included in a governed manifest, the daily Shooting Type tick preserves this
+sibling scope, and the existing queue composer processes its accepted source
+observations without hosted NBA calls. Archetype refresh remains separate.

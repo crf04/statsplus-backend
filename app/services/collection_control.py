@@ -219,7 +219,7 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     {"stream_key": "traditional_opponent_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
     {"stream_key": "assist_locations_season", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     {"stream_key": "assist_locations_l15", "provider": "ledger", "owner": "railway", "scope": "l15", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("l15",), "enabled": False},
-    {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    {"stream_key": "synergy_play_types", "provider": "nba", "owner": "residential_collector", "scope": "season", "required": ("synergy_play_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     # ``grouped_shot_types`` is the observation type the player shot-type
     # normalizer and envelope actually emit.  The registration must name it
     # exactly: ingestion admits only a type the stream requires, and
@@ -285,7 +285,8 @@ def _collector_scope_descriptors(
     if synergy:
         descriptors.extend({"scope": synergy, "parameters": {
             "window": "season", "subject": "player", "play_type": category,
-            "subject_code": "P", "type_grouping": "season",
+            "subject_code": "P", "type_grouping": "Offensive", "per_mode": "Totals",
+            "value_mode": "totals", "phase": "Regular Season",
         }} for category in PLAY_TYPES)
     if shots:
         descriptors.extend({"scope": shots, "parameters": {
@@ -818,6 +819,12 @@ def _compose_player_diet_observation_payload(
     ``(player, slice)`` is therefore published on its own.
     """
 
+    if stream_key == "synergy_play_types":
+        return _compose_player_synergy_observation_payload(
+            session, stream=stream, season=season, cutoff=cutoff,
+            manifest_id=manifest_id, provenance_ids=provenance_ids,
+        )
+
     from app.services.player_diet import shot_type_shooting_violation
 
     base = "shot_types"
@@ -938,6 +945,61 @@ def _compose_player_diet_observation_payload(
         "rows": [facts[identity] for identity in sorted(facts)],
         "source_observations": sources,
     }
+
+
+def _compose_player_synergy_observation_payload(
+    session: Session, *, stream: PublicationStream, season: str,
+    cutoff: datetime, manifest_id: str, provenance_ids: set[str],
+) -> dict[str, Any]:
+    """Aggregate all eleven player categories from their latest source rows."""
+    from app.domain.player_synergy import aggregate_player_synergy
+
+    latest: dict[str, CollectionObservation] = {}
+    for observation_id in sorted(provenance_ids):
+        observation = session.get(CollectionObservation, observation_id)
+        if (observation is None or observation.manifest_id != manifest_id
+                or observation.season != season or _aware(observation.cutoff) != cutoff
+                or observation.provider != stream.provider
+                or observation.observation_type != "synergy_play_types"):
+            raise ValueError("publication observation authority mismatch")
+        scope = _safe_json_mapping(observation.scope)
+        category = str(scope.get("play_type", scope.get("category", "")))
+        if (scope.get("window") != "season" or scope.get("phase") != "Regular Season"
+                or scope.get("subject") != "player" or scope.get("value_mode") != "totals"
+                or scope.get("type_grouping") != "Offensive" or category not in PLAY_TYPES
+                or ("category" in scope and scope["category"] != category)):
+            raise ValueError("publication observation scope mismatch")
+        held = latest.get(category)
+        if held is None or (_aware(observation.accepted_at), observation.observation_id) > (
+            _aware(held.accepted_at), held.observation_id
+        ):
+            latest[category] = observation
+    if set(latest) != set(PLAY_TYPES):
+        raise ValueError("publication observation categories incomplete")
+    records: list[dict[str, Any]] = []
+    sources: list[dict[str, str]] = []
+    for category, observation in sorted(latest.items()):
+        try:
+            document = json.loads(observation.payload)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("publication observation malformed") from error
+        if (not isinstance(document, Mapping) or document.get("base") != "play_types"
+                or not hmac.compare_digest(_checksum(observation.payload), observation.checksum)):
+            raise ValueError("publication observation integrity mismatch")
+        category_records = document.get("records")
+        if not isinstance(category_records, list) or not category_records:
+            raise ValueError("publication observation rows missing")
+        for record in category_records:
+            if not isinstance(record, Mapping) or record.get("category") != category:
+                raise ValueError("publication observation taxonomy mismatch")
+            records.append(record)
+        sources.append({"observation_id": observation.observation_id, "checksum": observation.checksum})
+    rows, withheld_players = aggregate_player_synergy(records)
+    if not rows:
+        raise ValueError("publication observation rows missing")
+    return {"base": "play_types", "rows": rows, "source_observations": sources,
+            "withheld_players": [{"player_id": player_id, "reason": reason}
+                                 for player_id, reason in sorted(withheld_players.items())]}
 
 
 def _surface_names(definition: SurfaceDefinition, observation_type: str | None = None) -> set[str]:

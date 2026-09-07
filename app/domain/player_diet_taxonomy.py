@@ -71,7 +71,7 @@ PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
 #: streams are.  Kept as its own set so player routing never widens the
 #: opponent taxonomy, which separately governs team-window decoding, repair
 #: group membership, and per-team governance expectations.
-PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({"grouped_shot_types"})
+PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({"grouped_shot_types", "synergy_play_types"})
 
 #: The human-readable label each qualifiable slice reads as.
 PLAYER_DIET_SLICE_LABELS = MappingProxyType({
