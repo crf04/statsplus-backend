@@ -690,6 +690,56 @@ def test_team_filters_reach_no_provider_client_by_construction(monkeypatch):
     assert not any("player_diets" in path for path in paths)
 
 
+def test_player_profiles_reach_no_provider_client_by_construction(monkeypatch):
+    """Every `GET /api/players/profile` tab reads only stored facts."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            database={"url": "sqlite:///:memory:"},
+        )
+    )
+    player_service = dependencies.player_service
+
+    providers = {
+        id(dependencies.nba_stats_provider),
+        id(dependencies.pbp_stats_provider),
+        id(dependencies.pbp_game_logs_provider),
+    }
+
+    class ProviderHolder:
+        def __init__(self, provider):
+            self.provider = provider
+
+    # Positive control: the walker must find an intentionally reachable
+    # provider, or the empty production result below would be vacuous.
+    assert _provider_paths(
+        ProviderHolder(dependencies.nba_stats_provider),
+        providers,
+        "positive_control",
+    ) == ["positive_control.provider"]
+
+    # Shooting Type and Archetype used to call NBA Stats at request time.
+    # Both now read stored facts, so the tabs cannot reach a provider client
+    # however they are dispatched.
+    assert not hasattr(player_service, "nba_stats")
+    assert _provider_paths(player_service, providers, "player_service") == []
+    assert player_service.game_logs is dependencies.matchup_service.player_logs
+
+
 def test_team_stats_reach_no_provider_client_by_construction(monkeypatch):
     """`GET /api/teams/stats` can only reach Season publications (#223)."""
 

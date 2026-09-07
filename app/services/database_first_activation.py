@@ -273,7 +273,11 @@ def decode_player_diet(
 ) -> tuple[Any, ...]:
     """Decode one governed player-Diet stream without filling defaults."""
 
-    from app.services.player_diet import PlayerDietFact, PLAYER_DIET_BASES
+    from app.services.player_diet import (
+        PlayerDietFact,
+        PLAYER_DIET_BASES,
+        decode_shot_type_shooting,
+    )
 
     stream_key = {
         "play_types": "synergy_play_types",
@@ -348,6 +352,15 @@ def decode_player_diet(
             games_played=_strict_int(row["games_played"], field="games_played", stream_key=stream_key, minimum=1),
             volume_unit=expected_units[base],
             provider=expected_providers[base],
+            # Optional additional evidence on the same row.  A publication
+            # composed before the split was retained still decodes; the
+            # Shooting Type profile reports those slices as unavailable
+            # rather than inventing a two/three-point division.
+            shooting=(
+                decode_shot_type_shooting(row.get("shooting"))
+                if base == "shot_types"
+                else None
+            ),
         ))
     if not result:
         raise PublicationPayloadError(f"{stream_key} publication is empty")

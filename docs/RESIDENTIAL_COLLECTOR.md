@@ -211,3 +211,40 @@ audit but never enqueue or advance a product Publication.
 `python -m statsplus_collector release` emits a deterministic SHA-256 over the staged
 files and their relative names. Railway should record that version/checksum.
 Keep old release directories until the rehearsal and rollback drill pass.
+
+## Daily player Shooting Type refresh
+
+`python scripts/player_shooting_refresh.py 2025-26` is the bounded hosted
+control-plane tick for the enabled `grouped_shot_types` stream. Configure its
+writable database through `DATABASE_URL`; the command takes no database URL or
+credentials in its arguments. Run it every five minutes (`*/5 * * * *`) with
+the deployed application's environment and migration pre-deploy gate.
+
+The tick requires an already-active Regular Season and the explicitly enabled
+stream. It never activates a season or stream. Between 03:45 and 11:00
+America/Chicago, it requests the exact day's 03:45 Event Catalog, then requests
+an Athlete Catalog only if the existing catalog fails the normal reuse and
+identity gates. Requests survive process restarts and repeated ticks reuse
+unexpired pending requests. All collection deadlines are 11:00 Central; DST
+changes follow the named timezone.
+
+Once the existing catalog gates pass, the tick creates one governed manifest
+with `grouped_shot_types` and the prior manifest's sibling scopes. Its decisions
+and writes hold the existing season-authority lock in one transaction. Newer
+authority, an active unpromoted repair group, or unexpired incomplete collection
+holds issuance. It records an actor and reason for new requests and manifests.
+Missing/invalid inputs and failed transactions leave last-good publications
+untouched. This operation does not change Archetype membership or refresh it.
+
+Configure the Windows task to start at 04:00 Central and repeat every thirty
+minutes for six hours, retaining the startup catch-up trigger and
+`MultipleInstances=IgnoreNew`. A catalog-only collector invocation exits
+successfully; later scheduled invocations collect the next catalog or manifest
+after the hosted tick makes it available. Conditional failure retries alone
+cannot drive this successful multi-stage handshake.
+
+Inside or outside the issuance window, already accepted queued composition
+jobs use the existing fenced `LedgerRuntime.compose_queued` path. That includes
+already-authorized sibling jobs; it never invokes provider refresh. Idle ticks
+do not construct the application/provider dependency graph. The worker does
+not call NBA endpoints or replace the residential collector.

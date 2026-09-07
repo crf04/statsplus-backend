@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 from math import isfinite
 from statistics import fmean, pstdev
 from types import MappingProxyType
@@ -16,6 +17,7 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import Connection, Engine
 
 from app.config.settings import PlayerDietBaselineSettings
+from app.domain.play_type_matchup import complete_play_type_shares
 from app.domain.player_diet_taxonomy import (
     ASSIST_SLICES,
     PLAYER_DIET_BASE_SLICES,
@@ -82,6 +84,115 @@ class _PlayTypeStint:
 
 
 @dataclass(frozen=True, slots=True)
+class ShotTypeShooting:
+    """One shot type's made/attempted split exactly as the provider reports it.
+
+    ``share``/``volume`` describe how often a player shoots a shot type and
+    how many attempts that is; they cannot say how those attempts divided
+    into twos and threes.  The Shooting Type profile shows that division, so
+    it is retained here as its own record rather than as seven more columns
+    on every Base's fact.  Counts are Totals for the season, on the same
+    scale as ``PlayerDietFact.volume``.
+    """
+
+    makes: float
+    two_point_makes: float
+    two_point_attempts: float
+    two_point_share: float
+    three_point_makes: float
+    three_point_attempts: float
+    three_point_share: float
+
+    def as_payload(self) -> dict[str, float]:
+        return {
+            "makes": self.makes,
+            "two_point_makes": self.two_point_makes,
+            "two_point_attempts": self.two_point_attempts,
+            "two_point_share": self.two_point_share,
+            "three_point_makes": self.three_point_makes,
+            "three_point_attempts": self.three_point_attempts,
+            "three_point_share": self.three_point_share,
+        }
+
+
+SHOT_TYPE_SHOOTING_FIELDS: tuple[str, ...] = tuple(
+    ShotTypeShooting.__dataclass_fields__
+)
+
+
+def shot_type_shooting_violation(values: Mapping[str, Any]) -> str | None:
+    """Name the first rule a shooting split breaks, or ``None`` if it holds.
+
+    One rule, stated once.  A split is evidence about a real shot profile
+    wherever it comes from, so the same invariants govern what the refresh
+    may persist and what an immutable publication may carry: an impossible
+    split must not reach the Shooting Type tab through either door.
+    """
+
+    for field_name in SHOT_TYPE_SHOOTING_FIELDS:
+        value = values.get(field_name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(value)
+            or value < 0
+        ):
+            return "player Diet shooting split values are invalid"
+    if any(
+        values[key] > 1 for key in ("two_point_share", "three_point_share")
+    ):
+        return "player Diet shooting split share is out of range"
+    if (
+        values["two_point_makes"] > values["two_point_attempts"]
+        or values["three_point_makes"] > values["three_point_attempts"]
+    ):
+        return "player Diet shooting split makes exceed attempts"
+    return None
+
+
+def decode_shot_type_shooting(payload: Any) -> ShotTypeShooting | None:
+    """Read one stored/published shooting split, or ``None`` when absent.
+
+    A partial or invalid split is treated as no evidence at all: the profile
+    reports the slice as unavailable rather than showing a number that was
+    never observed.  ``shot_type_shooting_violation`` is the single rule, so
+    a publication cannot carry a split the refresh would have refused.
+    """
+
+    if payload is None:
+        return None
+    if isinstance(payload, (str, bytes, bytearray)):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(payload, Mapping):
+        return None
+    values = {
+        field_name: payload.get(field_name)
+        for field_name in SHOT_TYPE_SHOOTING_FIELDS
+    }
+    if shot_type_shooting_violation(values) is not None:
+        return None
+    return ShotTypeShooting(**{
+        field_name: float(value) for field_name, value in values.items()
+    })
+
+
+def _shooting_identity(shooting: "ShotTypeShooting | None") -> str:
+    """The comparable form of a shooting split, for change detection.
+
+    A string rather than a tuple so a Base whose facts mix present and
+    absent splits still sorts, which is how the stored and incoming
+    generations are compared.
+    """
+
+    if shooting is None:
+        return ""
+    return json.dumps(shooting.as_payload(), sort_keys=True)
+
+
+@dataclass(frozen=True, slots=True)
 class PlayerDietFact:
     player_id: int
     base: str
@@ -91,6 +202,9 @@ class PlayerDietFact:
     games_played: int
     volume_unit: str
     provider: str
+    #: Keyword-only and defaulted so the existing subclass field ordering and
+    #: every existing construction site stay valid.
+    shooting: ShotTypeShooting | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +361,9 @@ class PlayerDietRepository:
                             row["games_played"],
                             row["volume_unit"],
                             row["provider"],
+                            _shooting_identity(
+                                decode_shot_type_shooting(row["shooting_detail"])
+                            ),
                             assume_utc(row["retrieved_at"]),
                         )
                         for row in connection.execute(
@@ -306,6 +423,14 @@ class PlayerDietRepository:
                                 "games_played": fact.games_played,
                                 "volume_unit": fact.volume_unit,
                                 "provider": fact.provider,
+                                "shooting_detail": (
+                                    None
+                                    if fact.shooting is None
+                                    else json.dumps(
+                                        fact.shooting.as_payload(),
+                                        sort_keys=True,
+                                    )
+                                ),
                                 "retrieved_at": observed_at,
                             }
                             for fact in facts_by_base[observation.base]
@@ -357,6 +482,7 @@ class PlayerDietRepository:
                     fact.games_played,
                     fact.volume_unit,
                     fact.provider,
+                    _shooting_identity(fact.shooting),
                     observed_at,
                 )
                 for fact in facts
@@ -423,6 +549,16 @@ class PlayerDietRepository:
             raise ValueError("player Diet volume unit is invalid")
         if fact.provider != _PROVIDERS[fact.base]:
             raise ValueError("player Diet provider is invalid")
+        if fact.shooting is not None:
+            if fact.base != "shot_types":
+                raise ValueError("only shot-type facts carry a shooting split")
+            PlayerDietRepository._validate_shooting(fact.shooting)
+
+    @staticmethod
+    def _validate_shooting(shooting: ShotTypeShooting) -> None:
+        violation = shot_type_shooting_violation(shooting.as_payload())
+        if violation is not None:
+            raise ValueError(violation)
 
     def get_for_players(
         self,
@@ -495,6 +631,7 @@ class PlayerDietRepository:
                     games_played=row["games_played"],
                     volume_unit=row["volume_unit"],
                     provider=row["provider"],
+                    shooting=decode_shot_type_shooting(row["shooting_detail"]),
                     retrieved_at=assume_utc(row["retrieved_at"]),
                 )
             )
@@ -625,6 +762,7 @@ class PlayerDietRepository:
                             games_played=fact.games_played,
                             volume_unit=fact.volume_unit,
                             provider=fact.provider,
+                            shooting=fact.shooting,
                             retrieved_at=retrieved_at,
                         )
                     )
@@ -667,6 +805,7 @@ class PlayerDietRepository:
                         games_played=row["games_played"],
                         volume_unit=row["volume_unit"],
                         provider=row["provider"],
+                        shooting=decode_shot_type_shooting(row["shooting_detail"]),
                         retrieved_at=assume_utc(row["retrieved_at"]),
                     )
                 )
@@ -901,7 +1040,21 @@ class PlayerDietService:
                         provider=_PROVIDERS["play_types"],
                     )
                 )
-        return facts
+        facts_by_player: dict[int, list[PlayerDietFact]] = defaultdict(list)
+        for fact in facts:
+            facts_by_player[fact.player_id].append(fact)
+        # Sparse Synergy slices can omit a traded player's team stint. The
+        # per-slice merge then mixes denominators. Quarantine only a proven
+        # impossible partition, never rescale it or reject a valid sparse one.
+        invalid_players = {
+            player_id
+            for player_id, player_facts in facts_by_player.items()
+            if len({fact.games_played for fact in player_facts}) > 1
+            and complete_play_type_shares(
+                (fact.slice_key, fact.share) for fact in player_facts
+            ) is None
+        }
+        return [fact for fact in facts if fact.player_id not in invalid_players]
 
     @staticmethod
     def _combine_play_type_stints(
@@ -963,9 +1116,43 @@ class PlayerDietService:
                         share=row["FGA_FREQUENCY"],
                         volume=row["FGA"],
                         games_played=games,
+                        shooting=self._shot_type_shooting(row),
                     )
                 )
         return facts
+
+    @classmethod
+    def _shot_type_shooting(
+        cls, row: Mapping[str, Any]
+    ) -> ShotTypeShooting | None:
+        """Retain the row's made/attempted split when the provider sent it.
+
+        The split is additional evidence on the same row, so a provider that
+        stops sending it degrades the Shooting Type profile rather than
+        failing the whole shot-type Base.
+        """
+
+        sources = {
+            "makes": "FGM",
+            "two_point_makes": "FG2M",
+            "two_point_attempts": "FG2A",
+            "two_point_share": "FG2A_FREQUENCY",
+            "three_point_makes": "FG3M",
+            "three_point_attempts": "FG3A",
+            "three_point_share": "FG3A_FREQUENCY",
+        }
+        if any(column not in row for column in sources.values()):
+            return None
+        try:
+            values = {
+                name: cls._number(row[column])
+                for name, column in sources.items()
+            }
+        except ValueError:
+            # A missing or nonfinite component leaves no usable split; the
+            # Base's own share and volume are unaffected.
+            return None
+        return decode_shot_type_shooting(values)
 
     def _collect_shot_zones(
         self,
@@ -1112,6 +1299,7 @@ class PlayerDietService:
         share: Any,
         volume: Any,
         games_played: Any,
+        shooting: ShotTypeShooting | None = None,
     ) -> PlayerDietFact:
         return PlayerDietFact(
             player_id=cls._joined_player_id(row["PLAYER_ID"], canonical_ids),
@@ -1122,6 +1310,7 @@ class PlayerDietService:
             games_played=cls._positive_int(games_played),
             volume_unit=_VOLUME_UNITS[base],
             provider=_PROVIDERS[base],
+            shooting=shooting,
         )
 
 
@@ -1137,7 +1326,11 @@ __all__ = [
     "PlayerDietObservation",
     "PlayerDietResult",
     "PlayerDietService",
+    "SHOT_TYPE_SHOOTING_FIELDS",
+    "ShotTypeShooting",
     "StoredPlayerDietFact",
     "StoredPlayerDietObservation",
     "compute_player_diet_baselines",
+    "decode_shot_type_shooting",
+    "shot_type_shooting_violation",
 ]

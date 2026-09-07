@@ -47,6 +47,7 @@ from app.domain.team_matchup_taxonomy import (
 from app.domain.slate_time import slate_date_for_instant
 from app.models.collection_control import (
     CollectionObservation,
+    PublicationStream,
     CompositionJob,
     PublicationPointer,
     PublicationVersion,
@@ -64,6 +65,7 @@ from app.services.collection_control import (
 )
 from app.services import collection_control as collection_control_module
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from app.services.ledger_runtime import LedgerGovernance
 from app.services.ledger_runtime import LedgerRuntime
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
@@ -369,10 +371,17 @@ def test_sanitized_recorded_nba_json_is_normalized_without_network():
     assert normalize_schedule_response(schedule, season="2025-26", cutoff=NOW).payload["records"]
     assert normalize_roster_response(roster, season="2024-25", cutoff=NOW).payload["records"]
     assert normalize_synergy_response(synergy, season="2025-26", cutoff=NOW).payload["records"]
-    assert normalize_grouped_shot_response(
+    shot_record = normalize_grouped_shot_response(
         shots, season="2025-26", cutoff=NOW,
         scope={"window": "season", "subject": "player", "category": "Catch and Shoot"},
-    ).payload["records"]
+    ).payload["records"][0]
+    # The Shooting Type profile shows the two- and three-point split, so the
+    # collector retains every component of it the provider reported.
+    assert shot_record["makes"] == 222
+    assert shot_record["FG2A"] == 22
+    assert shot_record["FG2A_FREQUENCY"] == 0.02
+    assert shot_record["FG3A"] == 493
+    assert shot_record["FG3A_FREQUENCY"] == 0.455
     assert normalize_zone_response(zones, season="2025-26", cutoff=NOW).payload["records"]
 
 
@@ -484,6 +493,486 @@ def test_scope_descriptors_govern_all_opponent_team_windows_and_cutoff():
         for item in prior_slate
         if item["parameters"].get("subject") == "opponent"
     } == {"11/01/2025"}
+
+
+def _player_shot_type_rows(player_id, category, *, share, fga, fgm):
+    return [{
+        "PLAYER_ID": player_id, "SHOT_TYPE": category, "GP": 20,
+        "FGA_FREQUENCY": share, "FGM": fgm, "FGA": fga,
+        "FG2M": fgm - 1, "FG2A": fga - 2, "FG2A_FREQUENCY": 0.4,
+        "FG3M": 1, "FG3A": 2, "FG3A_FREQUENCY": 0.6,
+    }]
+
+
+_SHOT_TYPE_CATEGORIES = ("Catch and Shoot", "Pullups", "Less Than 10 ft")
+
+
+def _grouped_shot_type_control_plane(
+    tmp_path, name, *, categories=_SHOT_TYPE_CATEGORIES
+):
+    """A control plane authorized to ingest the player shot-type surface."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / name}")
+    run_migrations(engine)
+    control = CollectionControlService(engine, clock=lambda: NOW)
+    control.activate_season("2025-26", actor="operator")
+    team_ids = sorted(NBA_TEAM_IDS)
+    event_request = control.create_bootstrap_request("2025-26", "event", cutoff=NOW)
+    control.publish_catalog(event_request.request_id, {
+        "complete_snapshot": True,
+        "events": [{
+            "nba_game_id": f"game-{index}",
+            "home_team_id": team_ids[index * 2],
+            "away_team_id": team_ids[index * 2 + 1],
+            "phase": "Regular Season", "status": "Final",
+            "scheduled_at": (NOW - timedelta(days=2, hours=index)).isoformat(),
+        } for index in range(15)],
+    }, version="event-v1")
+    athlete_request = control.create_bootstrap_request("2025-26", "athlete", cutoff=NOW)
+    control.publish_catalog(athlete_request.request_id, {
+        "complete_snapshot": True,
+        "identities": [{
+            "player_id": "2544", "team_id": team_ids[0], "status": "active",
+            "event_ids": [f"game-{index}" for index in range(15)],
+        }],
+    }, version="athlete-v1")
+    manifest = control.create_manifest(
+        "2025-26", cutoff=NOW,
+        scopes={"grouped_shot_types", "canonical_game_ledger"},
+        collect_before=NOW + timedelta(hours=1),
+    )
+    publications = PublicationService(
+        engine, clock=lambda: NOW,
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
+    )
+    # The production registration, verbatim from the surface registry, then
+    # the supported operator enable.  Nothing here restates what the stream
+    # requires, so a registry that does not name the observation type the
+    # real normalizer emits fails these tests exactly as it fails production.
+    publications.register_default_streams()
+    operations = CollectionOperationsService(
+        engine, publication_service=publications, clock=lambda: NOW,
+    )
+    activation = operations.activate_stream(
+        "grouped_shot_types", actor="operator",
+        reason="enable for first collection",
+    )
+    assert activation.resource.enabled is True
+    tokens = CollectorTokenService(
+        engine, environment="testing", signing_secret="test", clock=lambda: NOW,
+    )
+    identity = tokens.create_identity(
+        "collector", scopes=["ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=["grouped_shot_types"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    ticks = iter(range(1, 10_000))
+    ingestion = ObservationIngestionService(
+        engine, publication_service=publications,
+        clock=lambda: NOW + timedelta(seconds=next(ticks)),
+    )
+
+    def deliver(rows_for, *, suffix="", window="season", scope_override=None):
+        for category in categories:
+            observation = normalize_grouped_shot_response(
+                rows_for(category), season="2025-26", cutoff=NOW,
+                scope={"window": window, "subject": "player",
+                       "phase": "Regular Season", "category": category,
+                       **(scope_override or {})},
+            )
+            raw = json.dumps(
+                observation.payload, sort_keys=True, separators=(",", ":")
+            ).encode()
+            ingestion.ingest(claims, {
+                "client_observation_id": f"shots-{window}-{category}{suffix}",
+                "observation_type": "grouped_shot_types",
+                "provider": "nba", "season": "2025-26",
+                "cutoff": NOW.isoformat(), "schema_version": 2,
+                "retrieved_at": NOW.isoformat(),
+                "manifest_id": manifest.manifest_id,
+                "scope": observation.scope, "environment": "testing",
+                "checksum": hashlib.sha256(raw).hexdigest(),
+            }, gzip.compress(raw), compressed=True)
+
+    return engine, manifest, publications, deliver
+
+
+def _compose_queued_slice(engine, season="2025-26"):
+    """Drive the production worker over whatever the ingest queued."""
+
+    class _Governance:
+        def read_for_composition(self, season, cutoff, manifest_id=None):
+            return LedgerGovernance(
+                season, cutoff, frozenset(), frozenset(), {},
+            )
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=CanonicalGameLedgerRepository(engine),
+        materialization=None,
+        governance=_Governance(),
+        publication_service=PublicationService(
+            engine, clock=lambda: NOW,
+            l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(engine),
+        ),
+        clock=lambda: NOW + timedelta(hours=1),
+    )
+    return runtime.compose_queued(season)
+
+
+def test_player_shot_types_compose_through_the_queue_into_the_profile(tmp_path):
+    # The whole production path for the Shooting Type tab: a normalized
+    # residential observation is accepted, the queued job the acceptance
+    # creates is drained by the same worker that drains the opponent streams,
+    # and the resulting active publication answers the profile read.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "player-shots.sqlite3"
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=46,
+    ))
+
+    with engine.begin() as connection:
+        queued = connection.execute(select(CompositionJob.__table__).where(
+            CompositionJob.__table__.c.stream_key == "grouped_shot_types",
+        )).mappings().all()
+    assert [row["status"] for row in queued] == ["queued"]
+
+    assert _compose_queued_slice(engine) == 1
+
+    with engine.begin() as connection:
+        job = connection.execute(select(CompositionJob.__table__).where(
+            CompositionJob.__table__.c.stream_key == "grouped_shot_types",
+        )).mappings().one()
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.__table__.c.stream_key == "grouped_shot_types",
+        )).mappings().one()
+        version = connection.execute(select(PublicationVersion.__table__).where(
+            PublicationVersion.__table__.c.publication_id
+            == pointer["active_publication_id"],
+        )).mappings().one()
+    assert job["status"] == "succeeded"
+    assert version["status"] == "active"
+    assert version["manifest_id"] == manifest.manifest_id
+
+    # The payload carries the stored slice vocabulary and the rich split the
+    # profile's two- and three-point columns are derived from.
+    payload = json.loads(version["payload"])
+    assert payload["base"] == "shot_types"
+    assert [row["slice_key"] for row in payload["rows"]] == [
+        "catch_and_shoot", "less_than_10_ft", "pullups",
+    ]
+    assert payload["rows"][0]["shooting"] == {
+        "makes": 46.0, "two_point_makes": 45.0, "two_point_attempts": 98.0,
+        "two_point_share": 0.4, "three_point_makes": 1.0,
+        "three_point_attempts": 2.0, "three_point_share": 0.6,
+    }
+    assert len(payload["source_observations"]) == 3
+
+    from app.config.settings import NBASeasonSettings, RuntimeSettings
+    from app.services.player_diet import PlayerDietRepository
+    from app.services.player_service import PlayerProfileReader, PlayerService
+
+    diets = PlayerDietRepository(
+        engine,
+        publication_reader=DatabaseFirstPublicationReader(engine),
+    )
+    result = diets.get_for_players("2025-26", [2544])
+    assert {fact.slice_key for fact in result.players[2544]} == {
+        "catch_and_shoot", "less_than_10_ft", "pullups",
+    }
+
+    class _Catalog:
+        @staticmethod
+        def get_catalog(season, *, active_only=False):
+            del season, active_only
+            return ()
+
+    service = PlayerService(
+        engine,
+        PlayerProfileReader(_Catalog(), diets),
+        settings=RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+            cache={"enabled": False},
+            nba=NBASeasonSettings(current_season="2025-26"),
+        ),
+    )
+    rows = service._get_shooting_type(2544)
+    assert [row["SHOT_TYPE"] for row in rows] == ["C&S", "Pullup", "<10 Ft"]
+    # Season Totals over the fact's own games played, and the provider's
+    # frequencies kept on the fraction scale the tab renders.
+    assert rows[0]["FGA"] == 5.0
+    assert rows[0]["FGM"] == 2.3
+    assert rows[0]["FGA_FREQUENCY"] == 0.25
+    assert rows[0]["FG3_PCT"] == 0.5
+
+
+def test_player_shot_type_composition_ignores_the_l15_observations(tmp_path):
+    # The same surface collects both windows, but the player Diet has no
+    # window: only the season evidence may authorize its publication.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "shots-windows.sqlite3"
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=46,
+    ))
+    deliver(
+        lambda category: _player_shot_type_rows(
+            2544, category, share=0.9, fga=7, fgm=3,
+        ),
+        window="l15",
+    )
+
+    version = publications.compose_from_observations(
+        "grouped_shot_types", season="2025-26", cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+
+    payload = json.loads(version.payload)
+    assert {row["volume"] for row in payload["rows"]} == {100.0}
+    assert {row["share"] for row in payload["rows"]} == {0.25}
+    assert len(payload["source_observations"]) == 3
+
+
+def test_player_shot_type_composition_publishes_a_sparse_player(tmp_path):
+    # The provider legitimately omits a player with no attempts of a shot
+    # type.  That player is published with the slices it does have, and the
+    # players around it are unaffected -- one sparse player must not withhold
+    # the publication from the league.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "sparse-player.sqlite3"
+    )
+    deliver(lambda category: (
+        _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=46)
+        + (
+            _player_shot_type_rows(201939, category, share=0.5, fga=80, fgm=40)
+            if category != "Pullups" else []
+        )
+    ))
+
+    version = publications.compose_from_observations(
+        "grouped_shot_types", season="2025-26", cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+
+    payload = json.loads(version.payload)
+    published = {
+        (row["player_id"], row["slice_key"]) for row in payload["rows"]
+    }
+    assert published == {
+        (2544, "catch_and_shoot"), (2544, "pullups"), (2544, "less_than_10_ft"),
+        (201939, "catch_and_shoot"), (201939, "less_than_10_ft"),
+    }
+
+
+def test_player_shot_type_composition_refuses_a_missing_category(tmp_path):
+    # A category absent from the evidence entirely is a different failure: it
+    # would drop a column from the tab for every player, so nothing publishes.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "missing-category.sqlite3", categories=(
+            "Catch and Shoot", "Less Than 10 ft",
+        ),
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=46,
+    ))
+
+    with pytest.raises(ControlPlaneError, match="base_incomplete"):
+        publications.compose_from_observations(
+            "grouped_shot_types", season="2025-26", cutoff=NOW,
+            manifest_id=manifest.manifest_id,
+        )
+
+
+def test_player_shot_type_composer_refuses_a_missing_category_centrally(
+    tmp_path,
+):
+    # The collection gate above refuses this first, but a collector's success
+    # is a claim rather than proof.  The composer re-derives category
+    # coverage from the immutable evidence it was handed, so incomplete
+    # provenance cannot compose a payload with a column missing.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "central-category.sqlite3"
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=46,
+    ))
+
+    with Session(engine) as session:
+        stream = session.get(PublicationStream, "grouped_shot_types")
+        observations = session.scalars(select(CollectionObservation)).all()
+        partial = {
+            row.observation_id for row in observations
+            if "Pullups" not in row.scope
+        }
+        complete = {row.observation_id for row in observations}
+
+        def compose(provenance_ids):
+            return collection_control_module._compose_player_diet_observation_payload(
+                session, stream=stream, stream_key="grouped_shot_types",
+                season="2025-26", cutoff=NOW,
+                manifest_id=manifest.manifest_id,
+                provenance_ids=provenance_ids,
+            )
+
+        assert len(compose(complete)["rows"]) == 3
+        with pytest.raises(ValueError, match="categories incomplete"):
+            compose(partial)
+
+
+@pytest.mark.parametrize("scope_override", [
+    {"subject": "opponent"},
+    {"phase": "Playoffs"},
+])
+def test_player_shot_type_composition_ignores_foreign_scopes(
+    tmp_path, scope_override
+):
+    # The same observation type carries opponent-subject and other-phase
+    # evidence.  Neither is the player season Diet, so neither may compose
+    # into it, and a slice left with no season evidence refuses outright.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, f"foreign-{sorted(scope_override)[0]}.sqlite3"
+    )
+    deliver(
+        lambda category: _player_shot_type_rows(
+            2544, category, share=0.25, fga=100, fgm=46,
+        ),
+        scope_override=scope_override,
+    )
+
+    with pytest.raises(ControlPlaneError):
+        publications.compose_from_observations(
+            "grouped_shot_types", season="2025-26", cutoff=NOW,
+            manifest_id=manifest.manifest_id,
+        )
+
+    with engine.begin() as connection:
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.__table__.c.stream_key == "grouped_shot_types",
+        )).mappings().all()
+    # A refused candidate never moved a pointer.
+    assert pointer == []
+
+
+def test_player_shot_type_composition_keeps_a_prior_publication_on_refusal(
+    tmp_path,
+):
+    # A later invalid generation must not disturb the active publication the
+    # profile is already reading.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "refusal-keeps-prior.sqlite3"
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=46,
+    ))
+    good = publications.compose_from_observations(
+        "grouped_shot_types", season="2025-26", cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+
+    def thin(category):
+        rows = _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=46)
+        del rows[0]["FG3A_FREQUENCY"]
+        return rows
+
+    # Accepted, later, and unusable: the newest evidence wins the identity,
+    # so the candidate is refused rather than composed from stale rows.
+    deliver(thin, suffix="-thin")
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose_from_observations(
+            "grouped_shot_types", season="2025-26", cutoff=NOW,
+            manifest_id=manifest.manifest_id,
+        )
+
+    with engine.begin() as connection:
+        pointer = connection.execute(select(PublicationPointer.__table__).where(
+            PublicationPointer.__table__.c.stream_key == "grouped_shot_types",
+        )).mappings().one()
+    assert pointer["active_publication_id"] == good.publication_id
+
+
+def test_player_shot_type_composer_refuses_an_impossible_split_centrally(
+    tmp_path,
+):
+    # The normalizer refuses makes above attempts, but an obsolete or
+    # tampered-with collector's acceptance is not proof.  The composer applies
+    # the same rule the refresh path does, from the immutable evidence, so an
+    # impossible split cannot become an active publication.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "central-split.sqlite3"
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=46,
+    ))
+
+    with Session(engine) as session, session.begin():
+        row = session.scalars(select(CollectionObservation).where(
+            CollectionObservation.scope.contains("Pullups"),
+        )).one()
+        document = json.loads(row.payload)
+        document["records"][0]["FG3M"] = 5.0
+        document["records"][0]["FG3A"] = 2.0
+        row.payload = json.dumps(
+            document, sort_keys=True, separators=(",", ":")
+        )
+        row.checksum = collection_control_module._checksum(row.payload)
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose_from_observations(
+            "grouped_shot_types", season="2025-26", cutoff=NOW,
+            manifest_id=manifest.manifest_id,
+        )
+
+
+def test_player_shot_type_composition_refuses_missing_rich_evidence(tmp_path):
+    # The made/attempted split is what the tab's two- and three-point columns
+    # are, so an observation without it must not authorize a publication.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "thin-evidence.sqlite3"
+    )
+
+    def thin(category):
+        rows = _player_shot_type_rows(2544, category, share=0.25, fga=100, fgm=45)
+        del rows[0]["FG3A_FREQUENCY"]
+        return rows
+
+    deliver(thin)
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.compose_from_observations(
+            "grouped_shot_types", season="2025-26", cutoff=NOW,
+            manifest_id=manifest.manifest_id,
+        )
+
+
+def test_player_shot_type_composition_prefers_the_latest_retry(tmp_path):
+    # Acceptance is append-only, so a retried collection leaves two accepted
+    # observations for one (player, category).  The newer one wins.
+    engine, manifest, publications, deliver = _grouped_shot_type_control_plane(
+        tmp_path, "shots-retry.sqlite3"
+    )
+    deliver(lambda category: _player_shot_type_rows(
+        2544, category, share=0.25, fga=100, fgm=45,
+    ))
+    deliver(
+        lambda category: _player_shot_type_rows(
+            2544, category, share=0.3, fga=120, fgm=60,
+        ),
+        suffix="-retry",
+    )
+
+    version = publications.compose_from_observations(
+        "grouped_shot_types", season="2025-26", cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+
+    payload = json.loads(version.payload)
+    assert {row["volume"] for row in payload["rows"]} == {120.0}
+    assert {row["share"] for row in payload["rows"]} == {0.3}
+    assert len(payload["source_observations"]) == 3
 
 
 def test_compose_prefers_the_latest_accepted_observation_per_identity(tmp_path):

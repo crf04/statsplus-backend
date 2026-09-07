@@ -66,6 +66,13 @@ PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
     for base, slices in PLAYER_DIET_BASE_SLICES.items()
 })
 
+#: The player Diet streams whose payload is derived at the publication
+#: boundary from accepted collector observations, exactly as the opponent
+#: streams are.  Kept as its own set so player routing never widens the
+#: opponent taxonomy, which separately governs team-window decoding, repair
+#: group membership, and per-team governance expectations.
+PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({"grouped_shot_types"})
+
 #: The human-readable label each qualifiable slice reads as.
 PLAYER_DIET_SLICE_LABELS = MappingProxyType({
     # shot_zones
@@ -101,6 +108,7 @@ PLAYER_DIET_SLICE_LABELS = MappingProxyType({
 __all__ = [
     "ASSIST_SLICES",
     "PLAYER_DIET_BASE_SLICES",
+    "PLAYER_DIET_OBSERVATION_STREAM_KEYS",
     "PLAYER_DIET_QUALIFIER_SLICES",
     "PLAYER_DIET_SLICE_LABELS",
 ]

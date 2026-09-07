@@ -7,6 +7,7 @@ from sqlalchemy import (
     Float,
     Integer,
     String,
+    Text,
     UniqueConstraint,
 )
 
@@ -28,6 +29,13 @@ class PlayerDietFactRow(Base):
     games_played = Column(Integer, nullable=False)
     volume_unit = Column(String(32), nullable=False)
     provider = Column(String(32), nullable=False)
+    #: Shot-type only: the provider's made/attempted split for this slice, as
+    #: a JSON object.  ``share``/``volume`` alone cannot answer the Shooting
+    #: Type profile's two- and three-point columns, and the split has no
+    #: meaning for the other Bases, so it is stored beside the fact rather
+    #: than widening every Base's row.  ``NULL`` means the split was never
+    #: observed and the profile reports it as unavailable.
+    shooting_detail = Column(Text, nullable=True)
     retrieved_at = Column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
