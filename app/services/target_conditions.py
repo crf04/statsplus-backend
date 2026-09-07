@@ -1,6 +1,7 @@
 """Conditions on an opponent's games, shared by saved and draft Targets."""
 
 from datetime import date
+from math import isfinite
 
 from app.errors import InvalidInputError
 
@@ -22,6 +23,20 @@ def minutes_are_kept(defender, minutes):
     )
 
 
+def player_minutes_are_kept(minutes, threshold):
+    """Return whether one player's appearance clears a strict threshold.
+
+    Game-log minutes are provider data, so a missing or non-finite value is
+    not evidence that the player cleared an enabled condition.
+    """
+
+    try:
+        value = float(minutes)
+    except (TypeError, ValueError):
+        return False
+    return isfinite(value) and value > threshold
+
+
 def validate_conditions(value):
     if value is None:
         return None
@@ -31,6 +46,7 @@ def validate_conditions(value):
         "defender": value.get("defender"),
         "from": value.get("from"),
         "to": value.get("to"),
+        "player_minutes": value.get("player_minutes"),
     }
     for key in ("from", "to"):
         day = result[key]
@@ -59,4 +75,10 @@ def validate_conditions(value):
         result["defender"] = {
             key: defender[key] for key in ("player_id", "comparator", "minutes")
         }
+    player_minutes = result.get("player_minutes")
+    if player_minutes is not None:
+        if type(player_minutes) is not int or not 0 <= player_minutes <= 48:
+            raise InvalidInputError(
+                "Player minutes must be an integer from 0 to 48."
+            )
     return result
