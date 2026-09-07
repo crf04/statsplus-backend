@@ -149,9 +149,12 @@ class ResidentialScopeExecutor:
             for category in categories:
                 raw = _call(
                     self.provider, "fetch_synergy_play_types", category,
-                    player_or_team_abbreviation=str(parameters.get("subject_code", "P")),
-                    type_grouping=str(parameters.get("type_grouping", "season")),
-                    per_mode_simple=str(parameters.get("per_mode", "Totals")),
+                    player_or_team_abbreviation=(str(parameters.get("subject_code", "P"))
+                                                 if scope == "synergy_opponent" else "P"),
+                    type_grouping=(str(parameters.get("type_grouping", "season"))
+                                   if scope == "synergy_opponent" else "Offensive"),
+                    per_mode_simple=(str(parameters.get("per_mode", "Totals"))
+                                     if scope == "synergy_opponent" else "Totals"),
                     season=work.season,
                     season_type="Regular Season",
                 )
@@ -161,6 +164,8 @@ class ResidentialScopeExecutor:
                     "subject": "opponent" if scope == "synergy_opponent" else "player",
                     "value_mode": str(parameters.get("value_mode", "totals")),
                 }
+                if scope != "synergy_opponent":
+                    normalized_scope.update(type_grouping="Offensive", value_mode="totals")
                 normalizer = (
                     normalize_opponent_synergy_response
                     if scope == "synergy_opponent" else normalize_synergy_response

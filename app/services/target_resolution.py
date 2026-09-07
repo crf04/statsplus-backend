@@ -31,6 +31,7 @@ from typing import Any, Protocol
 
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
 from app.models.target import TARGET_COMPARATOR_TESTS
+from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 
 _WINDOW_NAMES = ("season", "last_15")
@@ -92,7 +93,7 @@ class TargetResolutionService:
         idle: list[dict[str, Any]] = []
         for target in self.targets.list_targets(firebase_uid):
             resolved = self._resolve_target(
-                target, games, read_matchups, matchups=self.matchups
+                target, games, read_matchups, matchups=self.matchups, slate_date=slate["slate_date"]
             )
             (idle if resolved["game"] is None else live).append(resolved)
         return {"slate_date": slate["slate_date"], "targets": live + idle}
@@ -123,6 +124,7 @@ class TargetResolutionService:
             self._games_by_tricode(slate["games"]),
             {},
             matchups=self.matchups if matchups is None else matchups,
+            slate_date=slate["slate_date"],
         )
         if resolved["game"] is None:
             return None
@@ -135,6 +137,7 @@ class TargetResolutionService:
         read_matchups: dict[str, Mapping[str, Any]],
         *,
         matchups: MatchupReader,
+        slate_date: str,
     ) -> dict[str, Any]:
         """Resolve one Target against an indexed Slate, reading each game once.
 
@@ -150,7 +153,7 @@ class TargetResolutionService:
         if game_id not in read_matchups:
             read_matchups[game_id] = matchups.get_matchup(game_id=game_id)
         return self._live(
-            target, game, opponent_side, filtered_side, read_matchups[game_id]
+            target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date
         )
 
     @staticmethod
@@ -198,6 +201,7 @@ class TargetResolutionService:
         opponent_side: str,
         filtered_side: str,
         matchup: Mapping[str, Any],
+        slate_date: str,
     ) -> dict[str, Any]:
         opponent_team_id = int(game[opponent_side]["team_id"])
         opponent_sheet = next(
@@ -208,6 +212,19 @@ class TargetResolutionService:
         league = matchup["league"]
         availability = self._participant_availability(matchup)
         qualifiers = list(target["qualifiers"])
+        conditions = target.get("conditions")
+        condition_kept = date_is_kept(conditions, slate_date)
+        defender = conditions.get("defender") if conditions else None
+        if defender:
+            out = any(
+                entry.get("canonical_player_id") == defender["player_id"]
+                and entry.get("canonical_status") == "Out"
+                for team in matchup.get("injuries", {}).get("teams", [])
+                if team.get("team_id") == opponent_team_id
+                for entry in team.get("entries", [])
+            )
+            if out:
+                condition_kept = condition_kept and minutes_are_kept(defender, 0)
         return {
             "target": dict(target),
             "game": {
@@ -230,7 +247,7 @@ class TargetResolutionService:
             "availability": availability,
             "players": (
                 []
-                if availability["status"] != "available"
+                if availability["status"] != "available" or not condition_kept
                 else self._players(qualifiers, matchup["players"], opponent_team_id)
             ),
         }

@@ -45,7 +45,8 @@ class SanitizedFixtureProvider:
 
     def fetch_synergy_play_types(self, play_type: str, **parameters: Any) -> list[dict[str, Any]]:
         self._record("synergy", play_type=play_type, **parameters)
-        return [{"player_id": 1, "category": play_type, "GP": 1, "POSS": 1, "PTS": 1}]
+        return [{"player_id": 1, "team_id": NBA_TEAM_IDS[0], "category": play_type,
+                 "GP": 1, "POSS": 1, "POSS_PCT": .05, "PTS": 1}]
 
     def fetch_player_shot_type(self, general_range: str, **parameters: Any) -> list[dict[str, Any]]:
         self._record("player_shot_type", general_range=general_range, **parameters)
@@ -141,7 +142,7 @@ class ResidentialCompatibilityProbes:
                 },
                 lambda category=category: normalize_synergy_response(
                     _call(self.provider, "fetch_synergy_play_types", category,
-                          player_or_team_abbreviation="P", type_grouping="season",
+                          player_or_team_abbreviation="P", type_grouping="Offensive", per_mode_simple="Totals",
                           season=season, season_type="Regular Season"),
                     season=season, cutoff=cutoff,
                     scope={"window": "season", "phase": "Regular Season", "play_type": category},

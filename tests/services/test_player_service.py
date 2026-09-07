@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
+from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.services.player_diet import (
     PlayerDietBaseline,
     PlayerDietResult,
+    ShotTypeShooting,
     StoredPlayerDietFact,
 )
+from app.services.player_game_log_repository import PlayerGameLogRecord
 from app.services.player_service import PlayerProfileReader, PlayerService
 
 
@@ -25,7 +30,7 @@ def _settings() -> RuntimeSettings:
     )
 
 
-def test_archetype_profile_uses_injected_nba_stats_provider(tmp_path, monkeypatch):
+def _archetype_engine(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'players.sqlite3'}")
     pd.DataFrame([{"full_name": "LeBron James", "id": 2544}]).to_sql(
         "player_information", engine, index=False
@@ -51,47 +56,67 @@ def test_archetype_profile_uses_injected_nba_stats_provider(tmp_path, monkeypatc
             }
         ]
     ).to_sql("player_per36_stats", engine, index=False)
+    return engine
 
-    class FakeNBAStatsProvider:
-        def __init__(self):
-            self.calls: list[dict] = []
 
-        def get_archetype_game_logs(
-            self,
-            *,
-            player_ids,
-            opponent_team_id,
-            season,
-            season_type="Regular Season",
-        ):
-            self.calls.append(
-                {
-                    "player_ids": list(player_ids),
-                    "opponent_team_id": opponent_team_id,
-                    "season": season,
-                    "season_type": season_type,
-                }
-            )
-            return pd.DataFrame(
-                [
-                    {
-                        "PLAYER_ID": 2544,
-                        "PLAYER_NAME": "LeBron James",
-                        "GAME_DATE": "2025-10-22",
-                        "MIN": 30.0,
-                        "FGM": 5.0,
-                        "FGA": 10.0,
-                        "FG3M": 2.0,
-                        "FG3A": 4.0,
-                        "FTM": 3.0,
-                        "FTA": 4.0,
-                        "PTS": 17.0,
-                        "TOV": 1.0,
-                    }
-                ]
-            )
+def _game_log_record(**overrides):
+    values = {
+        "season": "2025-26",
+        "season_type": REGULAR_SEASON_TYPE,
+        "player_id": 2544,
+        "game_id": "0022500001",
+        "player_name": "LeBron James",
+        "game_date": date(2025, 10, 22),
+        "team_id": 1610612747,
+        "team_tricode": "LAL",
+        "opponent_team_id": 1610612738,
+        "opponent_team_tricode": "BOS",
+        "is_home": False,
+        "minutes": 30.0,
+        "points": 17,
+        "rebounds": 8,
+        "assists": 7,
+        "field_goals_made": 5,
+        "field_goals_attempted": 10,
+        "three_pointers_made": 2,
+        "three_pointers_attempted": 4,
+        "free_throws_made": 3,
+        "free_throws_attempted": 4,
+        "turnovers": 1,
+    }
+    values.update(overrides)
+    return PlayerGameLogRecord(**values)
 
-    provider = FakeNBAStatsProvider()
+
+class _StoredArchetypeLogs:
+    """Read-only test seam for the governed player game-log publication."""
+
+    def __init__(self, records):
+        self.records = tuple(records)
+        self.calls: list[dict] = []
+        self.snapshots: list[str] = []
+
+    def read_publication_snapshot(self, season):
+        self.snapshots.append(season)
+        return f"snapshot:{season}"
+
+    def list_archetype_rows(
+        self, season, player_ids, opponent_team_id, *, publication_snapshot=None
+    ):
+        self.calls.append(
+            {
+                "season": season,
+                "player_ids": list(player_ids),
+                "opponent_team_id": opponent_team_id,
+                "publication_snapshot": publication_snapshot,
+            }
+        )
+        return self.records
+
+
+def test_archetype_profile_reads_the_stored_cluster_rows(tmp_path, monkeypatch):
+    engine = _archetype_engine(tmp_path)
+    logs = _StoredArchetypeLogs([_game_log_record()])
     monkeypatch.setattr(
         PlayerService,
         "_get_teams",
@@ -103,7 +128,7 @@ def test_archetype_profile_uses_injected_nba_stats_provider(tmp_path, monkeypatc
         engine,
         PlayerProfileReader.unavailable(),
         settings=_settings(),
-        nba_stats_provider=provider,
+        game_logs=logs,
     )
 
     result = service.get_player_profile(
@@ -111,15 +136,179 @@ def test_archetype_profile_uses_injected_nba_stats_provider(tmp_path, monkeypatc
     )
 
     assert result[0]["PLAYER_NAME"] == "LeBron James"
+    assert result[0]["GAME_DATE"] == "2025-10-22"
+    assert result[0]["MIN"] == 30
     assert result[0]["FGM/36MIN"] == 6.0
-    assert provider.calls == [
+    assert result[0]["FGM/36MIN_DIFF"] == pytest.approx(0.0)
+    # The selected player stays in the comparison alongside the cluster, and
+    # the read is scoped by the governed publication snapshot.
+    assert logs.calls == [
         {
+            "season": "2025-26",
             "player_ids": [2544, 201939],
             "opponent_team_id": 1610612738,
-            "season": "2025-26",
-            "season_type": "Regular Season",
+            "publication_snapshot": "snapshot:2025-26",
         }
     ]
+    assert not hasattr(service, "nba_stats")
+
+
+def test_archetype_profile_keeps_only_regular_season_rows(tmp_path, monkeypatch):
+    engine = _archetype_engine(tmp_path)
+    logs = _StoredArchetypeLogs(
+        [
+            _game_log_record(),
+            _game_log_record(
+                game_id="0042500001",
+                season_type="Playoffs",
+                game_date=date(2026, 4, 20),
+                field_goals_made=9,
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        PlayerService,
+        "_get_teams",
+        staticmethod(
+            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
+        ),
+    )
+    service = PlayerService(
+        engine,
+        PlayerProfileReader.unavailable(),
+        settings=_settings(),
+        game_logs=logs,
+    )
+
+    result = service.get_player_profile(
+        "LeBron James", "Archetype", "Boston Celtics"
+    )
+
+    assert [row["GAME_DATE"] for row in result] == ["2025-10-22"]
+
+
+def test_archetype_profile_omits_a_row_without_usable_season_baselines(
+    tmp_path, monkeypatch
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'players.sqlite3'}")
+    pd.DataFrame([{"full_name": "LeBron James", "id": 2544}]).to_sql(
+        "player_information", engine, index=False
+    )
+    pd.DataFrame(
+        [{"PlayerName": "LeBron James", "ClusterID": 7, "PlayerID": 2544}]
+    ).to_sql("player_clusters", engine, index=False)
+    pd.DataFrame(
+        [
+            {
+                "PLAYER_ID": 2544,
+                "FGM": 6.0,
+                "FGA": 12.0,
+                "FG3M": 0.0,
+                "FG3A": 0.0,
+                "FTM": 4.0,
+                "FTA": 5.0,
+                "PTS": 18.0,
+                "TOV": 2.0,
+            }
+        ]
+    ).to_sql("player_per36_stats", engine, index=False)
+    monkeypatch.setattr(
+        PlayerService,
+        "_get_teams",
+        staticmethod(
+            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
+        ),
+    )
+    service = PlayerService(
+        engine,
+        PlayerProfileReader.unavailable(),
+        settings=_settings(),
+        game_logs=_StoredArchetypeLogs([_game_log_record()]),
+    )
+
+    result = service.get_player_profile(
+        "LeBron James", "Archetype", "Boston Celtics"
+    )
+
+    # Dividing by a zero season rate has no answer to report, and the client
+    # renders every returned cell as a number, so the row is omitted rather
+    # than published with a value that would read as "no change".
+    assert result == []
+
+
+def test_archetype_profile_keeps_cluster_rows_that_do_have_baselines(
+    tmp_path, monkeypatch
+):
+    # Omission is per row, not per request: one cluster member's unusable
+    # baseline must not discard the members whose comparison is well defined.
+    engine = _archetype_engine(tmp_path)
+    pd.DataFrame(
+        [
+            {
+                "PLAYER_ID": 201939,
+                "FGM": 6.0,
+                "FGA": 12.0,
+                "FG3M": 0.0,
+                "FG3A": 5.0,
+                "FTM": 4.0,
+                "FTA": 5.0,
+                "PTS": 18.0,
+                "TOV": 2.0,
+            }
+        ]
+    ).to_sql("player_per36_stats", engine, index=False, if_exists="append")
+    monkeypatch.setattr(
+        PlayerService,
+        "_get_teams",
+        staticmethod(
+            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
+        ),
+    )
+    service = PlayerService(
+        engine,
+        PlayerProfileReader.unavailable(),
+        settings=_settings(),
+        game_logs=_StoredArchetypeLogs([
+            _game_log_record(),
+            _game_log_record(
+                player_id=201939,
+                player_name="Stephen Curry",
+                game_id="0022500002",
+            ),
+        ]),
+    )
+
+    result = service.get_player_profile(
+        "LeBron James", "Archetype", "Boston Celtics"
+    )
+
+    assert [row["PLAYER_NAME"] for row in result] == ["LeBron James"]
+    assert all(
+        isinstance(row[column], float)
+        for row in result
+        for column in row
+        if column.endswith("_DIFF")
+    )
+
+
+def test_archetype_profile_is_empty_without_a_stored_game_log_reader(
+    tmp_path, monkeypatch
+):
+    engine = _archetype_engine(tmp_path)
+    monkeypatch.setattr(
+        PlayerService,
+        "_get_teams",
+        staticmethod(
+            lambda: [{"full_name": "Boston Celtics", "id": 1610612738}]
+        ),
+    )
+    service = PlayerService(
+        engine, PlayerProfileReader.unavailable(), settings=_settings()
+    )
+
+    assert service.get_player_profile(
+        "LeBron James", "Archetype", "Boston Celtics"
+    ) == []
 
 
 class _DurableProfileReader:
@@ -203,14 +392,9 @@ def _durable_profile_reader():
 def test_profiles_and_player_list_use_durable_catalog_and_diet_facts(monkeypatch):
     reader = _durable_profile_reader()
 
-    class RefusingProvider:
-        def __getattr__(self, name):
-            raise AssertionError(f"provider call reached profile read: {name}")
-
     service = PlayerService(
         object(),
         settings=_settings(),
-        nba_stats_provider=RefusingProvider(),
         profile_reader=reader,
     )
 
@@ -234,6 +418,121 @@ def test_profiles_and_player_list_use_durable_catalog_and_diet_facts(monkeypatch
     assert reader.diet_calls
 
 
+def _shot_type_fact(slice_key, *, shooting, share=0.475, volume=515.0, games=81):
+    return StoredPlayerDietFact(
+        player_id=111,
+        base="shot_types",
+        slice_key=slice_key,
+        share=share,
+        volume=volume,
+        games_played=games,
+        volume_unit="field_goal_attempts",
+        provider="nba_stats",
+        shooting=shooting,
+        retrieved_at=pd.Timestamp("2026-08-23", tz="UTC").to_pydatetime(),
+    )
+
+
+def _catch_and_shoot_shooting():
+    """The recorded ``LeagueDashPTShots`` row, as stored Totals."""
+
+    return ShotTypeShooting(
+        makes=222.0,
+        two_point_makes=13.0,
+        two_point_attempts=22.0,
+        two_point_share=0.02,
+        three_point_makes=209.0,
+        three_point_attempts=493.0,
+        three_point_share=0.455,
+    )
+
+
+def _shot_type_reader(facts):
+    return _DurableProfileReader(
+        [_catalog_row(111, "Kon Knueppel", "CHA")],
+        PlayerDietResult(
+            season="2025-26",
+            players={111: tuple(facts)},
+            observations=(),
+            baselines={},
+        ),
+    )
+
+
+def test_shooting_type_profile_renders_stored_facts_as_per_game_values():
+    reader = _shot_type_reader(
+        [_shot_type_fact("Catch and Shoot", shooting=_catch_and_shoot_shooting())]
+    )
+    service = PlayerService(object(), reader, settings=_settings())
+
+    rows = service.get_player_profile("Kon Knueppel", "Shooting Type")
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["SHOT_TYPE"] == "C&S"
+    # Frequencies and percentages stay fractions; counts are Totals divided
+    # by the fact's own games played.
+    assert row["FGA_FREQUENCY"] == pytest.approx(0.475)
+    assert row["FGA"] == pytest.approx(round(515 / 81, 1))
+    assert row["FGM"] == pytest.approx(round(222 / 81, 1))
+    assert row["FG_PCT"] == pytest.approx(0.431, abs=0.001)
+    assert row["FG2A_FREQUENCY"] == pytest.approx(0.02)
+    assert row["FG2M"] == pytest.approx(round(13 / 81, 1))
+    assert row["FG2A"] == pytest.approx(round(22 / 81, 1))
+    assert row["FG2_PCT"] == pytest.approx(0.591, abs=0.001)
+    assert row["FG3A_FREQUENCY"] == pytest.approx(0.455)
+    assert row["FG3M"] == pytest.approx(round(209 / 81, 1))
+    assert row["FG3A"] == pytest.approx(round(493 / 81, 1))
+    assert row["FG3_PCT"] == pytest.approx(0.424, abs=0.001)
+    assert reader.diet_calls == [("2025-26", (111,))]
+
+
+def test_shooting_type_profile_labels_every_stored_slice_vocabulary():
+    reader = _shot_type_reader(
+        [
+            _shot_type_fact(
+                "catch_and_shoot", shooting=_catch_and_shoot_shooting()
+            ),
+            _shot_type_fact(
+                "pullups", shooting=_catch_and_shoot_shooting()
+            ),
+            _shot_type_fact(
+                "Less Than 10 ft", shooting=_catch_and_shoot_shooting()
+            ),
+        ]
+    )
+    service = PlayerService(object(), reader, settings=_settings())
+
+    rows = service.get_player_profile("Kon Knueppel", "Shooting Type")
+
+    # Published slices arrive under stored keys and legacy table rows under
+    # display keys; both read as the labels the tab has always shown.
+    assert [row["SHOT_TYPE"] for row in rows] == ["C&S", "Pullup", "<10 Ft"]
+
+
+def test_shooting_type_profile_omits_a_slice_without_a_stored_split():
+    reader = _shot_type_reader(
+        [
+            _shot_type_fact("Catch and Shoot", shooting=None),
+            _shot_type_fact("Pullups", shooting=_catch_and_shoot_shooting()),
+        ]
+    )
+    service = PlayerService(object(), reader, settings=_settings())
+
+    rows = service.get_player_profile("Kon Knueppel", "Shooting Type")
+
+    # A share and a volume cannot say how the attempts divided into twos and
+    # threes, so the slice is unavailable rather than invented.
+    assert [row["SHOT_TYPE"] for row in rows] == ["Pullup"]
+
+
+def test_shooting_type_profile_is_empty_without_stored_shot_type_facts():
+    reader = _shot_type_reader([])
+    service = PlayerService(object(), reader, settings=_settings())
+
+    assert service.get_player_profile("Kon Knueppel", "Shooting Type") == []
+
+
 def test_player_service_requires_an_explicit_profile_reader():
     with pytest.raises(TypeError, match="profile_reader"):
         PlayerService(object(), settings=_settings())
@@ -243,7 +542,6 @@ def test_player_service_requires_an_explicit_profile_reader():
     ("category", "method_name", "expected"),
     (
         ("Archetype", "_get_archetype_gamelogs", [{"PLAYER_NAME": "Legacy Name"}]),
-        ("Shooting Type", "_get_shooting_type", [{"SHOT_TYPE": "C&S"}]),
         ("Zone Shooting", "_get_player_zone_shooting", {"Restricted Area": 0.7}),
     ),
 )
@@ -284,16 +582,14 @@ def test_profile_read_does_not_touch_legacy_tables_or_provider(monkeypatch):
         def connect(self):
             raise AssertionError("legacy profile table read reached the service")
 
-    class RefusingProvider:
-        def __getattr__(self, name):
-            raise AssertionError(f"provider call reached profile read: {name}")
-
     service = PlayerService(
         RefusingEngine(),
         settings=_settings(),
-        nba_stats_provider=RefusingProvider(),
         profile_reader=reader,
     )
+    # The service owns no provider client at all, so no profile category can
+    # reach one however it is dispatched.
+    assert not hasattr(service, "nba_stats")
 
     assert service.get_all_players() == ["Jayson Tatum"]
     assert service.get_player_profile("Jayson Tatum", "Playtypes")["Transition%"] == 20.0

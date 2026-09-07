@@ -1073,11 +1073,18 @@ class NBAStatsProvider(Protocol):
 ```
 
 The production adapter owns endpoint construction, timeout, concurrency,
-telemetry, response normalization, and provider error translation. Tests inject
-the protocol into `PlayerService` rather than patching `nba_api`. `GameService`
+telemetry, response normalization, and provider error translation. `GameService`
 no longer takes the adapter at all: after the #198 cutover its player logs come
 from the injected game-log source and its Team Filters from Season
 publications, so no request-time NBA Stats call is reachable from it.
+`PlayerService` no longer takes it either: its Shooting Type category projects
+stored Player Diet `shot_types` facts and its Archetype category reads the
+governed `player_game_logs` publication through the same
+`PlayerGameLogRepository` the matchup cards use, so the whole player profile
+read path is database-only by construction. Archetype omits any comparison row
+whose per-36 season baselines are not all positive and finite: the tab renders
+every returned cell as a number, so an unreportable difference is withheld as
+a row rather than published as a value that would read as no change.
 
 `get_season_player_game_logs` is the legacy season-wide NBA durable-log seam.
 Each call fetches one explicit phase for the whole season, retains canonical
@@ -2083,8 +2090,11 @@ current Slate Date through the same `_resolve_target` step `resolve` runs per
 stored Target, and reduces the result to `{game, fit_count}` or `None`. The
 mapping either read accepts is the item `list_targets` emits, which is why
 `UserService.validate_target_draft` exists: it runs the create validators and
-derives the title without touching the database, and returns that shape minus
-`id` and timestamps. The cap and the duplicate rule are deliberately not
+derives the title and returns that shape minus `id` and timestamps. A
+defender Condition also verifies membership through the injected stored
+player-game-log reader; this validation writes nothing. Membership validation
+runs before the preview captures its evidence snapshot, so it is not part of
+the atomic generation shared by the Backtest and tonight's evidence. The cap and the duplicate rule are deliberately not
 applied there -- both compare a write against held rows, and a draft is not a
 write.
 
@@ -2255,7 +2265,9 @@ there is no player Last-15 window and no traditional Diet Base.
 One refresh has a fixed 16-call plan: the 11 offensive `PLAY_TYPES` through
 player Synergy with `POSS_PCT`, `POSS`, and `GP`; the three `SHOOTING_TYPES`
 through league-wide `LeagueDashPlayerPtShot` GeneralRange calls with
-`FGA_FREQUENCY`, `FGA`, and `GP`; one league-wide
+`FGA_FREQUENCY`, `FGA`, and `GP`, plus that response's made/attempted split
+(`FGM`, `FG2M`, `FG2A`, `FG2A_FREQUENCY`, `FG3M`, `FG3A`, `FG3A_FREQUENCY`)
+retained beside the fact as `shooting_detail`; one league-wide
 `LeagueDashPlayerShotLocations` call; and one PBP player-totals call. Shot-zone
 games played come from the three fixed player-shot observations; the joined
 union must cover every shot-location player and may not disagree on `GP`.
@@ -3886,7 +3898,40 @@ against an independent opponent TeamStats read for the identical window (five
 canonical zones plus Backcourt equal the opponent total; the combined Corner 3
 equals its left and right sides), are refetched as a pair once on a first
 mismatch, and are re-validated centrally from the immutable observation before
-composition. See [RESIDENTIAL_COLLECTOR.md](RESIDENTIAL_COLLECTOR.md). Composition derives its gate
+composition. See [RESIDENTIAL_COLLECTOR.md](RESIDENTIAL_COLLECTOR.md).
+
+The player-scoped `grouped_shot_types` Diet stream is composed from its
+accepted observations by the same boundary and the same worker, through
+`PLAYER_DIET_OBSERVATION_STREAM_KEYS` rather than the opponent taxonomy sets
+-- those separately govern team-window decoding, repair-group membership, and
+per-team governance expectations, and must not be widened by player routing.
+Its payload is re-derived centrally from the immutable observations: only the
+season window authorizes it (the Diet has no window), each observation is
+checked against the manifest, season, cutoff, provider, required type, and its
+own checksum, the latest accepted observation per `(type, category)` wins so a
+retry is not a duplicate, display shot-type labels are mapped to the stored
+slice keys, and each row carries the full made/attempted split the Shooting
+Type profile's two- and three-point columns are. Only player-subject, season,
+Regular Season evidence composes into it; the opponent-subject, Last-15, and
+other-phase observations the same surfaces collect belong to other
+publications. Completeness is over the categories, not the players: every shot
+type must be present, because a missing category would drop a column for
+everyone, but a player the provider omits from one category is published with
+the slices it does have -- the Diet and profile already report an absent slice
+as absent rather than as zero. A split that breaks
+`shot_type_shooting_violation` -- the one rule shared with the refresh path --
+fails the candidate. The version binds the same manifest and Event Catalog
+authority the opponent streams bind, and the strict `decode_player_diet`
+read-side decoder must accept the exact candidate before its pointer moves.
+
+`shot_type_shooting_violation` is the single statement of what a shooting
+split may be: finite, nonnegative, shares at most one, and makes never above
+attempts. `PlayerDietRepository` raises on it when persisting a refreshed
+fact, and `decode_shot_type_shooting` degrades to unavailable on it when
+reading a published one, so an impossible split cannot reach the Shooting Type
+tab through either door.
+
+Composition derives its gate
 from registered required observations plus league/Base completeness evidence;
 a caller-provided `complete` flag alone cannot advance a pointer. A manifest
 may additionally declare one immutable atomic repair group: the set of streams

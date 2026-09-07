@@ -851,7 +851,7 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
     for kind in ("event", "athlete"):
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(request.request_id, _catalog_payload(kind), version="v1")
-    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy"], collect_before=now + timedelta(hours=1))
+    manifest = control.create_manifest("2025-26", cutoff=cutoff, scopes=["synergy_play_types"], collect_before=now + timedelta(hours=1))
     tokens = CollectorTokenService(control_db, environment="testing", signing_secret="test", clock=lambda: now)
     identity = tokens.create_identity(
         "pc", scopes=["ingest"], owner="residential_collector", providers=["nba"],
@@ -863,7 +863,7 @@ def test_ingestion_is_atomic_and_same_id_replay_returns_original_receipt(control
         "rows": [{"slice_key": "Transition"}, {"slice_key": "Isolation"}],
     }, separators=(",", ":")).encode()
     envelope = {"manifest_id": manifest.manifest_id, "client_observation_id": "obs-1", "environment": "testing",
-        "provider": "nba", "observation_type": "synergy", "scope": {"season": "2025-26"}, "season": "2025-26",
+        "provider": "nba", "observation_type": "synergy_play_types", "scope": {"season": "2025-26"}, "season": "2025-26",
         "cutoff": cutoff.isoformat(), "schema_version": 2, "checksum": __import__("hashlib").sha256(payload).hexdigest(),
         "retrieved_at": now.isoformat()}
     ingestion = ObservationIngestionService(control_db, clock=lambda: now)
@@ -1310,12 +1310,12 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
         request = control.create_bootstrap_request("2025-26", kind, cutoff=cutoff)
         control.publish_catalog(request.request_id, _catalog_payload(kind), version=f"{kind}-v1")
     manifest = control.create_manifest(
-        "2025-26", cutoff=cutoff, scopes=["synergy"],
+        "2025-26", cutoff=cutoff, scopes=["traditional_opponent"],
         collect_before=clock[0] + timedelta(days=1),
     )
     publication = PublicationService(control_db, clock=lambda: clock[0])
     publication.register_stream(
-        "synergy_play_types", provider="nba", owner="collector", required_observations=[],
+        "traditional_opponent", provider="nba", owner="collector", required_observations=[],
         publication_strategy="replace", supported_windows=["season"], enabled=True,
     )
     cycle = control.open_cycle(manifest.manifest_id)
@@ -1324,7 +1324,7 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
     )
     with control_db.begin() as connection:
         connection.execute(CompositionJob.__table__.insert().values(
-            job_id="lifecycle-job", stream_key="synergy_play_types", manifest_id=manifest.manifest_id,
+            job_id="lifecycle-job", stream_key="traditional_opponent", manifest_id=manifest.manifest_id,
             season="2025-26", cutoff=cutoff, status="queued", attempts=0,
             created_at=clock[0], updated_at=clock[0],
         ))
@@ -1351,7 +1351,7 @@ def test_lifecycle_alerts_are_deterministic_pending_safe_and_recover(control_db)
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
         assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "cycle_attention")).first() is not None
-    publication.compose("synergy_play_types", season="2025-26", cutoff=cutoff, payload={"ok": True}, manifest_id=manifest.manifest_id)
+    publication.compose("traditional_opponent", season="2025-26", cutoff=cutoff, payload={"ok": True}, manifest_id=manifest.manifest_id)
     operations.run_maintenance(season="2025-26", cutoff=cutoff, now=clock[0])
     with control_db.connect() as connection:
         assert connection.execute(select(CollectionAlert).where(CollectionAlert.code == "recovery")).first() is not None

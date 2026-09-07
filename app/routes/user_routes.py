@@ -345,7 +345,8 @@ def create_target():
         firebase_uid,
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
-        note=data.get('note')
+        note=data.get('note'),
+        **({key: data[key] for key in ('conditions', 'stat_preferences') if key in data}),
     )
     return jsonify({'success': True, 'target': created}), 201
 
@@ -393,7 +394,8 @@ def preview_target():
     draft = user_service.validate_target_draft(
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
-        note=data.get('note')
+        note=data.get('note'),
+        **({key: data[key] for key in ('conditions', 'stat_preferences') if key in data}),
     )
     return jsonify({'success': True, **target_preview_service.preview(draft)})
 
@@ -421,7 +423,7 @@ def backtest_target(target_id):
 @route_error_boundary("Failed to update the target.")
 def update_target(target_id):
     """
-    Edit the Qualifiers and/or the note of one of the caller's Targets.
+    Edit a caller's Qualifiers, note, Conditions, or stat preferences.
 
     Expected JSON body, with either key or both:
         {

@@ -1,0 +1,880 @@
+{
+  "source": "Read-only NBA Stats SynergyPlayTypes offensive player Totals, 2025-26 Regular Season; residential Windows capture used in the September 2026 source audit. Only public sports fields retained. Eleven players with previously invalid merged partitions. Raw captured 2026-09-07T03:08:40Z through 03:09:06Z; SHA256 0dc68c791be8eed1f2f0387254fea7f4b964e788d7eb58d30f4377a5c3fc3826. Expected denominators independently audited from inclusive rounding intervals.",
+  "records": [
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 152,
+      "possession_share": 0.291,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 39,
+      "possession_share": 0.075,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612766,
+      "games_played": 22,
+      "possessions": 18,
+      "possession_share": 0.058,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612766,
+      "games_played": 22,
+      "possessions": 116,
+      "possession_share": 0.374,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 156,
+      "possession_share": 0.298,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 112,
+      "possession_share": 0.214,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612766,
+      "games_played": 22,
+      "possessions": 16,
+      "possession_share": 0.052,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 15,
+      "possession_share": 0.029,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 15,
+      "possession_share": 0.029,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612766,
+      "games_played": 22,
+      "possessions": 10,
+      "possession_share": 0.032,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1629632,
+      "team_id": 1610612741,
+      "games_played": 28,
+      "possessions": 23,
+      "possession_share": 0.044,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 108,
+      "possession_share": 0.234,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 53,
+      "possession_share": 0.115,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612765,
+      "games_played": 25,
+      "possessions": 21,
+      "possession_share": 0.095,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 12,
+      "possession_share": 0.026,
+      "category": "PRRollMan"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 14,
+      "possession_share": 0.03,
+      "category": "OffRebound"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 163,
+      "possession_share": 0.354,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 35,
+      "possession_share": 0.076,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 31,
+      "possession_share": 0.067,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612765,
+      "games_played": 25,
+      "possessions": 27,
+      "possession_share": 0.123,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612765,
+      "games_played": 25,
+      "possessions": 28,
+      "possession_share": 0.127,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 19,
+      "possession_share": 0.041,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1628989,
+      "team_id": 1610612741,
+      "games_played": 42,
+      "possessions": 17,
+      "possession_share": 0.037,
+      "category": "Misc"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 101,
+      "possession_share": 0.185,
+      "category": "Transition"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612737,
+      "games_played": 41,
+      "possessions": 56,
+      "possession_share": 0.074,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 46,
+      "possession_share": 0.084,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612737,
+      "games_played": 41,
+      "possessions": 269,
+      "possession_share": 0.353,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 171,
+      "possession_share": 0.313,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612737,
+      "games_played": 41,
+      "possessions": 17,
+      "possession_share": 0.022,
+      "category": "PRRollMan"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 95,
+      "possession_share": 0.174,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612737,
+      "games_played": 41,
+      "possessions": 17,
+      "possession_share": 0.022,
+      "category": "Cut"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 55,
+      "possession_share": 0.101,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612737,
+      "games_played": 41,
+      "possessions": 63,
+      "possession_share": 0.083,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612737,
+      "games_played": 41,
+      "possessions": 65,
+      "possession_share": 0.085,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 35,
+      "possession_share": 0.064,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 203468,
+      "team_id": 1610612764,
+      "games_played": 31,
+      "possessions": 20,
+      "possession_share": 0.037,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 65,
+      "possession_share": 0.241,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612747,
+      "games_played": 32,
+      "possessions": 27,
+      "possession_share": 0.112,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 22,
+      "possession_share": 0.081,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 86,
+      "possession_share": 0.319,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 18,
+      "possession_share": 0.067,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 20,
+      "possession_share": 0.074,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612747,
+      "games_played": 32,
+      "possessions": 13,
+      "possession_share": 0.054,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612747,
+      "games_played": 32,
+      "possessions": 53,
+      "possession_share": 0.219,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 32,
+      "possession_share": 0.119,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1628379,
+      "team_id": 1610612737,
+      "games_played": 44,
+      "possessions": 14,
+      "possession_share": 0.052,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 69,
+      "possession_share": 0.162,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612746,
+      "games_played": 19,
+      "possessions": 40,
+      "possession_share": 0.108,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 30,
+      "possession_share": 0.07,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 180,
+      "possession_share": 0.423,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612746,
+      "games_played": 19,
+      "possessions": 158,
+      "possession_share": 0.425,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 72,
+      "possession_share": 0.169,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 14,
+      "possession_share": 0.033,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612746,
+      "games_played": 19,
+      "possessions": 33,
+      "possession_share": 0.089,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 24,
+      "possession_share": 0.056,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 11,
+      "possession_share": 0.026,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1629636,
+      "team_id": 1610612739,
+      "games_played": 23,
+      "possessions": 21,
+      "possession_share": 0.049,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 62,
+      "possession_share": 0.204,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 13,
+      "possession_share": 0.043,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612752,
+      "games_played": 28,
+      "possessions": 17,
+      "possession_share": 0.081,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 78,
+      "possession_share": 0.257,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612752,
+      "games_played": 28,
+      "possessions": 64,
+      "possession_share": 0.306,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 96,
+      "possession_share": 0.316,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 10,
+      "possession_share": 0.033,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612752,
+      "games_played": 28,
+      "possessions": 11,
+      "possession_share": 0.053,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 13,
+      "possession_share": 0.043,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 10,
+      "possession_share": 0.033,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1630631,
+      "team_id": 1610612740,
+      "games_played": 38,
+      "possessions": 18,
+      "possession_share": 0.059,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 75,
+      "possession_share": 0.225,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612763,
+      "games_played": 24,
+      "possessions": 19,
+      "possession_share": 0.065,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 11,
+      "possession_share": 0.033,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 100,
+      "possession_share": 0.299,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612763,
+      "games_played": 24,
+      "possessions": 110,
+      "possession_share": 0.377,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 70,
+      "possession_share": 0.21,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 14,
+      "possession_share": 0.042,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 25,
+      "possession_share": 0.075,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 16,
+      "possession_share": 0.048,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612763,
+      "games_played": 24,
+      "possessions": 15,
+      "possession_share": 0.051,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1642383,
+      "team_id": 1610612762,
+      "games_played": 43,
+      "possessions": 20,
+      "possession_share": 0.06,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612755,
+      "games_played": 35,
+      "possessions": 76,
+      "possession_share": 0.314,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612755,
+      "games_played": 35,
+      "possessions": 21,
+      "possession_share": 0.087,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612760,
+      "games_played": 30,
+      "possessions": 11,
+      "possession_share": 0.038,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612760,
+      "games_played": 30,
+      "possessions": 65,
+      "possession_share": 0.223,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612755,
+      "games_played": 35,
+      "possessions": 36,
+      "possession_share": 0.149,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612755,
+      "games_played": 35,
+      "possessions": 74,
+      "possession_share": 0.306,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612760,
+      "games_played": 30,
+      "possessions": 51,
+      "possession_share": 0.175,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612760,
+      "games_played": 30,
+      "possessions": 15,
+      "possession_share": 0.052,
+      "category": "OffScreen"
+    },
+    {
+      "player_id": 1642272,
+      "team_id": 1610612755,
+      "games_played": 35,
+      "possessions": 10,
+      "possession_share": 0.041,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612738,
+      "games_played": 31,
+      "possessions": 38,
+      "possession_share": 0.236,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612751,
+      "games_played": 16,
+      "possessions": 14,
+      "possession_share": 0.093,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612738,
+      "games_played": 31,
+      "possessions": 18,
+      "possession_share": 0.112,
+      "category": "OffRebound"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612738,
+      "games_played": 31,
+      "possessions": 61,
+      "possession_share": 0.379,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612738,
+      "games_played": 31,
+      "possessions": 17,
+      "possession_share": 0.106,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612751,
+      "games_played": 16,
+      "possessions": 15,
+      "possession_share": 0.099,
+      "category": "Handoff"
+    },
+    {
+      "player_id": 1631169,
+      "team_id": 1610612738,
+      "games_played": 31,
+      "possessions": 10,
+      "possession_share": 0.062,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1627824,
+      "team_id": 1610612752,
+      "games_played": 36,
+      "possessions": 18,
+      "possession_share": 0.151,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1627824,
+      "team_id": 1610612741,
+      "games_played": 26,
+      "possessions": 69,
+      "possession_share": 0.267,
+      "category": "PRRollMan"
+    },
+    {
+      "player_id": 1627824,
+      "team_id": 1610612752,
+      "games_played": 36,
+      "possessions": 58,
+      "possession_share": 0.487,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1627824,
+      "team_id": 1610612752,
+      "games_played": 36,
+      "possessions": 12,
+      "possession_share": 0.101,
+      "category": "Cut"
+    },
+    {
+      "player_id": 1627824,
+      "team_id": 1610612752,
+      "games_played": 36,
+      "possessions": 10,
+      "possession_share": 0.084,
+      "category": "Misc"
+    },
+    {
+      "player_id": 1627824,
+      "team_id": 1610612741,
+      "games_played": 26,
+      "possessions": 14,
+      "possession_share": 0.054,
+      "category": "Postup"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612760,
+      "games_played": 25,
+      "possessions": 19,
+      "possession_share": 0.202,
+      "category": "Transition"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612749,
+      "games_played": 30,
+      "possessions": 56,
+      "possession_share": 0.143,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612760,
+      "games_played": 25,
+      "possessions": 17,
+      "possession_share": 0.181,
+      "category": "Isolation"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612749,
+      "games_played": 30,
+      "possessions": 103,
+      "possession_share": 0.263,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612760,
+      "games_played": 25,
+      "possessions": 10,
+      "possession_share": 0.106,
+      "category": "PRBallHandler"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612760,
+      "games_played": 25,
+      "possessions": 34,
+      "possession_share": 0.362,
+      "category": "Spotup"
+    },
+    {
+      "player_id": 1631172,
+      "team_id": 1610612749,
+      "games_played": 30,
+      "possessions": 24,
+      "possession_share": 0.061,
+      "category": "Handoff"
+    }
+  ],
+  "expected_player_denominators": {
+    "1629632": 833,
+    "1628989": 681,
+    "1628379": 512,
+    "1629636": 798,
+    "1630631": 513,
+    "1642383": 626,
+    "1642272": 533,
+    "1631169": 312,
+    "1627824": 377
+  }
+}
