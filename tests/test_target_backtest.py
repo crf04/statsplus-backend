@@ -24,6 +24,8 @@ from app.config.settings import (
     MatchupScoreSettings,
     RuntimeSettings,
 )
+from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+from app.domain.team_matchup_taxonomy import THREE_POINT_SHOT_ZONES
 from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
 from app.models.user import User
@@ -86,9 +88,8 @@ SHOT_ZONES = (
     "Corner 3",
     "Above the Break 3",
 )
-#: Every market a Corner 3 Qualifier's Defense Sheet *outcome* row maps to.
-#: The FGA row's attempt markets are deliberately not columns.
-CORNER_THREE_COLUMNS = ["PTS", "3PM"]
+#: The approved default display columns for a Corner 3 Target.
+CORNER_THREE_COLUMNS = ["PTS", "PTS/36", "3PA", "3PA/36"]
 
 MARKET_PER_GAME = {
     "PTS": 25.0,
@@ -178,27 +179,47 @@ class FakeLogs:
         player_ids = tuple(player_ids)
         self.summary_calls.append((season, player_ids))
         self.snapshots.append(publication_snapshot)
-        return {
-            player_id: PlayerSeasonLogSummary(
+        summaries = {}
+        for player_id in player_ids:
+            rate_rows = tuple(
+                row
+                for row in getattr(self, "season_rows", self.rows)
+                if row.player_id == player_id and row.season_type == "Regular Season"
+            )
+            total_minutes = sum(row.minutes for row in rate_rows)
+            totals = {
+                "PTS": sum(row.points for row in rate_rows),
+                "FGA": sum(row.field_goals_attempted for row in rate_rows),
+                "FG2A": sum(
+                    row.field_goals_attempted - row.three_pointers_attempted
+                    for row in rate_rows
+                ),
+                "FG3A": sum(row.three_pointers_attempted for row in rate_rows),
+                "AST": sum(row.assists for row in rate_rows),
+            }
+            per_minute = (
+                {market: value / total_minutes for market, value in totals.items()}
+                if total_minutes > 0
+                else {}
+            )
+            summaries[player_id] = PlayerSeasonLogSummary(
                 season=season,
                 player_id=player_id,
                 season_rate=PlayerSeasonRate(
                     season=season,
                     player_id=player_id,
                     game_count=self.game_counts.get(player_id, 20),
-                    total_minutes=700.0,
+                    total_minutes=total_minutes,
                     per_game={
                         **MARKET_PER_GAME,
                         "PTS": self.scoring.get(player_id, 25.0),
                     },
-                    per_minute={},
+                    per_minute=per_minute,
                 ),
                 last_ten_minutes=(34.0,),
-                rate_rows=tuple(row for row in getattr(self, 'season_rows', self.rows)
-                                if row.player_id == player_id and row.season_type == 'Regular Season'),
+                rate_rows=rate_rows,
             )
-            for player_id in player_ids
-        }
+        return summaries
 
 
 class FakeDiets:
@@ -359,12 +380,18 @@ def build_backtest(targets, backtest_settings):
 
     unset = object()
 
-    def _service(*, logs=None, diets=unset, publication_reader=None):
+    def _service(
+        *, logs=None, diets=unset, publication_reader=None, statistic_catalog=None
+    ):
         return TargetBacktestService(
             targets=targets,
             player_logs=logs if logs is not None else FakeLogs(),
             player_diets=FakeDiets() if diets is unset else diets,
-            statistic_catalog=StatisticCatalog.load_default(),
+            statistic_catalog=(
+                StatisticCatalog.load_default()
+                if statistic_catalog is None
+                else statistic_catalog
+            ),
             settings=backtest_settings,
             publication_reader=publication_reader,
         )
@@ -446,21 +473,36 @@ def test_a_qualifying_player_reports_shares_averages_and_every_game(
                     "league_average_share": 0.2,
                 }
             ],
-            "season_averages": {"PTS": 25.0, "3PM": 2.0},
+            "season_averages": {
+                "PTS": 25.0,
+                "PTS/36": 27.529412,
+                "3PA": 6.0,
+                "3PA/36": 6.882353,
+            },
             "games": [
                 {
                     "game_id": "0022500584",
                     "game_date": "2026-01-16",
                     "matchup": "LAL vs. OKC",
                     "minutes": 34.0,
-                    "stats": {"PTS": 30.0, "3PM": 4.0},
+                    "stats": {
+                        "PTS": 30.0,
+                        "PTS/36": 31.764706,
+                        "3PA": 8.0,
+                        "3PA/36": 8.470588,
+                    },
                 },
                 {
                     "game_id": "0022500120",
                     "game_date": "2025-11-03",
                     "matchup": "LAL @ OKC",
                     "minutes": 34.0,
-                    "stats": {"PTS": 22.0, "3PM": 2.0},
+                    "stats": {
+                        "PTS": 22.0,
+                        "PTS/36": 23.294118,
+                        "3PA": 5.0,
+                        "3PA/36": 5.294118,
+                    },
                 },
             ],
         }
@@ -552,16 +594,16 @@ def test_the_summary_reads_every_listed_game_against_its_players_season_rate(
 
     payload = backtest(created["id"], logs=logs, diets=diets)
 
-    # PTS: (30-25) + (22-25) + (27-27) = 2 over three games, two of them at or
-    # above the average.  3PM: (4-2) + (2-2) + (1-2) = 1 over the same three;
-    # the game exactly on the average counts as over it, the one below does
-    # not.
+    # PTS keeps the existing per-game baseline. Per-36 uses each player's
+    # aggregate season totals and minutes, not an average of game rates.
     assert payload["summary"] == {
         "players": 2,
         "games": 3,
         "columns": {
             "PTS": {"mean_difference": 0.666667, "over_average_share": 0.666667},
-            "3PM": {"mean_difference": 0.333333, "over_average_share": 0.666667},
+            "PTS/36": {"mean_difference": 0.0, "over_average_share": 0.666667},
+            "3PA": {"mean_difference": 2.0, "over_average_share": 1.0},
+            "3PA/36": {"mean_difference": 0.0, "over_average_share": 1.0},
         },
     }
 
@@ -579,7 +621,9 @@ def test_an_empty_backtest_summarises_nobody_and_leaves_every_column_blank(
         "games": 0,
         "columns": {
             "PTS": {"mean_difference": None, "over_average_share": None},
-            "3PM": {"mean_difference": None, "over_average_share": None},
+            "PTS/36": {"mean_difference": None, "over_average_share": None},
+            "3PA": {"mean_difference": None, "over_average_share": None},
+            "3PA/36": {"mean_difference": None, "over_average_share": None},
         },
     }
 
@@ -783,7 +827,7 @@ def test_a_player_with_no_stored_share_for_a_slice_does_not_fit(targets, backtes
     assert payload["players"] == []
 
 
-def test_stat_columns_union_every_qualifiers_slice_markets_in_order(
+def test_stat_columns_union_every_qualifier_default_in_order(
     targets, backtest
 ):
     created = _create(targets, qualifiers=(CORNER_THREE, TRANSITION))
@@ -795,7 +839,14 @@ def test_stat_columns_union_every_qualifiers_slice_markets_in_order(
 
     payload = backtest(created["id"], logs=logs, diets=diets)
 
-    assert payload["stat_columns"] == ["PTS", "3PM", "PA", "PR", "PRA"]
+    assert payload["stat_columns"] == [
+        "PTS",
+        "PTS/36",
+        "3PA",
+        "3PA/36",
+        "FGA",
+        "FGA/36",
+    ]
     player = payload["players"][0]
     assert list(player["season_averages"]) == payload["stat_columns"]
     assert list(player["games"][0]["stats"]) == payload["stat_columns"]
@@ -804,19 +855,14 @@ def test_stat_columns_union_every_qualifiers_slice_markets_in_order(
 @pytest.mark.parametrize(
     ("base", "slice_key", "expected"),
     [
-        # A shot zone reports made shots and attempts; only the made row is an
-        # outcome, and a two-point zone's makes are points alone.
-        ("shot_zones", "Corner 3", ["PTS", "3PM"]),
-        ("shot_zones", "Restricted Area", ["PTS"]),
-        # Synergy reports points and possessions; possessions are not an
-        # outcome, and the points row carries its combo markets.
-        ("play_types", "Transition", ["PTS", "PA", "PR", "PRA"]),
-        # Both of a shot type's made rows are outcomes; neither attempt row is.
-        ("shot_types", "Catch and Shoot", ["PTS", "3PM"]),
-        ("assist_locations", "Corner3Assists", ["AST", "PA", "RA", "PRA"]),
+        ("shot_zones", "Corner 3", ["PTS", "PTS/36", "3PA", "3PA/36"]),
+        ("shot_zones", "Restricted Area", ["PTS", "PTS/36", "FG2A", "FG2A/36"]),
+        ("play_types", "Transition", ["PTS", "FGA", "PTS/36", "FGA/36"]),
+        ("shot_types", "Catch and Shoot", ["PTS", "PTS/36", "FGA", "FGA/36"]),
+        ("assist_locations", "Corner3Assists", ["AST", "AST/36"]),
     ],
 )
-def test_stat_columns_are_outcomes_never_attempts(
+def test_stat_columns_follow_the_approved_defaults(
     targets, backtest, base, slice_key, expected
 ):
     created = _create(
@@ -834,7 +880,189 @@ def test_stat_columns_are_outcomes_never_attempts(
     payload = backtest(created["id"])
 
     assert payload["stat_columns"] == expected
-    assert not {"FGA", "FG2A", "FG3A", "POSS"} & set(payload["stat_columns"])
+
+
+@pytest.mark.parametrize(
+    ("base", "slice_key"),
+    [
+        (base, slice_key)
+        for base, slices in PLAYER_DIET_QUALIFIER_SLICES.items()
+        for slice_key in slices
+    ],
+)
+def test_every_qualifier_slice_preserves_its_default_order(base, slice_key):
+    columns = TargetBacktestService._stat_columns(
+        ({"base": base, "slice_key": slice_key},)
+    )
+    if base == "assist_locations":
+        expected = ("AST", "AST/36")
+    elif base == "shot_zones" and slice_key in THREE_POINT_SHOT_ZONES:
+        expected = ("PTS", "PTS/36", "3PA", "3PA/36")
+    elif base == "shot_zones":
+        expected = ("PTS", "PTS/36", "FG2A", "FG2A/36")
+    elif base == "play_types":
+        expected = ("PTS", "FGA", "PTS/36", "FGA/36")
+    else:
+        expected = ("PTS", "PTS/36", "FGA", "FGA/36")
+    assert columns == expected
+
+
+def test_saved_stat_preferences_are_echoed_without_changing_backend_defaults(
+    targets, backtest
+):
+    preferences = {"columns": ["TS%", "PTS/36"], "graded_by": "TS%"}
+    created = targets.create_target(
+        OWNER,
+        opponent="OKC",
+        qualifiers=[CORNER_THREE],
+        stat_preferences=preferences,
+    )
+    payload = backtest(
+        created["id"],
+        logs=FakeLogs(rows=(_row(LEBRON),)),
+        diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}),
+    )
+
+    assert payload["target"]["stat_preferences"] == preferences
+    assert payload["stat_columns"] == CORNER_THREE_COLUMNS
+    assert list(payload["players"][0]["games"][0]["stats"]) == CORNER_THREE_COLUMNS
+
+
+def test_two_point_attempts_are_derived_and_season_per36_uses_total_minutes(
+    targets, backtest
+):
+    created = _create(targets, qualifiers=(LOW_RIM,))
+    game = _row(
+        LEBRON,
+        minutes=30,
+        points=18,
+        field_goals_attempted=12,
+        three_pointers_attempted=4,
+    )
+    other = _row(
+        LEBRON,
+        game_id="other-season-game",
+        opponent_team_id=BOS,
+        opponent_team_tricode="BOS",
+        minutes=60,
+        points=60,
+        field_goals_attempted=30,
+        three_pointers_attempted=3,
+    )
+    logs = FakeLogs(rows=(game,))
+    logs.season_rows = (game, other)
+    payload = backtest(
+        created["id"],
+        logs=logs,
+        diets=FakeDiets(zones={LEBRON: _zone_diet(0.2, 0.2)}),
+    )
+
+    assert payload["stat_columns"] == ["PTS", "PTS/36", "FG2A", "FG2A/36"]
+    player = payload["players"][0]
+    assert player["games"][0]["stats"] == {
+        "PTS": 18.0,
+        "PTS/36": 21.6,
+        "FG2A": 8.0,
+        "FG2A/36": 9.6,
+    }
+    # (18 + 60) / (30 + 60) * 36; averaging 21.6 and 36.0 would be wrong.
+    assert player["season_averages"] == {
+        "PTS": 25.0,
+        "PTS/36": 31.2,
+        "FG2A": 14.0,
+        "FG2A/36": 14.0,
+    }
+    assert payload["summary"]["columns"] == {
+        "PTS": {"mean_difference": -7.0, "over_average_share": 0.0},
+        "PTS/36": {"mean_difference": -9.6, "over_average_share": 0.0},
+        "FG2A": {"mean_difference": -6.0, "over_average_share": 0.0},
+        "FG2A/36": {"mean_difference": -4.4, "over_average_share": 0.0},
+    }
+
+
+def test_game_default_values_follow_catalogue_components(targets, build_backtest):
+    from dataclasses import replace
+
+    # Keep the catalog structurally valid while changing this component in the
+    # seam. A Target-specific FGA - 3PA calculation would ignore this definition.
+    catalog = StatisticCatalog(
+        tuple(
+            replace(statistic, components=("field_goals_attempted",))
+            if statistic.market_category == "FG2A"
+            else statistic
+            for statistic in StatisticCatalog.load_default().statistics
+        )
+    )
+    created = _create(targets, qualifiers=(LOW_RIM,))
+    payload = build_backtest(
+        logs=FakeLogs(
+            rows=(
+                _row(
+                    LEBRON,
+                    points=18,
+                    field_goals_attempted=12,
+                    three_pointers_attempted=4,
+                ),
+            )
+        ),
+        diets=FakeDiets(zones={LEBRON: _zone_diet(0.2, 0.2)}),
+        statistic_catalog=catalog,
+    ).backtest(OWNER, created["id"])
+
+    assert payload["players"][0]["games"][0]["stats"]["FG2A"] == 12.0
+
+
+def test_zero_minutes_leave_base_stats_available_and_per36_null(targets, backtest):
+    created = _create(targets, qualifiers=(LOW_RIM,))
+    zero_minute_game = _row(
+        LEBRON,
+        minutes=0,
+        points=18,
+        field_goals_attempted=12,
+        three_pointers_attempted=4,
+    )
+    positive_minute_game = _row(
+        LEBRON,
+        game_id="other-season-game",
+        opponent_team_id=BOS,
+        opponent_team_tricode="BOS",
+        minutes=30,
+        points=12,
+        field_goals_attempted=10,
+        three_pointers_attempted=2,
+    )
+    logs = FakeLogs(
+        rows=(zero_minute_game,)
+    )
+    logs.season_rows = (zero_minute_game, positive_minute_game)
+
+    payload = backtest(
+        created["id"],
+        logs=logs,
+        diets=FakeDiets(zones={LEBRON: _zone_diet(0.2, 0.2)}),
+    )
+
+    player = payload["players"][0]
+    assert player["games"][0]["stats"] == {
+        "PTS": 18.0,
+        "PTS/36": None,
+        "FG2A": 8.0,
+        "FG2A/36": None,
+    }
+    assert player["season_averages"] == {
+        "PTS": 25.0,
+        "PTS/36": 36.0,
+        "FG2A": 14.0,
+        "FG2A/36": 19.2,
+    }
+    assert payload["summary"]["columns"]["PTS/36"] == {
+        "mean_difference": None,
+        "over_average_share": None,
+    }
+    assert payload["summary"]["columns"]["FG2A/36"] == {
+        "mean_difference": None,
+        "over_average_share": None,
+    }
 
 
 class FakePublicationReader:
@@ -1057,7 +1285,9 @@ BACKTESTED = {
         "games": 0,
         "columns": {
             "PTS": {"mean_difference": None, "over_average_share": None},
-            "3PM": {"mean_difference": None, "over_average_share": None},
+            "PTS/36": {"mean_difference": None, "over_average_share": None},
+            "3PA": {"mean_difference": None, "over_average_share": None},
+            "3PA/36": {"mean_difference": None, "over_average_share": None},
         },
     },
     "players": [],
@@ -1199,7 +1429,9 @@ def test_player_minutes_filters_appearances_and_preserves_season_baseline(
         'games': 1,
         'columns': {
             'PTS': {'mean_difference': 8.0, 'over_average_share': 1.0},
-            '3PM': {'mean_difference': 2.0, 'over_average_share': 1.0},
+            'PTS/36': {'mean_difference': 73.823762, 'over_average_share': 1.0},
+            '3PA': {'mean_difference': 2.0, 'over_average_share': 1.0},
+            '3PA/36': {'mean_difference': 9.314851, 'over_average_share': 1.0},
         },
     }
 
@@ -1456,8 +1688,18 @@ def test_box_lines_and_totals_include_the_whole_regular_season(targets, build_ba
         'threes_made': 8, 'threes_attempted': 16, 'free_throws_made': 4, 'free_throws_attempted': 6,
         'steals': 2, 'blocks': 4, 'turnovers': 6, 'offensive_rebounds': 4, 'defensive_rebounds': 12, 'fouls': 8, 'minutes': 60,
     }
-    assert player['games'][0]['stats'] == {'PTS': 30, '3PM': 4}
-    assert player['season_averages'] == {'PTS': 25, '3PM': 2}
+    assert player['games'][0]['stats'] == {
+        'PTS': 30,
+        'PTS/36': 31.764706,
+        '3PA': 8,
+        '3PA/36': 8.470588,
+    }
+    assert player['season_averages'] == {
+        'PTS': 25,
+        'PTS/36': 30.0,
+        '3PA': 6,
+        '3PA/36': 9.6,
+    }
 
 
 def test_stat_preferences_save_independently_from_conditions_and_criteria(targets):
@@ -1491,7 +1733,7 @@ def test_invalid_stat_preferences_are_refused_everywhere(targets, preferences):
             action()
 
 
-@pytest.mark.parametrize('key', 'PTS REB AST 3PM 3PA FGM FGA FTM FTA STL BLK TOV OREB DREB PF MIN PA PR RA PRA SB PTS/36 REB/36 AST/36 3PM/36 3PA/36 FGA/36 FTA/36 STL/36 BLK/36 TOV/36 PRA/36 PR/36 PA/36 FG% 3P% TS% PTS/FGA'.split())
+@pytest.mark.parametrize('key', 'PTS REB AST 3PM FG2A 3PA FGM FGA FTM FTA STL BLK TOV OREB DREB PF MIN PA PR RA PRA SB PTS/36 REB/36 AST/36 3PM/36 FG2A/36 3PA/36 FGA/36 FTA/36 STL/36 BLK/36 TOV/36 PRA/36 PR/36 PA/36 FG% 3P% TS% PTS/FGA'.split())
 def test_every_spec_stat_key_is_accepted_by_draft_validation(targets, key):
     preferences = {'columns': [key], 'graded_by': key}
     assert targets.validate_target_draft(opponent='OKC', qualifiers=[CORNER_THREE], stat_preferences=preferences)['stat_preferences'] == preferences
