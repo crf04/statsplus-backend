@@ -39,6 +39,21 @@ SHOT_ZONES = (
 # as reconciliation evidence and dropped before publication.
 RECONCILED_ZONE = "Backcourt"
 CORNER_3_SIDES = ("Left Corner 3", "Right Corner 3")
+# The wide ``LeagueDashPlayerShotLocations`` vocabulary behind the player Zone
+# Shooting profile.  ``app.domain.player_shot_zone_taxonomy`` owns the backend
+# copy; this package ships as a standalone wheel with no ``app`` package, so
+# the names are repeated here and pinned equal by the collector tests.  The
+# order is the provider's own header order and is documentation only:
+# validation compares sets, because the header names its columns.
+PLAYER_ZONE_PROFILE_CATEGORIES = (
+    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Left Corner 3",
+    "Right Corner 3", "Above the Break 3", "Backcourt", "Corner 3",
+)
+PLAYER_ZONE_PROFILE_METRICS = ("FGM", "FGA", "FG_PCT")
+PLAYER_ZONE_PROFILE_IDENTITY = (
+    "PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION", "AGE",
+    "NICKNAME",
+)
 REGULAR_SEASON_TYPE = "Regular Season"
 _GAME_TYPE_BY_ID_PREFIX = {
     "001": "Preseason",
@@ -78,6 +93,51 @@ def _flatten_frame_columns(response: Any) -> Any:
     return response
 
 
+def _grouped_header_records(
+    headers: Sequence[Any], rows: Sequence[Any],
+) -> list[dict[str, Any]]:
+    """Flatten a grouped ``resultSets`` header the way pandas would.
+
+    ``LeagueDashPlayerShotLocations`` reports a ``SHOT_CATEGORY`` header naming
+    the repeated category blocks and a ``columns`` header naming every column.
+    The header itself states how many identity columns precede the blocks and
+    how wide a block is, so the layout is read from the response rather than
+    assumed, and a flat ``identity``/``category_metric`` record comes out --
+    the same names ``_flatten_frame_columns`` gives the equivalent frame.
+    """
+
+    category_header = next(
+        (header for header in headers if "columnsToSkip" in header), None
+    )
+    column_header = next(
+        (header for header in headers if header.get("name") == "columns"), None
+    )
+    if category_header is None or column_header is None:
+        raise ProviderContractError("provider_schema_changed")
+    categories = [str(value) for value in category_header.get("columnNames") or []]
+    columns = [str(value) for value in column_header.get("columnNames") or []]
+    try:
+        skip = int(category_header["columnsToSkip"])
+        span = int(category_header["columnSpan"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProviderContractError("provider_schema_changed") from error
+    if skip < 0 or span < 1 or len(columns) != skip + span * len(categories):
+        raise ProviderContractError("provider_schema_changed")
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) != len(columns):
+            raise ProviderContractError("provider_schema_changed")
+        record: dict[str, Any] = {
+            columns[index]: row[index] for index in range(skip)
+        }
+        for offset, category in enumerate(categories):
+            for position in range(span):
+                index = skip + offset * span + position
+                record[f"{category}_{columns[index]}"] = row[index]
+        records.append(record)
+    return records
+
+
 def _records(response: Any) -> list[dict[str, Any]]:
     if pd is not None and isinstance(response, pd.DataFrame):
         response = _flatten_frame_columns(response)
@@ -93,25 +153,7 @@ def _records(response: Any) -> list[dict[str, Any]]:
                     if all(isinstance(header, str) for header in headers):
                         response = [dict(zip(headers, row)) for row in rows if isinstance(row, (list, tuple))]
                     elif all(isinstance(header, Mapping) for header in headers):
-                        # ``LeagueDashPlayerShotLocations`` uses a grouped
-                        # header.  Flatten only the identity and the FGA
-                        # values needed by the exact-zone contract.
-                        category_header = next((header for header in headers if "columnNames" in header), {})
-                        categories = list(category_header.get("columnNames") or [])
-                        converted: list[dict[str, Any]] = []
-                        for row in rows:
-                            if not isinstance(row, (list, tuple)) or len(row) < 6:
-                                raise ProviderContractError("provider_schema_changed")
-                            item: dict[str, Any] = {
-                                "PLAYER_ID": row[0], "PLAYER_NAME": row[1],
-                                "TEAM_ID": row[2], "TEAM_ABBREVIATION": row[3],
-                            }
-                            for index, category in enumerate(categories):
-                                position = 6 + index * 3 + 1
-                                if position < len(row):
-                                    item[category] = row[position]
-                            converted.append(item)
-                        response = converted
+                        response = _grouped_header_records(headers, rows)
         if isinstance(response, Mapping):
             if isinstance(response.get("records"), list):
                 response = response["records"]
@@ -658,7 +700,7 @@ def normalize_opponent_grouped_shot_response(
 def _zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any], endpoint: str, identity: Sequence[str],
-    observation_type: str = "exact_shot_zones",
+    observation_type: str,
 ) -> NormalizedObservation:
     rows = _records(response)
     output: list[dict[str, Any]] = []
@@ -682,12 +724,6 @@ def _zone_response(
             identity_values[field] = _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
         values: dict[str, dict[str, Any]] = {}
         for zone in SHOT_ZONES:
-            if observation_type == "exact_shot_zones":
-                raw = _value(row, zone, zone.upper(), zone.replace(" ", "_"))
-                if raw is None:
-                    raise ProviderContractError("provider_schema_changed")
-                values[zone] = {"value": _number(raw)}
-                continue
             flattened = zone.replace(" ", "_")
             makes = _value(
                 row, f"{zone}_OPP_FGM", f"{flattened}_OPP_FGM",
@@ -849,14 +885,233 @@ def _zone_response(
     )
 
 
+def _zone_metric(value: Any) -> float | None:
+    """Read one profile metric, keeping an unreported cell unreported.
+
+    The endpoint really does omit a category for a player who never shot from
+    it, and the legacy profile's league reference is a mean that skips those
+    cells.  Substituting zero here would move every other player's ``PTS%+``,
+    so an absent value stays absent all the way to the publication.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if math.isnan(float(value)):
+            return None
+    return float(_number(value))
+
+
+def _zone_metric_violation(
+    values: Mapping[str, Any], *, exact: bool,
+) -> str | None:
+    """The collector's copy of ``player_shot_zone_profile_violation``.
+
+    Duplicated for the same reason the vocabulary above is: this package ships
+    without the ``app`` package.  The collector tests pin the two behaviours.
+    """
+
+    if all(values.get(metric) is None for metric in PLAYER_ZONE_PROFILE_METRICS):
+        return None
+    if any(values.get(metric) is None for metric in PLAYER_ZONE_PROFILE_METRICS):
+        return "a metric is missing beside a reported metric"
+    makes = float(values["FGM"])
+    attempts = float(values["FGA"])
+    rate = float(values["FG_PCT"])
+    if makes > attempts:
+        return "FGM exceeds FGA"
+    if rate > 1:
+        return "FG_PCT is out of range"
+    if exact and attempts == 0 and rate != 0:
+        return "FG_PCT describes no attempts"
+    if exact and not (makes.is_integer() and attempts.is_integer()):
+        return "Totals counts are not whole"
+    return None
+
+
+def _player_zone_profile_rows(
+    response: Any, *, value_mode: str,
+) -> dict[int, dict[str, Any]]:
+    """Read one wide shot-location response into per-player profile rows.
+
+    Every provider category is kept, including the two corner sides and
+    ``Backcourt``.  The Zone Shooting profile needs them: its ``Sum`` and its
+    league ``PTS%`` reference read ``Backcourt`` before dropping it, and the
+    tab shows the corner sides separately.  Narrowing here to the five Diet
+    slices is what made the previous scalar contract unable to serve the
+    profile at all.
+    """
+
+    rows: dict[int, dict[str, Any]] = {}
+    for row in _records(response):
+        lowered = {str(key).strip().casefold() for key in row}
+        player_id = _positive_id(_required(row, "PLAYER_ID", "player_id"))
+        if player_id in rows:
+            raise ProviderContractError("duplicate_identity")
+        record: dict[str, Any] = {
+            "player_id": player_id,
+            "player_name": _text(_required(row, "PLAYER_NAME", "player_name")),
+            "team_id": _positive_id(_required(row, "TEAM_ID", "team_id")),
+            "team_abbreviation": _text(
+                _required(row, "TEAM_ABBREVIATION", "team_abbreviation")
+            ),
+            "age": _number(_required(row, "AGE", "age")),
+            "nickname": _text(_required(row, "NICKNAME", "nickname")),
+            "value_mode": value_mode,
+        }
+        for category in PLAYER_ZONE_PROFILE_CATEGORIES:
+            if not all(
+                f"{category}_{metric}".casefold() in lowered
+                for metric in PLAYER_ZONE_PROFILE_METRICS
+            ):
+                # A scalar per-zone response, or any narrower shape, is not
+                # evidence a profile can be published from.  All three source
+                # keys must be present for every declared category: with only
+                # some of them the absent ones read as ``None`` and the
+                # category is indistinguishable from a genuine unreported
+                # triplet, laundering an omitted field into a published null.
+                raise ProviderContractError("provider_schema_changed")
+            values = {
+                metric: _zone_metric(_value(row, f"{category}_{metric}"))
+                for metric in PLAYER_ZONE_PROFILE_METRICS
+            }
+            if _zone_metric_violation(values, exact=value_mode == "Totals"):
+                raise ProviderContractError("value_invariant_failed")
+            for metric, value in values.items():
+                record[f"{category}_{metric}"] = value
+        rows[player_id] = record
+    if not rows:
+        raise ProviderContractError("provider_schema_changed")
+    return rows
+
+
+def _player_games_played(response: Any) -> dict[int, int]:
+    """Read trustworthy games-played evidence for the same player population.
+
+    The shot-location endpoint reports no games, and multiplying a rounded
+    PerGame value back up would invent Totals.  The Diet volumes therefore
+    require their own explicit read, and a player without one is refused
+    rather than given a guessed denominator.
+    """
+
+    games: dict[int, int] = {}
+    for row in _records(response):
+        player_id = _positive_id(_required(row, "PLAYER_ID", "player_id"))
+        if player_id in games:
+            raise ProviderContractError("duplicate_identity")
+        played = _number(_required(row, "GP", "games_played"), integer=True)
+        if played < 1:
+            raise ProviderContractError("value_invariant_failed")
+        games[player_id] = int(played)
+    if not games:
+        raise ProviderContractError("provider_schema_changed")
+    return games
+
+
 def normalize_zone_response(
     response: Any, *, season: str, cutoff: datetime | str,
     scope: Mapping[str, Any] | None = None,
+    totals_response: Any = None,
+    games_response: Any = None,
 ) -> NormalizedObservation:
+    """Normalize the player shot-location surface into one observation.
+
+    Three provider reads describe one window and are validated together:
+
+    ``response``
+        ``PerGame`` shot locations.  This is the profile evidence, and the
+        per-mode the historical Zone Shooting table was always built from.
+    ``totals_response``
+        ``Totals`` shot locations.  Diet shares and volumes are season totals,
+        so they cannot be derived from the rounded PerGame values.
+    ``games_response``
+        Player season totals carrying ``GP``, the only trustworthy games-played
+        denominator for those volumes.
+
+    The three must describe exactly the same players, which is what proves
+    they are one window rather than three unrelated reads.
+    """
+
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
     if scope.get("window") not in {"season", "l15"}:
         raise ProviderContractError("provider_window_unsupported")
-    return _zone_response(response, season=season, cutoff=cutoff, scope=scope, endpoint="player_zones", identity=("player_id",))
+    if totals_response is None or games_response is None:
+        # The Diet facts and the profile are one publication; refusing here
+        # keeps a partially collected surface from being stored as evidence.
+        raise ProviderContractError("provider_scope_unavailable")
+    scope = {
+        **scope,
+        "profile_value_mode": "PerGame",
+        "diet_value_mode": "Totals",
+    }
+
+    profile = _player_zone_profile_rows(response, value_mode="PerGame")
+    totals = _player_zone_profile_rows(totals_response, value_mode="Totals")
+    games = _player_games_played(games_response)
+    if set(profile) != set(totals) or not set(profile) <= set(games):
+        raise ProviderContractError("provider_window_unverified")
+
+    records: list[dict[str, Any]] = []
+    for player_id in sorted(totals):
+        totals_row = totals[player_id]
+        volumes = {
+            zone: float(totals_row[f"{zone}_FGA"]) for zone in SHOT_ZONES
+        }
+        attempted = sum(volumes.values())
+        if attempted == 0:
+            # The provider legitimately reports a player with no field-goal
+            # attempts in any published zone.  The Diet reports an absent
+            # slice rather than a zero share; the profile row is still kept
+            # above, because the league reference reads every source row.
+            continue
+        for zone in SHOT_ZONES:
+            records.append({
+                "base": "shot_zones",
+                "category": zone,
+                "slice_key": zone,
+                "player_id": player_id,
+                "team_id": totals_row["team_id"],
+                "games_played": games[player_id],
+                "share": volumes[zone] / attempted,
+                "attempts": volumes[zone],
+                "makes": float(totals_row[f"{zone}_FGM"]),
+            })
+    if not records:
+        raise ProviderContractError("provider_schema_changed")
+
+    payload = {
+        "base": "shot_zones",
+        "records": records,
+        # The wide profile evidence, kept beside the five Diet slices rather
+        # than folded into them.  The Diet vocabulary is shared with the
+        # opponent and Target surfaces and is deliberately not widened.
+        "profile": {
+            "value_mode": "PerGame",
+            "categories": list(PLAYER_ZONE_PROFILE_CATEGORIES),
+            "metrics": list(PLAYER_ZONE_PROFILE_METRICS),
+            # Source order, not identifier order.  The profile's ``PTS%+``
+            # columns divide by a league mean summed over this frame, and
+            # floating-point summation is order-dependent, so reordering the
+            # population here would move published values in their last digit.
+            "rows": list(profile.values()),
+        },
+        "coverage": {
+            "zones": list(SHOT_ZONES),
+            "profile_categories": list(PLAYER_ZONE_PROFILE_CATEGORIES),
+            "profile_value_mode": "PerGame",
+            "diet_value_mode": "Totals",
+            "scope": dict(scope),
+        },
+    }
+    return NormalizedObservation(
+        observation_type="exact_shot_zones", scope=scope,
+        season=_canonical_season(season), cutoff=_timestamp(cutoff),
+        payload=payload,
+        provenance=_provenance(
+            endpoint="player_zones", scope=scope, records=len(records),
+        ),
+        complete=True,
+    )
 
 
 def normalize_opponent_zone_response(
@@ -921,6 +1176,8 @@ normalize_shot_zone_response = normalize_zone_response
 
 __all__ = [
     "PLAY_TYPES", "SHOT_TYPES", "SHOT_ZONES",
+    "PLAYER_ZONE_PROFILE_CATEGORIES", "PLAYER_ZONE_PROFILE_IDENTITY",
+    "PLAYER_ZONE_PROFILE_METRICS",
     "normalize_grouped_shot_response", "normalize_opponent_grouped_shot_response",
     "normalize_opponent_zone_response", "normalize_roster_response",
     "normalize_schedule_response", "normalize_synergy_response",

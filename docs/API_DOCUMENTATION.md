@@ -1346,6 +1346,22 @@ attempts. A shot type whose made/attempted split was never observed is omitted
 rather than reported with an invented two- and three-point division, so the
 category can return `[]`.
 
+`Zone Shooting` keeps its historical single-object shape and its historical
+values: `PLAYER_NAME` plus `FGM`, `FGA`, `FG_PCT`, `PTS`, `PTS%`, and `PTS%+`
+for each of the seven published source zones, which is 43 fields in all. Six of
+those zones are the rows the tab displays, and they keep the two corner sides
+separate; the response also carries the provider's combined `Corner 3` zone,
+which the tab ignores. An eighth source zone, `Backcourt`, contributes to the
+calculation and is then dropped, so it reaches no field of the response. Counts
+are per game. It is served publication-first from
+`exact_shot_zones`, following the `player_per36` precedent: while that stream
+is disabled the legacy `player_shooting_zones` table is read, and once it is
+enabled the publication is the only source. Both render the same profile
+through one transformation, so the cutover changes where the numbers come from
+and not what they are. The name is still resolved by the historical
+`player_information` lookup, and an unknown player, an unavailable publication,
+or a publication the strict decoder refuses all return `404`.
+
 `Archetype` returns the same array of per-36 cluster game logs it always has,
 now read from the governed `player_game_logs` publication rather than from an
 upstream provider. Membership is the selected player's `player_clusters`

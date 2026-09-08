@@ -291,3 +291,224 @@ def test_the_on_demand_play_type_seam_still_collects_and_publishes(
     assert read_table(engine, "player_play_types")["PLAYER_NAME"].tolist() == [
         "LeBron James"
     ]
+
+
+# --- player shooting zones (#267) ------------------------------------------
+
+
+def _recorded_zone_frame(kind="per_game"):
+    """A recorded wide provider frame, exactly as the endpoint returns it.
+
+    ``per_game`` is the per-mode the nightly reads.  ``totals`` is the same
+    endpoint and the same players in season counts, and is used where the
+    assertion needs the nonzero ``Backcourt`` attempts that PerGame rounds
+    away for every player.
+    """
+
+    import json
+    from pathlib import Path
+
+    from nba_api.stats.endpoints._base import Endpoint
+
+    result_set = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "player_diets"
+         / "player_shot_zones_league.json").read_text(encoding="utf-8")
+    )[kind]
+    return Endpoint.DataSet(
+        {"headers": result_set["headers"], "data": result_set["rowSet"]}
+    ).get_data_frame()
+
+
+def test_the_zone_profile_transform_is_the_historical_43_column_arithmetic(
+    service, monkeypatch
+):
+    """#267 moves this frame's source, not its statistics.
+
+    The fixture carries nonzero ``Backcourt`` attempts, which the profile reads
+    into ``Sum`` and into the league ``PTS%`` mean before dropping the category
+    at the final projection.  Pinning the values here is what stops the
+    cutover quietly changing a published number.
+    """
+
+    monkeypatch.setattr(
+        service, "_fetch_player_zone_data",
+        lambda *a, **k: _recorded_zone_frame("totals"),
+    )
+
+    frame = service._collect_player_zone()
+
+    assert len(frame.columns) == 43
+    assert not [column for column in frame.columns if "Backcourt" in column]
+    assert list(frame.columns[:4]) == [
+        "PLAYER_NAME", "Restricted Area_FGM", "Restricted Area_FGA",
+        "Restricted Area_FG_PCT",
+    ]
+    source = _recorded_zone_frame("totals")
+    source.columns = ["_".join(filter(None, column)).strip() for column in source.columns]
+    assert source["Backcourt_FGA"].sum() > 0
+
+    row = frame[frame["PLAYER_NAME"] == "LeBron James"].to_dict(orient="records")[0]
+    assert row["Restricted Area_FGM"] == pytest.approx(257.0)
+    assert row["Restricted Area_PTS"] == pytest.approx(514.0)
+    assert row["Above the Break 3_PTS"] == pytest.approx(
+        source.loc[source["PLAYER_NAME"] == "LeBron James", "Above the Break 3_FGM"].iloc[0] * 3
+    )
+    # ``Sum`` is the historical sum over every remaining numeric column, which
+    # includes the Backcourt metrics that never reach the rendered row.
+    identity = ["PLAYER_ID", "PLAYER_NAME", "TEAM_ID", "TEAM_ABBREVIATION", "AGE", "NICKNAME"]
+    lebron = source[source["PLAYER_NAME"] == "LeBron James"]
+    expected_sum = (
+        lebron.drop(identity, axis=1).sum(axis=1).iloc[0]
+        + row["Restricted Area_PTS"]
+        + sum(
+            row[column] for column in row
+            if column.endswith("_PTS") and column != "Restricted Area_PTS"
+        )
+    )
+    assert row["Restricted Area_PTS%"] == pytest.approx(
+        row["Restricted Area_PTS"] / expected_sum * 100
+    )
+
+    # LeBron attempted no backcourt shot, so his ``Sum`` cannot notice the
+    # category leaving the denominator and his row alone cannot pin the rule
+    # the spec states: "Drop Backcourt only at the original transformation
+    # stage after Sum/PTS%/league PTS%+ calculation."  Anthony Black made one
+    # of one from the backcourt, so his three Backcourt source cells are worth
+    # exactly 3.0 in a historically computed ``Sum`` and his ``PTS%`` moves if
+    # they are dropped first.
+    assert source.loc[source["PLAYER_NAME"] == "Anthony Black", "Backcourt_FGA"].iloc[0] > 0
+    black = frame[frame["PLAYER_NAME"] == "Anthony Black"].to_dict(orient="records")[0]
+
+    # Derived from the fixture alone, never from the transform: the historical
+    # ``Sum`` is every source metric cell across all eight provider categories
+    # plus the seven published zones' ``PTS``, two points inside the arc and
+    # three outside it.
+    two_point_zones = ("Restricted Area", "In The Paint (Non-RA)", "Mid-Range")
+    three_point_zones = (
+        "Left Corner 3", "Right Corner 3", "Above the Break 3", "Corner 3",
+    )
+    black_source = source[source["PLAYER_NAME"] == "Anthony Black"]
+    metric_cells = black_source.drop(identity, axis=1).sum(axis=1).iloc[0]
+    zone_points = sum(
+        black_source[f"{zone}_FGM"].iloc[0] * points
+        for zones, points in ((two_point_zones, 2), (three_point_zones, 3))
+        for zone in zones
+    )
+    backcourt_cells = sum(
+        black_source[f"Backcourt_{metric}"].iloc[0]
+        for metric in ("FGM", "FGA", "FG_PCT")
+    )
+    assert backcourt_cells == pytest.approx(3.0)
+    assert black["Restricted Area_PTS"] == pytest.approx(340.0)
+    assert black["Restricted Area_PTS%"] == pytest.approx(
+        black["Restricted Area_PTS"] / (metric_cells + zone_points) * 100
+    )
+    # The independently computed historical value, pinned so the published
+    # number cannot drift with the implementation.
+    assert black["Restricted Area_PTS%"] == pytest.approx(15.86696390779054)
+    # ...and the same statistic with Backcourt dropped before ``Sum`` is a
+    # different number, so the two assertions above are genuinely load-bearing
+    # rather than agreeing by coincidence the way LeBron's row does.
+    assert black["Restricted Area_PTS%"] != pytest.approx(
+        black["Restricted Area_PTS"]
+        / (metric_cells + zone_points - backcourt_cells) * 100
+    )
+
+
+def test_extra_provider_evidence_cannot_reach_the_zone_profile_denominator(
+    service, monkeypatch
+):
+    """Games played and minutes are collected beside the profile, not into it.
+
+    ``Sum`` sums every remaining numeric column, so an unpinned input column
+    would silently move every ``PTS%`` and every ``PTS%+`` on the tab.
+    """
+
+    monkeypatch.setattr(
+        service, "_fetch_player_zone_data", lambda *a, **k: _recorded_zone_frame()
+    )
+    clean = service._collect_player_zone()
+
+    contaminated = _recorded_zone_frame()
+    contaminated.columns = [
+        "_".join(filter(None, column)).strip() for column in contaminated.columns
+    ]
+    contaminated["GP"] = 41
+    contaminated["MIN"] = 1234.5
+    contaminated["RETRIEVED_AT_EPOCH"] = 1.7e9
+    monkeypatch.setattr(
+        service, "_fetch_player_zone_data", lambda *a, **k: contaminated
+    )
+
+    pd.testing.assert_frame_equal(clean, service._collect_player_zone())
+
+
+def test_an_activated_zone_stream_costs_the_nightly_no_nba_request(
+    service, monkeypatch
+):
+    """The last NBA Stats dependency leaves the nightly on activation.
+
+    The fence decides from the table name before the collector runs, so assert
+    on the collector invocation rather than on the published set.
+    """
+
+    from app.services.collection_control import ControlPlaneError
+
+    collected = []
+
+    class Fence:
+        def __init__(self, activated):
+            self.activated = activated
+
+        def assert_writable(self, stream_key, connection=None):
+            if stream_key in self.activated:
+                raise ControlPlaneError("legacy_write_fenced")
+
+    def _record(name, value):
+        def build():
+            collected.append(name)
+            return value
+        return build
+
+    for attribute, table_name in (
+        ("_collect_player_information", "player_information"),
+        ("_fetch_player_per36_stats", "player_per36_stats"),
+        ("_collect_opp_shooting_zone", "opp_shooting_zone"),
+        ("_collect_player_zone", "player_shooting_zones"),
+    ):
+        monkeypatch.setattr(
+            service, attribute, _record(table_name, pd.DataFrame([{"value": "new"}])),
+        )
+    monkeypatch.setattr(
+        service, "_collect_pbp_frame",
+        lambda kind: _record("pbp_opponent_stats", pd.DataFrame([{"v": 1}]))(),
+    )
+
+    # Preactivation: the legacy fallback writer is still the only source.
+    service.write_fence = Fence(set())
+    service._collect_all_frames()
+    assert "player_shooting_zones" in collected
+
+    collected.clear()
+    service.write_fence = Fence({"exact_shot_zones"})
+    frames = service._collect_all_frames()
+    assert "player_shooting_zones" not in collected
+    assert "player_shooting_zones" not in frames
+    # The tables with no database-first replacement still refresh.
+    assert "player_information" in collected
+
+
+def test_a_zone_response_missing_a_pinned_source_column_is_refused(
+    service, monkeypatch
+):
+    """A narrowed provider response must fail, not render a partial profile."""
+
+    frame = _recorded_zone_frame()
+    frame.columns = ["_".join(filter(None, column)).strip() for column in frame.columns]
+    monkeypatch.setattr(
+        service, "_fetch_player_zone_data",
+        lambda *a, **k: frame.drop(columns=["Backcourt_FGA"]),
+    )
+
+    with pytest.raises(KeyError, match="Backcourt_FGA"):
+        service._collect_player_zone()

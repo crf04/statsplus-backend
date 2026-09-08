@@ -3924,6 +3924,27 @@ fails the candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
 read-side decoder must accept the exact candidate before its pointer moves.
 
+`exact_shot_zones` is the third member of that set and the only one with two
+readers, so it is a third composition branch rather than a set entry: the
+shot-type branch would compose it as shot types. Its branch reads one wide
+observation per manifest, requires the five canonical zone slices, and asserts
+both per-modes explicitly -- the Diet volumes are season `Totals` over an
+explicit games-played read, and the auxiliary `profile` section is `PerGame`.
+That profile section carries the wider provider vocabulary the "Zone Shooting"
+tab renders (separate corner sides, and `Backcourt` as an input to its `Sum`
+and league reference) and deliberately does not widen the shared Diet/opponent
+zone slices in `app/domain/player_shot_zone_taxonomy.py` versus
+`app/domain/team_matchup_taxonomy.py`. Both read-side decoders --
+`decode_player_diet` for the five facts and `decode_player_shot_zones` for the
+profile -- must accept the exact candidate before its pointer moves, because
+activation cuts both readers over at once. The profile keeps every source row
+and the provider's row order, and keeps an unreported category `null`: its
+`PTS%+` columns divide by a league mean over that population, so dropping a
+row, reordering it, or zeroing a missing cell moves published values.
+`app/services/player_zone_profile.py` is the single implementation of that
+43-column transformation, used by both the legacy nightly frame and the
+publication reader so the two cannot drift.
+
 `shot_type_shooting_violation` is the single statement of what a shooting
 split may be: finite, nonnegative, shares at most one, and makes never above
 attempts. `PlayerDietRepository` raises on it when persisting a refreshed

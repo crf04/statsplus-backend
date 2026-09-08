@@ -499,86 +499,15 @@ class DataService:
         return pivot_df
 
     def _collect_player_zone(self):
-        """Build the player shooting-zone frame."""
-        player_zones = self._fetch_player_zone_data()
-        player_zones.columns = [
-            "_".join(filter(None, column)).strip() for column in player_zones.columns
-        ]
+        """Build the player shooting-zone frame.
 
-        player_zones_columns = [
-            column
-            for column in player_zones.columns
-            if ("FGM" in column or "_NAME" in column) and "Back" not in column
-        ]
+        The arithmetic lives in :mod:`app.services.player_zone_profile` so the
+        legacy table and the ``exact_shot_zones`` publication reader render one
+        profile from one implementation and cannot drift apart.
+        """
+        from app.services.player_zone_profile import transform_player_zone_profile
 
-        for column in player_zones_columns:
-            if "NAME" not in column:
-                player_zones[column.split("_")[0] + "_PTS"] = (
-                    player_zones[column] * 2
-                    if "3" not in column
-                    else player_zones[column] * 3
-                )
-
-        sums = player_zones.drop(
-            [
-                "PLAYER_NAME",
-                "PLAYER_ID",
-                "TEAM_ID",
-                "TEAM_ABBREVIATION",
-                "AGE",
-                "NICKNAME",
-            ],
-            axis=1,
-        ).sum(axis=1)
-        player_zones["Sum"] = sums
-
-        for column in player_zones_columns:
-            if "NAME" not in column:
-                percentage_column_name = column.split("_")[0] + "_PTS%"
-                player_zones[percentage_column_name] = (
-                    player_zones[column.split("_")[0] + "_PTS"]
-                    / player_zones["Sum"]
-                    * 100
-                )
-
-        means = player_zones.drop(
-            [
-                "PLAYER_NAME",
-                "PLAYER_ID",
-                "TEAM_ID",
-                "TEAM_ABBREVIATION",
-                "AGE",
-                "NICKNAME",
-            ],
-            axis=1,
-        ).mean()
-        cols = [column for column in player_zones.columns if "PTS%" in column]
-
-        for column in cols:
-            if means[column] != 0:
-                player_zones[f"{column}+"] = player_zones[column] / means[column]
-            else:
-                player_zones[f"{column}+"] = 0
-
-        player_zones.drop(
-            [column for column in player_zones.columns if "Backcourt" in column],
-            axis=1,
-            inplace=True,
-        )
-        player_zones.drop(
-            [
-                "PLAYER_ID",
-                "TEAM_ID",
-                "TEAM_ABBREVIATION",
-                "AGE",
-                "NICKNAME",
-                "Sum",
-            ],
-            axis=1,
-            inplace=True,
-        )
-        player_zones.fillna(0, inplace=True)
-        return player_zones
+        return transform_player_zone_profile(self._fetch_player_zone_data())
 
     def _collect_assist_frames(self, pbp_player_df):
         """Build the processed player assist table from the in-memory PBP frame.

@@ -17,7 +17,11 @@ from app.models.collection_control import (
 from app.services.collection_control import CollectionControlService, ControlPlaneError
 from app.services.matchup_authority import lock_matchup_authority_serialization
 
-STREAM = "grouped_shot_types"
+#: The residential player-shooting streams this daily tick authorizes.  Each
+#: is scheduled on its own enabled flag: one being disabled -- or having no
+#: evidence yet -- must not stop the other being collected, and one manifest
+#: covers whichever are enabled rather than one manifest per stream.
+STREAMS = ("grouped_shot_types", "exact_shot_zones")
 CENTRAL = ZoneInfo("America/Chicago")
 ACTOR = "player_shooting_refresh"
 REASON = "Daily residential player shooting refresh"
@@ -50,9 +54,14 @@ class PlayerShootingRefresh:
                 ActiveSeason.season == season, ActiveSeason.status == "active",
                 ActiveSeason.phase == "Regular Season",
             )).first()
-            enabled = connection.execute(select(PublicationStream.stream_key).where(
-                PublicationStream.stream_key == STREAM, PublicationStream.enabled.is_(True),
-            )).first()
+            enabled = {
+                row[0] for row in connection.execute(
+                    select(PublicationStream.stream_key).where(
+                        PublicationStream.stream_key.in_(STREAMS),
+                        PublicationStream.enabled.is_(True),
+                    )
+                )
+            }
             queued = connection.execute(select(CompositionJob.job_id).where(
                 CompositionJob.season == season, CompositionJob.status == "queued",
             ).limit(1)).first() if active and enabled else None
@@ -65,15 +74,23 @@ class PlayerShootingRefresh:
             # Every decision and the existing nested control-service writes
             # share this transaction and the lock also used by manual writers.
             active = lock_matchup_authority_serialization(session, season)
-            stream = session.scalar(select(PublicationStream).where(
-                PublicationStream.stream_key == STREAM,
-            ).with_for_update())
-            if stream is None or not stream.enabled:
+            streams = {
+                row.stream_key
+                for row in session.scalars(select(PublicationStream).where(
+                    PublicationStream.stream_key.in_(STREAMS),
+                ).with_for_update()).all()
+                if row.enabled
+            }
+            if not streams:
                 return {"state": "disabled", "composed_jobs": composed}
-            state = self._authorize(connection, session, active, season, now, cutoff, deadline)
+            state = self._authorize(
+                connection, session, active, season, now, cutoff, deadline,
+                streams=streams,
+            )
         return {"state": state, "composed_jobs": composed, "cutoff": cutoff.isoformat()}
 
-    def _authorize(self, connection, session, active, season, now, cutoff, deadline):
+    def _authorize(self, connection, session, active, season, now, cutoff,
+                   deadline, *, streams):
         manifests = session.scalars(select(CollectionManifest).where(
             CollectionManifest.season == season,
         ).order_by(CollectionManifest.cutoff.desc(), CollectionManifest.created_at.desc())).all()
@@ -96,13 +113,26 @@ class PlayerShootingRefresh:
         if pending_repair:
             return "repair_pending"
         for manifest in current:
-            if _utc(manifest.cutoff) == cutoff and _utc(manifest.collect_before) >= deadline and STREAM in json.loads(manifest.scopes):
+            # Every enabled stream must already be in the open manifest.  A
+            # manifest that covers only the sibling is not authority for a
+            # stream enabled since it was issued.
+            if (
+                _utc(manifest.cutoff) == cutoff
+                and _utc(manifest.collect_before) >= deadline
+                and streams <= set(json.loads(manifest.scopes))
+            ):
                 return "manifest_ready"
             if _utc(manifest.collect_before) > now and not self._complete(session, manifest):
                 return "collection_pending"
-        scopes = {STREAM}
+        scopes = set(streams)
         for manifest in current or ([latest] if latest else []):
-            scopes.update(json.loads(manifest.scopes))
+            # Sibling scopes this tick does not manage are preserved as
+            # before.  Membership of the player-shooting streams, though,
+            # follows the currently enabled set: a stream disabled since the
+            # prior manifest was issued must not be copied forward into new
+            # collectible work, which would leave it discoverable and
+            # executable by the collector after being turned off.
+            scopes.update(set(json.loads(manifest.scopes)) - set(STREAMS))
         control = CollectionControlService(connection, clock=lambda: now)
         # create_manifest remains the authority for freshness, identity,
         # completeness, and immutable Event Catalog binding.

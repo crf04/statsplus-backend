@@ -262,14 +262,41 @@ class ResidentialScopeExecutor:
                     observation = fetch_and_reconcile()
                 yield observation
                 return
-            raw = _call(
+            # Three reads describe one window.  ``PerGame`` is the profile
+            # evidence the Zone Shooting tab has always been built from;
+            # ``Totals`` and an explicit games-played read are what the Diet
+            # volumes need, because a rounded PerGame value cannot be
+            # multiplied back into a season total.  The date bound is passed to
+            # all three so they cannot describe different cutoffs.
+            date_to = parameters.get("date_to")
+            per_game = _call(
                 self.provider, "fetch_player_shooting_zone",
-                parameters.get("date_from"), season=work.season,
-                season_type="Regular Season",
+                parameters.get("date_from"), date_to=date_to,
+                season=work.season, season_type="Regular Season",
+                per_mode_detailed="PerGame",
+            )
+            totals = _call(
+                self.provider, "fetch_player_shooting_zone",
+                parameters.get("date_from"), date_to=date_to,
+                season=work.season, season_type="Regular Season",
+                per_mode_detailed="Totals",
+            )
+            games = _call(
+                self.provider, "fetch_player_season_totals",
+                parameters.get("date_from"), date_to=date_to,
+                season=work.season, season_type="Regular Season",
             )
             yield normalize_zone_response(
-                raw, season=work.season, cutoff=work.cutoff,
-                scope={"window": window, "subject": "player", "phase": "Regular Season"},
+                per_game, season=work.season, cutoff=work.cutoff,
+                scope={
+                    "window": window, "subject": "player",
+                    "phase": "Regular Season",
+                    "endpoint_window": {
+                        "date_from": parameters.get("date_from"),
+                        "date_to": date_to,
+                    },
+                },
+                totals_response=totals, games_response=games,
             )
             return
         if scope in {"synergy:l15", "synergy_l15"}:
@@ -438,16 +465,40 @@ class _StandaloneNBAProvider:
         ))
 
     def fetch_player_shooting_zone(
-        self, date_from: str | None = None, *, season: str,
-        season_type: str,
+        self, date_from: str | None = None, *, date_to: str | None = None,
+        season: str, season_type: str, per_mode_detailed: str = "PerGame",
     ) -> Any:
         from nba_api.stats import endpoints
         return self._request(lambda: endpoints.LeagueDashPlayerShotLocations(
             distance_range="By Zone",
-            per_mode_detailed="PerGame",
+            per_mode_detailed=per_mode_detailed,
             date_from_nullable=date_from,
+            date_to_nullable=date_to,
             season=season,
             season_type_all_star=season_type,
+            timeout=self.timeout,
+        ))
+
+    def fetch_player_season_totals(
+        self, date_from: str | None = None, *, date_to: str | None = None,
+        season: str, season_type: str,
+    ) -> Any:
+        """Fetch the player games-played evidence the zone volumes need.
+
+        ``LeagueDashPlayerShotLocations`` reports no ``GP``, and deriving one
+        by dividing Totals by rounded PerGame values would invent a game count.
+        The Diet's denominator therefore comes from its own read, over the same
+        season, phase and date bound.
+        """
+
+        from nba_api.stats import endpoints
+        return self._request(lambda: endpoints.LeagueDashPlayerStats(
+            per_mode_detailed="Totals",
+            date_from_nullable=date_from,
+            date_to_nullable=date_to,
+            season=season,
+            season_type_all_star=season_type,
+            league_id_nullable="00",
             timeout=self.timeout,
         ))
 

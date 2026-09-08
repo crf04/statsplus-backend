@@ -376,6 +376,146 @@ def decode_player_diet(
     return tuple(result)
 
 
+@dataclass(frozen=True, slots=True)
+class PlayerShotZoneProfileRow:
+    """One player's wide Zone Shooting evidence, exactly as published.
+
+    ``categories`` holds every provider category, including the two corner
+    sides and ``Backcourt``, each mapping ``FGM``/``FGA``/``FG_PCT`` to a
+    number or to ``None``.  ``None`` means the provider reported no such shot,
+    and it must stay ``None``: the profile's league ``PTS%+`` reference is a
+    mean that skips missing cells, so substituting zero would change every
+    other player's row.
+    """
+
+    player_id: int
+    player_name: str
+    team_id: int
+    team_abbreviation: str
+    age: float
+    nickname: str
+    categories: Mapping[str, Mapping[str, float | None]]
+
+
+def decode_player_shot_zones(payload: Any) -> tuple[PlayerShotZoneProfileRow, ...]:
+    """Decode only the auxiliary Zone Shooting profile section.
+
+    The five-slice Diet facts on the same publication are decoded by
+    ``decode_player_diet``, which already owns that fact model; duplicating its
+    validation here would give the two consumers two different opinions of the
+    same rows.  This decoder covers what the Diet fact model has no place for:
+    the wider profile vocabulary the "Zone Shooting" tab renders.
+
+    Both decoders must accept a candidate before it is activated, because the
+    publication serves both readers.
+    """
+
+    from app.domain.player_shot_zone_taxonomy import (
+        PLAYER_SHOT_ZONE_PROFILE_CATEGORIES,
+        PLAYER_SHOT_ZONE_PROFILE_METRICS,
+        player_shot_zone_profile_violation,
+    )
+
+    stream_key = "exact_shot_zones"
+    if not isinstance(payload, Mapping):
+        raise PublicationPayloadError(f"{stream_key} publication must be an object")
+    if payload.get("base") not in (None, "shot_zones"):
+        raise PublicationPayloadError(f"{stream_key} publication base mismatch")
+    profile = _strict_mapping(
+        payload.get("profile"), field="profile", stream_key=stream_key
+    )
+    if profile.get("value_mode") != "PerGame":
+        # The tab has always shown per-game counts.  A Totals payload would
+        # render silently, and every number on the tab would be wrong.
+        raise PublicationPayloadError(
+            f"{stream_key} publication profile value mode mismatch"
+        )
+    if set(profile.get("categories") or ()) != set(
+        PLAYER_SHOT_ZONE_PROFILE_CATEGORIES
+    ) or set(profile.get("metrics") or ()) != set(PLAYER_SHOT_ZONE_PROFILE_METRICS):
+        raise PublicationPayloadError(
+            f"{stream_key} publication profile taxonomy mismatch"
+        )
+    rows = profile.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise PublicationPayloadError(f"{stream_key} publication profile is empty")
+    result: list[PlayerShotZoneProfileRow] = []
+    identities: set[int] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise PublicationPayloadError(
+                f"{stream_key} publication profile row is not an object"
+            )
+        for field in (
+            "player_id", "player_name", "team_id", "team_abbreviation", "age",
+            "nickname", "categories",
+        ):
+            _required(row, field, stream_key=stream_key)
+        player_id = _strict_int(
+            row["player_id"], field="player_id", stream_key=stream_key, minimum=1
+        )
+        if player_id in identities:
+            raise PublicationPayloadError(
+                f"{stream_key} publication profile repeats a player"
+            )
+        identities.add(player_id)
+        source = _strict_mapping(
+            row["categories"], field="categories", stream_key=stream_key
+        )
+        if set(source) != set(PLAYER_SHOT_ZONE_PROFILE_CATEGORIES):
+            raise PublicationPayloadError(
+                f"{stream_key} publication profile taxonomy mismatch"
+            )
+        categories: dict[str, dict[str, float | None]] = {}
+        for category in PLAYER_SHOT_ZONE_PROFILE_CATEGORIES:
+            values = _strict_mapping(
+                source[category], field=category, stream_key=stream_key
+            )
+            if set(values) != set(PLAYER_SHOT_ZONE_PROFILE_METRICS):
+                raise PublicationPayloadError(
+                    f"{stream_key} publication profile taxonomy mismatch"
+                )
+            violation = player_shot_zone_profile_violation(values)
+            if violation is not None:
+                raise PublicationPayloadError(
+                    f"{stream_key} publication profile {category}: {violation}"
+                )
+            categories[category] = {
+                metric: (
+                    None
+                    if values[metric] is None
+                    else _strict_float(
+                        values[metric],
+                        field=f"{category}.{metric}",
+                        stream_key=stream_key,
+                        minimum=0,
+                    )
+                )
+                for metric in PLAYER_SHOT_ZONE_PROFILE_METRICS
+            }
+        result.append(PlayerShotZoneProfileRow(
+            player_id=player_id,
+            player_name=_strict_text(
+                row["player_name"], field="player_name", stream_key=stream_key
+            ),
+            team_id=_strict_int(
+                row["team_id"], field="team_id", stream_key=stream_key, minimum=1
+            ),
+            team_abbreviation=_strict_text(
+                row["team_abbreviation"], field="team_abbreviation",
+                stream_key=stream_key,
+            ),
+            age=_strict_float(
+                row["age"], field="age", stream_key=stream_key, minimum=0
+            ),
+            nickname=_strict_text(
+                row["nickname"], field="nickname", stream_key=stream_key
+            ),
+            categories=categories,
+        ))
+    return tuple(result)
+
+
 def decode_player_per36(payload: Any, *, season: str | None = None) -> tuple[Any, ...]:
     """Decode the immutable per-36 ledger rows without lossy coercion.
 

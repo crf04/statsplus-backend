@@ -119,6 +119,40 @@ AC recovery to restore the prior power state, and keep WakeToRun enabled. A
 private-network always-on device may provide manual Wake-on-LAN recovery; the
 Railway service never opens an inbound connection to the PC.
 
+## Player shot zones: three reads, two per-modes, one window
+
+`exact_shot_zones` is the only player surface whose publication serves two
+readers, and they need different per-modes. The Player Profile's "Zone
+Shooting" category has always shown per-game counts; the player Diet's five
+canonical slices are season totals over an explicit games-played denominator.
+A rounded PerGame value cannot be multiplied back into a season total, so the
+collector makes three reads for one observation:
+
+| read | endpoint | per-mode | feeds |
+| --- | --- | --- | --- |
+| profile | `LeagueDashPlayerShotLocations` | `PerGame` | the wide `profile` section |
+| volumes | `LeagueDashPlayerShotLocations` | `Totals` | the five Diet slices |
+| denominator | `LeagueDashPlayerStats` | `Totals` (`GP`) | `games_played` |
+
+All three carry the manifest's date bound, and all three must describe the same
+players; a disagreement is `provider_window_unverified` rather than a partial
+observation. The scope and payload state both per-modes explicitly
+(`profile_value_mode`, `diet_value_mode`), and a candidate that does not state
+them cannot authorize a publication.
+
+The `profile` section keeps every provider category, including `Left Corner 3`,
+`Right Corner 3` and `Backcourt`. That is deliberately wider than the five
+shared Diet/opponent zone slices, which are unchanged: the profile shows the
+corner sides separately, and its `Sum` and league `PTS%` reference read
+`Backcourt` before dropping it. A category the provider did not report stays
+`null` all the way to the publication, because the league reference is a mean
+that skips missing cells and a zero would move every other player's row. For
+the same reason the published profile keeps the provider's row order.
+
+Every source row is retained even when the player has no attempts in any
+published zone and therefore contributes no Diet facts: the league reference is
+a mean over the whole population.
+
 ## Opponent shot zones: Totals, not the provider's rate
 
 The NBA shot-location endpoint offers a `Per48` per-mode, and for opponent
@@ -212,16 +246,19 @@ audit but never enqueue or advance a product Publication.
 files and their relative names. Railway should record that version/checksum.
 Keep old release directories until the rehearsal and rollback drill pass.
 
-## Daily player Shooting Type refresh
+## Daily player shooting refresh
 
 `python scripts/player_shooting_refresh.py 2025-26` is the bounded hosted
-control-plane tick for the enabled `grouped_shot_types` stream. Configure its
+control-plane tick for the enabled player shooting streams, `grouped_shot_types`
+(Shooting Type) and `exact_shot_zones` (Zone Shooting). Configure its
 writable database through `DATABASE_URL`; the command takes no database URL or
 credentials in its arguments. Run it every five minutes (`*/5 * * * *`) with
 the deployed application's environment and migration pre-deploy gate.
 
-The tick requires an already-active Regular Season and the explicitly enabled
-stream. It never activates a season or stream. Between 03:45 and 11:00
+The tick requires an already-active Regular Season and at least one explicitly
+enabled stream. Each stream is scheduled on its own `enabled` flag, so one may
+be collected while the other stays disabled. The tick never activates a season
+or stream. Between 03:45 and 11:00
 America/Chicago, it requests the exact day's 03:45 Event Catalog, then requests
 an Athlete Catalog only if the existing catalog fails the normal reuse and
 identity gates. Requests survive process restarts and repeated ticks reuse
@@ -229,7 +266,11 @@ unexpired pending requests. All collection deadlines are 11:00 Central; DST
 changes follow the named timezone.
 
 Once the existing catalog gates pass, the tick creates one governed manifest
-with `grouped_shot_types` and the prior manifest's sibling scopes. Its decisions
+covering every enabled player shooting stream plus the prior manifest's sibling
+scopes. An open manifest that does not already cover a stream enabled since it
+was issued is not authority for that stream, but its collection window is still
+a shared completeness fence: the tick waits for it rather than issuing an
+overlapping manifest. Its decisions
 and writes hold the existing season-authority lock in one transaction. Newer
 authority, an active unpromoted repair group, or unexpired incomplete collection
 holds issuance. It records an actor and reason for new requests and manifests.
