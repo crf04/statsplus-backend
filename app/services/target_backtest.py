@@ -16,13 +16,12 @@ is a claim about production, and a claim resting on an unusable Diet is worse
 than no claim.
 
 *Outcomes are proxies.*  No per-game shot-zone or play-type evidence exists,
-so a Qualifier's slice is measured through the box-score markets the Defense
-Sheet already maps that slice to (``qualifier_slice_outcome_markets``).  Only
-the slice's outcome rows are asked -- a shot zone's made shots, not its
-attempts -- because the question is what a player produced against this
-opponent, and an attempt is not production.  A Corner 3 Qualifier therefore
-reads as points and threes, never as corner threes made, and the response says
-so in ``proxy``.
+so a Qualifier's slice is measured through a small, approved set of box-score
+columns.  The defaults follow the slice's family: points and field-goal
+attempts for play and shot types, the relevant two- or three-point attempts
+for shot zones, and assists for assist locations.  Each default also carries
+its per-36 rate where the box score supplies minutes.  The response says this
+in ``proxy``; the complete typed line remains available for saved preferences.
 
 The player set is drawn from the whole league rather than one team, and it is
 drawn from the opponent's own game-log rows: a qualifying player who has never
@@ -41,16 +40,17 @@ NBA, PBP, or DFS provider is reached.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from math import isfinite
 from typing import Any, Protocol
 
 from app.config.settings import RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+from app.domain.target_statistics import target_stat_columns
 from app.models.target import TARGET_COMPARATOR_TESTS
 from app.services.matchup import (
     diet_evidence_thin,
     observed_diet_share,
-    slice_markets,
 )
 from app.services.player_diet import (
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
@@ -64,7 +64,10 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerSeasonLogSummary,
 )
-from app.services.player_game_log_values import player_game_log_focal_line
+from app.services.player_game_log_values import (
+    player_game_log_focal_line,
+    selected_player_game_log_market_values,
+)
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.target_conditions import (
     date_is_kept,
@@ -84,6 +87,9 @@ _BOX_FIELDS = {
     'fouls': 'personal_fouls', 'minutes': 'minutes',
 }
 
+# ``3PA`` is the Target display spelling for the governed ``FG3A`` market.
+_TARGET_MARKET_ALIASES = {"3PA": "FG3A"}
+
 #: Every stream this read composes.  The Diet and the game logs are resolved
 #: from one snapshot so a response cannot mix generations.
 _PUBLICATION_STREAM_KEYS = (
@@ -102,50 +108,13 @@ BACKTEST_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
 #: the caller hands it one.
 _OWN = object()
 
-#: The stat key each Diet Base states an *outcome* in.  A Base publishes a
-#: Defense Sheet row per stat key, but only some of those rows are things a
-#: player produced: a shot zone has an FGM row and an FGA row, and only FGM is
-#: production.  Attempt and possession rows (``FGA``, ``FG2A``, ``FG3A``,
-#: ``POSS``) are deliberately absent, so a backtest column is always something
-#: that happened rather than something that was tried.  Assist locations name
-#: the slice as their own stat key, so they are read from the slice rather
-#: than listed here.
-_BASE_OUTCOME_STAT_KEYS = {
-    "play_types": ("PTS",),
-    "shot_types": ("FG2M", "FG3M"),
-    "shot_zones": ("FGM",),
-}
-
-
-def qualifier_slice_outcome_markets(base: str, slice_key: str) -> tuple[str, ...]:
-    """The Stat Categories a Diet slice's outcome rows map to.
-
-    The mapping from a Qualifier's slice to the box-score columns that stand
-    in for it, restricted to the rows that state an outcome: ``Corner 3`` is
-    points and threes, ``Transition`` is points and the point combos, and
-    neither carries the attempts its own Defense Sheet row also reports.
-
-    The mapping itself is ``slice_markets``, the Matchup's own, so a column
-    here can never disagree with the ``markets`` a Defense Sheet row
-    advertises for the same slice; what this narrows is which of that slice's
-    rows are asked.  It lives here rather than in ``matchup.py`` because a
-    Qualifier is a Target's concern, not the Defense Sheet's.
-    """
-
-    markets: list[str] = []
-    for stat_key in _BASE_OUTCOME_STAT_KEYS.get(base, (slice_key,)):
-        for market in slice_markets(base, slice_key, stat_key):
-            if market not in markets:
-                markets.append(market)
-    return tuple(markets)
-
-#: The one sentence this response owes its reader.  Every column below is a
-#: box-score market the Qualifier's slice maps to, not the slice itself.
+#: The one sentence this response owes its reader.  The columns are approved
+#: box-score proxies for the named Diet slices, not slice-level outcomes.
 PROXY_NOTE = (
     "Outcomes are box-score proxies for the Qualifier slices, not slice-level "
-    "results. Each stat column is a market the Matchup's defense sheet already "
-    "maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and "
-    "threes rather than as corner threes made."
+    "results. Base columns are whole-game box-score stats, and /36 columns are "
+    "derived from minutes. A Corner 3 Qualifier therefore reads as points and "
+    "three-point attempts rather than as corner threes."
 )
 
 
@@ -292,12 +261,13 @@ class TargetBacktestService:
         """Reduce every listed game to one line per stat column.
 
         ``mean_difference`` is the mean of (game stat - that player's season
-        average) over every game listed under every player, and
-        ``over_average_share`` the share of those games at or above the
-        average -- on the average counts, as both comparators are inclusive.
-        Both are ``None`` when no game is listed: no evidence is not a
-        difference of zero.  Computed here rather than by each reader so the
-        Lab and the saved detail show the same numbers.
+        average) over every listed game with both values available, and
+        ``over_average_share`` is the share of those same pairs at or above
+        the average -- an exact average counts, as both comparators are
+        inclusive.  Both are ``None`` when no such pair exists, including
+        when no game is listed or every listed value is unavailable.  Computed
+        here rather than by each reader so the Lab and the saved detail show
+        the same numbers.
         """
 
         lines = [
@@ -307,7 +277,12 @@ class TargetBacktestService:
         ]
         columns = {}
         for market in markets:
-            differences = [stats[market] - averages[market] for averages, stats in lines]
+            differences = [
+                stats[market] - averages[market]
+                for averages, stats in lines
+                if stats.get(market) is not None
+                and averages.get(market) is not None
+            ]
             columns[market] = {
                 "mean_difference": (
                     cls._number(sum(differences) / len(differences))
@@ -351,21 +326,9 @@ class TargetBacktestService:
     def _stat_columns(
         qualifiers: Sequence[Mapping[str, Any]],
     ) -> tuple[str, ...]:
-        """Union every Qualifier slice's outcome markets, in Qualifier order.
+        """Resolve the approved default union order."""
 
-        Two Qualifiers naming overlapping markets contribute one column each,
-        the first time each is named, so the column order is the reader's own
-        Qualifier order rather than an arbitrary set ordering.
-        """
-
-        columns: list[str] = []
-        for qualifier in qualifiers:
-            for market in qualifier_slice_outcome_markets(
-                qualifier["base"], qualifier["slice_key"]
-            ):
-                if market not in columns:
-                    columns.append(market)
-        return tuple(columns)
+        return target_stat_columns(qualifiers)
 
     def _players(
         self,
@@ -527,33 +490,104 @@ class TargetBacktestService:
         """
 
         newest = rows[0]
-        per_game = summary.season_rate.per_game
+        season_values = self._season_averages(summary, markets)
+        per_game_points = (
+            None
+            if summary.season_rate is None
+            else self._number_or_none(summary.season_rate.per_game.get("PTS"))
+        )
+        games = []
+        for record in rows:
+            line = player_game_log_focal_line(
+                record, (), self._statistics, precision=_WIRE_PRECISION
+            )
+            line["stats"] = self._game_stats(record, markets)
+            line["line"] = {
+                field: self._number(getattr(record, attr))
+                for field, attr in _BOX_FIELDS.items()
+            }
+            games.append(line)
         return {
             "canonical_id": int(newest.player_id),
             "name": newest.player_name,
             "team_id": int(newest.team_id),
             "tricode": str(newest.team_tricode),
-            "season_scoring": self._number_or_none(per_game.get("PTS")),
+            "season_scoring": per_game_points,
             "shares": list(shares),
             "season_games": len(season_rows),
             "season_totals": {
                 field: self._number(sum(getattr(row, attr) for row in season_rows))
                 for field, attr in _BOX_FIELDS.items()
             },
-            "season_averages": {
-                market: self._number_or_none(per_game.get(market))
-                for market in markets
-            },
-            "games": [
-                {
-                    **player_game_log_focal_line(
-                        record, markets, self._statistics, precision=_WIRE_PRECISION
-                    ),
-                    "line": {field: self._number(getattr(record, attr)) for field, attr in _BOX_FIELDS.items()},
-                }
-                for record in rows
-            ],
+            "season_averages": season_values,
+            "games": games,
         }
+
+    def _game_stats(
+        self, record: PlayerGameLogRecord, markets: Sequence[str]
+    ) -> dict[str, float | None]:
+        """Read governed game values and add Target's minute-based rates."""
+
+        display_bases = {
+            market: market[:-3] if market.endswith("/36") else market
+            for market in markets
+        }
+        governed_markets = tuple(
+            dict.fromkeys(
+                _TARGET_MARKET_ALIASES.get(base, base)
+                for base in display_bases.values()
+            )
+        )
+        values = selected_player_game_log_market_values(
+            record, governed_markets, self._statistics
+        )
+        stats: dict[str, float | None] = {}
+        for market, base in display_bases.items():
+            value = values[_TARGET_MARKET_ALIASES.get(base, base)]
+            if market.endswith("/36"):
+                minutes = getattr(record, "minutes", None)
+                if minutes is None:
+                    value = None
+                else:
+                    minutes = float(minutes)
+                    value = (
+                        None
+                        if not isfinite(minutes) or minutes <= 0
+                        else value / minutes * 36.0
+                    )
+            stats[market] = self._number_or_none(value)
+        return stats
+
+    @classmethod
+    def _season_averages(
+        cls,
+        summary: PlayerSeasonLogSummary,
+        markets: Sequence[str],
+    ) -> dict[str, float | None]:
+        """Read all-season rates, with per-36 weighted by total minutes."""
+
+        rate = summary.season_rate
+        per_game = {} if rate is None else rate.per_game
+        per_minute = {} if rate is None else rate.per_minute
+        result: dict[str, float | None] = {}
+        for market in markets:
+            if market.endswith("/36"):
+                base = market[:-3]
+                rate_base = "FG3A" if base == "3PA" else base
+                value = (
+                    None
+                    if rate is None or rate.total_minutes <= 0
+                    else per_minute.get(rate_base)
+                )
+                if value is not None:
+                    value *= 36.0
+                result[market] = cls._number_or_none(value)
+                continue
+
+            rate_market = "FG3A" if market == "3PA" else market
+            value = per_game.get(rate_market)
+            result[market] = cls._number_or_none(value)
+        return result
 
     @staticmethod
     def _number(value: float) -> float:

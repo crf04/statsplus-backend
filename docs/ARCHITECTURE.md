@@ -2062,11 +2062,14 @@ decoding the whole league twice per request.
 What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
 `observed_diet_share`, both now module-level in `matchup.py` for that reason,
 so the player the Matchup marks thin is the player the backtest drops. The
-stat columns are `qualifier_slice_outcome_markets`, which is
-`MatchupService._markets` over the rows a slice states an *outcome* in -- a
-shot zone's FGM row, not its FGA row -- so a backtest column cannot disagree
-with the `markets` a Defense Sheet row advertises for the same slice, and never
-reports an attempt as production. The Qualifier conjunction is
+stat columns come from `target_stat_columns` in `target_statistics.py`, which
+selects the approved whole-game box-score proxies for each Qualifier family in
+Qualifier order. Play and shot types expose points and field-goal attempts;
+two- and three-point zones expose `FG2A` and Target's `3PA` alias for governed
+`FG3A`; assist locations expose assists. Each base has a game and season
+per-36 rate when minutes are positive. These columns deliberately do not reuse
+Matchup's slice markets because the published game logs contain no
+slice-level shot or play evidence. The Qualifier conjunction is
 `TARGET_COMPARATOR_TESTS`, as in resolution.
 
 A deployment with no Diet service (the demo database, which carries no Diet

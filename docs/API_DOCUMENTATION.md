@@ -2881,14 +2881,16 @@ own. The request makes no NBA, PBP, or DFS call.
     "updated_at": "2026-09-04T12:00:00+00:00"
   },
   "season": "2025-26",
-  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
-  "stat_columns": ["PTS", "3PM"],
+  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
+  "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
   "summary": {
     "players": 1,
     "games": 2,
     "columns": {
       "PTS": {"mean_difference": 1.0, "over_average_share": 0.5},
-      "3PM": {"mean_difference": 1.0, "over_average_share": 1.0}
+      "PTS/36": {"mean_difference": 1.058824, "over_average_share": 0.5},
+      "3PA": {"mean_difference": 0.5, "over_average_share": 0.5},
+      "3PA/36": {"mean_difference": 0.529412, "over_average_share": 0.5}
     }
   },
   "players": [
@@ -2906,21 +2908,21 @@ own. The request makes no NBA, PBP, or DFS call.
           "league_average_share": 0.2
         }
       ],
-      "season_averages": {"PTS": 25.0, "3PM": 2.0},
+      "season_averages": {"PTS": 25.0, "PTS/36": 26.470588, "3PA": 6.0, "3PA/36": 6.352941},
       "games": [
         {
           "game_id": "0022500584",
           "game_date": "2026-01-16",
           "matchup": "LAL vs. OKC",
           "minutes": 34.0,
-          "stats": {"PTS": 30.0, "3PM": 4.0}
+          "stats": {"PTS": 30.0, "PTS/36": 31.764706, "3PA": 8.0, "3PA/36": 8.470588}
         },
         {
           "game_id": "0022500120",
           "game_date": "2025-11-03",
           "matchup": "LAL @ OKC",
           "minutes": 34.0,
-          "stats": {"PTS": 22.0, "3PM": 2.0}
+          "stats": {"PTS": 22.0, "PTS/36": 23.294118, "3PA": 5.0, "3PA/36": 5.294118}
         }
       ]
     }
@@ -2936,24 +2938,25 @@ or play-type evidence exists, so a Qualifier's slice is measured through
 box-score markets. Read `"PTS": 30` as thirty points, never as thirty corner
 threes.
 
-`stat_columns` is the union of the **outcome** markets each Qualifier's slice
-maps to, deduplicated and in the Target's own Qualifier order.
+`stat_columns` is the union of the approved default columns for each
+Qualifier, deduplicated and in the Target's own Qualifier order.
 `season_averages` and every game's `stats` carry exactly these columns, in this
 order.
 
-The mapping is the Matchup's -- the same `markets` its defense-sheet rows
-advertise for that slice, so a backtest column can never disagree with
-[Get Matchup](#get-matchup) about the same slice -- but only the slice's
-outcome rows are asked. A backtest measures what a player produced, and an
-attempt is not production, so the attempt and possession rows a slice also
-publishes (`FGA`, `FG2A`, `FG3A`, `POSS`) never become columns:
+The defaults are selected by Qualifier family. Season `/36` values use the
+player's all-season totals divided by total minutes, multiplied by 36. A
+game's `/36` values use that game's minutes; zero or missing minutes yield a
+`null` game per-36 value, and zero or missing season minutes yield a `null`
+season per-36 value. `FG2A` is the governed two-point-attempt component,
+derived from `FGA - 3PA`, and `3PA` is the Target display spelling for governed
+`FG3A`:
 
-| Qualifier base | Rows asked | Example |
+| Qualifier base | Default columns | Example |
 | --- | --- | --- |
-| `shot_zones` | `FGM` | `Corner 3` -> `PTS`, `3PM`; `Restricted Area` -> `PTS` |
-| `play_types` | `PTS` | `Transition` -> `PTS`, `PA`, `PR`, `PRA` |
-| `shot_types` | `FG2M`, `FG3M` | `Catch and Shoot` -> `PTS`, `3PM` |
-| `assist_locations` | the slice itself | `Corner3Assists` -> `AST`, `PA`, `RA`, `PRA` |
+| `shot_zones` | the zone's attempts | two-point -> `PTS`, `PTS/36`, `FG2A`, `FG2A/36`; three-point -> `PTS`, `PTS/36`, `3PA`, `3PA/36` |
+| `play_types` | the play's box score | `Transition` -> `PTS`, `FGA`, `PTS/36`, `FGA/36` |
+| `shot_types` | the shot type's attempts | `Catch and Shoot` -> `PTS`, `PTS/36`, `FGA`, `FGA/36` |
+| `assist_locations` | the slice's assists | `Corner3Assists` -> `AST`, `AST/36` |
 
 `summary` reduces every game listed below to one line per stat column, so the
 number that moves when a threshold moves is one glance away and the saved
@@ -2968,9 +2971,11 @@ detail and the [Lab](#preview-a-draft-target) show the same figure:
   is the share of those games **at or above** the average -- a game exactly
   on the average counts, as both comparators are inclusive. Above, LeBron's
   30 and 22 against a 25.0 average give `(5 − 3) / 2 = 1.0` and one game of
-  two over; his 4 and 2 threes against 2.0 give `1.0` and both games over.
-- Both values are `null` when no game is listed: no evidence is not a
-  difference of zero.
+  two over; his 8 and 5 three-point attempts against 6.0 give `0.5` and one
+  game over. Per-36 differences use the same weighted season baseline.
+- Both values are `null` when no game is listed, or when no listed game has a
+  non-null game value and season baseline for that column: missing evidence is
+  not a difference of zero.
 
 `players` holds the qualifying players in the Matchup's own order -- Season
 scoring descending, canonical id breaking ties.
@@ -3063,14 +3068,16 @@ shape for the draft plus `today`:
     ]
   },
   "season": "2025-26",
-  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Each stat column is a market the Matchup's defense sheet already maps to a Qualifier's slice, so a Corner 3 Qualifier reads as points and threes rather than as corner threes made.",
-  "stat_columns": ["PTS", "3PM"],
+  "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
+  "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
   "summary": {
     "players": 1,
     "games": 2,
     "columns": {
       "PTS": {"mean_difference": 1.0, "over_average_share": 0.5},
-      "3PM": {"mean_difference": 1.0, "over_average_share": 1.0}
+      "PTS/36": {"mean_difference": 1.058824, "over_average_share": 0.5},
+      "3PA": {"mean_difference": 0.5, "over_average_share": 0.5},
+      "3PA/36": {"mean_difference": 0.529412, "over_average_share": 0.5}
     }
   },
   "players": [
@@ -3088,21 +3095,21 @@ shape for the draft plus `today`:
           "league_average_share": 0.2
         }
       ],
-      "season_averages": {"PTS": 25.0, "3PM": 2.0},
+      "season_averages": {"PTS": 25.0, "PTS/36": 26.470588, "3PA": 6.0, "3PA/36": 6.352941},
       "games": [
         {
           "game_id": "0022500584",
           "game_date": "2026-01-16",
           "matchup": "LAL vs. OKC",
           "minutes": 34.0,
-          "stats": {"PTS": 30.0, "3PM": 4.0}
+          "stats": {"PTS": 30.0, "PTS/36": 31.764706, "3PA": 8.0, "3PA/36": 8.470588}
         },
         {
           "game_id": "0022500120",
           "game_date": "2025-11-03",
           "matchup": "LAL @ OKC",
           "minutes": 34.0,
-          "stats": {"PTS": 22.0, "3PM": 2.0}
+          "stats": {"PTS": 22.0, "PTS/36": 23.294118, "3PA": 5.0, "3PA/36": 5.294118}
         }
       ]
     }
@@ -3247,7 +3254,10 @@ The exact uppercase keys use `/36` for per-36; `SB` denotes steals plus blocks.
 List, resolve, backtest, and preview echo preferences, or null for legacy
 Targets. PATCH preserves omitted fields, so changing preferences leaves
 Qualifiers, Conditions, and note intact; explicit null clears preferences.
-The client owns deriving combinations, per-36, and efficiency.
+Backtest `stat_columns` uses the approved Qualifier defaults above even when a
+Target has saved preferences; those preferences are stored and echoed for the
+client to select. The complete game `line` and season totals remain available
+so the client can derive custom combinations, per-36, and efficiency columns.
 
 Backtest and preview add a `line` to every `players[].games[]`, containing
 `points`, `rebounds`, `assists`, `field_goals_made`, `field_goals_attempted`,
