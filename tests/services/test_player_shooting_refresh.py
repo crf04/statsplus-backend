@@ -199,3 +199,178 @@ def test_completed_prior_work_can_advance_without_touching_last_good_publication
     with Session(engine) as session:
         assert [(row.publication_id, row.payload, row.status) for row in session.scalars(select(PublicationVersion))] == before
         assert session.get(PublicationPointer, "grouped_shot_types").active_publication_id == pointer
+
+
+# --- independent player-shooting streams (#267) ----------------------------
+
+
+def _enable(engine, *stream_keys):
+    with engine.begin() as connection:
+        connection.execute(PublicationStream.__table__.update().values(enabled=False))
+        connection.execute(PublicationStream.__table__.update().where(
+            PublicationStream.stream_key.in_(stream_keys),
+        ).values(enabled=True))
+
+
+def _ready_manifest(engine, control, service, *, scopes=None):
+    """Drive the catalog chain until this tick issues its own manifest."""
+
+    _manifest(engine, deadline=NOW - timedelta(minutes=1), scopes=scopes)
+    assert service.tick(SEASON)["state"] == "awaiting_event"
+    _publish_requested(engine, control, "event")
+    assert service.tick(SEASON)["state"] == "awaiting_athlete"
+    _publish_requested(engine, control, "athlete")
+    assert service.tick(SEASON)["state"] == "manifest_ready"
+    with Session(engine) as session:
+        current = next(
+            row for row in session.scalars(select(CollectionManifest)).all()
+            if row.status == "active" and row.manifest_id != "prior"
+        )
+        return set(json.loads(current.scopes))
+
+
+def test_both_player_shooting_streams_are_authorized_by_one_manifest(setup):
+    engine, control, service, _ = setup
+    _enable(engine, "grouped_shot_types", "exact_shot_zones")
+    assert {"grouped_shot_types", "exact_shot_zones"} <= _ready_manifest(
+        engine, control, service,
+    )
+
+
+def test_the_zone_stream_is_scheduled_without_its_sibling(setup):
+    """Each stream is scheduled on its own enabled flag."""
+
+    engine, control, service, _ = setup
+    _enable(engine, "exact_shot_zones")
+    scopes = _ready_manifest(engine, control, service, scopes=["exact_shot_zones"])
+    assert "exact_shot_zones" in scopes
+    assert "grouped_shot_types" not in scopes
+
+
+def test_a_manifest_covering_only_the_sibling_is_not_authority_for_a_newly_enabled_stream(
+    setup,
+):
+    """Enabling zones mid-window waits for the open manifest, then covers both.
+
+    The open manifest is a shared completeness fence.  A stream enabled after
+    it was issued is not already authorized by it, but that is not a licence to
+    issue an overlapping manifest while its collection window is still running.
+    """
+
+    engine, control, service, _ = setup
+    _enable(engine, "grouped_shot_types")
+    _ready_manifest(engine, control, service)
+    with Session(engine) as session:
+        before = {row.manifest_id for row in session.scalars(select(CollectionManifest))}
+
+    _enable(engine, "grouped_shot_types", "exact_shot_zones")
+    # The sibling's manifest does not read as ready for the new stream, and
+    # its own window is still open, so nothing overlapping is issued.
+    assert service.tick(SEASON)["state"] == "collection_pending"
+    with Session(engine) as session:
+        assert {
+            row.manifest_id for row in session.scalars(select(CollectionManifest))
+        } == before
+
+    # Once that window closes, the next manifest covers both streams.
+    with engine.begin() as connection:
+        connection.execute(CollectionManifest.__table__.update().where(
+            CollectionManifest.manifest_id.in_(before),
+        ).values(collect_before=NOW - timedelta(minutes=1)))
+    assert service.tick(SEASON)["state"] == "manifest_ready"
+    with Session(engine) as session:
+        issued = [
+            row for row in session.scalars(select(CollectionManifest))
+            if row.manifest_id not in before
+        ]
+    assert len(issued) == 1
+    assert {"grouped_shot_types", "exact_shot_zones"} <= set(json.loads(issued[0].scopes))
+
+
+def test_a_disabled_zone_stream_leaves_shot_type_scheduling_unchanged(setup):
+    """The preactivation behaviour of the sibling stream is untouched."""
+
+    engine, control, service, _ = setup
+    _enable(engine, "grouped_shot_types")
+    assert _ready_manifest(engine, control, service) == {
+        "grouped_shot_types", "canonical_game_ledger",
+    }
+
+
+def test_ready_sibling_work_still_composes_when_the_other_stream_fails(setup):
+    """One stream's composition failure must not strand the other's job."""
+
+    engine, _, _, _ = setup
+    _enable(engine, "grouped_shot_types", "exact_shot_zones")
+    for stream_key in ("grouped_shot_types", "exact_shot_zones"):
+        with engine.begin() as connection:
+            connection.execute(CompositionJob.__table__.insert().values(
+                job_id=f"job-{stream_key}", season=SEASON, stream_key=stream_key,
+                cutoff=NOW, manifest_id="prior", status="queued", generation=1,
+                attempts=0, created_at=NOW, updated_at=NOW,
+            ))
+
+    from app.services.collection_control import ControlPlaneError
+    from app.services.ledger_runtime import LedgerGovernance, LedgerRuntime
+    from app.services.canonical_game_ledger import CanonicalGameLedgerRepository
+
+    composed = []
+    publications = PublicationService(engine, clock=lambda: NOW)
+
+    def compose_from_observations(stream_key, **kwargs):
+        if stream_key == "exact_shot_zones":
+            raise ControlPlaneError("incomplete_publication")
+        composed.append(stream_key)
+
+    publications.compose_from_observations = compose_from_observations
+
+    class Governance:
+        def read_for_composition(self, season, cutoff, manifest_id=None):
+            return LedgerGovernance(season, cutoff, frozenset(), frozenset(), {})
+
+    runtime = LedgerRuntime(
+        backfill=None, repository=CanonicalGameLedgerRepository(engine),
+        materialization=None, governance=Governance(),
+        publication_service=publications, clock=lambda: NOW,
+    )
+    runtime.compose_queued(SEASON)
+
+    assert composed == ["grouped_shot_types"]
+    with Session(engine) as session:
+        statuses = {
+            row.stream_key: row.status
+            for row in session.scalars(select(CompositionJob))
+        }
+    assert statuses["grouped_shot_types"] == "succeeded"
+    assert statuses["exact_shot_zones"] != "succeeded"
+
+
+def test_a_stream_disabled_since_the_prior_manifest_is_not_copied_forward(setup):
+    """History must not keep a turned-off stream collectible.
+
+    A new manifest preserves sibling scopes it does not manage, but membership
+    of the player-shooting streams follows the currently enabled set.  Copying
+    ``exact_shot_zones`` forward from yesterday's manifest would leave it
+    discoverable and executable by the collector after it was disabled --
+    ``_manifest_streams`` reads the manifest, not the enabled flag.
+    """
+
+    engine, control, service, _ = setup
+    _enable(engine, "grouped_shot_types")
+    scopes = _ready_manifest(engine, control, service, scopes=[
+        "grouped_shot_types", "exact_shot_zones", "canonical_game_ledger",
+    ])
+    assert "exact_shot_zones" not in scopes
+    # The unrelated sibling scope this tick does not manage is still preserved.
+    assert {"grouped_shot_types", "canonical_game_ledger"} <= scopes
+
+
+def test_a_re_enabled_stream_is_restored_to_the_next_manifest(setup):
+    """The inverse: the enabled set is what decides, in both directions."""
+
+    engine, control, service, _ = setup
+    _enable(engine, "grouped_shot_types", "exact_shot_zones")
+    scopes = _ready_manifest(engine, control, service, scopes=[
+        "grouped_shot_types", "canonical_game_ledger",
+    ])
+    assert {"grouped_shot_types", "exact_shot_zones", "canonical_game_ledger"} <= scopes

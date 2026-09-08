@@ -54,7 +54,12 @@ class SanitizedFixtureProvider:
 
     def fetch_player_shooting_zone(self, date_from: str | None = None, **parameters: Any) -> list[dict[str, Any]]:
         self._record("player_zone", date_from=date_from, **parameters)
-        return [self._zones(player_id=1)]
+        scale = 1 if parameters.get("per_mode_detailed") == "PerGame" else 40
+        return [self._zones(player_id=1, scale=scale)]
+
+    def fetch_player_season_totals(self, date_from: str | None = None, **parameters: Any) -> list[dict[str, Any]]:
+        self._record("player_totals", date_from=date_from, **parameters)
+        return [{"PLAYER_ID": 1, "GP": 40}]
 
     def fetch_opponent_shot_chart(self, general_range: str, date_from: str | None, **parameters: Any) -> list[dict[str, Any]]:
         self._record("opponent_shot_type", general_range=general_range, date_from=date_from, **parameters)
@@ -93,9 +98,25 @@ class SanitizedFixtureProvider:
         }]
 
     @staticmethod
-    def _zones(**identity: Any) -> dict[str, Any]:
-        return {**identity, "Restricted Area": 1, "In The Paint (Non-RA)": 1,
-                "Mid-Range": 1, "Corner 3": 1, "Above the Break 3": 1}
+    def _zones(*, scale: int = 1, **identity: Any) -> dict[str, Any]:
+        # The wide profile shape the endpoint really returns: every category,
+        # including the two corner sides and Backcourt.
+        return {
+            **identity, "PLAYER_NAME": "Fixture Player",
+            "TEAM_ID": NBA_TEAM_IDS[0], "TEAM_ABBREVIATION": "ATL",
+            "AGE": 25.0, "NICKNAME": "Fixture",
+            **{
+                f"{category}_{metric}": value
+                for category in (
+                    "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+                    "Left Corner 3", "Right Corner 3", "Above the Break 3",
+                    "Backcourt", "Corner 3",
+                )
+                for metric, value in (
+                    ("FGM", 1 * scale), ("FGA", 2 * scale), ("FG_PCT", 0.5),
+                )
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,12 +183,31 @@ class ResidentialCompatibilityProbes:
                 ),
             ))
         results.append(self._probe(
-            "player_shot_zones", {"season": season, "season_type": "Regular Season", "window": "season"},
+            "player_shot_zones", {
+                "season": season, "season_type": "Regular Season",
+                "window": "season", "date_from": None, "date_to": date_to,
+            },
+            # Three bound reads describe one window: the PerGame profile
+            # evidence, the Totals the Diet volumes need, and the explicit
+            # games-played denominator the shot-location endpoint never
+            # reports.
             lambda: normalize_zone_response(
                 _call(self.provider, "fetch_player_shooting_zone", None,
-                      season=season, season_type="Regular Season"),
+                      date_to=date_to, season=season,
+                      season_type="Regular Season",
+                      per_mode_detailed="PerGame"),
                 season=season, cutoff=cutoff,
                 scope={"window": "season", "subject": "player", "phase": "Regular Season"},
+                totals_response=_call(
+                    self.provider, "fetch_player_shooting_zone", None,
+                    date_to=date_to, season=season,
+                    season_type="Regular Season", per_mode_detailed="Totals",
+                ),
+                games_response=_call(
+                    self.provider, "fetch_player_season_totals", None,
+                    date_to=date_to, season=season,
+                    season_type="Regular Season",
+                ),
             ),
         ))
         for window in ("season", "l15"):

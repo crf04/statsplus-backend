@@ -33,7 +33,11 @@ from app.collector.normalizers import (
 )
 from app.collector.diagnostics import build_safe_logger
 from app.collector.outbox import OutboxBusy, OutboxFull, OutboxRepository
-from app.collector.provider import _StandaloneNBAProvider
+from app.collector.provider import (
+    ResidentialScopeExecutor,
+    ScopeWork,
+    _StandaloneNBAProvider,
+)
 from app.collector.runner import (
     EXIT_NO_WORK,
     EXIT_NON_RETRYABLE,
@@ -109,6 +113,46 @@ def _zones():
     }]
 
 
+#: A six-player slice of a real recorded league response, kept small but not
+#: synthetic: it carries nonzero ``Backcourt`` attempts, an unreported
+#: ``Left Corner 3``, and the grouped ``SHOT_CATEGORY``/``columns`` header the
+#: endpoint actually returns -- with ``Backcourt`` ahead of ``Corner 3``.
+PLAYER_SHOT_ZONE_LEAGUE_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "player_diets"
+     / "player_shot_zones_league.json").read_text(encoding="utf-8")
+)
+
+
+def _zone_result_set(kind: str) -> dict:
+    """Return one recorded result set in its on-the-wire response envelope."""
+
+    from copy import deepcopy
+    return {"resultSets": deepcopy(PLAYER_SHOT_ZONE_LEAGUE_FIXTURE[kind])}
+
+
+def _zone_frame(kind: str) -> pd.DataFrame:
+    """Return the same recorded result set as the provider's pandas frame."""
+
+    from nba_api.stats.endpoints._base import Endpoint
+    result_set = PLAYER_SHOT_ZONE_LEAGUE_FIXTURE[kind]
+    return Endpoint.DataSet(
+        {"headers": result_set["headers"], "data": result_set["rowSet"]}
+    ).get_data_frame()
+
+
+def _normalized_zones(**overrides):
+    arguments = {
+        "response": _zone_result_set("per_game"),
+        "totals_response": _zone_result_set("totals"),
+        "games_response": _zone_result_set("games"),
+    }
+    arguments.update(overrides)
+    response = arguments.pop("response")
+    return normalize_zone_response(
+        response, season="2025-26", cutoff=NOW, **arguments
+    )
+
+
 def _wire_checksum(marker: str) -> str:
     payload = {"records": [marker]}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -146,10 +190,217 @@ def test_normalizers_preserve_provider_categories_and_scope_evidence():
     assert synergy.observation_type == "synergy_play_types"
     assert synergy.payload["records"][0]["category"] == "Transition"
     assert synergy.scope["phase"] == "Regular Season"
-    zones = normalize_zone_response(_zones(), season="2025-26", cutoff=NOW)
+    zones = _normalized_zones()
+    assert zones.observation_type == "exact_shot_zones"
     assert zones.payload["coverage"]["zones"] == [
         "Restricted Area", "In The Paint (Non-RA)", "Mid-Range", "Corner 3", "Above the Break 3"
     ]
+    assert {row["slice_key"] for row in zones.payload["records"]} == set(SHOT_ZONES)
+
+
+def test_player_zone_normalizer_publishes_wide_profile_beside_totals_diet_facts():
+    zones = _normalized_zones()
+
+    # The value modes are stated, not inferred: the profile is the PerGame
+    # evidence the tab has always shown, the Diet volumes are season Totals.
+    assert zones.payload["coverage"]["profile_value_mode"] == "PerGame"
+    assert zones.payload["coverage"]["diet_value_mode"] == "Totals"
+    assert zones.scope["profile_value_mode"] == "PerGame"
+    assert zones.scope["diet_value_mode"] == "Totals"
+
+    profile = zones.payload["profile"]
+    assert profile["value_mode"] == "PerGame"
+    # Every provider category survives, including the corner sides the tab
+    # shows separately and the Backcourt the profile arithmetic reads.
+    assert set(profile["categories"]) == {
+        "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+        "Left Corner 3", "Right Corner 3", "Above the Break 3",
+        "Backcourt", "Corner 3",
+    }
+    assert len(profile["rows"]) == 6
+    lebron = next(row for row in profile["rows"] if row["player_id"] == 2544)
+    assert lebron["player_name"] == "LeBron James"
+    assert lebron["team_abbreviation"] == "LAL"
+    assert lebron["Restricted Area_FGA"] == 5.7
+
+    # The Diet half is season Totals divided by an explicit games-played read,
+    # never the rounded PerGame values multiplied back up.
+    lebron_facts = [
+        row for row in zones.payload["records"] if row["player_id"] == 2544
+    ]
+    assert {row["slice_key"] for row in lebron_facts} == set(SHOT_ZONES)
+    assert all(row["games_played"] == 60 for row in lebron_facts)
+    restricted = next(
+        row for row in lebron_facts if row["slice_key"] == "Restricted Area"
+    )
+    assert restricted["attempts"] == 340.0
+    assert restricted["makes"] == 257.0
+    assert sum(row["share"] for row in lebron_facts) == pytest.approx(1.0)
+    assert lebron["Restricted Area_FGA"] != restricted["attempts"]
+
+
+def test_player_zone_normalizer_keeps_an_unreported_category_unreported():
+    """A null cell must never become a zero.
+
+    The legacy profile's league ``PTS%+`` reference is a mean that skips
+    missing cells, so zeroing one here would move every other player's row.
+    """
+
+    profile = _normalized_zones().payload["profile"]
+    colby = next(row for row in profile["rows"] if row["player_name"] == "Colby Jones")
+    assert colby["Left Corner 3_FGA"] is None
+    assert colby["Left Corner 3_FGM"] is None
+    assert colby["Left Corner 3_FG_PCT"] is None
+    assert colby["Right Corner 3_FGA"] is not None
+
+
+def test_player_zone_normalizer_accepts_the_providers_own_multiindex_frame():
+    """The live adapter returns a frame, rehearsal fakes return the JSON."""
+
+    from_frames = normalize_zone_response(
+        _zone_frame("per_game"), season="2025-26", cutoff=NOW,
+        totals_response=_zone_frame("totals"),
+        games_response=_zone_frame("games"),
+    )
+    assert from_frames.payload == _normalized_zones().payload
+
+
+def test_scalar_player_zone_observations_cannot_authorize_profile_publication():
+    """The old scalar per-zone contract is not profile evidence."""
+
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
+        normalize_zone_response(
+            _zones(), season="2025-26", cutoff=NOW,
+            totals_response=_zones(), games_response=[{"player_id": 1, "GP": 10}],
+        )
+
+
+@pytest.mark.parametrize("missing", ["totals_response", "games_response"])
+def test_player_zone_normalizer_refuses_a_partially_collected_surface(missing):
+    with pytest.raises(ProviderContractError, match="provider_scope_unavailable"):
+        _normalized_zones(**{missing: None})
+
+
+def test_player_zone_normalizer_refuses_reads_of_different_populations():
+    """Three reads that disagree on who played are not one window."""
+
+    totals = _zone_result_set("totals")
+    totals["resultSets"]["rowSet"] = totals["resultSets"]["rowSet"][:-1]
+    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+        _normalized_zones(totals_response=totals)
+
+    games = _zone_result_set("games")
+    games["resultSets"]["rowSet"] = games["resultSets"]["rowSet"][:-1]
+    with pytest.raises(ProviderContractError, match="provider_window_unverified"):
+        _normalized_zones(games_response=games)
+
+
+def test_player_zone_normalizer_refuses_invented_games_played():
+    games = _zone_result_set("games")
+    index = games["resultSets"]["headers"].index("GP")
+    games["resultSets"]["rowSet"][0][index] = 0
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
+        _normalized_zones(games_response=games)
+
+
+def test_player_zone_normalizer_refuses_makes_above_attempts():
+    totals = _zone_result_set("totals")
+    row = totals["resultSets"]["rowSet"][0]
+    row[6], row[7] = row[7] + 1, row[7]
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
+        _normalized_zones(totals_response=totals)
+
+
+def test_collector_player_zone_vocabulary_matches_the_backend_taxonomy():
+    """The wheel ships without ``app``, so the two copies are pinned here."""
+
+    from app.collector import normalizers
+    from app.domain import player_shot_zone_taxonomy as taxonomy
+
+    assert (
+        normalizers.PLAYER_ZONE_PROFILE_CATEGORIES
+        == taxonomy.PLAYER_SHOT_ZONE_PROFILE_CATEGORIES
+    )
+    assert (
+        normalizers.PLAYER_ZONE_PROFILE_METRICS
+        == taxonomy.PLAYER_SHOT_ZONE_PROFILE_METRICS
+    )
+    assert (
+        normalizers.PLAYER_ZONE_PROFILE_IDENTITY
+        == taxonomy.PLAYER_SHOT_ZONE_PROFILE_IDENTITY
+    )
+    cases = [
+        {"FGM": None, "FGA": None, "FG_PCT": None},
+        {"FGM": None, "FGA": 1.0, "FG_PCT": 0.5},
+        {"FGM": 2.0, "FGA": 1.0, "FG_PCT": 1.0},
+        {"FGM": 1.0, "FGA": 2.0, "FG_PCT": 1.5},
+        {"FGM": 0.0, "FGA": 0.0, "FG_PCT": 0.5},
+        {"FGM": 1.0, "FGA": 2.0, "FG_PCT": 0.5},
+        # Whole under ``Totals``, and the provider's own rounding under
+        # ``PerGame`` -- the two copies must agree on both readings.
+        {"FGM": 1.5, "FGA": 2.0, "FG_PCT": 0.75},
+        {"FGM": 1.0, "FGA": 2.5, "FG_PCT": 0.4},
+    ]
+    for exact in (False, True):
+        for values in cases:
+            assert (
+                normalizers._zone_metric_violation(values, exact=exact) is None
+            ) is (
+                taxonomy.player_shot_zone_profile_violation(values, exact=exact)
+                is None
+            ), (values, exact)
+
+
+def test_player_zone_scope_reads_per_game_totals_and_games_for_one_window():
+    """One authorized zone scope, three bound reads, one observation."""
+
+    calls = []
+
+    class Provider:
+        def fetch_player_shooting_zone(self, date_from=None, **kwargs):
+            calls.append(("zones", date_from, kwargs))
+            return _zone_result_set(
+                "totals" if kwargs["per_mode_detailed"] == "Totals" else "per_game"
+            )
+
+        def fetch_player_season_totals(self, date_from=None, **kwargs):
+            calls.append(("games", date_from, kwargs))
+            return _zone_result_set("games")
+
+    executor = ResidentialScopeExecutor(Provider(), clock=lambda: NOW)
+    observations = executor.execute_scope(
+        ScopeWork(
+            scope="exact_shot_zones", observation_type="exact_shot_zones",
+            season="2025-26", cutoff=NOW.isoformat(), instruction_id="i",
+            manifest_id="m",
+            parameters={
+                "window": "season", "subject": "player",
+                "date_from": None, "date_to": "09/07/2026",
+            },
+        ),
+        collector_id="c", environment="testing", retrieved_at=NOW,
+    )
+
+    assert [call[0] for call in calls] == ["zones", "zones", "games"]
+    assert [call[2].get("per_mode_detailed") for call in calls[:2]] == [
+        "PerGame", "Totals"
+    ]
+    # One date bound on all three, or they do not describe one window.
+    assert {call[2]["date_to"] for call in calls} == {"09/07/2026"}
+    assert {call[1] for call in calls} == {None}
+    assert len(observations) == 1
+    assert observations[0].observation_type == "exact_shot_zones"
+    assert observations[0].scope["endpoint_window"] == {
+        "date_from": None, "date_to": "09/07/2026",
+    }
+
+
+def test_authorized_player_zone_descriptor_binds_the_manifest_date_bound():
+    descriptors = _collector_scope_descriptors({"exact_shot_zones"}, NOW)
+    assert [item["parameters"] for item in descriptors] == [{
+        "window": "season", "subject": "player", "phase": "Regular Season",
+        "date_from": None, "date_to": slate_date_for_instant(NOW).strftime("%m/%d/%Y"),
+    }]
 
 
 def test_schedule_roster_require_identity_and_exact_season():
@@ -367,7 +618,6 @@ def test_sanitized_recorded_nba_json_is_normalized_without_network():
     roster = json.loads((fixture_root / "nba_stats_player_roster.json").read_text())
     synergy = json.loads((fixture_root / "player_diets" / "synergy_isolation.json").read_text())
     shots = json.loads((fixture_root / "player_diets" / "shot_type_catch_and_shoot.json").read_text())
-    zones = json.loads((fixture_root / "player_diets" / "shot_zones.json").read_text())
     assert normalize_schedule_response(schedule, season="2025-26", cutoff=NOW).payload["records"]
     assert normalize_roster_response(roster, season="2024-25", cutoff=NOW).payload["records"]
     assert normalize_synergy_response(synergy, season="2025-26", cutoff=NOW).payload["records"]
@@ -382,7 +632,7 @@ def test_sanitized_recorded_nba_json_is_normalized_without_network():
     assert shot_record["FG2A_FREQUENCY"] == 0.02
     assert shot_record["FG3A"] == 493
     assert shot_record["FG3A_FREQUENCY"] == 0.455
-    assert normalize_zone_response(zones, season="2025-26", cutoff=NOW).payload["records"]
+    assert _normalized_zones().payload["records"]
 
 
 def test_outbox_is_newest_cutoff_first_and_receipt_gated(tmp_path: Path):
@@ -2880,3 +3130,65 @@ def test_run_once_writes_the_zone_diagnostic_to_the_configured_log(
     detail = diagnostics[-1]["detail"]
     assert "equation=zones_plus_backcourt_equals_opponent_fga" in detail
     assert "residual=1.0" in detail
+
+
+def _flat_zone_records(kind: str) -> list[dict]:
+    """The recorded result set as flat ``category_metric`` mappings."""
+
+    frame = _zone_frame(kind)
+    frame = frame.copy()
+    frame.columns = ["_".join(filter(None, column)).strip() for column in frame.columns]
+    return frame.astype(object).where(pd.notnull(frame), None).to_dict("records")
+
+
+def test_player_zone_normalizer_refuses_a_partially_reported_profile_category():
+    """Two of three source keys absent must not read as an unreported zone.
+
+    ``Left Corner 3_FGM`` present and null, with its ``FGA`` and ``FG_PCT``
+    keys absent, resolves to three ``None`` values and is otherwise
+    indistinguishable from a category the provider genuinely did not report.
+    Accepting it would launder an omitted field into a published null that the
+    league ``PTS%`` mean then skips.
+    """
+
+    records = _flat_zone_records("per_game")
+    for record in records:
+        record["Left Corner 3_FGM"] = None
+        del record["Left Corner 3_FGA"]
+        del record["Left Corner 3_FG_PCT"]
+    with pytest.raises(ProviderContractError, match="provider_schema_changed"):
+        _normalized_zones(response=records)
+
+
+def test_player_zone_normalizer_keeps_a_fully_present_null_triplet():
+    """The legitimate half of the rule above: all three keys, all three null."""
+
+    records = _flat_zone_records("per_game")
+    for record in records:
+        for metric in ("FGM", "FGA", "FG_PCT"):
+            record[f"Left Corner 3_{metric}"] = None
+    profile = _normalized_zones(response=records).payload["profile"]
+    assert all(row["Left Corner 3_FGA"] is None for row in profile["rows"])
+    assert all(row["Right Corner 3_FGA"] is not None for row in profile["rows"])
+
+
+def test_player_zone_normalizer_refuses_rounded_counts_labelled_totals():
+    """Season ``Totals`` field goals are whole provider counts.
+
+    Every one of the 4,656 recorded ``Totals`` count cells is an exact
+    integer, while 6,475 of the ``PerGame`` cells are not.  A fractional
+    ``Totals`` count is therefore a rounded ``PerGame`` reading wearing the
+    ``Totals`` label, which would understate every Diet volume derived from
+    it -- and it must not be accepted as the Diet's evidence.
+    """
+
+    records = _flat_zone_records("totals")
+    records[0]["Mid-Range_FGA"] = float(records[0]["Mid-Range_FGA"]) + 0.5
+    with pytest.raises(ProviderContractError, match="value_invariant_failed"):
+        _normalized_zones(totals_response=records)
+
+    # The same fractional value under ``PerGame`` is the provider's own
+    # rounding and stays legitimate.
+    per_game = _flat_zone_records("per_game")
+    per_game[0]["Mid-Range_FGA"] = float(per_game[0]["Mid-Range_FGA"]) + 0.5
+    assert _normalized_zones(response=per_game).payload["profile"]["rows"]

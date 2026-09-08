@@ -21,7 +21,9 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Mapping, NamedTuple, Sequence
+from typing import (
+    AbstractSet, Any, Callable, Iterable, Mapping, NamedTuple, Sequence,
+)
 
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.engine import Engine
@@ -226,7 +228,14 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     # completeness refuses a stream whose required types were not all
     # observed, so a near-miss name rejects the real collector twice.
     {"stream_key": "grouped_shot_types", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("grouped_shot_types",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
-    {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
+    # Named for the observation type the player zone normalizer and envelope
+    # actually emit, exactly as ``grouped_shot_types`` above.  The registration
+    # previously read ``shot_zones``, a name nothing produces, so ingestion
+    # would have refused every real collection and completeness would have
+    # refused the stream a second time.  ``register_default_streams`` rewrites
+    # ``required_observations`` on every boot, so correcting it here reconciles
+    # the already-registered production row without a migration.
+    {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("exact_shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
     {"stream_key": "player_assist_locations", "provider": "pbp", "owner": "railway", "scope": "season", "required": ("player_assists",), "schema": (1,), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     # Opponent grouped surfaces are independent publications from their
     # player Diet counterparts.  Keeping a stream per subject/window is what
@@ -292,15 +301,20 @@ def _collector_scope_descriptors(
         descriptors.extend({"scope": shots, "parameters": {
             "window": "season", "subject": "player", "general_range": category,
         }} for category in SHOOTING_TYPES)
+    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     if zones:
-        descriptors.append({"scope": zones, "parameters": {"window": "season", "subject": "player"}})
+        # The player zone surface takes three provider reads, so binding the
+        # manifest's own date bound is what proves they describe one window.
+        descriptors.append({"scope": zones, "parameters": {
+            "window": "season", "subject": "player", "phase": "Regular Season",
+            "date_from": None, "date_to": date_to,
+        }})
     if opponent_synergy:
         descriptors.extend({"scope": opponent_synergy, "parameters": {
             "window": "season", "subject": "opponent", "play_type": category,
             "subject_code": "T", "type_grouping": "Defensive",
             "per_mode": "Totals", "value_mode": "totals_with_minutes",
         }} for category in PLAY_TYPES)
-    date_to = slate_date_for_instant(_aware(cutoff)).strftime("%m/%d/%Y")
     for team_id in sorted(int(value) for value in NBA_TEAM_IDS):
         for window in ("season", "l15"):
             if window == "l15" and (
@@ -431,6 +445,7 @@ def _validate_activation_candidate_payload(
             decode_player_diet,
             decode_player_game_logs,
             decode_player_per36,
+            decode_player_shot_zones,
             decode_team_window,
         )
 
@@ -444,6 +459,11 @@ def _validate_activation_candidate_payload(
                 base=diet_bases[stream_key],
                 retrieved_at=utcnow(),
             )
+            if stream_key == "exact_shot_zones":
+                # This publication serves two readers, so both read-side
+                # decoders must accept the exact candidate that is about to
+                # become active -- not only the Diet half.
+                decode_player_shot_zones(document)
         else:
             rows = decode_team_window(document, stream_key=decoder_streams[stream_key])
             if expected_game_ids_by_team is not None:
@@ -824,6 +844,11 @@ def _compose_player_diet_observation_payload(
             session, stream=stream, season=season, cutoff=cutoff,
             manifest_id=manifest_id, provenance_ids=provenance_ids,
         )
+    if stream_key == "exact_shot_zones":
+        return _compose_player_shot_zone_observation_payload(
+            session, stream=stream, season=season, cutoff=cutoff,
+            manifest_id=manifest_id, provenance_ids=provenance_ids,
+        )
 
     from app.services.player_diet import shot_type_shooting_violation
 
@@ -944,6 +969,273 @@ def _compose_player_diet_observation_payload(
         "base": base,
         "rows": [facts[identity] for identity in sorted(facts)],
         "source_observations": sources,
+    }
+
+
+def _require_player_shot_zone_partition(
+    facts: Mapping[tuple[int, str], Mapping[str, Any]],
+    makes: Mapping[tuple[int, str], float],
+    expected_slices: AbstractSet[str],
+) -> None:
+    """Require each represented player's own complete five-zone partition.
+
+    The league-wide category union cannot see a player published with four
+    slices because a different player supplied the fifth, a player whose
+    slices disagree about how many games they describe, or a share that is
+    not this player's own portion of their own attempts.  Those are exactly
+    the shapes a partial or stitched-together collection produces.
+
+    Diet evidence is season ``Totals``, so makes and attempts are whole
+    provider counts; a fractional value is a rounded ``PerGame`` reading
+    relabelled, which would understate every published volume.
+
+    A player with no attempts in any published zone has no share to state and
+    is legitimately absent from the Diet facts entirely.  Such players are
+    still retained in the auxiliary profile population, which the league
+    ``PTS%`` reference reads, so this check runs only over players the Diet
+    actually represents.
+    """
+
+    by_player: dict[int, dict[str, Mapping[str, Any]]] = {}
+    for player_id, slice_key in facts:
+        by_player.setdefault(player_id, {})[slice_key] = facts[
+            (player_id, slice_key)
+        ]
+    for player_id, slices in by_player.items():
+        if set(slices) != set(expected_slices):
+            raise ValueError("publication observation categories incomplete")
+        if len({fact["games_played"] for fact in slices.values()}) != 1:
+            raise ValueError("publication observation value invalid")
+        attempted = 0.0
+        for slice_key, fact in slices.items():
+            volume = float(fact["volume"])
+            if not volume.is_integer():
+                raise ValueError("publication observation value invalid")
+            if not float(makes[(player_id, slice_key)]).is_integer():
+                raise ValueError("publication observation value invalid")
+            attempted += volume
+        if attempted <= 0:
+            raise ValueError("publication observation value invalid")
+        for fact in slices.values():
+            # The attempts are whole counts, so their sum and this quotient
+            # are exact; a share that does not reproduce is a different
+            # denominator, not a rounding difference.
+            if fact["share"] != float(fact["volume"]) / attempted:
+                raise ValueError("publication observation value invalid")
+
+
+def _compose_player_shot_zone_observation_payload(
+    session: Session, *, stream: PublicationStream, season: str,
+    cutoff: datetime, manifest_id: str, provenance_ids: set[str],
+) -> dict[str, Any]:
+    """Derive the player shot-zone publication from its accepted evidence.
+
+    This is the third player-Diet branch, not a reuse of the shot-type one.
+    Zones differ in three ways that the shot-type composer would get wrong:
+
+    * The provider reports one wide row per player, so the whole surface is a
+      single observation rather than one per category.  Completeness is still
+      over the five published zones, which the one payload must all carry.
+    * The Diet volumes are season ``Totals`` while the profile evidence is
+      ``PerGame``.  Both value modes are asserted explicitly here, because a
+      publication that silently mixed them would report per-game counts as
+      season volumes.
+    * The publication carries an auxiliary ``profile`` section beside the five
+      Diet facts.  Zone Shooting is a product surface with a wider vocabulary
+      -- separate corner sides, and ``Backcourt`` as an input to its ``Sum``
+      and league reference -- and that vocabulary deliberately does not widen
+      the shared Diet/opponent taxonomy.  Every source row is retained, even
+      one with no attempts and therefore no Diet facts, because the profile's
+      league ``PTS%+`` reference is a mean over the whole population.
+    """
+
+    from app.domain.player_shot_zone_taxonomy import (
+        PLAYER_SHOT_ZONE_PROFILE_CATEGORIES,
+        PLAYER_SHOT_ZONE_PROFILE_METRICS,
+        player_shot_zone_profile_violation,
+    )
+
+    base = "shot_zones"
+    required_types = set(json.loads(stream.required_observations))
+    expected_slices = set(SHOT_ZONE_SLICES)
+    # One wide response per manifest, but a retried collection appends a fresh
+    # observation for the same surface.  The latest accepted one wins, ordered
+    # by acceptance so the winner never depends on identifier ordering.
+    latest: CollectionObservation | None = None
+    for observation_id in sorted(provenance_ids):
+        observation = session.get(CollectionObservation, observation_id)
+        if observation is None:
+            continue
+        if not _is_player_season_scope(_safe_json_mapping(observation.scope)):
+            continue
+        if latest is None or (
+            _aware(observation.accepted_at), observation.observation_id
+        ) > (_aware(latest.accepted_at), latest.observation_id):
+            latest = observation
+    if latest is None:
+        raise ValueError("publication observation season evidence missing")
+    if (
+        latest.manifest_id != manifest_id
+        or latest.season != season
+        or _aware(latest.cutoff) != cutoff
+        or latest.provider != stream.provider
+        or latest.observation_type not in required_types
+    ):
+        raise ValueError("publication observation authority mismatch")
+    try:
+        document = json.loads(latest.payload)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("publication observation malformed") from error
+    if (
+        not isinstance(document, Mapping)
+        or document.get("base") != base
+        or not hmac.compare_digest(_checksum(latest.payload), latest.checksum)
+    ):
+        raise ValueError("publication observation integrity mismatch")
+    coverage = document.get("coverage")
+    if not isinstance(coverage, Mapping) or (
+        coverage.get("profile_value_mode") != "PerGame"
+        or coverage.get("diet_value_mode") != "Totals"
+    ):
+        # An observation that does not state which per-mode each half was read
+        # in cannot authorize either consumer.  The old scalar zone evidence
+        # states neither, so it fails closed here as well as at the normalizer.
+        raise ValueError("publication observation value mode mismatch")
+
+    records = document.get("records")
+    if not isinstance(records, list):
+        raise ValueError("publication observation rows missing")
+    observed_categories: set[str] = set()
+    observed_makes: dict[tuple[int, str], float] = {}
+    facts: dict[tuple[int, str], dict[str, Any]] = {}
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("publication observation row malformed")
+        try:
+            player_id = int(record["player_id"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("publication player identity missing") from error
+        if player_id <= 0:
+            raise ValueError("publication player identity invalid")
+        slice_key = str(record.get("slice_key", record.get("category", ""))).strip()
+        if slice_key not in expected_slices:
+            raise ValueError("publication observation taxonomy mismatch")
+        observed_categories.add(slice_key)
+        if (player_id, slice_key) in facts:
+            raise ValueError("publication observation taxonomy mismatch")
+        share = _player_diet_number(record, "share")
+        if share > 1:
+            raise ValueError("publication observation value invalid")
+        volume = _player_diet_number(record, "attempts")
+        games_played = _player_diet_number(record, "games_played", minimum=1)
+        if not games_played.is_integer():
+            raise ValueError("publication observation value invalid")
+        # The zone counterpart of the shot-type shooting rule: a slice's makes
+        # are a part of its own attempts.
+        makes = _player_diet_number(record, "makes")
+        if makes > volume:
+            raise ValueError("publication observation value invalid")
+        observed_makes[(player_id, slice_key)] = makes
+        facts[(player_id, slice_key)] = {
+            "player_id": player_id,
+            "slice_key": slice_key,
+            "share": share,
+            "volume": volume,
+            "games_played": int(games_played),
+            "volume_unit": "field_goal_attempts",
+            "provider": "nba_stats",
+        }
+    if not facts:
+        raise ValueError("publication observation rows missing")
+    if observed_categories != expected_slices:
+        raise ValueError("publication observation categories incomplete")
+    _require_player_shot_zone_partition(facts, observed_makes, expected_slices)
+
+    profile = document.get("profile")
+    if not isinstance(profile, Mapping) or profile.get("value_mode") != "PerGame":
+        raise ValueError("publication observation profile missing")
+    if set(profile.get("categories") or ()) != set(
+        PLAYER_SHOT_ZONE_PROFILE_CATEGORIES
+    ) or set(profile.get("metrics") or ()) != set(
+        PLAYER_SHOT_ZONE_PROFILE_METRICS
+    ):
+        raise ValueError("publication observation profile taxonomy mismatch")
+    profile_rows = profile.get("rows")
+    if not isinstance(profile_rows, list) or not profile_rows:
+        raise ValueError("publication observation profile missing")
+    composed_profile: dict[int, dict[str, Any]] = {}
+    for row in profile_rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("publication observation profile row malformed")
+        try:
+            player_id = int(row["player_id"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("publication player identity missing") from error
+        if player_id <= 0 or player_id in composed_profile:
+            raise ValueError("publication player identity invalid")
+        identity = {
+            "player_id": player_id,
+            "player_name": str(row.get("player_name") or "").strip(),
+            "team_id": int(row.get("team_id") or 0),
+            "team_abbreviation": str(row.get("team_abbreviation") or "").strip(),
+            "age": _player_diet_number(row, "age"),
+            "nickname": str(row.get("nickname") or "").strip(),
+        }
+        if (
+            not identity["player_name"]
+            or identity["team_id"] <= 0
+            or not identity["team_abbreviation"]
+        ):
+            # The profile is located by the matched player name, so an
+            # unidentified row cannot be published as one.
+            raise ValueError("publication player identity invalid")
+        if row.get("value_mode") != "PerGame":
+            # The container label is not enough: a row read in ``Totals`` and
+            # dropped into a ``PerGame`` profile would publish season counts
+            # as per-game rates.  Each retained source row states its own mode.
+            raise ValueError("publication observation value mode mismatch")
+        categories: dict[str, dict[str, float | None]] = {}
+        for category in PLAYER_SHOT_ZONE_PROFILE_CATEGORIES:
+            values: dict[str, Any] = {}
+            for metric in PLAYER_SHOT_ZONE_PROFILE_METRICS:
+                key = f"{category}_{metric}"
+                if key not in row:
+                    # An absent key reads as ``None`` and would make a
+                    # partially reported category indistinguishable from a
+                    # genuinely unreported one.  All three must be present;
+                    # all three may still legitimately be ``None``.
+                    raise ValueError(
+                        "publication observation profile taxonomy mismatch"
+                    )
+                values[metric] = row[key]
+            if player_shot_zone_profile_violation(values) is not None:
+                raise ValueError("publication observation value invalid")
+            categories[category] = {
+                metric: (None if value is None else float(value))
+                for metric, value in values.items()
+            }
+        composed_profile[player_id] = {**identity, "categories": categories}
+    if {player_id for player_id, _ in facts} - set(composed_profile):
+        raise ValueError("publication observation profile missing")
+    return {
+        "base": base,
+        "rows": [facts[identity] for identity in sorted(facts)],
+        "profile": {
+            "value_mode": "PerGame",
+            "categories": list(PLAYER_SHOT_ZONE_PROFILE_CATEGORIES),
+            "metrics": list(PLAYER_SHOT_ZONE_PROFILE_METRICS),
+            # The evidence's own order, which is the provider's.  Composition
+            # is still fully determined by the immutable observation, and the
+            # profile's league ``PTS%`` mean is a floating-point sum over this
+            # population -- reordering it moves published values in their last
+            # digit.  The Diet rows above are sorted, as the sibling streams'
+            # are, because nothing derives a total from their order.
+            "rows": list(composed_profile.values()),
+        },
+        "source_observations": [{
+            "observation_id": latest.observation_id,
+            "checksum": latest.checksum,
+        }],
     }
 
 

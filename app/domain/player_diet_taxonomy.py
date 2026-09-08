@@ -71,7 +71,16 @@ PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
 #: streams are.  Kept as its own set so player routing never widens the
 #: opponent taxonomy, which separately governs team-window decoding, repair
 #: group membership, and per-team governance expectations.
-PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({"grouped_shot_types", "synergy_play_types"})
+#:
+#: The name is now narrower than the set: ``exact_shot_zones`` feeds the Zone
+#: Shooting profile tab as well as the Diet's five zone slices.  What the three
+#: members share is the routing fact this set exists for -- a player-subject,
+#: season, Regular Season snapshot composed at the publication boundary from
+#: collector observations -- so they stay together rather than gaining a fourth
+#: composition route.
+PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({
+    "grouped_shot_types", "synergy_play_types", "exact_shot_zones",
+})
 
 #: The human-readable label each qualifiable slice reads as.
 PLAYER_DIET_SLICE_LABELS = MappingProxyType({

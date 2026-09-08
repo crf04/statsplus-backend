@@ -375,9 +375,68 @@ class PlayerService:
             raise
 
     def _get_player_zone_shooting(self, player_name):
-        """Get player zone shooting data"""
-        df = self._fetch_data_from_table('player_shooting_zones')
+        """Get player zone shooting data.
+
+        Publication-first, following the ``_per36_frame`` precedent: the
+        immutable ``exact_shot_zones`` publication is the source once the
+        stream is activated, and the legacy ``player_shooting_zones`` table is
+        read only while it is not.  Either way the frame is the same 43-column
+        profile, rendered once in
+        :func:`app.services.player_zone_profile.transform_player_zone_profile`,
+        and the row is still located by the fuzzy-matched player name the
+        caller resolved.
+        """
+
+        df = self._zone_shooting_frame()
         return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
+
+    def _zone_shooting_frame(self):
+        """Read the Zone Shooting profile from the publication, else legacy."""
+
+        if self.publication_reader is None:
+            return self._fetch_data_from_table('player_shooting_zones')
+        from app.services.database_first_activation import (
+            PublicationPayloadError,
+            decode_player_shot_zones,
+        )
+        from app.services.player_zone_profile import transform_player_zone_profile
+
+        season = self.settings.nba.current_season
+        read = self.publication_reader.read("exact_shot_zones", season=season)
+        if read.legacy_fallback_allowed:
+            return self._fetch_data_from_table('player_shooting_zones')
+        if not read.available:
+            return pd.DataFrame(columns=['PLAYER_NAME'])
+        try:
+            rows = decode_player_shot_zones(read.payload)
+        except PublicationPayloadError:
+            return pd.DataFrame(columns=['PLAYER_NAME'])
+        frame = pd.DataFrame([
+            {
+                'PLAYER_ID': row.player_id,
+                'PLAYER_NAME': row.player_name,
+                'TEAM_ID': row.team_id,
+                'TEAM_ABBREVIATION': row.team_abbreviation,
+                'AGE': row.age,
+                'NICKNAME': row.nickname,
+                **{
+                    f'{category}_{metric}': value
+                    for category, values in row.categories.items()
+                    for metric, value in values.items()
+                },
+            }
+            for row in rows
+        ])
+        # An entirely unreported category would otherwise arrive as an object
+        # column of ``None``, which the profile arithmetic cannot sum.  A
+        # reported one is already float and is unchanged.
+        for column in frame.columns:
+            if column not in ('PLAYER_NAME', 'TEAM_ABBREVIATION', 'NICKNAME'):
+                frame[column] = pd.to_numeric(frame[column])
+        # The whole published population is transformed, not just the matched
+        # player: the profile's ``PTS%+`` columns are ratios against a league
+        # mean taken over every source row.
+        return transform_player_zone_profile(frame)
 
     def _get_shooting_type(self, player_id: int):
         """Render the Shooting Type tab from stored player Diet facts.
