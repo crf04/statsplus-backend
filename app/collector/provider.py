@@ -442,6 +442,11 @@ class _StandaloneNBAProvider:
         season_type: str,
     ) -> Any:
         from nba_api.stats import endpoints
+        # The provider's own PerGame rate is published as it stands.  The
+        # tab shows per-game values, and this endpoint returns no games-played
+        # column in any per-mode, so deriving the rate here would require a
+        # games count from another surface that need not agree with the
+        # provider's own.
         return self._request(lambda: endpoints.LeagueDashPlayerShotLocations(
             distance_range="By Zone",
             per_mode_detailed="PerGame",

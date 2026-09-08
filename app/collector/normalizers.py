@@ -94,8 +94,13 @@ def _records(response: Any) -> list[dict[str, Any]]:
                         response = [dict(zip(headers, row)) for row in rows if isinstance(row, (list, tuple))]
                     elif all(isinstance(header, Mapping) for header in headers):
                         # ``LeagueDashPlayerShotLocations`` uses a grouped
-                        # header.  Flatten only the identity and the FGA
-                        # values needed by the exact-zone contract.
+                        # header: one category spans FGM, FGA and FG_PCT.
+                        # Flatten the identity and name every column after
+                        # its category, so a zone's makes and attempts stay
+                        # distinguishable downstream.  Carrying attempts
+                        # alone cannot reproduce the shooting tab, and cannot
+                        # state the Corner 3 == Left + Right identity for
+                        # makes.
                         category_header = next((header for header in headers if "columnNames" in header), {})
                         categories = list(category_header.get("columnNames") or [])
                         converted: list[dict[str, Any]] = []
@@ -107,9 +112,15 @@ def _records(response: Any) -> list[dict[str, Any]]:
                                 "TEAM_ID": row[2], "TEAM_ABBREVIATION": row[3],
                             }
                             for index, category in enumerate(categories):
-                                position = 6 + index * 3 + 1
-                                if position < len(row):
-                                    item[category] = row[position]
+                                start = 6 + index * 3
+                                for offset, statistic in enumerate(
+                                    ("FGM", "FGA", "FG_PCT")
+                                ):
+                                    position = start + offset
+                                    if position < len(row):
+                                        item[f"{category}_{statistic}"] = (
+                                            row[position]
+                                        )
                             converted.append(item)
                         response = converted
         if isinstance(response, Mapping):
@@ -614,6 +625,9 @@ def normalize_grouped_shot_response(
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
     if scope.get("window") not in {"season", "l15"}:
         raise ProviderContractError("provider_window_unsupported")
+    # Declared on the scope so the composer can refuse evidence collected in
+    # any other per-mode rather than inferring the scale from the values.
+    scope.setdefault("value_mode", "per_game")
     requested = scope.get("category", scope.get("general_range"))
     required = (str(requested),) if requested is not None else None
     return _stat_rows(
@@ -667,6 +681,17 @@ def _zone_response(
         observation_type == "shot_zones_opponent"
         and str(scope.get("value_mode", "")) == "totals_with_minutes"
     )
+    # The player surface publishes the provider's own PerGame rates.  Each
+    # zone is rounded to one decimal independently, so the exact corner
+    # identity the opponent surface asserts cannot hold here and is not
+    # attempted: roughly two in five players disagree on rounding alone.
+    player_zone = observation_type == "exact_shot_zones"
+    exact_corner = totals_mode
+    # One player's inconsistent evidence withholds that player, not the
+    # league: the response carries every player at once, so raising would
+    # discard hundreds of sound rows for one bad one.  A missing or malformed
+    # column still fails the source as a whole.
+    withheld: dict[Any, str] = {}
     reconciliation: dict[str, Any] = {}
     if totals_mode and len(rows) != 1:
         # The opponent request is scoped to one team, so its Totals response is
@@ -681,13 +706,8 @@ def _zone_response(
             aliases = (field, field.upper())
             identity_values[field] = _positive_id(_value(row, *aliases)) if field.endswith("_id") else _text(_value(row, *aliases))
         values: dict[str, dict[str, Any]] = {}
+        violation: str | None = None
         for zone in SHOT_ZONES:
-            if observation_type == "exact_shot_zones":
-                raw = _value(row, zone, zone.upper(), zone.replace(" ", "_"))
-                if raw is None:
-                    raise ProviderContractError("provider_schema_changed")
-                values[zone] = {"value": _number(raw)}
-                continue
             flattened = zone.replace(" ", "_")
             makes = _value(
                 row, f"{zone}_OPP_FGM", f"{flattened}_OPP_FGM",
@@ -698,14 +718,22 @@ def _zone_response(
                 f"{zone}_FGA", f"{flattened}_FGA",
             )
             if zone == "Corner 3":
-                left_makes = _value(row, "Left Corner 3_OPP_FGM")
-                left_attempts = _value(row, "Left Corner 3_OPP_FGA")
-                right_makes = _value(row, "Right Corner 3_OPP_FGM")
-                right_attempts = _value(row, "Right Corner 3_OPP_FGA")
+                left_makes = _value(
+                    row, "Left Corner 3_OPP_FGM", "Left Corner 3_FGM",
+                )
+                left_attempts = _value(
+                    row, "Left Corner 3_OPP_FGA", "Left Corner 3_FGA",
+                )
+                right_makes = _value(
+                    row, "Right Corner 3_OPP_FGM", "Right Corner 3_FGM",
+                )
+                right_attempts = _value(
+                    row, "Right Corner 3_OPP_FGA", "Right Corner 3_FGA",
+                )
                 side_values = (
                     left_makes, left_attempts, right_makes, right_attempts
                 )
-                if totals_mode:
+                if exact_corner:
                     # Under Totals the sides are exact additive components of
                     # the combined corner, so disagreement is a defect rather
                     # than a per-mode artifact.  (Under the endpoint's Per48
@@ -761,7 +789,12 @@ def _zone_response(
                 raise ProviderContractError("provider_schema_changed")
             values[zone] = {"FGM": _number(makes), "FGA": _number(attempts)}
             if values[zone]["FGM"] > values[zone]["FGA"]:
-                raise ProviderContractError("value_invariant_failed")
+                if not player_zone:
+                    raise ProviderContractError("value_invariant_failed")
+                violation = (
+                    f"{zone.lower().replace(' ', '_')}_fgm_exceeds_fga "
+                    f"fgm={values[zone]['FGM']} fga={values[zone]['FGA']}"
+                )
         if totals_mode:
             backcourt_makes = _value(
                 row, f"{RECONCILED_ZONE}_OPP_FGM", f"{RECONCILED_ZONE}_FGM",
@@ -810,6 +843,13 @@ def _zone_response(
         if key in seen:
             raise ProviderContractError("duplicate_identity")
         seen.add(key)
+        if violation is not None:
+            # Recorded, not silently dropped: a surface that quietly loses a
+            # player reads identically to one that never had them.
+            withheld[identity_values.get("player_id", key[0] if key else 0)] = (
+                violation
+            )
+            continue
         # The provider returns one wide row, while the registry consumes one
         # explicit Base/slice record. Keep all five values, but materialize
         # one registry row per zone so category coverage is inspectable.
@@ -841,6 +881,11 @@ def _zone_response(
         # record rather than trusting the collector's success.  Backcourt and
         # the Corner 3 sides are evidence only; they never reach a publication.
         payload["reconciliation"] = reconciliation
+    if withheld:
+        payload["withheld_players"] = {
+            str(player_id): reason
+            for player_id, reason in sorted(withheld.items(), key=lambda i: str(i[0]))
+        }
     return NormalizedObservation(
         observation_type=observation_type, scope=scope,
         season=_canonical_season(season), cutoff=_timestamp(cutoff), payload=payload,
@@ -856,6 +901,9 @@ def normalize_zone_response(
     scope = dict(scope or {"window": "season", "subject": "player", "phase": "Regular Season"})
     if scope.get("window") not in {"season", "l15"}:
         raise ProviderContractError("provider_window_unsupported")
+    # Declared on the scope so the composer can refuse evidence collected in
+    # any other per-mode rather than inferring the scale from the values.
+    scope.setdefault("value_mode", "per_game")
     return _zone_response(response, season=season, cutoff=cutoff, scope=scope, endpoint="player_zones", identity=("player_id",))
 
 

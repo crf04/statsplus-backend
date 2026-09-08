@@ -104,8 +104,14 @@ def _stats(category="Transition"):
 
 def _zones():
     return [{
-        "player_id": 1, "Restricted Area": 1, "In The Paint (Non-RA)": 2,
-        "Mid-Range": 3, "Corner 3": 4, "Above the Break 3": 5,
+        "player_id": 1,
+        "Restricted Area_FGM": 1, "Restricted Area_FGA": 1,
+        "In The Paint (Non-RA)_FGM": 1, "In The Paint (Non-RA)_FGA": 2,
+        "Mid-Range_FGM": 1, "Mid-Range_FGA": 3,
+        "Above the Break 3_FGM": 2, "Above the Break 3_FGA": 5,
+        "Left Corner 3_FGM": 1, "Left Corner 3_FGA": 2,
+        "Right Corner 3_FGM": 1, "Right Corner 3_FGA": 2,
+        "Corner 3_FGM": 2, "Corner 3_FGA": 4,
     }]
 
 

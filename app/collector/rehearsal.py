@@ -94,8 +94,20 @@ class SanitizedFixtureProvider:
 
     @staticmethod
     def _zones(**identity: Any) -> dict[str, Any]:
-        return {**identity, "Restricted Area": 1, "In The Paint (Non-RA)": 1,
-                "Mid-Range": 1, "Corner 3": 1, "Above the Break 3": 1}
+        # Per-game rates carrying both makes and attempts, the shape the
+        # player zone contract now consumes.
+        return {
+            **identity,
+            **{
+                f"{zone}_{statistic}": value
+                for zone in ("Restricted Area", "In The Paint (Non-RA)",
+                             "Mid-Range", "Above the Break 3")
+                for statistic, value in (("FGM", 1), ("FGA", 2))
+            },
+            "Left Corner 3_FGM": 1, "Left Corner 3_FGA": 2,
+            "Right Corner 3_FGM": 1, "Right Corner 3_FGA": 2,
+            "Corner 3_FGM": 2, "Corner 3_FGA": 4,
+        }
 
 
 @dataclass(frozen=True, slots=True)
