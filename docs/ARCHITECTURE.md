@@ -2077,6 +2077,22 @@ projection's opponent and player indexes; without it they fall back to decoding
 the season-wide payload in Python, which for a league-wide question means
 decoding the whole league twice per request.
 
+`backtest_target` opens one connection for the request through the same
+`request_read_scope` seam `MatchupService` and `MatchupSelectionService`
+share, binding the publication snapshot's session to it and passing it as
+`connection=` to every read; a wiring without an engine keeps today's
+per-call default. The Targets page backtests its saved Targets one at a
+time, each against the same active publication but naming a different
+opponent's player pool, so `PlayerGameLogRepository` additionally caches
+each player's decoded season rows under the publication that produced
+them: a Publication's projection is immutable once composed, so a later
+backtest reuses whichever players an earlier one in the same generation
+already decoded instead of repeating the SELECT and JSON decode of their
+whole season, bounded to the latest two publications. The projection also
+carries an index on `(publication_id, game_id)`, which the team-rows
+semi-join and the focal single-game read filter by but previously matched
+no index of their own.
+
 What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
 `observed_diet_share`, both now module-level in `matchup.py` for that reason,
 so the player the Matchup marks thin is the player the backtest drops. The

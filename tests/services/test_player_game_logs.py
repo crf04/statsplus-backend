@@ -925,42 +925,8 @@ class _RenderedPayloadReader:
         )()
 
 
-@pytest.fixture(params=["legacy_sql", "rendered_payload", "projection"])
-def league_opponent_reads(request, tmp_path):
-    """One opponent's league-wide rows over each of the three read paths."""
-
-    records = _league_opponent_rows()
-    if request.param == "legacy_sql":
-        repository = _repository(tmp_path)
-        repository.publish(
-            SEASON,
-            records,
-            retrieved_at=RETRIEVED_AT,
-            source_provider="nba_stats",
-            source_row_count=len(records),
-        )
-        # A prior season's game against the same opponent. Only the legacy
-        # table can hold one: a Publication is season-scoped and refuses a row
-        # whose season is not its own, so the other two paths cannot express
-        # this case at all.
-        repository.publish(
-            HISTORICAL_SEASON,
-            [
-                replace(
-                    _record(player_id=404, game_id="0022400001"),
-                    season=HISTORICAL_SEASON,
-                )
-            ],
-            retrieved_at=RETRIEVED_AT,
-            source_provider="nba_stats",
-            source_row_count=1,
-        )
-        return repository, None
-
-    if request.param == "rendered_payload":
-        return _repository(
-            tmp_path, publication_reader=_RenderedPayloadReader(records)
-        ), None
+def _projected_publication_repository(tmp_path, records):
+    """A repository reading an active, projection-ready publication."""
 
     from app.services.database_first_activation import (
         DatabaseFirstPublicationReader,
@@ -1001,6 +967,46 @@ def league_opponent_reads(request, tmp_path):
     )
     assert snapshot.read("player_game_logs").projection_ready is True
     return repository, snapshot
+
+
+@pytest.fixture(params=["legacy_sql", "rendered_payload", "projection"])
+def league_opponent_reads(request, tmp_path):
+    """One opponent's league-wide rows over each of the three read paths."""
+
+    records = _league_opponent_rows()
+    if request.param == "legacy_sql":
+        repository = _repository(tmp_path)
+        repository.publish(
+            SEASON,
+            records,
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=len(records),
+        )
+        # A prior season's game against the same opponent. Only the legacy
+        # table can hold one: a Publication is season-scoped and refuses a row
+        # whose season is not its own, so the other two paths cannot express
+        # this case at all.
+        repository.publish(
+            HISTORICAL_SEASON,
+            [
+                replace(
+                    _record(player_id=404, game_id="0022400001"),
+                    season=HISTORICAL_SEASON,
+                )
+            ],
+            retrieved_at=RETRIEVED_AT,
+            source_provider="nba_stats",
+            source_row_count=1,
+        )
+        return repository, None
+
+    if request.param == "rendered_payload":
+        return _repository(
+            tmp_path, publication_reader=_RenderedPayloadReader(records)
+        ), None
+
+    return _projected_publication_repository(tmp_path, records)
 
 
 def test_one_opponents_rows_are_listed_league_wide(league_opponent_reads):
@@ -1207,6 +1213,55 @@ def test_batch_summaries_use_one_rows_query_and_keep_phase_semantics(tmp_path):
     assert [
         row.season_type for row in repository.list_h2h_rows(SEASON, 101, 2)[:3]
     ] == ["Playoffs", "Playoffs", "Regular Season"]
+
+
+def test_get_player_summaries_reuses_cached_publication_decode_across_calls(
+    tmp_path,
+):
+    """A Target backtest asks for a different opponent's player pool on every
+    call against the same active publication.  Without a cache, each call
+    re-selects and re-JSON-decodes a player's whole season from scratch, even
+    for a player an earlier call already decoded.  A Publication's rows are
+    immutable once composed, so that repeated decode is pure waste.
+    """
+
+    records = [
+        _record(player_id=101, game_id="0022500001"),
+        _record(player_id=202, game_id="0022500002"),
+        _record(player_id=303, game_id="0022500003"),
+    ]
+    repository, snapshot = _projected_publication_repository(tmp_path, records)
+
+    statements: list[str] = []
+
+    def record_statement(_connection, _cursor, statement, *_args):
+        if "publication_player_game_logs" in statement:
+            statements.append(statement)
+
+    event.listen(repository.engine, "before_cursor_execute", record_statement)
+    try:
+        first = repository.get_player_summaries(
+            SEASON, [101, 202], publication_snapshot=snapshot
+        )
+        # 202 was already decoded by the call above; only 303 is new.
+        second = repository.get_player_summaries(
+            SEASON, [202, 303], publication_snapshot=snapshot
+        )
+        # Every one of these players is already cached, so this call issues
+        # no statement against the projection at all.
+        third = repository.get_player_summaries(
+            SEASON, [101, 202, 303], publication_snapshot=snapshot
+        )
+    finally:
+        event.remove(repository.engine, "before_cursor_execute", record_statement)
+
+    # Two statements total: the first batch (101, 202), then just 303.
+    # Before the cache, three calls cost three statements, the last of them
+    # a redundant full re-decode of players the first two calls already read.
+    assert len(statements) == 2
+    assert third[101].season_rate == first[101].season_rate
+    assert third[202].season_rate == first[202].season_rate
+    assert third[303].season_rate == second[303].season_rate
 
 
 class _RecordedSeasonProvider:

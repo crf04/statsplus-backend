@@ -12,7 +12,7 @@ stub service, matching ``test_target_resolution``.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1150,6 +1150,169 @@ def test_a_reader_offering_no_snapshot_at_all_reads_the_durable_tables(
     # response is still composed; it is the cost that differs.
     assert logs.snapshots == [None, None]
     assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+
+
+def test_repeated_backtests_reuse_cached_publication_decode_and_keep_response_stable(
+    targets, backtest_settings, backtest_engine
+):
+    """The Targets page backtests one Target at a time, all against the same
+    active publication, each naming a different opponent's player pool.
+
+    Before the fix, ``get_player_summaries`` re-selects and re-JSON-decodes a
+    player's whole season on every one of those requests, even for a player
+    an earlier request in this same generation already decoded.  The fix
+    caches a player's decoded season rows per publication -- immutable once
+    composed -- so only a player not yet seen this generation costs a fresh
+    statement, and the season summary a cached player gets stays the exact
+    one a fresh decode would have produced.
+    """
+
+    from dataclasses import asdict
+
+    from sqlalchemy import event
+
+    from app.services.collection_control import PublicationService
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+    )
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+
+    retrieved_at = datetime(2026, 1, 16, tzinfo=timezone.utc)
+    day = date(2026, 1, 16)
+    filler_team, filler_tricode = 1610612744, "GSW"  # Named by neither Target.
+
+    def _game(player_id, name, game_id, days_ago, opponent_id, opponent_tricode):
+        return _row(
+            player_id,
+            name=name,
+            game_id=game_id,
+            game_date=day - timedelta(days=days_ago),
+            opponent_team_id=opponent_id,
+            opponent_team_tricode=opponent_tricode,
+        )
+
+    def _filler_games(player_id, name, prefix, count):
+        return [
+            _game(player_id, name, f"{prefix}{i}", i, filler_team, filler_tricode)
+            for i in range(1, count + 1)
+        ]
+
+    # Each player clears the min-games floor across their whole season, not
+    # just against the one opponent a Target names.
+    records = [
+        _game(LEBRON, "LeBron James", "L-OKC", 0, OKC, "OKC"),
+        _game(LEBRON, "LeBron James", "L-LAL", 1, LAL, "LAL"),
+        *_filler_games(LEBRON, "LeBron James", "L-F", 3),
+        _game(TATUM, "Jayson Tatum", "T-OKC", 0, OKC, "OKC"),
+        *_filler_games(TATUM, "Jayson Tatum", "T-F", 4),
+        _game(EMBIID, "Joel Embiid", "E-LAL", 0, LAL, "LAL"),
+        *_filler_games(EMBIID, "Joel Embiid", "E-F", 4),
+    ]
+
+    def _payload_rows(records):
+        rows = []
+        for record in records:
+            row = asdict(record)
+            row["game_date"] = record.game_date.isoformat()
+            rows.append(row)
+        return rows
+
+    publications = PublicationService(backtest_engine, clock=lambda: retrieved_at)
+    publications.register_stream(
+        "player_game_logs",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    publications.compose(
+        "player_game_logs",
+        season=SEASON,
+        cutoff=retrieved_at,
+        payload={"rows": _payload_rows(records)},
+    )
+    reader = DatabaseFirstPublicationReader(backtest_engine, clock=lambda: retrieved_at)
+    real_logs = PlayerGameLogRepository(
+        backtest_engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=SEASON,
+        clock=lambda: retrieved_at,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    diets = FakeDiets(
+        zones={
+            LEBRON: _zone_diet(0.42, 0.2),
+            TATUM: _zone_diet(0.42, 0.2),
+            EMBIID: _zone_diet(0.42, 0.2),
+        }
+    )
+    service = TargetBacktestService(
+        targets=targets,
+        player_logs=real_logs,
+        player_diets=diets,
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        publication_reader=reader,
+    )
+    target_okc = _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    target_lal = _create(targets, opponent="LAL", qualifiers=(CORNER_THREE,))
+
+    # Only record the summary read's own statements against the projection --
+    # the opponent-rows read filters on ``opponent_team_id`` and is a
+    # separate, already-indexed cost this fix does not touch.  Each entry is
+    # how many players one statement decoded, read from its own bind
+    # parameters (``publication_id`` plus one per named player), so the
+    # count reflects the actual decode work rather than just how many
+    # statements ran.
+    summary_reads: list[int] = []
+
+    def record_statement(_connection, _cursor, statement, parameters, *_args):
+        if statement.strip().startswith(
+            "SELECT publication_player_game_logs.row_payload"
+        ) and "opponent_team_id" not in statement:
+            summary_reads.append(len(parameters) - 1)
+
+    event.listen(backtest_engine, "before_cursor_execute", record_statement)
+    try:
+        first = service.backtest(OWNER, target_okc["id"])
+        second = service.backtest(OWNER, target_lal["id"])
+        # A third ask for a player pool this generation has already fully
+        # decoded -- OKC's, exactly as the first backtest asked -- costs no
+        # further statement against the projection at all.
+        third = service.backtest(OWNER, target_okc["id"])
+    finally:
+        event.remove(backtest_engine, "before_cursor_execute", record_statement)
+
+    # The first backtest decodes both its players (LeBron and Tatum) in one
+    # statement; the second decodes only Embiid, since LeBron's season is
+    # already cached; the third repeats the first Target's exact player pool
+    # and triggers no statement at all.  Before the fix, every one of these
+    # three requests re-selects and re-decodes its whole player pool from
+    # scratch: three statements naming 2, 2, and 2 players, instead of two
+    # statements naming 2 and 1.
+    assert summary_reads == [2, 1]
+
+    assert {player["canonical_id"] for player in first["players"]} == {LEBRON, TATUM}
+    assert {player["canonical_id"] for player in second["players"]} == {
+        LEBRON,
+        EMBIID,
+    }
+    assert third == first
+
+    lebron_first = next(
+        player for player in first["players"] if player["canonical_id"] == LEBRON
+    )
+    lebron_second = next(
+        player for player in second["players"] if player["canonical_id"] == LEBRON
+    )
+    # The cached read for the second backtest reports the exact season
+    # summary the first backtest's fresh decode did.
+    assert lebron_first["season_games"] == lebron_second["season_games"] == 5
+    assert lebron_first["season_averages"] == lebron_second["season_averages"]
+    assert lebron_first["season_totals"] == lebron_second["season_totals"]
 
 
 def test_a_deployment_with_no_diet_service_reports_no_players(targets, backtest):
