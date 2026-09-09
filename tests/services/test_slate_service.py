@@ -98,9 +98,21 @@ class RecordedStoredInjuries:
         self.out_player_ids = frozenset(out_player_ids)
         self.calls = []
 
-    def get_stored_injuries(self, *, event, season, pool_players):
-        self.calls.append((event["nba_game_id"], season, tuple(pool_players)))
-        return MatchupInjuryResult({}, self.out_player_ids, {})
+    def get_stored_injuries_many(self, *, events, season, pool_players_by_game):
+        self.calls.append(
+            (
+                tuple(event["nba_game_id"] for event in events),
+                season,
+                {
+                    game_id: tuple(players)
+                    for game_id, players in pool_players_by_game.items()
+                },
+            )
+        )
+        return {
+            event["nba_game_id"]: MatchupInjuryResult({}, self.out_player_ids, {})
+            for event in events
+        }
 
 
 def test_slate_orders_tip_then_game_id_independently_of_repository_order():
@@ -393,7 +405,37 @@ def test_slate_targetable_counts_apply_the_same_stored_out_override_as_matchup()
 
     assert payload["games"][0]["away_team"]["targetable_player_count"] == 1
     assert payload["games"][0]["home_team"]["targetable_player_count"] == 1
-    assert injuries.calls[0][0:2] == ("0022500001", "2025-26")
+    assert injuries.calls[0][0:2] == (("0022500001",), "2025-26")
+
+
+def test_slate_reads_every_events_stored_injuries_with_one_call():
+    players = (
+        PoolPlayer(10, "Out Away", 1, ("PTS",), {"dabble": ("PTS",)}),
+        PoolPlayer(20, "Active Home", 2, ("PTS",), {"dabble": ("PTS",)}),
+    )
+    pool = RecordedPlayerPool(
+        PlayerPool(players, {1: 1, 2: 1}, {"status": "fresh"})
+    )
+    injuries = RecordedStoredInjuries({10})
+    service = _service(
+        [
+            _event("0022500001", "2026-01-03T00:00:00+00:00"),
+            _event("0022500002", "2026-01-03T01:00:00+00:00"),
+            _event("0022500003", "2026-01-03T02:00:00+00:00"),
+        ],
+        player_pool=pool,
+        injuries=injuries,
+    )
+
+    service.get_slate("2026-01-02")
+
+    # Three events on the page ask for their stored overrides with one call,
+    # not three: the Slate composes the batch, the reader below issues one
+    # ``(season, game_id) IN (...)`` statement instead of a SELECT per event.
+    assert len(injuries.calls) == 1
+    game_ids, season, _pool_players_by_game = injuries.calls[0]
+    assert set(game_ids) == {"0022500001", "0022500002", "0022500003"}
+    assert season == "2025-26"
 
 
 def test_schedule_freshness_uses_its_own_nightly_refresh_window():

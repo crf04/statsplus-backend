@@ -8,7 +8,7 @@ from datetime import datetime
 import json
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, insert, select, update
+from sqlalchemy import and_, delete, exists, insert, select, tuple_, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.utc import assume_utc
@@ -97,6 +97,50 @@ class InjurySnapshotRepository:
             retrieved_at=assume_utc(row["retrieved_at"]),
             unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
         )
+
+    def get_many(
+        self, scopes: Sequence[InjurySnapshotScope]
+    ) -> dict[InjurySnapshotScope, StoredInjurySnapshot]:
+        """Read every scope's reconciled snapshot with one statement.
+
+        Same contract as ``get`` called once per scope, batched: the Slate
+        reads one stored override per event on the page, and this turns that
+        into one ``(season, game_id) IN (...)`` statement instead of N.  A
+        scope with nothing stored is simply absent from the result.
+        """
+
+        if not scopes:
+            return {}
+        table = InjurySnapshot.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    table.c.season,
+                    table.c.game_id,
+                    table.c.normalized_entries,
+                    table.c.retrieved_at,
+                    table.c.unresolved_team_entry_count,
+                ).where(
+                    tuple_(table.c.season, table.c.game_id).in_(
+                        (scope.season, scope.game_id) for scope in scopes
+                    )
+                )
+            ).mappings().all()
+        by_identity = {(row["season"], row["game_id"]): row for row in rows}
+        result: dict[InjurySnapshotScope, StoredInjurySnapshot] = {}
+        for scope in scopes:
+            row = by_identity.get((scope.season, scope.game_id))
+            if row is None:
+                continue
+            normalized = self._decode_objects(
+                row["normalized_entries"], "normalized injuries"
+            )
+            result[scope] = StoredInjurySnapshot(
+                normalized_entries=tuple(normalized),
+                retrieved_at=assume_utc(row["retrieved_at"]),
+                unresolved_team_entry_count=int(row["unresolved_team_entry_count"]),
+            )
+        return result
 
     def get_evidence(
         self, scope: InjurySnapshotScope

@@ -823,8 +823,13 @@ fixed injury-report source URL.
 
 `SlateService` uses its existing stored-snapshot injury read to apply the same
 Out override to targetable counts. It never refreshes injuries; opening a
-Slate cannot fan out league-feed requests across its games. This does not
-change the separate Matchup Injury Reports live/snapshot contract.
+Slate cannot fan out league-feed requests across its games. It reads every
+event's stored override through `MatchupInjuryService.get_stored_injuries_many`,
+which batches `InjurySnapshotRepository.get_many` into one
+`(season, game_id) IN (...)` statement rather than one connection checkout
+per event; the single-scope `get_stored_injuries`/`get` pair is unchanged for
+other callers. This does not change the separate Matchup Injury Reports
+live/snapshot contract.
 
 DFS provider requests use connection/read caps of 3/8 seconds (or the
 remaining absolute budget), and safe GET transport retries at most once for a
