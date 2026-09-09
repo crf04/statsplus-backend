@@ -2172,6 +2172,29 @@ def _add_player_diet_shooting_detail(connection: Connection) -> None:
     ))
 
 
+def _add_publication_player_game_log_game_index(connection: Connection) -> None:
+    """Index the projection's ``(publication_id, game_id)`` filter.
+
+    The team-rows semi-join and the focal single-game read (#246) both filter
+    the projection by exactly these two columns and previously got no index
+    for it, unlike the existing player- and opponent-led indexes.
+    """
+
+    from app.models.player_game_log import PublicationPlayerGameLog
+
+    if not inspect(connection).has_table(PublicationPlayerGameLog.__tablename__):
+        return
+    index = next(
+        index
+        for index in PublicationPlayerGameLog.__table__.indexes
+        if index.name == "ix_publication_player_game_logs_game"
+    )
+    ddl = str(CreateIndex(index).compile(dialect=connection.dialect))
+    connection.exec_driver_sql(
+        ddl.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ", 1)
+    )
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2308,6 +2331,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         55,
         "055_player_diet_shooting_detail",
         _add_player_diet_shooting_detail,
+    ),
+    Migration(
+        56,
+        "056_publication_player_game_log_game_index",
+        _add_publication_player_game_log_game_index,
     ),
 )
 

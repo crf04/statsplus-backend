@@ -165,6 +165,15 @@ class PublicationPlayerGameLog(Base):
             "player_id",
             "game_date",
         ),
+        # The team-rows semi-join and the focal single-game read both filter
+        # by exactly these two columns; without this index they fall back to
+        # scanning the whole publication instead of the rows one game or
+        # team's opponents actually touch.
+        Index(
+            "ix_publication_player_game_logs_game",
+            "publication_id",
+            "game_id",
+        ),
     )
 
 
