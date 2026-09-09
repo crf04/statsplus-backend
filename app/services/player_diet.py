@@ -567,6 +567,7 @@ class PlayerDietRepository:
         *,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
+        baseline_cache: dict[Any, dict[tuple[str, str], PlayerDietBaseline]] | None = None,
     ) -> PlayerDietResult:
         season = validate_canonical_season(season)
         requested = self._canonical_player_ids(player_ids)
@@ -575,6 +576,7 @@ class PlayerDietRepository:
             requested,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            baseline_cache=baseline_cache,
         )
         if publication_result is not None:
             return publication_result
@@ -673,8 +675,17 @@ class PlayerDietRepository:
         *,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
+        baseline_cache: dict[Any, dict[tuple[str, str], PlayerDietBaseline]] | None = None,
     ) -> PlayerDietResult | None:
-        """Serve activated Diet bases independently from immutable payloads."""
+        """Serve activated Diet bases independently from immutable payloads.
+
+        The league-wide baseline population for every Base is the same for
+        any two calls sharing one immutable Publication generation, whatever
+        players either requests, so a caller composing many players across
+        many calls from that generation may pass ``baseline_cache``: the
+        first call builds the baselines and the rest reuse them instead of
+        re-decoding and re-aggregating the whole league.
+        """
 
         if self._publication_reader is None:
             return None
@@ -682,11 +693,26 @@ class PlayerDietRepository:
         facts_by_player: dict[int, list[StoredPlayerDietFact]] = defaultdict(list)
         # The baseline population is the whole stored season fact set for
         # the Base, so every decoded/legacy fact is kept here regardless of
-        # whether its player was requested.
+        # whether its player was requested -- unless a cached baseline for
+        # this generation already exists, in which case this collection is
+        # skipped entirely.
         baseline_facts_by_base: dict[str, list[PlayerDietFact]] = defaultdict(list)
         observations: list[StoredPlayerDietObservation] = []
         fallback_bases: list[str] = []
         used_publication = False
+        # A snapshot's own immutable ``generation`` is the cache key when the
+        # object carries one; a bare stand-in (as a fake test snapshot may be)
+        # is hashable and stable across calls, so it is used as-is.
+        cache_key = (
+            None
+            if publication_snapshot is None
+            else (getattr(publication_snapshot, "generation", publication_snapshot), season)
+        )
+        cached_baselines = (
+            baseline_cache.get(cache_key)
+            if baseline_cache is not None and cache_key is not None
+            else None
+        )
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key)
@@ -749,7 +775,8 @@ class PlayerDietRepository:
                     retrieved_at=retrieved_at,
                 )
             )
-            baseline_facts_by_base[base].extend(facts)
+            if cached_baselines is None:
+                baseline_facts_by_base[base].extend(facts)
             for fact in facts:
                 if fact.player_id in requested:
                     facts_by_player[fact.player_id].append(
@@ -781,13 +808,19 @@ class PlayerDietRepository:
                     )
                 ).mappings().all() if requested else ()
                 # The baseline population is the whole stored season fact
-                # set for the Base, not just the requested players.
-                legacy_baseline_facts = connection.execute(
-                    select(fact_table).where(
-                        fact_table.c.season == season,
-                        fact_table.c.base.in_(fallback_bases),
-                    )
-                ).mappings().all()
+                # set for the Base, not just the requested players -- and is
+                # skipped entirely once a cached generation baseline covers
+                # it, exactly as the publication-decoded facts above are.
+                legacy_baseline_facts = (
+                    connection.execute(
+                        select(fact_table).where(
+                            fact_table.c.season == season,
+                            fact_table.c.base.in_(fallback_bases),
+                        )
+                    ).mappings().all()
+                    if cached_baselines is None
+                    else ()
+                )
                 legacy_observations = connection.execute(
                     select(observation_table).where(
                         observation_table.c.season == season,
@@ -809,19 +842,20 @@ class PlayerDietRepository:
                         retrieved_at=assume_utc(row["retrieved_at"]),
                     )
                 )
-            for row in legacy_baseline_facts:
-                baseline_facts_by_base[row["base"]].append(
-                    PlayerDietFact(
-                        player_id=row["player_id"],
-                        base=row["base"],
-                        slice_key=row["slice_key"],
-                        share=row["share"],
-                        volume=row["volume"],
-                        games_played=row["games_played"],
-                        volume_unit=row["volume_unit"],
-                        provider=row["provider"],
+            if cached_baselines is None:
+                for row in legacy_baseline_facts:
+                    baseline_facts_by_base[row["base"]].append(
+                        PlayerDietFact(
+                            player_id=row["player_id"],
+                            base=row["base"],
+                            slice_key=row["slice_key"],
+                            share=row["share"],
+                            volume=row["volume"],
+                            games_played=row["games_played"],
+                            volume_unit=row["volume_unit"],
+                            provider=row["provider"],
+                        )
                     )
-                )
             observations.extend(
                 StoredPlayerDietObservation(
                     base=row["base"],
@@ -833,10 +867,15 @@ class PlayerDietRepository:
             )
         if not used_publication:
             return None
-        baselines = compute_player_diet_baselines(
-            (fact for facts in baseline_facts_by_base.values() for fact in facts),
-            settings=self._baseline_settings,
-        )
+        if cached_baselines is not None:
+            baselines = cached_baselines
+        else:
+            baselines = compute_player_diet_baselines(
+                (fact for facts in baseline_facts_by_base.values() for fact in facts),
+                settings=self._baseline_settings,
+            )
+            if baseline_cache is not None and cache_key is not None:
+                baseline_cache[cache_key] = baselines
         return PlayerDietResult(
             season=season,
             players={
@@ -946,12 +985,14 @@ class PlayerDietService:
         *,
         publication_snapshot: Any | None = None,
         connection: Connection | None = None,
+        baseline_cache: dict[Any, dict[tuple[str, str], PlayerDietBaseline]] | None = None,
     ) -> PlayerDietResult:
         return self.repository.get_for_players(
             season,
             player_ids,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            baseline_cache=baseline_cache,
         )
 
     @staticmethod
