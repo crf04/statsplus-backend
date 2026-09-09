@@ -35,6 +35,7 @@ from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
 )
+from app.services.matchup_snapshot import SnapshotMatchupComposer, SnapshotMatchups
 from app.services.publication_snapshot_calls import accepts_keyword
 from app.services.target_backtest import (
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -65,30 +66,6 @@ class TodayReader(Protocol):
     def today(
         self, target: Mapping[str, Any], *, matchups: Any
     ) -> dict[str, Any] | None: ...
-
-
-class SnapshotMatchupComposer(Protocol):
-    def get_matchup_from_snapshot(
-        self, *, game_id: str, publication_snapshot: Any, injuries: Any
-    ) -> Mapping[str, Any]: ...
-
-
-class _SnapshotMatchups:
-    """The ``MatchupReader`` ``today`` expects, bound to one generation."""
-
-    def __init__(
-        self, composer: SnapshotMatchupComposer, snapshot: Any, injuries: Any
-    ) -> None:
-        self.composer = composer
-        self.snapshot = snapshot
-        self.injuries = injuries
-
-    def get_matchup(self, *, game_id: str) -> Mapping[str, Any]:
-        return self.composer.get_matchup_from_snapshot(
-            game_id=game_id,
-            publication_snapshot=self.snapshot,
-            injuries=self.injuries,
-        )
 
 
 class TargetPreviewService:
@@ -124,7 +101,7 @@ class TargetPreviewService:
         )
         today = self.resolutions.today(
             draft,
-            matchups=_SnapshotMatchups(self.matchups, snapshot, self.injuries),
+            matchups=SnapshotMatchups(self.matchups, snapshot, self.injuries),
         )
         return {**previewed, "today": today}
 
