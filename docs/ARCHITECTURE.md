@@ -2020,6 +2020,24 @@ directly. For one ET Slate Date it partitions the account's Targets into those
 whose opponent has a game and those that do not, and for each distinct game a
 Target names it reads that game's Matchup once.
 
+`resolve` additionally captures one Publication snapshot for the whole
+request -- constructor-injected `publication_reader`, `injuries` (a
+stored-only reader), and `settings` together gate this path -- and composes
+every distinct game's Matchup from it through `MatchupService`
+`.get_matchup_from_snapshot`, using `app.services.matchup_snapshot
+.SnapshotMatchups`, the same wrapper the preview (#253) uses so the two
+callers share one implementation rather than two copies. Injuries are read
+through the caller's stored-only reader, never the live one `get_matchup`
+would consult, so a pre-tip game with a stale stored override cannot start a
+synchronous provider refresh -- let alone a write -- inside this GET.
+`SnapshotMatchups` also owns a per-request `MatchupComposeCache`: the two
+league-wide Defense Sheet windows (keyed by `season, window_games, as_of`) and
+the league-wide Diet baseline population (keyed by the snapshot's immutable
+generation) are identical across every game the one captured snapshot composes,
+so they are read or built once per resolve rather than once per game. A
+deployment missing any of the three gating collaborators keeps calling
+`MatchupService.get_matchup` once per game, live injuries included, unchanged.
+
 Every number it returns is the Matchup's own: per-slice shares and their
 league averages, the `diet_thin` verdict, posted markets, injury badge
 references, Season scoring and the player ordering derived from it, the
