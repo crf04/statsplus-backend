@@ -18,10 +18,15 @@ from sqlalchemy import create_engine
 
 import tests.services.test_matchup_service as matchup_doubles
 from app.config.settings import NBASeasonSettings, RuntimeSettings
-from app.errors import InvalidInputError
+from app.errors import InvalidInputError, ProviderUnavailableError
 from app.migrations import run_migrations
 from app.models.user import User
 from app.services.matchup import MatchupService
+from app.services.matchup_injuries import (
+    MatchupInjuryService,
+    StoredMatchupInjuryReader,
+    unavailable_injury_result,
+)
 from app.services.player_diet import (
     PlayerDietBaseline,
     PlayerDietResult,
@@ -1833,3 +1838,368 @@ def test_resolve_date_conditions_are_inclusive(targets, resolve, start, end, cou
     targets.update_target(OWNER, created['id'], changes={'conditions': {'from': start, 'to': end}})
     result = resolve()
     assert len(result['targets'][0]['players']) == count
+
+
+# --- one Publication snapshot per resolve (perf, #274-perf) ----------------
+#
+# Before this change, ``_resolve_target`` called ``matchups.get_matchup``
+# once per distinct game, and the production ``MatchupService.get_matchup``
+# captures its own Publication snapshot, decodes its own injuries, and reads
+# its own league-wide team windows and Diet baselines on every call. These
+# tests pin ``resolve``'s promise, mirroring the preview's own (#253): one
+# snapshot for the whole request, no injury provider call, and no repeated
+# league-wide read for work that is identical across games.
+
+
+class _FakeSnapshot:
+    """A minimal Publication snapshot stand-in for a real ``MatchupService``.
+
+    A real ``MatchupService`` composing over a caller-supplied snapshot always
+    calls ``.metadata()`` for the response's provenance block, so a bare
+    generation string is not enough once the composer is real rather than a
+    pure recording double.
+    """
+
+    def __init__(self, generation):
+        self.generation = generation
+
+    def metadata(self):
+        return {
+            "streams": {},
+            "mixed_cutoff": False,
+            "mixed_freshness": False,
+            "coverage_cutoffs": [],
+        }
+
+
+class _AdvancingPublicationReader:
+    """Every capture is a new generation, so two captures can never agree."""
+
+    def __init__(self):
+        self.calls = []
+
+    def snapshot(self, stream_keys, *, season, projection_only_keys=None):
+        self.calls.append((tuple(stream_keys), season, projection_only_keys))
+        return _FakeSnapshot(f"generation-{len(self.calls)}")
+
+
+class _RecordedSnapshotMatchups:
+    """A ``SnapshotMatchupComposer`` recording every call's generation."""
+
+    def __init__(self, payloads):
+        self.payloads = payloads
+        self.calls = []
+
+    def get_matchup_from_snapshot(
+        self, *, game_id, publication_snapshot, injuries, compose_cache=None
+    ):
+        self.calls.append((game_id, publication_snapshot, injuries))
+        return self.payloads[game_id]
+
+    def get_matchup(self, *, game_id):
+        raise AssertionError(
+            "resolve must compose every game from its one captured snapshot"
+        )
+
+
+class _GenericLogs:
+    """A ``player_logs`` seam serving whatever players a game requests."""
+
+    def get_player_summaries(self, season, player_ids):
+        return {
+            player_id: PlayerSeasonLogSummary(
+                season=season,
+                player_id=player_id,
+                season_rate=PlayerSeasonRate(
+                    season=season,
+                    player_id=player_id,
+                    game_count=20,
+                    total_minutes=700,
+                    per_game={"PTS": 20.0},
+                    per_minute={"PTS": 20.0 / 35},
+                ),
+                last_ten_minutes=(20.0,),
+            )
+            for player_id in player_ids
+        }
+
+    def get_read_freshness(self, season):
+        return PlayerGameLogReadFreshness("fresh", matchup_doubles.RETRIEVED_AT)
+
+
+class _CountingDiets:
+    """A Diet reader honoring ``baseline_cache`` the way the real repository does.
+
+    ``build_calls`` only increments on a cache miss, so it counts how many
+    times the league-wide baseline population was actually built rather than
+    how many times a game asked for one -- proving the shared cache, not the
+    reader's own memory, is what prevented a rebuild.
+    """
+
+    def __init__(self):
+        self.build_calls = 0
+        self.get_calls = []
+
+    def get_for_players(
+        self,
+        season,
+        player_ids,
+        *,
+        publication_snapshot=None,
+        connection=None,
+        baseline_cache=None,
+    ):
+        self.get_calls.append(tuple(player_ids))
+        key = (season, getattr(publication_snapshot, "generation", publication_snapshot))
+        if baseline_cache is not None and key in baseline_cache:
+            baselines = baseline_cache[key]
+        else:
+            self.build_calls += 1
+            baselines = {("shot_zones", "Corner 3"): PlayerDietBaseline(0.2, 0.05)}
+            if baseline_cache is not None:
+                baseline_cache[key] = baselines
+        return PlayerDietResult(
+            season=season,
+            players={
+                player_id: (
+                    StoredPlayerDietFact(
+                        player_id,
+                        "shot_zones",
+                        "Corner 3",
+                        0.45,
+                        100.0,
+                        20,
+                        "field_goal_attempts",
+                        "nba_stats",
+                        matchup_doubles.RETRIEVED_AT,
+                    ),
+                )
+                for player_id in player_ids
+            },
+            observations=(),
+            baselines=baselines,
+        )
+
+
+class _StoredNoInjuries:
+    """A stored-only injury reader that never reaches a provider."""
+
+    def get_injuries(self, *, event, season, pool_players):
+        return unavailable_injury_result("disabled")
+
+
+def _resolution_settings():
+    return RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings(current_season=matchup_doubles.SEASON),
+    )
+
+
+def test_resolve_captures_exactly_one_publication_snapshot_across_games(targets):
+    """Three Targets across two games still capture one generation, not one per game."""
+
+    okc_game_id, mia_game_id = "0022500900", "0022500901"
+    okc_game = _game(
+        game_id=okc_game_id,
+        away=(LAL, "LAL", "Los Angeles Lakers"),
+        home=(OKC, "OKC", "Oklahoma City Thunder"),
+    )
+    mia_game = _game(
+        game_id=mia_game_id,
+        away=(MIA, "MIA", "Miami Heat"),
+        home=(DEN, "DEN", "Denver Nuggets"),
+    )
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    _create(targets, opponent="MIA", qualifiers=(LOW_RIM,))
+    _create(targets, opponent="DEN", qualifiers=(TRANSITION,))
+    reader = _AdvancingPublicationReader()
+    composer = _RecordedSnapshotMatchups(
+        {
+            okc_game_id: _matchup(game=okc_game),
+            mia_game_id: _matchup(game=mia_game),
+        }
+    )
+    service = TargetResolutionService(
+        targets=targets,
+        slates=FakeSlate(games=[okc_game, mia_game]),
+        matchups=composer,
+        publication_reader=reader,
+        injuries=object(),
+        settings=_resolution_settings(),
+    )
+
+    result = service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert len(result["targets"]) == 3
+    assert len(reader.calls) == 1
+    assert {call[0] for call in composer.calls} == {okc_game_id, mia_game_id}
+    # Every compose call shares the one captured generation and the one
+    # injected stored-only injury reader -- never a second capture.
+    assert {call[1].generation for call in composer.calls} == {"generation-1"}
+    assert {call[2] for call in composer.calls} == {service.injuries}
+
+
+def test_resolve_never_reaches_the_injury_provider(targets):
+    """A stale/missing stored override would refresh live from ``get_matchup``;
+    ``resolve`` must never take that path.
+    """
+
+    provider = Mock(name="rotowire")
+    provider.get_snapshot.side_effect = ProviderUnavailableError("rotowire down")
+    repository = Mock(name="injury_snapshots")
+    repository.get.return_value = None
+    repository.get_latest_source.return_value = None
+    injury_service = MatchupInjuryService(
+        provider=provider,
+        snapshot_repository=repository,
+        athlete_catalog=Mock(name="athletes"),
+        enabled=True,
+        permission_granted=True,
+        clock=lambda: matchup_doubles.NOW,
+    )
+    matchup_service = matchup_doubles._service(injuries=injury_service)
+    slate = FakeSlate(
+        games=[
+            _game(
+                game_id=matchup_doubles.GAME_ID,
+                away=(matchup_doubles.LAL, "LAL", "Los Angeles Lakers"),
+                home=(matchup_doubles.BOS, "BOS", "Boston Celtics"),
+            )
+        ]
+    )
+    _create(targets, opponent="BOS", qualifiers=(CORNER_THREE,))
+    service = TargetResolutionService(
+        targets=targets,
+        slates=slate,
+        matchups=matchup_service,
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=StoredMatchupInjuryReader(injury_service),
+        settings=_resolution_settings(),
+    )
+
+    result = service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert result["targets"][0]["game"]["game_id"] == matchup_doubles.GAME_ID
+    provider.get_snapshot.assert_not_called()
+    repository.publish.assert_not_called()
+    repository.replace_from_source.assert_not_called()
+    # The Matchup route's own read would refresh on this same stale evidence,
+    # so this is exactly what a regression back to the live reader catches.
+    matchup_service.get_matchup(game_id=matchup_doubles.GAME_ID)
+    assert provider.get_snapshot.call_count == 1
+
+
+def test_resolve_shares_team_windows_and_diet_baselines_across_games(targets):
+    """Two games sharing a date should share their window and baseline reads.
+
+    Both games are scheduled on the same date, so ``(season, window_games,
+    as_of)`` is identical for both: the season window and the Last-15 window
+    should each be read once, not once per game, and the league-wide Diet
+    baseline population -- identical for both games under one generation --
+    should be built once rather than rebuilt per game.
+    """
+
+    okc_game_id, den_game_id = "0022500910", "0022500911"
+    scheduled_at = "2026-01-15T00:30:00+00:00"  # before matchup_doubles.NOW
+
+    def _event(game_id, *, home_id, home_name, home_tricode, away_id, away_name, away_tricode):
+        return {
+            "nba_game_id": game_id,
+            "season": matchup_doubles.SEASON,
+            "scheduled_at": scheduled_at,
+            "status_text": "Scheduled",
+            "status_code": 1,
+            "postponed_status": None,
+            "postponement_evidence": None,
+            "classification": "Regular Season",
+            "home_team_id": home_id,
+            "home_team_name": home_name,
+            "home_team_tricode": home_tricode,
+            "away_team_id": away_id,
+            "away_team_name": away_name,
+            "away_team_tricode": away_tricode,
+            "home_team": {"id": home_id, "name": home_name, "tricode": home_tricode},
+            "away_team": {"id": away_id, "name": away_name, "tricode": away_tricode},
+        }
+
+    events = [
+        _event(
+            okc_game_id,
+            home_id=OKC, home_name="Oklahoma City Thunder", home_tricode="OKC",
+            away_id=LAL, away_name="Los Angeles Lakers", away_tricode="LAL",
+        ),
+        _event(
+            den_game_id,
+            home_id=DEN, home_name="Denver Nuggets", home_tricode="DEN",
+            away_id=MIA, away_name="Miami Heat", away_tricode="MIA",
+        ),
+    ]
+    pool = PlayerPool(
+        players=(
+            PoolPlayer(101, "Laker One", LAL, ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(102, "Thunder One", OKC, ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(103, "Heat One", MIA, ("PTS",), {"prizepicks": ("PTS",)}),
+            PoolPlayer(104, "Nugget One", DEN, ("PTS",), {"prizepicks": ("PTS",)}),
+        ),
+        team_counts={LAL: 1, OKC: 1, MIA: 1, DEN: 1},
+        freshness={
+            "status": "fresh",
+            "retrieved_at": matchup_doubles.RETRIEVED_AT.isoformat(),
+            "providers": {},
+        },
+    )
+    team_matchups = matchup_doubles.RecordedTeamWindows(
+        matchup_doubles._window(), matchup_doubles._window(last_15=True)
+    )
+    diets = _CountingDiets()
+    matchup_service = MatchupService(
+        event_catalog=matchup_doubles.RecordedEvents(events=events),
+        player_pool=matchup_doubles.RecordedPool(pool),
+        player_logs=_GenericLogs(),
+        player_diets=diets,
+        team_matchups=team_matchups,
+        stats_freshness=SimpleNamespace(
+            get=lambda: StatsFreshness(matchup_doubles.RETRIEVED_AT)
+        ),
+        settings=_resolution_settings(),
+        clock=lambda: matchup_doubles.NOW,
+    )
+    slate = FakeSlate(
+        games=[
+            _game(
+                game_id=okc_game_id,
+                away=(LAL, "LAL", "Los Angeles Lakers"),
+                home=(OKC, "OKC", "Oklahoma City Thunder"),
+            ),
+            _game(
+                game_id=den_game_id,
+                away=(MIA, "MIA", "Miami Heat"),
+                home=(DEN, "DEN", "Denver Nuggets"),
+            ),
+        ]
+    )
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    _create(targets, opponent="DEN", qualifiers=(CORNER_THREE,))
+    service = TargetResolutionService(
+        targets=targets,
+        slates=slate,
+        matchups=matchup_service,
+        publication_reader=_AdvancingPublicationReader(),
+        injuries=_StoredNoInjuries(),
+        settings=_resolution_settings(),
+    )
+
+    result = service.resolve(OWNER, requested_date=SLATE_DATE)
+
+    assert len(result["targets"]) == 2
+    # One season window, one Last-15 window -- not one pair per game.
+    assert len(team_matchups.calls) == 2
+    assert {call[1] for call in team_matchups.calls} == {None, 15}
+    # Both games resolve to the same Eastern as-of date, whatever it is --
+    # the shared cache is what's under test, not the exact date.
+    assert len({call[2] for call in team_matchups.calls}) == 1
+    # The league-wide baseline population is identical for both games under
+    # one generation, so it must be built exactly once even though both
+    # games ask for it.
+    assert len(diets.get_calls) == 2
+    assert diets.build_calls == 1

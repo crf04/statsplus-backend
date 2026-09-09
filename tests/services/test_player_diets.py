@@ -1087,6 +1087,90 @@ def _publication_repository_with_shared_facts(tmp_path):
     )
 
 
+class _FakeGenerationSnapshot:
+    """A ``publication_snapshot`` stand-in exposing ``.read`` and ``.generation``.
+
+    Mirrors the shape ``PublicationReadSnapshot`` presents to
+    ``_publication_result``: an immutable ``.generation`` a caller composing
+    several reads may key a cache on, and a per-stream ``.read`` in place of
+    the injected reader's own.
+    """
+
+    def __init__(self, decoded, *, generation):
+        self.generation = generation
+        self._decoded = decoded
+
+    def read(self, stream_key):
+        if stream_key == "synergy_play_types":
+            return PublicationRead(
+                stream_key=stream_key,
+                publication_id="publication-1",
+                season="2025-26",
+                cutoff=None,
+                version=1,
+                status="active",
+                freshness="fresh",
+                age_seconds=0,
+                payload={"rows": []},
+                decoded=self._decoded,
+                retrieved_at=NOW,
+            )
+        return PublicationRead(
+            stream_key=stream_key,
+            publication_id=None,
+            season="2025-26",
+            cutoff=None,
+            version=None,
+            status="missing",
+            freshness="missing",
+            age_seconds=None,
+            payload=None,
+            retrieved_at=NOW,
+        )
+
+
+def test_get_for_players_reuses_baselines_across_calls_sharing_one_generation(
+    tmp_path,
+):
+    """A caller composing several games from one generation shares one build.
+
+    ``MatchupService`` recomputed the whole league-wide baseline population
+    on every call to ``get_for_players``, even though it depends only on the
+    Publication generation and not on which players a particular game
+    requests. A caller that passes the same ``baseline_cache`` dict across
+    calls sharing one generation must get back the identical baselines
+    object the second time -- proof the second call skipped rebuilding it --
+    while a call under a different generation must not reuse it.
+    """
+
+    repository = _publication_repository_with_shared_facts(tmp_path)
+    snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
+    )
+    cache: dict = {}
+
+    first = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=snapshot, baseline_cache=cache
+    )
+    second = repository.get_for_players(
+        "2025-26", [1005], publication_snapshot=snapshot, baseline_cache=cache
+    )
+
+    assert first.baselines is second.baselines
+    assert len(cache) == 1
+    assert {player_id for player_id in second.players} == {1005}
+
+    other_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-2",)
+    )
+    third = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=other_snapshot, baseline_cache=cache
+    )
+
+    assert third.baselines is not first.baselines
+    assert len(cache) == 2
+
+
 def test_legacy_and_publication_paths_agree_on_the_same_baseline_fixture(tmp_path):
     requested = [1001, 1005]
 
