@@ -5,6 +5,11 @@ generation for a whole request and need a ``MatchupReader`` --
 ``.get_matchup(game_id=...)`` -- bound to it, so a Matchup composed this way
 never captures a second, independently advancing snapshot.  This is the one
 place that binding lives; neither caller defines its own copy.
+
+``capture_publication_snapshot`` is the matching capture-side seam: both
+callers resolve their own generation from an injected publication reader in
+the same shape -- ``snapshot`` or the older ``read_snapshot``, narrowing
+offered only where accepted -- so that step lives in one place too.
 """
 
 from __future__ import annotations
@@ -14,6 +19,34 @@ from typing import Any, Protocol
 
 from app.services.matchup import MatchupComposeCache
 from app.services.publication_snapshot_calls import accepts_keyword
+
+
+def capture_publication_snapshot(
+    publication_reader: Any | None,
+    stream_keys: Any,
+    *,
+    projection_only_keys: Any,
+    season: str,
+) -> Any:
+    """Capture one Publication generation over a caller's stream set, if any.
+
+    Mirrors the reads' own resolution -- ``snapshot`` or the older
+    ``read_snapshot``, narrowing offered only where accepted -- so a reader
+    either read can use, this can. Returns ``None`` when ``publication_reader``
+    is absent or exposes neither method.
+    """
+
+    if publication_reader is None:
+        return None
+    snapshot = getattr(publication_reader, "snapshot", None)
+    if not callable(snapshot):
+        snapshot = getattr(publication_reader, "read_snapshot", None)
+    if not callable(snapshot):
+        return None
+    keyword = {}
+    if accepts_keyword(snapshot, "projection_only_keys"):
+        keyword["projection_only_keys"] = projection_only_keys
+    return snapshot(stream_keys, season=season, **keyword)
 
 
 class SnapshotMatchupComposer(Protocol):
@@ -58,4 +91,8 @@ class SnapshotMatchups:
         )
 
 
-__all__ = ["SnapshotMatchupComposer", "SnapshotMatchups"]
+__all__ = [
+    "SnapshotMatchupComposer",
+    "SnapshotMatchups",
+    "capture_publication_snapshot",
+]

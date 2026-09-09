@@ -36,8 +36,10 @@ from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
 )
-from app.services.matchup_snapshot import SnapshotMatchups
-from app.services.publication_snapshot_calls import accepts_keyword
+from app.services.matchup_snapshot import (
+    SnapshotMatchups,
+    capture_publication_snapshot,
+)
 from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 
@@ -140,28 +142,13 @@ class TargetResolutionService:
             or not callable(getattr(composer, "get_matchup_from_snapshot", None))
         ):
             return self.matchups
-        snapshot = self._publication_snapshot(self.settings.nba.current_season)
+        snapshot = capture_publication_snapshot(
+            self.publication_reader,
+            MATCHUP_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            season=self.settings.nba.current_season,
+        )
         return SnapshotMatchups(composer, snapshot, self.injuries)
-
-    def _publication_snapshot(self, season: str):
-        """Capture the one generation ``_request_matchups`` hands to every game.
-
-        Mirrors the Matchup's own resolution and the preview's mirror of it --
-        ``snapshot`` or the older ``read_snapshot``, narrowing offered only
-        where accepted -- over exactly the streams a Matchup composes, so the
-        generation this captures is the same shape ``get_matchup`` would
-        capture for one game.
-        """
-
-        snapshot = getattr(self.publication_reader, "snapshot", None)
-        if not callable(snapshot):
-            snapshot = getattr(self.publication_reader, "read_snapshot", None)
-        if not callable(snapshot):
-            return None
-        keyword = {}
-        if accepts_keyword(snapshot, "projection_only_keys"):
-            keyword["projection_only_keys"] = MATCHUP_PROJECTION_ONLY_STREAM_KEYS
-        return snapshot(MATCHUP_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     def today(
         self,

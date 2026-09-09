@@ -35,8 +35,11 @@ from app.services.matchup import (
     MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
     MATCHUP_PUBLICATION_STREAM_KEYS,
 )
-from app.services.matchup_snapshot import SnapshotMatchupComposer, SnapshotMatchups
-from app.services.publication_snapshot_calls import accepts_keyword
+from app.services.matchup_snapshot import (
+    SnapshotMatchupComposer,
+    SnapshotMatchups,
+    capture_publication_snapshot,
+)
 from app.services.target_backtest import (
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
     BACKTEST_PUBLICATION_STREAM_KEYS,
@@ -95,7 +98,12 @@ class TargetPreviewService:
         returns; it is echoed as the response's ``target``.
         """
 
-        snapshot = self._publication_snapshot(self.settings.nba.current_season)
+        snapshot = capture_publication_snapshot(
+            self.publication_reader,
+            PREVIEW_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
+            season=self.settings.nba.current_season,
+        )
         previewed = self.backtests.backtest_target(
             draft, publication_snapshot=snapshot
         )
@@ -104,26 +112,6 @@ class TargetPreviewService:
             matchups=SnapshotMatchups(self.matchups, snapshot, self.injuries),
         )
         return {**previewed, "today": today}
-
-    def _publication_snapshot(self, season: str):
-        """Resolve the one generation both reads compose from, if any.
-
-        Mirrors the reads' own resolution -- ``snapshot`` or the older
-        ``read_snapshot``, narrowing offered only where accepted -- so a reader
-        either read can use, this can.
-        """
-
-        if self.publication_reader is None:
-            return None
-        snapshot = getattr(self.publication_reader, "snapshot", None)
-        if not callable(snapshot):
-            snapshot = getattr(self.publication_reader, "read_snapshot", None)
-        if not callable(snapshot):
-            return None
-        keyword = {}
-        if accepts_keyword(snapshot, "projection_only_keys"):
-            keyword["projection_only_keys"] = PREVIEW_PROJECTION_ONLY_STREAM_KEYS
-        return snapshot(PREVIEW_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
 
 __all__ = [
