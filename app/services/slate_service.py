@@ -33,13 +33,13 @@ EASTERN = ZoneInfo("America/New_York")
 
 
 class StoredInjuryOverrideReader(Protocol):
-    def get_stored_injuries(
+    def get_stored_injuries_many(
         self,
         *,
-        event: Mapping[str, Any],
+        events: Sequence[Mapping[str, Any]],
         season: str,
-        pool_players: Sequence[PoolPlayer],
-    ) -> MatchupInjuryResult: ...
+        pool_players_by_game: Mapping[str, Sequence[PoolPlayer]],
+    ) -> Mapping[str, MatchupInjuryResult]: ...
 
 
 class SlateService:
@@ -125,19 +125,21 @@ class SlateService:
             pool_freshness = dict(pool.freshness)
             removed_player_ids: set[int] = set()
             if self.injuries is not None:
+                pool_players_by_game: dict[str, tuple[PoolPlayer, ...]] = {}
                 for event in selected_events:
                     team_ids = {
                         int(event[f"{side}_team"]["id"])
                         for side in ("away", "home")
                     }
-                    event_players = tuple(
+                    pool_players_by_game[str(event.get("nba_game_id", ""))] = tuple(
                         player for player in pool.players if player.team_id in team_ids
                     )
-                    result = self.injuries.get_stored_injuries(
-                        event=event,
-                        season=season,
-                        pool_players=event_players,
-                    )
+                results = self.injuries.get_stored_injuries_many(
+                    events=selected_events,
+                    season=season,
+                    pool_players_by_game=pool_players_by_game,
+                )
+                for result in results.values():
                     removed_player_ids.update(result.out_player_ids)
             targetable_counts = dict(pool.team_counts)
             for player in pool.players:

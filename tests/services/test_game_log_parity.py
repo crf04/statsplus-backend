@@ -7,7 +7,7 @@ from the same canonical facts produced by durable PBP ingestion.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, timedelta
 import hashlib
 import json
@@ -468,6 +468,93 @@ def test_active_player_log_read_uses_indexed_publication_projection(
     assert any(
         "ix_publication_player_game_logs_player_date" in str(step)
         for step in plan
+    )
+
+
+def test_active_game_row_read_uses_the_publication_game_index(tmp_path):
+    """The team-rows semi-join and the focal single-game read both filter the
+    projection by exactly ``(publication_id, game_id)``.  Migration
+    056 adds the index that lets that filter reach an index seek instead of
+    scanning the whole publication's rows.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'game-index.sqlite3'}")
+    run_migrations(engine)
+    # Enough games and players that SQLite's planner (with real statistics)
+    # prefers a narrow two-column seek over scanning every one of a
+    # publication's rows through the primary key's ``publication_id`` prefix
+    # alone; a single game's two rows would not tell the two plans apart.
+    records = tuple(
+        replace(_record(), player_id=100 + player, game_id=f"00225000{game:02d}")
+        for game in range(1, 7)
+        for player in range(1, 4)
+    )
+    payload_rows = []
+    for record in records:
+        row = asdict(record)
+        row["game_date"] = record.game_date.isoformat()
+        payload_rows.append(row)
+    encoded = json.dumps({"rows": payload_rows}, sort_keys=True)
+
+    with engine.begin() as connection:
+        connection.execute(insert(PublicationStream).values(
+            stream_key="player_game_logs",
+            provider="ledger",
+            owner="railway",
+            required_observations="[]",
+            publication_strategy="ledger_compose",
+            supported_windows='["season"]',
+            schema_versions="[1]",
+            completeness_rule="league_complete",
+            freshness_rule="cutoff_current",
+            enabled=True,
+            created_at=RETRIEVED_AT,
+        ))
+        connection.execute(insert(PublicationVersion).values(
+            publication_id="publication-1",
+            stream_key="player_game_logs",
+            season=SEASON,
+            cutoff=RETRIEVED_AT,
+            version=1,
+            status="active",
+            checksum=hashlib.sha256(encoded.encode()).hexdigest(),
+            payload=encoded,
+            created_at=RETRIEVED_AT,
+            reason="projection regression",
+            fence=1,
+        ))
+        connection.execute(
+            text(
+                "INSERT INTO publication_player_game_logs "
+                "(publication_id, player_id, game_id, game_date, "
+                "opponent_team_id, row_payload) "
+                "VALUES (:publication_id, :player_id, :game_id, :game_date, "
+                ":opponent_team_id, :row_payload)"
+            ),
+            [
+                {
+                    "publication_id": "publication-1",
+                    "player_id": row["player_id"],
+                    "game_id": row["game_id"],
+                    "game_date": row["game_date"],
+                    "opponent_team_id": row["opponent_team_id"],
+                    "row_payload": json.dumps(row, sort_keys=True),
+                }
+                for row in payload_rows
+            ],
+        )
+        connection.exec_driver_sql("ANALYZE")
+
+    with engine.connect() as connection:
+        plan = connection.exec_driver_sql(
+            "EXPLAIN QUERY PLAN "
+            "SELECT row_payload FROM publication_player_game_logs "
+            "WHERE publication_id = ? AND game_id = ? "
+            "ORDER BY player_id ASC",
+            ("publication-1", "0022500003"),
+        ).all()
+    assert any(
+        "ix_publication_player_game_logs_game" in str(step) for step in plan
     )
 
 

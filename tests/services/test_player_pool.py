@@ -1368,11 +1368,14 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
             }]
 
     class StoredInjuries:
-        def get_stored_injuries(self, *, event, season, pool_players):
-            assert event["nba_game_id"] == "0022500001"
+        def get_stored_injuries_many(self, *, events, season, pool_players_by_game):
+            assert [event["nba_game_id"] for event in events] == ["0022500001"]
             assert season == "2025-26"
-            assert [player.canonical_player_id for player in pool_players] == [101]
-            return MatchupInjuryResult({}, frozenset({101}), {})
+            assert [
+                player.canonical_player_id
+                for player in pool_players_by_game["0022500001"]
+            ] == [101]
+            return {"0022500001": MatchupInjuryResult({}, frozenset({101}), {})}
 
     dependencies.slate_service = SlateService(
         Catalog(),

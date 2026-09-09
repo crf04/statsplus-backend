@@ -43,6 +43,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from math import isfinite
 from typing import Any, Protocol
 
+from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.orm import Session
+
 from app.config.settings import RuntimeSettings
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
@@ -68,6 +71,7 @@ from app.services.player_game_log_values import (
     player_game_log_focal_line,
     selected_player_game_log_market_values,
 )
+from app.services.request_reads import request_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.target_conditions import (
     date_is_kept,
@@ -166,12 +170,17 @@ class TargetBacktestService:
         statistic_catalog: StatisticCatalog,
         settings: RuntimeSettings,
         publication_reader: Any | None = None,
+        engine: Engine | None = None,
     ) -> None:
         self.targets = targets
         self.player_logs = player_logs
         self.player_diets = player_diets
         self.publication_reader = publication_reader
         self.settings = settings
+        # One request checks out one connection for every read it composes;
+        # without an engine each seam keeps opening its own, exactly as the
+        # Matchup and Selection reads default without one.
+        self._engine = engine
         self._statistics = {
             statistic.market_category: statistic
             for statistic in statistic_catalog.statistics
@@ -208,40 +217,46 @@ class TargetBacktestService:
         season = self.settings.nba.current_season
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
-        # One snapshot for the whole response: the Diet a player ate and the
-        # games they played have to come from the same generation of evidence.
-        snapshot = (
-            self._publication_snapshot(season)
-            if publication_snapshot is _OWN
-            else publication_snapshot
-        )
-        opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
-        rows = tuple(record for record in call_with_read_scope(
-            self.player_logs.list_opponent_rows, season, opponent_team_id,
-            publication_snapshot=snapshot,
-        ) if record.season_type == REGULAR_SEASON_TYPE)
-        conditions = target.get("conditions")
-        defender = conditions.get("defender") if conditions else None
-        player_minutes = conditions.get("player_minutes") if conditions else None
-        defender_minutes = {}
-        if defender:
-            defender_minutes = {
-                row.game_id: row.minutes for row in call_with_read_scope(
-                    self.player_logs.list_player_rows, season, defender["player_id"],
-                    publication_snapshot=snapshot,
-                ) if row.team_id == opponent_team_id and row.season_type == REGULAR_SEASON_TYPE
-            }
-        kept = tuple(row for row in rows if date_is_kept(conditions, row.game_date)
-                     and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0))))
-        players = self._players(
-            target,
-            qualifiers,
-            markets,
-            season,
-            snapshot,
-            kept,
-            player_minutes=player_minutes,
-        )
+        # One connection for every read this request composes, exactly as
+        # the Matchup and Selection reads share theirs; without an engine
+        # each seam keeps opening its own.
+        with request_read_scope(self._engine) as (connection, session):
+            # One snapshot for the whole response: the Diet a player ate and
+            # the games they played have to come from the same generation of
+            # evidence.
+            snapshot = (
+                self._publication_snapshot(season, session=session)
+                if publication_snapshot is _OWN
+                else publication_snapshot
+            )
+            opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
+            rows = tuple(record for record in call_with_read_scope(
+                self.player_logs.list_opponent_rows, season, opponent_team_id,
+                publication_snapshot=snapshot, connection=connection,
+            ) if record.season_type == REGULAR_SEASON_TYPE)
+            conditions = target.get("conditions")
+            defender = conditions.get("defender") if conditions else None
+            player_minutes = conditions.get("player_minutes") if conditions else None
+            defender_minutes = {}
+            if defender:
+                defender_minutes = {
+                    row.game_id: row.minutes for row in call_with_read_scope(
+                        self.player_logs.list_player_rows, season, defender["player_id"],
+                        publication_snapshot=snapshot, connection=connection,
+                    ) if row.team_id == opponent_team_id and row.season_type == REGULAR_SEASON_TYPE
+                }
+            kept = tuple(row for row in rows if date_is_kept(conditions, row.game_date)
+                         and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0))))
+            players = self._players(
+                target,
+                qualifiers,
+                markets,
+                season,
+                snapshot,
+                kept,
+                player_minutes=player_minutes,
+                connection=connection,
+            )
         return {
             "target": dict(target),
             "season": season,
@@ -300,7 +315,7 @@ class TargetBacktestService:
             }
         return {"players": len(players), "games": len(lines), "columns": columns}
 
-    def _publication_snapshot(self, season: str):
+    def _publication_snapshot(self, season: str, *, session: Session | None = None):
         """Resolve this request's immutable Publication generation, if any.
 
         Mirrors the Matchup and Selection reads, including their
@@ -320,6 +335,8 @@ class TargetBacktestService:
         keyword = {}
         if accepts_keyword(snapshot, "projection_only_keys"):
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if session is not None and accepts_keyword(snapshot, "session"):
+            keyword["session"] = session
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     @staticmethod
@@ -340,6 +357,7 @@ class TargetBacktestService:
         records: Sequence[PlayerGameLogRecord],
         *,
         player_minutes: int | None = None,
+        connection: Connection | None = None,
     ) -> list[dict[str, Any]]:
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {}
         for record in records:
@@ -372,6 +390,7 @@ class TargetBacktestService:
                 season,
                 player_ids,
                 publication_snapshot=snapshot,
+                connection=connection,
             )
         )
         summaries = call_with_read_scope(
@@ -379,6 +398,7 @@ class TargetBacktestService:
             season,
             player_ids,
             publication_snapshot=snapshot,
+            connection=connection,
         )
 
         players = []

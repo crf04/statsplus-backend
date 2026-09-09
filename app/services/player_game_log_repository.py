@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+import threading
 from typing import Any
 
 from sqlalchemy import delete, func, insert, select, update
@@ -152,6 +154,12 @@ class PlayerSeasonLogSummary:
 class PlayerGameLogRepository:
     """Publish season facts and observe one explicit current stats surface."""
 
+    #: A Publication's projected rows never change once composed, so decoded
+    #: season rows are cached under the publication that produced them and
+    #: bounded to the latest few generations -- an older one's rows are worth
+    #: nothing once a newer one activates.
+    _SUMMARY_PROJECTION_CACHE_PUBLICATIONS = 2
+
     def __init__(
         self,
         engine: Engine,
@@ -173,6 +181,9 @@ class PlayerGameLogRepository:
         self._write_fence = write_fence
         self._serve_stale = bool(serve_stale)
         self._publication_reader = publication_reader
+        # publication_id -> {player_id: decoded season rows}, oldest first.
+        self._summary_projection_cache: "OrderedDict[str, dict[int, tuple[PlayerGameLogRecord, ...]]]" = OrderedDict()
+        self._summary_projection_cache_lock = threading.Lock()
         self._stats_surface_max_age_seconds = exact_seconds(
             exact_timedelta(
                 exact_seconds(stats_surface_max_age),
@@ -501,7 +512,7 @@ class PlayerGameLogRepository:
         publication_snapshot: Any | None,
         connection: Connection | None = None,
     ) -> tuple[PlayerGameLogRecord, ...] | None:
-        """Read one game's player pool from the active projection.
+        """Read one player pool's season rows from the active projection.
 
         ``None`` means this snapshot carries no projection, so the caller keeps
         its existing payload or legacy path.
@@ -514,20 +525,72 @@ class PlayerGameLogRepository:
             return None
         if read.publication_id is None:
             return ()
-        projection = PublicationPlayerGameLog.__table__
-        return self._decode_projection(
-            select(projection.c.row_payload)
-            .where(
-                projection.c.publication_id == read.publication_id,
-                projection.c.player_id.in_(player_ids),
+        return self._cached_summary_rows(
+            read.publication_id, season, player_ids, connection=connection
+        )
+
+    def _cached_summary_rows(
+        self,
+        publication_id: str,
+        season: str,
+        player_ids: tuple[int, ...],
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...]:
+        """Decode each player's season rows once per immutable publication.
+
+        A Target backtest asks this question once per saved Target, each
+        naming a different opponent's player pool against the same active
+        publication.  Without this cache, every one of those requests
+        re-selects and re-JSON-decodes up to a season's worth of rows for
+        every player it names, even the players an earlier request in the
+        same generation already decoded.  Publications are immutable once
+        composed, so a cached player's rows never go stale; only the number
+        of publications kept live is bounded.
+        """
+
+        with self._summary_projection_cache_lock:
+            cache = self._summary_projection_cache.get(publication_id)
+            if cache is None:
+                cache = {}
+                self._summary_projection_cache[publication_id] = cache
+            self._summary_projection_cache.move_to_end(publication_id)
+            missing = tuple(
+                player_id for player_id in player_ids if player_id not in cache
             )
-            .order_by(
-                projection.c.player_id.asc(),
-                projection.c.game_date.asc(),
-                projection.c.game_id.asc(),
-            ),
-            season=season,
-            connection=connection,
+
+        if missing:
+            projection = PublicationPlayerGameLog.__table__
+            decoded = self._decode_projection(
+                select(projection.c.row_payload)
+                .where(
+                    projection.c.publication_id == publication_id,
+                    projection.c.player_id.in_(missing),
+                )
+                .order_by(
+                    projection.c.player_id.asc(),
+                    projection.c.game_date.asc(),
+                    projection.c.game_id.asc(),
+                ),
+                season=season,
+                connection=connection,
+            )
+            by_player: dict[int, list[PlayerGameLogRecord]] = {
+                player_id: [] for player_id in missing
+            }
+            for record in decoded:
+                by_player[record.player_id].append(record)
+            for player_id in missing:
+                cache.setdefault(player_id, tuple(by_player[player_id]))
+            with self._summary_projection_cache_lock:
+                while (
+                    len(self._summary_projection_cache)
+                    > self._SUMMARY_PROJECTION_CACHE_PUBLICATIONS
+                ):
+                    self._summary_projection_cache.popitem(last=False)
+
+        return tuple(
+            record for player_id in player_ids for record in cache.get(player_id, ())
         )
 
     def _decode_projection(

@@ -687,6 +687,7 @@ def build_dependencies(
         statistic_catalog=statistic_catalog,
         settings=settings,
         publication_reader=publication_reader,
+        engine=engine,
     )
     # A preview composes the two Target reads from one Publication snapshot
     # and reads injuries stored-only: the Matchup route may refresh them from

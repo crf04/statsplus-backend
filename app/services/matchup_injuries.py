@@ -237,6 +237,64 @@ class MatchupInjuryService:
             pool_players=pool_players,
         )
 
+    def get_stored_injuries_many(
+        self,
+        *,
+        events: Sequence[Mapping[str, Any]],
+        season: str,
+        pool_players_by_game: Mapping[str, Sequence[Any]],
+    ) -> dict[str, MatchupInjuryResult]:
+        """Read every event's stored override with one batched statement.
+
+        Same gated, stored-only contract as ``get_stored_injuries`` called
+        once per event -- never starts provider collection -- except every
+        event's snapshot comes from one
+        ``InjurySnapshotRepository.get_many`` statement instead of N.  The
+        Slate is the caller: it asks this question once per event on the page.
+        """
+
+        if not self.enabled:
+            return {
+                str(event["nba_game_id"]): unavailable_injury_result("disabled")
+                for event in events
+            }
+        if not self.permission_granted:
+            return {
+                str(event["nba_game_id"]): unavailable_injury_result(
+                    "permission_required"
+                )
+                for event in events
+            }
+        if self.snapshot_repository is None:
+            return {
+                str(event["nba_game_id"]): unavailable_injury_result("fetch_failed")
+                for event in events
+            }
+        scopes_by_game = {
+            str(event["nba_game_id"]): InjurySnapshotScope(
+                season, str(event["nba_game_id"])
+            )
+            for event in events
+        }
+        try:
+            stored_by_scope = self.snapshot_repository.get_many(
+                tuple(scopes_by_game.values())
+            )
+        except (SQLAlchemyError, TypeError, ValueError):
+            stored_by_scope = {}
+        now = assume_utc(self.clock())
+        results: dict[str, MatchupInjuryResult] = {}
+        for event in events:
+            game_id = str(event["nba_game_id"])
+            stored = stored_by_scope.get(scopes_by_game[game_id])
+            results[game_id] = self._stored_result(
+                stored,
+                now=now,
+                event=event,
+                pool_players=pool_players_by_game.get(game_id, ()),
+            )
+        return results
+
     def _stored_result(
         self,
         stored: Any | None,

@@ -138,6 +138,62 @@ def test_game_snapshot_read_does_not_load_league_source_evidence(tmp_path):
     assert "raw_payload" not in statements[0]
 
 
+def test_get_many_reads_every_scope_with_one_statement(tmp_path):
+    """The Slate asks this once per event on the page.  ``get`` called once
+    per event pays one connection checkout and ``SELECT`` per event; the
+    batched read composes the same identity ``WHERE`` clause once for every
+    scope named, so N events cost one statement rather than N.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'batched-injuries.sqlite3'}")
+    run_migrations(engine)
+    repository = InjurySnapshotRepository(engine)
+    scopes = [
+        InjurySnapshotScope("2025-26", f"002250000{i}") for i in range(1, 4)
+    ]
+    # Only the first two scopes have anything stored; the third has never
+    # been observed, which ``get`` reports as ``None`` and ``get_many`` must
+    # simply omit rather than raise for.
+    for i, scope in enumerate(scopes[:2]):
+        repository.publish(
+            scope,
+            source="rotowire",
+            raw_payload=[{"ID": str(i)}],
+            source_entries=[{"entry_id": f"rotowire:{i}"}],
+            normalized_entries=[
+                {
+                    "entry_id": f"rotowire:{i}",
+                    "team_id": 1,
+                    "canonical_player_id": i,
+                    "canonical_status": "Out",
+                }
+            ],
+            retrieved_at=NOW,
+            unresolved_team_entry_count=0,
+        )
+
+    statements = []
+
+    def record_statement(connection, cursor, statement, parameters, context, many):
+        if "injury_snapshots" in statement and "injury_source_snapshots" not in statement:
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        results = repository.get_many(scopes)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+
+    assert len(statements) == 1
+    assert set(results) == {scopes[0], scopes[1]}
+    assert results[scopes[0]].normalized_entries[0]["canonical_player_id"] == 0
+    assert results[scopes[1]].normalized_entries[0]["canonical_player_id"] == 1
+    # Matches what three individual ``get`` calls would have reported.
+    assert results[scopes[0]] == repository.get(scopes[0])
+    assert results[scopes[1]] == repository.get(scopes[1])
+    assert repository.get(scopes[2]) is None
+
+
 def test_source_retention_prunes_only_old_unreferenced_evidence(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'retention.sqlite3'}")
     run_migrations(engine)
