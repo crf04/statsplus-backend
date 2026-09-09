@@ -29,8 +29,17 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
+from app.config.settings import RuntimeSettings
 from app.domain.player_diet_taxonomy import PLAYER_DIET_SLICE_LABELS
 from app.models.target import TARGET_COMPARATOR_TESTS
+from app.services.matchup import (
+    MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+    MATCHUP_PUBLICATION_STREAM_KEYS,
+)
+from app.services.matchup_snapshot import (
+    SnapshotMatchups,
+    capture_publication_snapshot,
+)
 from app.services.target_conditions import date_is_kept, minutes_are_kept
 
 
@@ -69,10 +78,22 @@ class TargetResolutionService:
         targets: TargetReader,
         slates: SlateReader,
         matchups: MatchupReader,
+        publication_reader: Any | None = None,
+        injuries: Any | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> None:
         self.targets = targets
         self.slates = slates
         self.matchups = matchups
+        # Every collaborator below is optional and every one is required
+        # together: they let ``resolve`` compose every game from one
+        # Publication snapshot with a stored-only injury reader, the same two
+        # promises the preview (#253) already makes for its own read. Missing
+        # any of them keeps today's per-game ``matchups.get_matchup``
+        # behavior, live injuries included, unchanged.
+        self.publication_reader = publication_reader
+        self.injuries = injuries
+        self.settings = settings
 
     def resolve(
         self, firebase_uid: str, *, requested_date: str | None = None
@@ -88,15 +109,46 @@ class TargetResolutionService:
         slate = self.slates.get_slate(requested_date)
         games = self._games_by_tricode(slate["games"])
         read_matchups: dict[str, Mapping[str, Any]] = {}
+        matchups = self._request_matchups()
 
         live: list[dict[str, Any]] = []
         idle: list[dict[str, Any]] = []
         for target in self.targets.list_targets(firebase_uid):
             resolved = self._resolve_target(
-                target, games, read_matchups, matchups=self.matchups, slate_date=slate["slate_date"]
+                target, games, read_matchups, matchups=matchups, slate_date=slate["slate_date"]
             )
             (idle if resolved["game"] is None else live).append(resolved)
         return {"slate_date": slate["slate_date"], "targets": live + idle}
+
+    def _request_matchups(self) -> MatchupReader:
+        """One reader for this whole resolve, reading no provider.
+
+        A distinct game a Target names is already composed at most once
+        (``_resolve_target``'s own ``read_matchups`` cache); this additionally
+        makes every one of those composes share one Publication snapshot
+        instead of ``self.matchups.get_matchup`` capturing its own per call,
+        and reads injuries from the caller's stored-only reader instead of
+        the live one ``get_matchup`` would use -- the same two promises the
+        preview (#253) already makes for its own ``today`` call, so a
+        pre-tip game with a stale stored override cannot start a synchronous
+        provider refresh, let alone a write, inside this GET.
+        """
+
+        composer = self.matchups
+        if (
+            self.publication_reader is None
+            or self.settings is None
+            or self.injuries is None
+            or not callable(getattr(composer, "get_matchup_from_snapshot", None))
+        ):
+            return self.matchups
+        snapshot = capture_publication_snapshot(
+            self.publication_reader,
+            MATCHUP_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+            season=self.settings.nba.current_season,
+        )
+        return SnapshotMatchups(composer, snapshot, self.injuries)
 
     def today(
         self,

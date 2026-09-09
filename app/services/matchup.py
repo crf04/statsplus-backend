@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -222,6 +222,27 @@ MATCHUP_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
 #: "Use the service's own": the compose path resolves its snapshot and reads
 #: its injuries itself unless a caller hands it either.
 _OWN = object()
+
+
+@dataclass
+class MatchupComposeCache:
+    """Per-request memo for per-game work that repeats within one generation.
+
+    A Defense Sheet window depends only on ``(season, window_games, as_of)``,
+    and a Diet baseline population depends only on the Publication generation
+    -- neither depends on which game or which players a particular Matchup
+    composition names. A caller composing many Matchups from one snapshot
+    (Target resolution, #245) shares one cache instance across every
+    ``get_matchup_from_snapshot`` call instead of re-reading the same
+    league-wide window or rebuilding the same league-wide baselines once per
+    game. The cache is created fresh per caller and is never shared across
+    requests, so it needs no invalidation.
+    """
+
+    windows: dict[tuple[str, int | None, date | None], "TeamMatchupWindow | None"] = field(
+        default_factory=dict
+    )
+    diet_baselines: dict[Any, dict[tuple[str, str], Any]] = field(default_factory=dict)
 
 
 class EventCatalogReader(Protocol):
@@ -535,6 +556,7 @@ class MatchupService:
         game_id: str,
         publication_snapshot: Any | None,
         injuries: MatchupInjuryReader | None,
+        compose_cache: MatchupComposeCache | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -543,7 +565,11 @@ class MatchupService:
         pairs this Matchup with another read from the same generation cannot
         mix two -- and injuries are read through the caller's reader rather
         than the service's own, so a caller promising no provider call can
-        hand in one that never refreshes.
+        hand in one that never refreshes. ``compose_cache`` is optional: a
+        caller composing many games from the same snapshot may hand in one
+        instance so the identical league-wide team window and Diet baseline
+        reads are not repeated per game; omitting it keeps today's per-call
+        behavior.
         """
 
         with request_read_scope(self._engine) as (connection, session):
@@ -553,6 +579,7 @@ class MatchupService:
                 session=session,
                 publication_snapshot=publication_snapshot,
                 injuries=injuries,
+                compose_cache=compose_cache,
             )
 
     def _compose_matchup(
@@ -563,6 +590,7 @@ class MatchupService:
         session: Session | None,
         publication_snapshot: Any = _OWN,
         injuries: Any = _OWN,
+        compose_cache: MatchupComposeCache | None = None,
     ) -> dict[str, Any]:
         season = self.settings.nba.current_season
         observed_at = assume_utc(self._clock())
@@ -647,6 +675,7 @@ class MatchupService:
             players,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            baseline_cache=None if compose_cache is None else compose_cache.diet_baselines,
         )
 
         slate_date = self._event_date(event)
@@ -658,6 +687,7 @@ class MatchupService:
             as_of=team_as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            cache=None if compose_cache is None else compose_cache.windows,
         )
         last_15_window = self._team_window(
             season,
@@ -665,6 +695,7 @@ class MatchupService:
             as_of=team_as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
+            cache=None if compose_cache is None else compose_cache.windows,
         )
         windows = {"season": season_window, "last_15": last_15_window}
         metric_indexes = {
@@ -1107,16 +1138,25 @@ class MatchupService:
         as_of: date | None,
         publication_snapshot=None,
         connection: Connection | None = None,
+        cache: dict[tuple[str, int | None, date | None], "TeamMatchupWindow | None"] | None = None,
     ) -> TeamMatchupWindow | None:
         """Read one Defense Sheet window.
 
         This is the shared window: `league` and `teams` display it, and #47
-        made it the Matchup Score input too, in every mode.
+        made it the Matchup Score input too, in every mode. ``cache`` is an
+        optional per-request memo keyed by ``(season, window_games, as_of)``:
+        a caller composing several games from one Publication generation may
+        pass the same dict to every call, so the second game sharing a window
+        does not read it again.
         """
 
         if self.team_matchups is None:
             return None
-        return call_with_read_scope(
+        if cache is not None:
+            key = (season, window_games, as_of)
+            if key in cache:
+                return cache[key]
+        window = call_with_read_scope(
             self.team_matchups.get_latest_window,
             season,
             window_games=window_games,
@@ -1124,6 +1164,9 @@ class MatchupService:
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
+        if cache is not None:
+            cache[key] = window
+        return window
 
     def _diets(
         self,
@@ -1132,15 +1175,26 @@ class MatchupService:
         *,
         publication_snapshot=None,
         connection: Connection | None = None,
+        baseline_cache: dict[Any, dict[tuple[str, str], Any]] | None = None,
     ) -> PlayerDietResult:
         if self.player_diets is None:
             return PlayerDietResult(season, {}, ())
+        extra_kwargs: dict[str, Any] = {}
+        if baseline_cache is not None and accepts_keyword(
+            self.player_diets.get_for_players, "baseline_cache"
+        ):
+            # League-wide Diet baselines depend only on the Publication
+            # generation, not on which players this game requests, so a
+            # caller composing many games from one generation shares one
+            # cache instead of rebuilding them per game.
+            extra_kwargs["baseline_cache"] = baseline_cache
         return call_with_read_scope(
             self.player_diets.get_for_players,
             season,
             tuple(player.canonical_player_id for player in players),
             publication_snapshot=publication_snapshot,
             connection=connection,
+            **extra_kwargs,
         )
 
     @classmethod
@@ -2224,6 +2278,7 @@ __all__ = [
     "HISTORICAL_MODE",
     "MATCHUP_PROJECTION_ONLY_STREAM_KEYS",
     "MATCHUP_PUBLICATION_STREAM_KEYS",
+    "MatchupComposeCache",
     "MatchupService",
     "diet_evidence_thin",
     "observed_diet_share",

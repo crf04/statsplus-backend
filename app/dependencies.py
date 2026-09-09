@@ -663,6 +663,13 @@ def build_dependencies(
         targets=user_service,
         slates=slate_service,
         matchups=matchup_service,
+        # One Publication snapshot and a stored-only injury reader for the
+        # whole resolve, the same two promises the preview (#253) already
+        # makes: without these, a per-game ``get_matchup`` call may open its
+        # own snapshot and reach the live injury provider from inside a GET.
+        publication_reader=publication_reader,
+        injuries=StoredMatchupInjuryReader(matchup_injury_service),
+        settings=settings,
     )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the
