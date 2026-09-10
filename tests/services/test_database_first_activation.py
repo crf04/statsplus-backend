@@ -1452,3 +1452,222 @@ def test_non_shot_type_publication_never_carries_a_shooting_split():
     )
 
     assert decoded[0].shooting is None
+
+
+def _play_type_publication_row(**overrides):
+    row = {
+        "player_id": 2544,
+        "slice_key": "Transition",
+        "share": 0.32,
+        "volume": 480.0,
+        "games_played": 60,
+        "volume_unit": "possessions",
+        "provider": "nba_synergy",
+    }
+    row.update(overrides)
+    return row
+
+
+def _seed_diet_publication(engine, payload, *, version=1, fence=0):
+    """Register the play-type stream and hand-seed one active publication.
+
+    The governed publication composition demands an Event Catalog authority,
+    which the decode cache test does not exercise: the reader's own
+    availability, checksum, and decode decisions are what this seam tests.
+    The rows it inserts are exactly the rows a real activation writes.
+    """
+
+    from app.domain.publication_integrity import (
+        canonical_publication_json,
+        publication_payload_checksum,
+    )
+    from app.models.collection_control import (
+        PublicationPointer,
+        PublicationVersion,
+    )
+
+    publication_id = f"pub-diet-{version}"
+    encoded = canonical_publication_json(payload)
+    checksum = publication_payload_checksum(encoded)
+
+    service = PublicationService(engine, clock=lambda: NOW)
+    stream = service.register_stream(
+        "synergy_play_types",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    assert stream.publication_strategy == "replace"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM publication_pointers "
+                "WHERE stream_key = 'synergy_play_types'"
+            )
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key="synergy_play_types",
+                season="2025-26",
+                cutoff=NOW,
+                version=version,
+                status="active",
+                checksum=checksum,
+                payload=encoded,
+                created_at=NOW,
+                fence=fence,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key="synergy_play_types",
+                active_publication_id=publication_id,
+                previous_publication_id=None,
+                fence=fence,
+                updated_at=NOW,
+            )
+        )
+    return publication_id
+
+
+def test_snapshot_reuses_decoded_diet_facts_within_one_generation(tmp_path):
+    """Second snapshot of one Diet generation decodes once, not twice.
+
+    The four Diet stream payloads are whole-season documents, so decoding
+    them again on every request is the largest cost of a warm read. The
+    cached decode is keyed by the immutable publication row's own identity
+    (publication_id, fence, version) per stream, so two snapshot() calls
+    over the same generation return the identical decoded fact objects
+    while every availability, authority, and checksum check still runs.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row(), _play_type_publication_row(
+            player_id=2, slice_key="Isolation")]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    decodes: list[int] = []
+    import app.services.database_first_activation as activation
+    real_decode = activation.decode_player_diet
+
+    def counting_decode(payload, **kwargs):
+        decodes.append(1)
+        return real_decode(payload, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(activation, "decode_player_diet", counting_decode)
+        first = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        second = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+
+    assert first.available is True
+    assert second.available is True
+    assert len(decodes) == 1
+    assert second.decoded is first.decoded
+    assert second.decoded[0].slice_key == "Transition"
+    assert second.checksum == first.checksum
+
+
+def test_snapshot_diet_decode_hit_still_verifies_the_immutable_row(tmp_path):
+    """A cache hit never skips the checks the read itself makes.
+
+    Corrupt the stored checksum after a first read and the hit refuses the
+    row rather than serving facts it decoded while the row matched its own
+    checksum: a cached decode is reused only for the row still judged valid.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    first = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+        "synergy_play_types"
+    )
+    assert first.available is True
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_versions SET checksum = 'deadbeef' "
+                "WHERE publication_id = 'pub-diet-1'"
+            )
+        )
+
+    second = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+        "synergy_play_types"
+    )
+
+    assert second.available is False
+    assert second.unavailable_reason == "publication_checksum_mismatch"
+    assert second.decoded is None
+
+
+def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path):
+    """A new publication is a new key; the oldest version's decode is evicted."""
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row(share=0.3)]},
+        version=1, fence=0,
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    decodes: list[int] = []
+    import app.services.database_first_activation as activation
+    real_decode = activation.decode_player_diet
+
+    def counting_decode(payload, **kwargs):
+        decodes.append(1)
+        return real_decode(payload, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(activation, "decode_player_diet", counting_decode)
+        warm = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        assert warm.decoded[0].share == 0.3
+        assert len(decodes) == 1
+
+        # A second immutable publication of the same stream is a different
+        # key: it decodes again, and both bounded versions live side by side.
+        _seed_diet_publication(
+            engine, {"rows": [_play_type_publication_row(share=0.4)]},
+            version=2, fence=1,
+        )
+        newest = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        assert newest.decoded[0].share == 0.4
+        assert len(decodes) == 2
+        assert len(reader._diet_decode_cache) == 2
+
+        # A third composition evicts the two older versions down to the
+        # bounded pair, so naming the first again decodes once more.
+        _seed_diet_publication(
+            engine, {"rows": [_play_type_publication_row(share=0.5)]},
+            version=3, fence=2,
+        )
+        last = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        assert last.decoded[0].share == 0.5
+        assert len(decodes) == 3
+        assert len(reader._diet_decode_cache) == 2
+
+        # Bound 2 evicting: the surviving decodes are exactly the two newest
+        # versions.
+        assert set(key[1] for key in reader._diet_decode_cache) == {
+            "pub-diet-2",
+            "pub-diet-3",
+        }

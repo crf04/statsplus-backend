@@ -10,11 +10,13 @@ active last-good version even when its age is stale.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from math import isfinite
+from threading import Lock
 from typing import Any, Callable, NamedTuple, Protocol
 
 from sqlalchemy import case, exists, null, select
@@ -84,6 +86,17 @@ def _reject_duplicate_json_keys(pairs):
 #: activated.  Callers that distinguish this refusal from an unreadable
 #: control plane compare against this constant, not against a literal.
 LEGACY_WRITE_FENCED = "legacy_write_fenced"
+
+#: The four player-Diet publication streams.  Their payloads are whole-season
+#: documents (~2 MB JSON per capture) whose decoded facts are a pure function
+#: of the immutable publication row they name, so the read-authority caches
+#: the decode per stream under that row's identity.
+_PLAYER_DIET_PUBLICATION_BASES = {
+    "synergy_play_types": "play_types",
+    "grouped_shot_types": "shot_types",
+    "exact_shot_zones": "shot_zones",
+    "player_assist_locations": "assist_locations",
+}
 
 
 class LegacyWriteFenceProtocol(Protocol):
@@ -771,12 +784,7 @@ def _decode_known_publication_payload(
         "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15",
     } | NBA_PUBLICATION_STREAM_KEYS
-    diet_bases = {
-        "synergy_play_types": "play_types",
-        "grouped_shot_types": "shot_types",
-        "exact_shot_zones": "shot_zones",
-        "player_assist_locations": "assist_locations",
-    }
+    diet_bases = _PLAYER_DIET_PUBLICATION_BASES
     if stream_key == "player_game_logs":
         return decode_player_game_logs(payload, season=season)
     if stream_key == "player_per36":
@@ -837,9 +845,12 @@ class PublicationRead:
     def available(self) -> bool:
         # A rollback pointer still names a known-good immutable publication.
         # Keep its rollback status visible to callers instead of treating the
-        # safety action itself as data loss.
+        # safety action itself as data loss.  A cached decoded fact set is
+        # just as available as the payload it was decoded from.
         return (
-            self.payload is not None or self.projection_ready
+            self.payload is not None
+            or self.projection_ready
+            or self.decoded is not None
         ) and self.status in {"active", "rollback", "stale"}
 
     def to_dict(self) -> dict[str, Any]:
@@ -946,6 +957,12 @@ class PublicationReadSnapshot:
 class DatabaseFirstPublicationReader:
     """Read active publication pointers without provider or legacy fallback."""
 
+    #: A Diet stream's decoded facts stay valid for as long as the immutable
+    #: publication row they name exists, so only the number of versions kept
+    #: live per stream is bounded; an older one is worthless once the pointer
+    #: names a newer one.
+    _DIET_DECODE_CACHE_VERSIONS_PER_STREAM = 2
+
     def __init__(
         self,
         engine: Engine,
@@ -959,6 +976,11 @@ class DatabaseFirstPublicationReader:
         self.freshness_seconds = dict(
             freshness_seconds or PUBLICATION_FRESHNESS_SECONDS
         )
+        # (stream_key, publication_id, fence, version) -> decoded Diet facts.
+        self._diet_decode_cache: "OrderedDict[tuple, tuple[Any, ...] | None]" = (
+            OrderedDict()
+        )
+        self._diet_decode_cache_lock = Lock()
 
     def read(
         self,
@@ -1319,6 +1341,43 @@ class DatabaseFirstPublicationReader:
                 freshness=freshness,
                 age_seconds=age,
             )
+        decode_cache_key = (
+            (
+                stream_key,
+                publication.publication_id,
+                int(pointer.fence),
+                int(publication.version),
+            )
+            if stream_key in _PLAYER_DIET_PUBLICATION_BASES
+            else None
+        )
+        if decode_cache_key is not None:
+            cached_decoded = self._diet_decoded(decode_cache_key)
+            if cached_decoded is not None:
+                # The availability, authority, and checksum checks above all
+                # ran again; only the decode they authorize is reused.
+                decoded = cached_decoded
+                payload = None
+                return PublicationRead(
+                    stream_key=stream_key,
+                    publication_id=publication.publication_id,
+                    season=publication.season,
+                    cutoff=_utc(publication.cutoff).isoformat(),
+                    version=int(publication.version),
+                    status=("active" if publication.status == "active" else "rollback"),
+                    freshness=freshness,
+                    age_seconds=age,
+                    payload=payload,
+                    retrieved_at=retrieved_at,
+                    checksum=publication.checksum,
+                    fence=int(pointer.fence),
+                    decoded=decoded,
+                    manifest_id=publication.manifest_id,
+                    event_catalog_publication_id=(
+                        publication.event_catalog_publication_id
+                    ),
+                    event_catalog_checksum=publication.event_catalog_checksum,
+                )
         try:
             payload = json.loads(payload_text, object_pairs_hook=_reject_duplicate_json_keys)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -1366,6 +1425,8 @@ class DatabaseFirstPublicationReader:
                 freshness=freshness,
                 age_seconds=age,
             )
+        if decode_cache_key is not None:
+            self._store_diet_decoded(decode_cache_key, decoded)
         return PublicationRead(
             stream_key=stream_key,
             publication_id=publication.publication_id,
@@ -1386,6 +1447,38 @@ class DatabaseFirstPublicationReader:
             ),
             event_catalog_checksum=publication.event_catalog_checksum,
         )
+
+    def _diet_decoded(
+        self, cache_key: tuple
+    ) -> tuple[Any, ...] | None:
+        """Return the cached decode of one immutable Diet publication row."""
+
+        with self._diet_decode_cache_lock:
+            decoded = self._diet_decode_cache.get(cache_key)
+            if decoded is not None:
+                self._diet_decode_cache.move_to_end(cache_key)
+            return decoded
+
+    def _store_diet_decoded(
+        self,
+        cache_key: tuple,
+        decoded: tuple[Any, ...] | None,
+    ) -> None:
+        """Cache one stream's decode and bound its versions, oldest first."""
+
+        if decoded is None:
+            return
+        with self._diet_decode_cache_lock:
+            self._diet_decode_cache[cache_key] = decoded
+            self._diet_decode_cache.move_to_end(cache_key)
+            keys_by_stream: dict[str, list[tuple]] = {}
+            for key in self._diet_decode_cache:
+                keys_by_stream.setdefault(key[0], []).append(key)
+            limit = self._DIET_DECODE_CACHE_VERSIONS_PER_STREAM
+            for keys in keys_by_stream.values():
+                # keys are oldest-first in the OrderedDict already.
+                for key in keys[: len(keys) - limit]:
+                    self._diet_decode_cache.pop(key, None)
 
     def metadata(
         self,
