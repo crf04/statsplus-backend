@@ -1215,6 +1215,73 @@ def test_batch_summaries_use_one_rows_query_and_keep_phase_semantics(tmp_path):
     ] == ["Playoffs", "Playoffs", "Regular Season"]
 
 
+def test_get_player_summaries_generation_cache_reuses_composed_summaries(
+    tmp_path,
+):
+    """A warm read skips both the projection decode and the rate arithmetic.
+
+    A composed ``PlayerSeasonLogSummary`` is keyed by every part that shapes
+    it -- the snapshot's generation, the player, the rate season type, and
+    the excluded focal game -- so a second read of the same players under the
+    same generation reads no rows at all, while a different rate type or
+    exclusion is a miss that still reads its own evidence.
+    """
+
+    records = [
+        _record(player_id=101, game_id="0022500001"),
+        _record(player_id=202, game_id="0022500002"),
+    ]
+    repository, snapshot = _projected_publication_repository(tmp_path, records)
+
+    statements: list[str] = []
+
+    def record_statement(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(repository.engine, "before_cursor_execute", record_statement)
+    try:
+        first = repository.get_player_summaries(
+            SEASON, [101, 202], publication_snapshot=snapshot
+        )
+        assert len(statements) == 1
+        # A warm request in the same generation re-decodes nothing.
+        second = repository.get_player_summaries(
+            SEASON, [101, 202], publication_snapshot=snapshot
+        )
+        assert len(statements) == 1
+        assert second is not None
+        for player_id in (101, 202):
+            assert second[player_id].season_rate == first[player_id].season_rate
+            assert second[player_id].last_ten_minutes == (
+                first[player_id].last_ten_minutes
+            )
+            assert second[player_id].rate_rows == first[player_id].rate_rows
+        # A different focal-game exclusion and a different rate season type
+        # are different keys: each composes and stores its own summaries even
+        # though the underlying projection rows may already be decoded.
+        excluded = repository.get_player_summaries(
+            SEASON,
+            [101],
+            exclude_game_id="0022500001",
+            publication_snapshot=snapshot,
+        )
+        assert excluded[101].season_rate is None
+        playoffs = repository.get_player_summaries(
+            SEASON, [101], rate_season_type="Playoffs", publication_snapshot=snapshot
+        )
+        assert playoffs[101].season_rate is None
+        cached = repository._season_summary_cache[snapshot.generation]
+        regular = "Regular Season"
+        assert set(cached) == {
+            (101, SEASON, regular, None),
+            (202, SEASON, regular, None),
+            (101, SEASON, regular, "0022500001"),
+            (101, SEASON, "Playoffs", None),
+        }
+    finally:
+        event.remove(repository.engine, "before_cursor_execute", record_statement)
+
+
 def test_get_player_summaries_reuses_cached_publication_decode_across_calls(
     tmp_path,
 ):
