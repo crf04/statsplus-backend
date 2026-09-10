@@ -88,6 +88,12 @@ SHOT_TYPE = {
     "comparator": "at_or_above",
     "threshold": 0.01,
 }
+ASSIST = {
+    "base": "assist_locations",
+    "slice_key": "Corner3Assists",
+    "comparator": "at_or_above",
+    "threshold": 0.1,
+}
 
 SHOT_ZONES = (
     "Restricted Area",
@@ -2436,6 +2442,23 @@ def test_a_note_only_edit_still_hits_with_the_new_note(
     assert len(service.player_logs.opponent_calls) == reads_before
 
 
+def _refused_read(stream_key):
+    """One stream read with a refusal label, an unavailable stream."""
+
+    return PublicationRead(
+        stream_key=stream_key,
+        publication_id=None,
+        season=None,
+        cutoff=None,
+        version=None,
+        status="unavailable",
+        freshness="unavailable",
+        age_seconds=None,
+        payload=None,
+        unavailable_reason="publication_checksum_mismatch",
+    )
+
+
 def test_a_read_with_unavailable_reason_bypasses_the_write(
     targets, build_backtest
 ):
@@ -2467,6 +2490,87 @@ def test_a_read_with_unavailable_reason_bypasses_the_write(
     assert [player["canonical_id"] for player in payload["players"]] == [
         LEBRON
     ]
+
+
+def test_an_unreferenced_stream_being_unavailable_still_caches(
+    targets, build_backtest
+):
+    """A Diet stream no Qualifier references cannot change the evidence.
+
+    The `player_assist_locations` stream was never activated in production,
+    and under the old all-streams eligibility that inert unavailability
+    made every real read bypass, leaving the cache perpetually empty.
+    """
+    created = _create(targets, qualifiers=(CORNER_THREE, TRANSITION))
+    refused = _available_reads()
+    refused["player_assist_locations"] = _refused_read(
+        "player_assist_locations"
+    )
+    service, _, client = _cached_service(build_backtest, reads=refused)
+
+    _, first = service.backtest(OWNER, created["id"])
+    _, second = service.backtest(OWNER, created["id"])
+
+    assert first == "miss"
+    assert second == "hit"
+    assert len(client.sets) == 1
+
+
+def test_a_referenced_stream_being_unavailable_bypasses_the_write(
+    targets, build_backtest
+):
+    """A Qualifier referencing the unavailable stream still bypasses.
+
+    An unavailable stream the Target does reference falls back to
+    unversioned legacy tables, so the read runs on evidence a future
+    generation may not reuse.
+    """
+    created = _create(targets, qualifiers=(ASSIST,))
+    refused = _available_reads()
+    refused["player_assist_locations"] = _refused_read(
+        "player_assist_locations"
+    )
+    service, _, client = _cached_service(build_backtest, reads=refused)
+
+    _, state = service.backtest(OWNER, created["id"])
+
+    assert state == "bypass"
+    assert client.sets == []
+
+
+def test_the_game_logs_being_unavailable_bypasses_regardless_of_qualifiers(
+    targets, build_backtest
+):
+    """The whole evidence composes the game logs, so its unavailability
+    bypasses no matter which Qualifiers the Target carries."""
+    created = _create(targets, qualifiers=(ASSIST,))
+    refused = _available_reads()
+    refused["player_game_logs"] = _refused_read("player_game_logs")
+    service, _, client = _cached_service(build_backtest, reads=refused)
+
+    _, state = service.backtest(OWNER, created["id"])
+
+    assert state == "bypass"
+    assert client.sets == []
+
+
+def test_a_referenced_stream_becoming_unavailable_turns_the_next_miss_bypass(
+    targets, build_backtest
+):
+    """Availability is judged on every read, not just the first: once a
+    stream the Target references goes unavailable, its stale entry is
+    recomputed under a bypass instead of reused."""
+    created = _create(targets, qualifiers=(CORNER_THREE,))
+    service, reader, client = _cached_service(build_backtest)
+
+    _, first = service.backtest(OWNER, created["id"])
+    client.store.clear()
+    reader.reads["exact_shot_zones"] = _refused_read("exact_shot_zones")
+    _, second = service.backtest(OWNER, created["id"])
+
+    assert first == "miss"
+    assert second == "bypass"
+    assert len(client.sets) == 1
 
 
 def test_a_redis_outage_is_computed_around_with_a_open_breaker(

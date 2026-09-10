@@ -65,6 +65,7 @@ from app.services.matchup import (
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    PLAYER_DIET_PUBLICATION_STREAMS,
     PlayerDietResult,
 )
 from app.services.publication_snapshot_calls import (
@@ -131,6 +132,31 @@ BACKTEST_DECODED_ONLY_STREAM_KEYS = frozenset(
 #: "Resolve your own": ``backtest_target`` captures a snapshot itself unless
 #: the caller hands it one.
 _OWN = object()
+
+#: The streams whose availability gates the result cache: the game logs the
+#: evidence composes plus the Diet publication stream each Qualifier `base`
+#: reads shares from.  A Diet stream no Qualifier references cannot change
+#: the evidence, so its unavailability must not block caching.
+_CACHE_REQUIRED_STREAMS = ("player_game_logs",)
+
+
+def _required_cache_streams(
+    qualifiers: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """Return the streams whose availability must uphold a cache write.
+
+    Includes every Diet publication stream a Qualifier `base` reads shares
+    from; a base with no publication stream (none today) contributes
+    nothing.  The game logs are always required.
+    """
+
+    required = set(_CACHE_REQUIRED_STREAMS)
+    for qualifier in qualifiers:
+        base = qualifier.get("base")
+        stream = PLAYER_DIET_PUBLICATION_STREAMS.get(base)
+        if stream is not None:
+            required.add(stream)
+    return frozenset(required)
 
 #: The one sentence this response owes its reader.  The columns are approved
 #: box-score proxies for the named Diet slices, not slice-level outcomes.
@@ -450,12 +476,15 @@ class TargetBacktestService:
                 connection=connection,
             )
             readings = getattr(snapshot, "reads", None)
+            eligibility = _required_cache_streams(qualifiers)
             eligible = (
                 snapshot is not None
                 and isinstance(readings, Mapping)
                 and all(
-                    read.available and read.unavailable_reason is None
-                    for read in readings.values()
+                    (read := readings.get(stream)) is not None
+                    and read.available
+                    and read.unavailable_reason is None
+                    for stream in eligibility
                 )
             )
             if cache_key is not None:
@@ -480,9 +509,10 @@ class TargetBacktestService:
                     )
                     cache_state = "miss"
                 else:
-                    # An unavailable stream means the read ran on refusal
-                    # labels, not evidence; a result computed from those is
-                    # not one any future generation may reuse.
+                    # A stream the Target's Qualifiers reference being
+                    # unavailable means the read ran on refusal labels, not
+                    # evidence; a result computed from those is not one any
+                    # future generation may reuse.
                     cache_state = "bypass"
         return {
             "target": dict(target),

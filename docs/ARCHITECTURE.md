@@ -2164,9 +2164,12 @@ Target load. A hit decompresses the stored evidence (`players`, `summary`,
 `stat_columns`, `games_considered`, `season`, zlib level-6) and assembles the
 response around the freshly loaded Target row, so a hit is byte-identical to
 a miss. A miss captures the full snapshot as today, and writes the result
-under the captured generation only when every stream read is available with
-no refusal label — `unavailable_reason` seeds a `bypass` that computes but
-writes nothing. Every Redis-level error is a miss, never a 5xx, with the
+under the captured generation only when every stream the Target's Qualifiers
+reference — the game logs plus the Diet publication stream each qualifier
+`base` reads shares from — is available with no refusal label; a Diet stream
+no Qualifier references cannot change the evidence, so its unavailability
+must not block caching.  An unavailable referenced stream
+(`unavailable_reason` seeds a `bypass` that computes and writes nothing). Every Redis-level error is a miss, never a 5xx, with the
 same 30 s circuit-breaker cooldown `NBAGameCache` uses; the flag off or no
 client leaves Redis untouched and `targets_cache` at `-`; and the Lab's
 Draft Target read never meets either. TTLs (`TARGET_BACKTEST_CACHE_TTL_SECONDS`,
