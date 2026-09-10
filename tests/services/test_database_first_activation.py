@@ -1671,3 +1671,88 @@ def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path)
             "pub-diet-2",
             "pub-diet-3",
         }
+
+
+def test_snapshot_decoded_only_read_serves_the_decode_cache_without_the_payload(
+    tmp_path,
+):
+    """A decoded-only read never moves the rendered payload on a cache hit.
+
+    The Target backtest and the Lab preview consume only the decoded Diet
+    facts, so their captures may opt into the decode cache serving the facts
+    of an unchanged publication alone: the shared statement defers the ~2 MB
+    payload column and a hit selects it neither there nor with the miss's
+    redirected load. Availability, authority, and season checks still ran on
+    the hit read.
+    """
+
+    from sqlalchemy import event
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("synergy_play_types",)
+    decoded_only_keys = frozenset({"synergy_play_types"})
+
+    first_read = reader.snapshot(
+        keys, season="2025-26", decoded_only_keys=decoded_only_keys
+    ).read("synergy_play_types")
+
+    statements: list[str] = []
+
+    def record_statement(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(
+        reader.engine, "before_cursor_execute", record_statement
+    )
+    try:
+        second_read = reader.snapshot(
+            keys, season="2025-26", decoded_only_keys=decoded_only_keys
+        ).read("synergy_play_types")
+    finally:
+        event.remove(reader.engine, "before_cursor_execute", record_statement)
+
+    assert first_read.available is True
+    assert second_read.available is True
+    assert second_read.payload is None
+    assert second_read.decoded is first_read.decoded
+    assert second_read.publication_id == first_read.publication_id
+    assert second_read.checksum == first_read.checksum
+    # Exactly one statement ran for the hit -- the shared pointer statement
+    # that defers the payload column -- and none of it selected the payload.
+    assert len(statements) == 1
+    assert "publication_versions.payload" not in statements[0]
+
+
+def test_snapshot_without_the_flag_always_returns_the_payload(tmp_path):
+    """Only an opt-in read may be served from the decode cache alone.
+
+    A read that did not opt in -- ``read()``, ``read_many()``, any snapshot
+    without ``decoded_only_keys`` -- still loads, parses, and returns the
+    rendered payload even when the decode cache is already warm, because
+    consumers on that path (the Zone Shooting profile) decode the payload
+    themselves.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("synergy_play_types",)
+    decoded_only_keys = frozenset({"synergy_play_types"})
+
+    warm = reader.snapshot(
+        keys, season="2025-26", decoded_only_keys=decoded_only_keys
+    ).read("synergy_play_types")
+    unflagged_first = reader.read("synergy_play_types", season="2025-26")
+    unflagged_second = reader.read("synergy_play_types", season="2025-26")
+
+    assert warm.decoded is not None
+    for read in (unflagged_first, unflagged_second):
+        assert read.available is True
+        assert read.payload is not None
+        assert read.decoded == warm.decoded

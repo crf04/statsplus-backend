@@ -525,6 +525,36 @@ def test_zone_shooting_is_served_from_the_publication_and_matches_the_legacy_tab
     assert published_row == legacy_row
 
 
+def test_zone_shooting_profile_reads_warm_decodes_a_hit_never_retires_the_payload(published):
+    """A warmed Diet decode cache never starves the Zone Shooting profile.
+
+    The Target backtest and the Zone Shooting profile read the same
+    ``exact_shot_zones`` publication, so one shared reader serves both.  A
+    backtest or Lab edit stores the stream's decoded facts in the reader's
+    decode cache; the profile, however, reads the rendered payload, so a
+    decode served from that cache must never come back as a read whose
+    ``payload`` is ``None`` -- before the fix, the second profile call through
+    a warmed reader decoded ``None`` and the tab lost its row.
+    """
+
+    engine = published
+    reader = DatabaseFirstPublicationReader(engine)
+    # Simulate the Diet consumer: a read that stores this row's decode in the
+    # shared reader's cache before the profile requests arrive.
+    reader.read("exact_shot_zones", season=SEASON)
+
+    service = _player_service(engine, publication_reader=reader)
+    first = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    second = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    legacy = _legacy_zone_frame()
+    legacy_row = legacy[
+        legacy["PLAYER_NAME"] == SAMPLE_PLAYER_NAME
+    ].to_dict(orient="records")[0]
+
+    assert first == legacy_row
+    assert second == legacy_row
+
+
 def test_the_published_profile_keeps_the_source_row_order(published):
     """The league ``PTS%`` reference is a floating-point sum over this frame.
 

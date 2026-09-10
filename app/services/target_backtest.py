@@ -109,6 +109,14 @@ _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 #: another read (#253).
 BACKTEST_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
 BACKTEST_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
+#: The Diet streams are the whole reason this read opens their payloads:
+#: their decoded facts are what the qualifiers consume, so a caller that
+#: already holds those facts per stream may be served from this reader's
+#: decode cache without the ~2 MB rendered payload. The game-log payload is
+#: still never loaded (see the projection-only set above).
+BACKTEST_DECODED_ONLY_STREAM_KEYS = frozenset(
+    PLAYER_DIET_PUBLICATION_STREAM_KEYS
+)
 #: "Resolve your own": ``backtest_target`` captures a snapshot itself unless
 #: the caller hands it one.
 _OWN = object()
@@ -364,6 +372,8 @@ class TargetBacktestService:
         keyword = {}
         if accepts_keyword(snapshot, "projection_only_keys"):
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if accepts_keyword(snapshot, "decoded_only_keys"):
+            keyword["decoded_only_keys"] = BACKTEST_DECODED_ONLY_STREAM_KEYS
         if session is not None and accepts_keyword(snapshot, "session"):
             keyword["session"] = session
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)

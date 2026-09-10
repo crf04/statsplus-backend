@@ -1028,6 +1028,7 @@ class DatabaseFirstPublicationReader:
         season: str | None = None,
         require_active: bool = True,
         projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture all requested pointers, payloads, and decoded facts once.
@@ -1035,6 +1036,11 @@ class DatabaseFirstPublicationReader:
         ``projection_only_keys`` names the streams a caller reads through an
         indexed projection instead of the rendered payload, so one generation
         can mix payload-bearing and payload-less reads.
+
+        ``decoded_only_keys`` names the streams a caller reads without the
+        rendered payload at all: on a decode-cache hit the payload column is
+        never selected, and the read serves the cached decoded facts alone.
+        Every other call still loads and returns the payload.
         """
 
         return self._snapshot(
@@ -1042,6 +1048,7 @@ class DatabaseFirstPublicationReader:
             season=season,
             require_active=require_active,
             projection_only_keys=projection_only_keys,
+            decoded_only_keys=decoded_only_keys,
             session=session,
         )
 
@@ -1067,6 +1074,7 @@ class DatabaseFirstPublicationReader:
         season: str | None,
         require_active: bool,
         projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
         session: Session | None = None,
     ) -> PublicationReadSnapshot:
         """Capture one immutable generation through its selected read shape."""
@@ -1075,6 +1083,8 @@ class DatabaseFirstPublicationReader:
         if not keys:
             return PublicationReadSnapshot(season, {}, ())
         projection_keys = frozenset(projection_only_keys).intersection(keys)
+        decoded_keys = frozenset(decoded_only_keys).intersection(keys)
+        narrowed_keys = projection_keys | decoded_keys
         with ExitStack() as stack:
             if session is None:
                 session = stack.enter_context(self._session())
@@ -1096,24 +1106,26 @@ class DatabaseFirstPublicationReader:
                 )
                 .where(PublicationStream.stream_key.in_(keys))
             )
-            hydrated_keys = frozenset(keys) - projection_keys
-            if projection_keys:
+            hydrated_keys = frozenset(keys) - narrowed_keys
+            if narrowed_keys:
                 statement = statement.options(
                     defer(PublicationVersion.payload, raiseload=True)
-                ).add_columns(
-                    exists(
-                        select(PublicationPlayerGameLog.publication_id).where(
-                            PublicationPlayerGameLog.publication_id
-                            == PublicationVersion.publication_id
-                        )
-                    ).label("projection_ready"),
                 )
+                if projection_keys:
+                    statement = statement.add_columns(
+                        exists(
+                            select(PublicationPlayerGameLog.publication_id).where(
+                                PublicationPlayerGameLog.publication_id
+                                == PublicationVersion.publication_id
+                            )
+                        ).label("projection_ready"),
+                    )
                 if hydrated_keys:
                     # One generation can mix payload-bearing and payload-less
                     # streams, so the large column is chosen per row instead of
                     # per statement.  CASE never evaluates the payload branch
-                    # for a projection-only key, and the deferred mapped
-                    # attribute stops a later attribute read from selecting it.
+                    # for a narrowed key, and the deferred mapped attribute
+                    # stops a later attribute read from selecting it.
                     statement = statement.add_columns(
                         case(
                             (
@@ -1125,16 +1137,23 @@ class DatabaseFirstPublicationReader:
                             else_=null(),
                         ).label("payload_text")
                     )
-                snapshot = {
-                    row[0].stream_key: _SnapshotRow(
+                snapshot = {}
+                for row in session.execute(statement).all():
+                    snapshot[row[0].stream_key] = _SnapshotRow(
                         stream=row[0],
                         pointer=row[1],
                         publication=row[2],
-                        projection_ready=bool(row.projection_ready),
-                        payload_text=row.payload_text if hydrated_keys else None,
+                        projection_ready=(
+                            bool(row.projection_ready)
+                            if projection_keys and hasattr(row, "projection_ready")
+                            else False
+                        ),
+                        payload_text=(
+                            row.payload_text
+                            if hydrated_keys and hasattr(row, "payload_text")
+                            else None
+                        ),
                     )
-                    for row in session.execute(statement).all()
-                }
             else:
                 snapshot = {
                     stream.stream_key: _SnapshotRow(stream, pointer, publication)
@@ -1153,6 +1172,7 @@ class DatabaseFirstPublicationReader:
                         and snapshot.get(key, missing).projection_ready
                     ),
                     "hydrate_payload": key not in projection_keys,
+                    "decoded_only": key in decoded_keys,
                     "payload_text": snapshot.get(key, missing).payload_text,
                     "season": season,
                     "require_active": require_active,
@@ -1191,6 +1211,7 @@ class DatabaseFirstPublicationReader:
         session,
         projection_ready: bool = False,
         hydrate_payload: bool = True,
+        decoded_only: bool = False,
         payload_text: str | None = None,
     ) -> PublicationRead:
         if stream is None:
@@ -1319,6 +1340,59 @@ class DatabaseFirstPublicationReader:
                 ),
                 event_catalog_checksum=publication.event_catalog_checksum,
             )
+        # A decoded-only read defers the payload column of the shared
+        # statement.  Availability, authority, season, and freshness checks
+        # above ran on this read regardless; on a decode-cache hit the payload
+        # is never selected, and the cached decode alone is served.  On a
+        # miss, this row's payload is loaded with one targeted select so the
+        # checks below verify its checksum, parse, decode, and store exactly
+        # as for any other read.
+        if decoded_only:
+            decode_cache_key = (
+                (
+                    stream_key,
+                    publication.publication_id,
+                    int(pointer.fence),
+                    int(publication.version),
+                )
+                if stream_key in _PLAYER_DIET_PUBLICATION_BASES
+                else None
+            )
+            if decode_cache_key is not None:
+                cached_decoded = self._diet_decoded(decode_cache_key)
+                if cached_decoded is not None:
+                    return PublicationRead(
+                        stream_key=stream_key,
+                        publication_id=publication.publication_id,
+                        season=publication.season,
+                        cutoff=_utc(publication.cutoff).isoformat(),
+                        version=int(publication.version),
+                        status=(
+                            "active"
+                            if publication.status == "active"
+                            else "rollback"
+                        ),
+                        freshness=freshness,
+                        age_seconds=age,
+                        payload=None,
+                        retrieved_at=retrieved_at,
+                        checksum=publication.checksum,
+                        fence=int(pointer.fence),
+                        decoded=cached_decoded,
+                        manifest_id=publication.manifest_id,
+                        event_catalog_publication_id=(
+                            publication.event_catalog_publication_id
+                        ),
+                        event_catalog_checksum=(
+                            publication.event_catalog_checksum
+                        ),
+                    )
+            payload_text = session.scalar(
+                select(PublicationVersion.payload).where(
+                    PublicationVersion.publication_id
+                    == publication.publication_id
+                )
+            )
         # A mixed snapshot selects this stream's payload as its own column, so
         # the mapped attribute stays deferred for every row in that statement.
         if payload_text is None:
@@ -1341,43 +1415,6 @@ class DatabaseFirstPublicationReader:
                 freshness=freshness,
                 age_seconds=age,
             )
-        decode_cache_key = (
-            (
-                stream_key,
-                publication.publication_id,
-                int(pointer.fence),
-                int(publication.version),
-            )
-            if stream_key in _PLAYER_DIET_PUBLICATION_BASES
-            else None
-        )
-        if decode_cache_key is not None:
-            cached_decoded = self._diet_decoded(decode_cache_key)
-            if cached_decoded is not None:
-                # The availability, authority, and checksum checks above all
-                # ran again; only the decode they authorize is reused.
-                decoded = cached_decoded
-                payload = None
-                return PublicationRead(
-                    stream_key=stream_key,
-                    publication_id=publication.publication_id,
-                    season=publication.season,
-                    cutoff=_utc(publication.cutoff).isoformat(),
-                    version=int(publication.version),
-                    status=("active" if publication.status == "active" else "rollback"),
-                    freshness=freshness,
-                    age_seconds=age,
-                    payload=payload,
-                    retrieved_at=retrieved_at,
-                    checksum=publication.checksum,
-                    fence=int(pointer.fence),
-                    decoded=decoded,
-                    manifest_id=publication.manifest_id,
-                    event_catalog_publication_id=(
-                        publication.event_catalog_publication_id
-                    ),
-                    event_catalog_checksum=publication.event_catalog_checksum,
-                )
         try:
             payload = json.loads(payload_text, object_pairs_hook=_reject_duplicate_json_keys)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -1397,36 +1434,56 @@ class DatabaseFirstPublicationReader:
                 freshness=freshness,
                 age_seconds=age,
             )
-        try:
-            decoded = _decode_known_publication_payload(
+        decode_cache_key = (
+            (
                 stream_key,
-                payload,
-                season=publication.season,
-                retrieved_at=retrieved_at,
+                publication.publication_id,
+                int(pointer.fence),
+                int(publication.version),
             )
-        except PublicationPayloadError as error:
-            return self._missing(
-                stream_key,
-                "unavailable",
-                # A refusal the owning module gave a stable code keeps that
-                # code here.  "This deployment no longer reads that format" is
-                # a different operational fact from "these bytes are
-                # malformed", and every consumer reports what it was told.
-                reason=(
-                    getattr(error, "reason", None) or "publication_payload_invalid"
-                ),
-                fence=pointer.fence,
-                publication_id=publication.publication_id,
-                season=publication.season,
-                cutoff=_utc(publication.cutoff).isoformat(),
-                version=int(publication.version),
-                retrieved_at=retrieved_at,
-                checksum=publication.checksum,
-                freshness=freshness,
-                age_seconds=age,
-            )
-        if decode_cache_key is not None:
-            self._store_diet_decoded(decode_cache_key, decoded)
+            if stream_key in _PLAYER_DIET_PUBLICATION_BASES
+            else None
+        )
+        cached_decoded = (
+            None
+            if decode_cache_key is None
+            else self._diet_decoded(decode_cache_key)
+        )
+        if cached_decoded is not None:
+            # The availability, authority, and checksum checks above all
+            # ran again; only the decode they authorize is reused.
+            decoded = cached_decoded
+        else:
+            try:
+                decoded = _decode_known_publication_payload(
+                    stream_key,
+                    payload,
+                    season=publication.season,
+                    retrieved_at=retrieved_at,
+                )
+            except PublicationPayloadError as error:
+                return self._missing(
+                    stream_key,
+                    "unavailable",
+                    # A refusal the owning module gave a stable code keeps that
+                    # code here.  "This deployment no longer reads that format" is
+                    # a different operational fact from "these bytes are
+                    # malformed", and every consumer reports what it was told.
+                    reason=(
+                        getattr(error, "reason", None) or "publication_payload_invalid"
+                    ),
+                    fence=pointer.fence,
+                    publication_id=publication.publication_id,
+                    season=publication.season,
+                    cutoff=_utc(publication.cutoff).isoformat(),
+                    version=int(publication.version),
+                    retrieved_at=retrieved_at,
+                    checksum=publication.checksum,
+                    freshness=freshness,
+                    age_seconds=age,
+                )
+            if decode_cache_key is not None:
+                self._store_diet_decoded(decode_cache_key, decoded)
         return PublicationRead(
             stream_key=stream_key,
             publication_id=publication.publication_id,

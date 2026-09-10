@@ -26,6 +26,7 @@ def capture_publication_snapshot(
     stream_keys: Any,
     *,
     projection_only_keys: Any,
+    decoded_only_keys: Any = frozenset(),
     season: str,
 ) -> Any:
     """Capture one Publication generation over a caller's stream set, if any.
@@ -46,6 +47,8 @@ def capture_publication_snapshot(
     keyword = {}
     if accepts_keyword(snapshot, "projection_only_keys"):
         keyword["projection_only_keys"] = projection_only_keys
+    if accepts_keyword(snapshot, "decoded_only_keys"):
+        keyword["decoded_only_keys"] = decoded_only_keys
     return snapshot(stream_keys, season=season, **keyword)
 
 
