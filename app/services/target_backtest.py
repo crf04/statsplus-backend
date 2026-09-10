@@ -46,12 +46,10 @@ from math import isfinite
 from typing import Any, Callable, Protocol
 import hashlib
 import json
-import threading
 import time
 import zlib
 
 import redis
-from flask import g
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -77,7 +75,6 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerSeasonLogSummary,
 )
-from app.services.nba_cache import REDIS_FAILURE_COOLDOWN_SECONDS
 from app.services.player_game_log_values import (
     player_game_log_focal_line,
     selected_player_game_log_market_values,
@@ -89,6 +86,10 @@ from app.services.target_conditions import (
     minutes_are_kept,
     player_minutes_are_kept,
 )
+from app.utils.redis_breaker import RedisCircuitBreaker
+
+
+logger = getLogger(__name__)
 
 
 _WIRE_PRECISION = 6
@@ -145,13 +146,11 @@ PROXY_NOTE = (
 #: older code shape wrote, and the constant is part of every key.
 TARGET_BACKTEST_CACHE_SCHEMA = 1
 
-#: The result cache lives in the shared Redis namespace under one schema.
-_TARGET_CACHE_KEY_PREFIX = "targets:backtest:v1:"
-
-#: Raw threshold precision in the cache key: the six-decimal
-#: ``qualifier_signature`` folds 0.4000001 and 0.4000004 onto one line, but
-#: those two Targets are different questions, so the key keeps ``repr`` of
-#: the full float.
+#: Raw threshold precision in the key: the six-decimal ``qualifier_signature``
+#: folds 0.4000001 and 0.4000004 onto one line, but those two Targets are
+#: different questions, so the key keeps ``repr`` of the full float. The
+#: prefix carries the schema constant so one knob versions the whole entry.
+_CACHE_KEY_PREFIX_TEMPLATE = "targets:backtest:v{schema}:"
 
 
 def backtest_cache_key(
@@ -206,7 +205,10 @@ def backtest_cache_key(
     }
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return f"{_TARGET_CACHE_KEY_PREFIX}{digest}"
+    prefix = _CACHE_KEY_PREFIX_TEMPLATE.format(
+        schema=TARGET_BACKTEST_CACHE_SCHEMA
+    )
+    return f"{prefix}{digest}"
 
 
 class TargetReader(Protocol):
@@ -285,15 +287,17 @@ class TargetBacktestService:
         )
         self._cache_ttl_seconds = settings.cache.target_backtest_ttl_seconds
         self._clock = cache_clock or time.monotonic
-        self._breaker_lock = threading.Lock()
-        self._open_until = 0.0
+        self._breaker = RedisCircuitBreaker(
+            clock=self._clock,
+            message="Targets result cache unavailable (%s); bypassing for %ss",
+        )
         self._statistics = {
             statistic.market_category: statistic
             for statistic in statistic_catalog.statistics
             if statistic.market_category is not None
         }
 
-    def backtest(self, firebase_uid: str, target_id: int) -> dict[str, Any]:
+    def backtest(self, firebase_uid: str, target_id: int) -> tuple[dict[str, Any], str]:
         """Return one of the caller's Targets with its season to date.
 
         The owned Target load runs inside the same ``request_read_scope`` the
@@ -301,6 +305,10 @@ class TargetBacktestService:
         rather than a second for the Target row.  A Target the caller does
         not own is missing, never forbidden, so the existence of another
         account's Target is not observable here.
+
+        The second element is this read's result-cache outcome -- ``hit``,
+        ``miss``, ``bypass``, or the unbilled ``-`` -- for the caller to
+        stamp on the request log; the service itself touches no HTTP state.
         """
 
         with request_read_scope(self._engine) as (connection, session):
@@ -312,7 +320,7 @@ class TargetBacktestService:
                 )
             else:
                 target = self.targets.get_target(firebase_uid, target_id)
-            return self.backtest_target(
+            return self._backtest_stateful(
                 target, connection=connection, session=session
             )
 
@@ -336,6 +344,30 @@ class TargetBacktestService:
         it already holds as ``publication_snapshot``; none is captured then.
         """
 
+        return self._backtest_stateful(
+            target,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+            session=session,
+        )[0]
+
+    def _backtest_stateful(
+        self,
+        target: Mapping[str, Any],
+        *,
+        publication_snapshot: Any = _OWN,
+        connection: Connection | None = None,
+        session: Session | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Compute the backtest and report its result-cache outcome.
+
+        The flag is one of ``hit``, ``miss``, ``bypass``, or ``-``: returned
+        to the caller rather than stored on ``self`` or stamped on
+        ``flask.g``, so a service stays HTTP-free even when its caller is a
+        route that wants the outcome on the request log.
+        """
+
+        cache_state = "-"
         season = self.settings.nba.current_season
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
@@ -353,7 +385,11 @@ class TargetBacktestService:
         if cache_key is not None:
             evidence = self._cache_read(cache_key)
             if evidence is not None:
-                self._stamp_targets_cache("hit")
+                # Residual window: a hit trusts the immutable row identity
+                # the key carries; out-of-band corruption of an immutable
+                # publication row (its checksum, payload, or projection)
+                # advances no pointer, so it is not detected until the next
+                # generation.
                 return {
                     "target": dict(target),
                     "season": evidence["season"],
@@ -362,7 +398,7 @@ class TargetBacktestService:
                     "summary": evidence["summary"],
                     "players": evidence["players"],
                     "games_considered": evidence["games_considered"],
-                }
+                }, "hit"
         with ExitStack() as scope:
             # One connection for every read this request composes, exactly as
             # the Matchup and Selection reads share theirs; a caller already
@@ -399,6 +435,10 @@ class TargetBacktestService:
                 }
             kept = tuple(row for row in rows if date_is_kept(conditions, row.game_date)
                          and (not defender or minutes_are_kept(defender, defender_minutes.get(row.game_id, 0))))
+            games_considered = {
+                "played": len({row.game_id for row in rows}),
+                "kept": len({row.game_id for row in kept}),
+            }
             players = self._players(
                 target,
                 qualifiers,
@@ -434,19 +474,16 @@ class TargetBacktestService:
                             "players": players,
                             "summary": self._summary(players, markets),
                             "stat_columns": list(markets),
-                            "games_considered": {
-                                "played": len({row.game_id for row in rows}),
-                                "kept": len({row.game_id for row in kept}),
-                            },
+                            "games_considered": games_considered,
                             "season": season,
                         },
                     )
-                    self._stamp_targets_cache("miss")
+                    cache_state = "miss"
                 else:
                     # An unavailable stream means the read ran on refusal
                     # labels, not evidence; a result computed from those is
                     # not one any future generation may reuse.
-                    self._stamp_targets_cache("bypass")
+                    cache_state = "bypass"
         return {
             "target": dict(target),
             "season": season,
@@ -454,8 +491,8 @@ class TargetBacktestService:
             "stat_columns": list(markets),
             "summary": self._summary(players, markets),
             "players": players,
-            "games_considered": {"played": len({row.game_id for row in rows}), "kept": len({row.game_id for row in kept})},
-        }
+            "games_considered": games_considered,
+        }, cache_state
 
     @classmethod
     def _summary(
@@ -557,7 +594,7 @@ class TargetBacktestService:
         through, and an unreadable stored value just misses this once.
         """
 
-        if self._circuit_open():
+        if self._breaker.is_open():
             return None
         try:
             payload = self._redis.get(key)
@@ -565,7 +602,7 @@ class TargetBacktestService:
             redis.exceptions.ConnectionError,
             redis.exceptions.TimeoutError,
         ) as error:
-            self._open_circuit(error)
+            self._breaker.record_failure(error)
             return None
         except Exception:
             return None
@@ -579,20 +616,19 @@ class TargetBacktestService:
     def _cache_write(self, key: str, evidence: Mapping[str, Any]) -> None:
         """Store one result's evidence under its generation key.
 
-        The stored document is the derived evidence only, zlib level-6
-        over canonical JSON, so a hit decompresses to the identical body a
-        miss would have serialized.  A write that fails is dropped: the
+        The stored document is the derived evidence only, zlib level-6 over
+        JSON in its natural construction order, so a hit decompresses to the
+        identically ordered dict a miss would have serialized (canonical
+        sorting is only in the key hash).  A write that fails is dropped: the
         response has already been computed, and a full cache must not
         block a read on its own room.
         """
 
-        if self._circuit_open():
+        if self._breaker.is_open():
             return
         try:
             payload = zlib.compress(
-                json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode(
-                    "utf-8"
-                ),
+                json.dumps(evidence, separators=(",", ":")).encode("utf-8"),
                 6,
             )
             self._redis.setex(key, self._cache_ttl_seconds, payload)
@@ -600,38 +636,8 @@ class TargetBacktestService:
             redis.exceptions.ConnectionError,
             redis.exceptions.TimeoutError,
         ) as error:
-            self._open_circuit(error)
+            self._breaker.record_failure(error)
         except Exception:
-            pass
-
-    def _circuit_open(self) -> bool:
-        with self._breaker_lock:
-            return self._clock() < self._open_until
-
-    def _open_circuit(self, error: Exception) -> None:
-        with self._breaker_lock:
-            now = self._clock()
-            already_open = now < self._open_until
-            self._open_until = now + REDIS_FAILURE_COOLDOWN_SECONDS
-        if already_open:
-            return
-        logger.warning(
-            "Targets result cache unavailable (%s); bypassing for %ss",
-            error,
-            REDIS_FAILURE_COOLDOWN_SECONDS,
-        )
-
-    @staticmethod
-    def _stamp_targets_cache(value: str) -> None:
-        """Stamp ``flask.g`` so the request log can report the cache seam.
-
-        Service callers outside a Request context (the tests) simply stay
-        unstamped; the log line's default already says ``-``.
-        """
-
-        try:
-            g.targets_cache = value
-        except RuntimeError:
             pass
 
     def _publication_snapshot(self, season: str, *, session: Session | None = None):
@@ -940,5 +946,3 @@ class TargetBacktestService:
 
 
 __all__ = ["TargetBacktestService"]
-
-logger = getLogger(__name__)
