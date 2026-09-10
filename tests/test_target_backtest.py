@@ -2470,6 +2470,10 @@ def test_the_flag_off_leaves_redis_entirely_alone(targets, build_backtest):
             matchup_scores=MatchupScoreSettings(),
             cache=CacheSettings(target_backtest_enabled=False),
         ),
+        redis_client=client,
+        publication_reader=GenerationSnapshotReader(
+            _available_reads(), _frozen_generation()
+        ),
     )
 
     payload = service.backtest(OWNER, created["id"])
