@@ -8,7 +8,7 @@ the panel-visible shape is proven, not mocked.
 
 import pytest
 
-from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
+from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY, PLAY_TYPES
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from tests.support.publication_stubs import (
     league,
@@ -261,3 +261,54 @@ def test_an_unknown_category_is_still_a_400_with_the_split_published(
     split_client,
 ):
     assert _get(split_client, "Rebounding").status_code == 400
+
+
+def test_playtype_points_are_volume_not_ppp(panel_client, dependencies):
+    reads = _seeded_reads()
+    reads["synergy_play_types_opponent_season"] = _read(
+        "synergy_play_types_opponent_season",
+        lambda tricode: {
+            key: (3.0 if key.endswith("_PTS") else 8.0)
+            * (1.5 if tricode == "LAL" else 1.0)
+            for key in NBA_PUBLICATION_TAXONOMY["play_types"]
+        },
+    )
+    dependencies.team_service = _team_service(reads)
+    response = _get(panel_client, "Playtype Points")
+    assert response.status_code == 200
+    body = response.get_json()
+    for play_type in PLAY_TYPES:
+        assert body[play_type] == pytest.approx(4.5)
+        assert body[f"{play_type}_RANK"] == 30
+        assert body[f"{play_type}_vs_avg_pct"] == pytest.approx(
+            (4.5 / ((4.5 + 29 * 3.0) / 30) - 1) * 100
+        )
+
+
+def test_shot_type_attempts_rank_the_combined_volume(panel_client, dependencies):
+    def shot_values(tricode):
+        two, three = {"LAL": (2.0, 8.0), "BOS": (8.0, 1.0)}.get(
+            tricode, (3.0, 3.0)
+        )
+        return {
+            key: two if key.endswith("_FG2A") else
+            three if key.endswith("_FG3A") else 1.0
+            for key in NBA_PUBLICATION_TAXONOMY["shot_types"]
+        }
+
+    reads = _seeded_reads()
+    reads["grouped_shot_types_opponent_season"] = _read(
+        "grouped_shot_types_opponent_season", shot_values
+    )
+    dependencies.team_service = _team_service(reads)
+    response = _get(panel_client, "Shooting Type")
+    assert response.status_code == 200
+    for row in response.get_json():
+        assert row["FGA"] == pytest.approx(10.0)
+        assert row["FGA_RANK"] == 30
+        assert row["FGA_vs_avg_pct"] == pytest.approx(
+            (10.0 / ((10.0 + 9.0 + 28 * 6.0) / 30) - 1) * 100
+        )
+        # Keep the old per-component columns for existing consumers.
+        assert row["FG2A_RANK"] == 1
+        assert row["FG3A_RANK"] == 30

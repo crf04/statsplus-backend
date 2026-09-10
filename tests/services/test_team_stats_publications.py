@@ -405,7 +405,7 @@ def test_shooting_type_returns_one_labelled_row_per_published_slice():
         "ShootingType",
         *(
             f"{stat}{suffix}"
-            for stat in ("PTS", "FG2M", "FG2A", "FG3M", "FG3A")
+            for stat in ("PTS", "FGA", "FG2M", "FG2A", "FG3M", "FG3A")
             for suffix in ("", "_RANK", "_vs_avg_pct")
         ),
     }
