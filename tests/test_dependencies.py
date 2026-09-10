@@ -892,7 +892,10 @@ def test_a_no_eviction_redis_with_no_maxmemory_warns_the_expected_policy(
     message = caplog.records[0].getMessage()
     assert "maxmemory-policy=allkeys-lru" in message
     assert "maxmemory=0" in message
-    assert redis_client.config_calls == [("maxmemory-policy", "maxmemory")]
+    assert redis_client.config_calls == [
+        ("maxmemory-policy",),
+        ("maxmemory",),
+    ]
 
 
 def test_an_allkeys_lru_redis_with_memory_set_warns_nothing(caplog):
@@ -921,3 +924,30 @@ def test_a_redis_that_forbids_config_never_fails_startup(caplog):
         _warn_on_redis_eviction_policy(redis_client)
 
     assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        # Eviction the cache can honor, but no ceiling: nothing is ever
+        # evictable, so a full cache fails writes outright.
+        {"maxmemory-policy": "allkeys-lru", "maxmemory": "0"},
+        # The ceiling is set, but noeviction refuses to honor it.
+        {"maxmemory-policy": "noeviction", "maxmemory": "268435456"},
+    ],
+)
+def test_a_half_correct_redis_policy_still_warns_the_expected_one(config, caplog):
+    import logging
+
+    from app.dependencies import _warn_on_redis_eviction_policy
+
+    redis_client = _PolicyRedis(config)
+
+    with caplog.at_level(logging.WARNING, logger="app.dependencies"):
+        _warn_on_redis_eviction_policy(redis_client)
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "maxmemory-policy=allkeys-lru" in message
+    assert f"maxmemory={config['maxmemory']}" in message
+    assert f"maxmemory-policy={config['maxmemory-policy']}" in message

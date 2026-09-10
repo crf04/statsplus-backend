@@ -159,9 +159,7 @@ class CacheSettings(BaseModel):
     # The saved-Target backtest result cache (#279): keyed on the Publication
     # generation, TTL-cleared, and switched off entirely under its own flag.
     target_backtest_enabled: bool = True
-    target_backtest_ttl_seconds: int = Field(
-        default=86400, ge=1, le=7 * 24 * 60 * 60
-    )
+    target_backtest_ttl_seconds: int = Field(default=86400, ge=1)
 
 
 class FeatureSettings(BaseModel):

@@ -92,15 +92,23 @@ def _warn_on_redis_eviction_policy(redis_client: Any) -> None:
     """
 
     try:
-        config = redis_client.config_get("maxmemory-policy", "maxmemory")
+        # Two single-pattern CONFIG GETs: a multi-pattern form errors on
+        # Redis < 7 and would silently lose the warning.  The per-setting
+        # decode runs inside the try, so an unexpected answer is tolerated
+        # like a refracting server, never a failed startup.
+        config = {}
+        for setting in ("maxmemory-policy", "maxmemory"):
+            config.update(
+                redis_client.config_get(setting) or {}
+            )
+        items = {
+            (key if isinstance(key, str) else key.decode("utf-8")): (
+                value if isinstance(value, str) else value.decode("utf-8")
+            )
+            for key, value in config.items()
+        }
     except Exception:
         return
-    items = {
-        (key if isinstance(key, str) else key.decode("utf-8")): (
-            value if isinstance(value, str) else value.decode("utf-8")
-        )
-        for key, value in config.items()
-    }
     policy = items.get("maxmemory-policy")
     maxmemory = items.get("maxmemory")
     if policy == "allkeys-lru" and str(maxmemory) not in {"0", ""}:
