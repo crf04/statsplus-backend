@@ -40,6 +40,7 @@ NBA, PBP, or DFS provider is reached.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from math import isfinite
 from typing import Any, Protocol
 
@@ -108,6 +109,14 @@ _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
 #: another read (#253).
 BACKTEST_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
 BACKTEST_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
+#: The Diet streams are the whole reason this read opens their payloads:
+#: their decoded facts are what the qualifiers consume, so a caller that
+#: already holds those facts per stream may be served from this reader's
+#: decode cache without the ~2 MB rendered payload. The game-log payload is
+#: still never loaded (see the projection-only set above).
+BACKTEST_DECODED_ONLY_STREAM_KEYS = frozenset(
+    PLAYER_DIET_PUBLICATION_STREAM_KEYS
+)
 #: "Resolve your own": ``backtest_target`` captures a snapshot itself unless
 #: the caller hands it one.
 _OWN = object()
@@ -125,6 +134,12 @@ PROXY_NOTE = (
 class TargetReader(Protocol):
     def get_target(
         self, firebase_uid: str, target_id: int
+    ) -> Mapping[str, Any]: ...
+
+    # A composed read supplies the request-scope session, so the Target load
+    # joins the one connection every other seam in the request uses.
+    def get_target_in_session(
+        self, session: Session | None, firebase_uid: str, target_id: int
     ) -> Mapping[str, Any]: ...
 
 
@@ -190,17 +205,33 @@ class TargetBacktestService:
     def backtest(self, firebase_uid: str, target_id: int) -> dict[str, Any]:
         """Return one of the caller's Targets with its season to date.
 
-        A Target the caller does not own is missing, never forbidden, so the
-        existence of another account's Target is not observable here.
+        The owned Target load runs inside the same ``request_read_scope`` the
+        whole response composes on, so one request checks out one connection
+        rather than a second for the Target row.  A Target the caller does
+        not own is missing, never forbidden, so the existence of another
+        account's Target is not observable here.
         """
 
-        return self.backtest_target(self.targets.get_target(firebase_uid, target_id))
+        with request_read_scope(self._engine) as (connection, session):
+            # Without an engine the scope yields no session, so the Target
+            # load keeps the per-call default exactly as every other seam.
+            if session is not None:
+                target = self.targets.get_target_in_session(
+                    session, firebase_uid, target_id
+                )
+            else:
+                target = self.targets.get_target(firebase_uid, target_id)
+            return self.backtest_target(
+                target, connection=connection, session=session
+            )
 
     def backtest_target(
         self,
         target: Mapping[str, Any],
         *,
         publication_snapshot: Any = _OWN,
+        connection: Connection | None = None,
+        session: Session | None = None,
     ) -> dict[str, Any]:
         """Return one Target mapping with its season to date.
 
@@ -217,10 +248,16 @@ class TargetBacktestService:
         season = self.settings.nba.current_season
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
-        # One connection for every read this request composes, exactly as
-        # the Matchup and Selection reads share theirs; without an engine
-        # each seam keeps opening its own.
-        with request_read_scope(self._engine) as (connection, session):
+        with ExitStack() as scope:
+            # One connection for every read this request composes, exactly as
+            # the Matchup and Selection reads share theirs; a caller already
+            # holding one (``backtest``) hands its connection and session in,
+            # so nothing here checks out a second.  Without an engine
+            # each seam keeps opening its own.
+            if connection is None and session is None:
+                connection, session = scope.enter_context(
+                    request_read_scope(self._engine)
+                )
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
             # evidence.
@@ -335,6 +372,8 @@ class TargetBacktestService:
         keyword = {}
         if accepts_keyword(snapshot, "projection_only_keys"):
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if accepts_keyword(snapshot, "decoded_only_keys"):
+            keyword["decoded_only_keys"] = BACKTEST_DECODED_ONLY_STREAM_KEYS
         if session is not None and accepts_keyword(snapshot, "session"):
             keyword["session"] = session
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)

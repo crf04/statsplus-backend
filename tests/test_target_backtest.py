@@ -1997,3 +1997,80 @@ def test_box_totals_use_real_batch_publication_rows_for_each_players_regular_sea
     assert by_id[TATUM]['season_games'] == 2
     assert by_id[TATUM]['season_totals']['points'] == 45
     assert by_id[TATUM]['season_averages']['PTS'] == 22.5
+
+
+def test_a_saved_backtest_loads_its_target_on_the_request_scope_connection(
+    backtest_engine, backtest_settings, targets
+):
+    """One saved backtest checks out one connection, count them.
+
+    The Target load joins the one ``request_read_scope`` checkout the whole
+    response composes on; it no longer opens the second session
+    ``UserService.get_target`` used to check out before the composition
+    began.
+    """
+
+    created = _create(targets)
+    seams = _two_games()
+    service = TargetBacktestService(
+        targets=targets,
+        player_logs=seams["logs"],
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        engine=backtest_engine,
+    )
+
+    checkouts: list[int] = []
+    real_connect = backtest_engine.connect
+
+    def counted():
+        checkouts.append(1)
+        return real_connect()
+
+    from unittest.mock import patch as mock_patch
+
+    loads_through_scope: list = []
+    real_loader = targets.get_target_in_session
+
+    def recording_loader(session, firebase_uid, target_id):
+        loads_through_scope.append(
+            (session is not None, firebase_uid, target_id)
+        )
+        return real_loader(session, firebase_uid, target_id)
+
+    with mock_patch.object(
+        backtest_engine, "connect", side_effect=lambda *a, **kw: counted()
+    ), mock_patch.object(
+        type(targets), "get_target", autospec=True, side_effect=AssertionError(
+            "the second per-call session still opened"
+        )
+    ), mock_patch.object(
+        targets, "get_target_in_session", side_effect=recording_loader
+    ):
+        payload = service.backtest(OWNER, created["id"])
+
+    assert len(checkouts) == 1
+    assert loads_through_scope == [(True, OWNER, created["id"])]
+    assert [player["canonical_id"] for player in payload["players"]] == [LEBRON]
+
+
+def test_the_scope_loaded_target_still_hides_an_unowned_one(
+    backtest_engine, backtest_settings, targets
+):
+    """Ownership is unchanged on the scope-loaded path: another account's
+    Target is missing, never forbidden."""
+
+    created = _create(targets)
+    seams = _two_games()
+    service = TargetBacktestService(
+        targets=targets,
+        player_logs=seams["logs"],
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        engine=backtest_engine,
+    )
+
+    with pytest.raises(ResourceNotFoundError):
+        service.backtest(STRANGER, created["id"])

@@ -63,6 +63,11 @@ an unchanged row writes `last_login` at most once per 15-minute interval;
 profile changes and new users persist immediately. This bounds authentication
 write amplification without caching authorization, claims, or revocation
 decisions.
+The explicitly enabled local development bypass (`FIREBASE_ADMIN_DISABLED`)
+provisions the `dev-user` durable user row through the same
+`create_or_update_user` seam when it first attaches, tolerating a failed
+provision with a warning only, so local Target writes clear the
+`targets_firebase_uid_fkey` exactly as verified-token writes do.
 
 ### Projection Provider registry
 
@@ -157,6 +162,18 @@ otherwise generates a fresh UUID; the app binds it to `flask.g.request_id` in a
 `before_request` and echoes it on the `X-Request-ID` response header. The same
 ID flows into provider telemetry events, so a log, a provider event, and a
 response header share one correlation key.
+
+`before_request` also records a `perf_counter` start and `after_request` emits
+one INFO lifecycle line for every route, including handled error responses:
+`request method=... rule=... status=... duration_ms=... request_id=...
+targets_cache=...` — the URL rule, the response status, the wall duration per
+request, the correlation ID, and the Target backtest cache decision. The
+`targets_cache` field is reserved: until the Targets result cache stamps
+`flask.g` (PR 2 of #279), it reports `-` on every line, and no request reports
+`hit`/`miss`/`bypass` yet. This line is
+the source for latency/regression triggers; the in-process telemetry deques
+are not. Unhandled catastrophic failures at shutdown skip after_request, so
+they are the one request shape without a line.
 
 External provider invocations and explicit local provider-normalization seams
 are wrapped in one structured event (`app.utils.telemetry.ProviderEvent`).
@@ -1782,6 +1799,18 @@ the game's player pool from one indexed query. The selection read does the same
 for one card: its snapshot is projection-only, and the head-to-head and
 archetype tables each resolve their opponent's rows from one query on the
 projection's `(publication_id, opponent_team_id, player_id, game_date)` index.
+Availability and authority checks run on every read regardless of shape. A third
+read shape is opt-in per `snapshot()` call via `decoded_only_keys` and covers
+only the four Player Diet (`_PLAYER_DIET_PUBLICATION_BASES`) streams: a caller
+that reads facts but never `.payload` names them decoded-only, the shared
+capture statement skips that stream's payload column, and the read serves the
+stream's decode cache alone — on a hit it returns `decoded` with
+`payload=None`, selecting no payload bytes at all; on a miss it loads the
+payload with one targeted select so the row's checksum is verified on the first
+decode of an immutable `(publication_id, fence, version)` row and its decoded
+facts are stored in the bounded Diet decode cache, which a later hit reuses
+without re-verify. Because a decoded-only hit serves no payload, callers that
+read `.payload` must not opt in.
 Composition and rollback write the
 projection in the publication transaction, while migration 036 backfills
 existing valid versions; the projection therefore preserves exact active and
@@ -2085,8 +2114,11 @@ decoding the whole league twice per request.
 `backtest_target` opens one connection for the request through the same
 `request_read_scope` seam `MatchupService` and `MatchupSelectionService`
 share, binding the publication snapshot's session to it and passing it as
-`connection=` to every read; a wiring without an engine keeps today's
-per-call default. The Targets page backtests its saved Targets one at a
+`connection=` to every read; `backtest(uid, id)` loads the owned Target on
+that same checkout through `UserService.get_target_in_session` instead of the
+per-call `get_target`, so one saved backtest checks out exactly one pooled
+connection, and the per-call default remains for wirings without an engine.
+The Targets page backtests its saved Targets one at a
 time, each against the same active publication but naming a different
 opponent's player pool, so `PlayerGameLogRepository` additionally caches
 each player's decoded season rows under the publication that produced
@@ -2097,6 +2129,21 @@ whole season, bounded to the latest two publications. The projection also
 carries an index on `(publication_id, game_id)`, which the team-rows
 semi-join and the focal single-game read filter by but previously matched
 no index of their own.
+
+Three generation-keyed in-process caches make the second read of the same
+evidence nearly free, each bounded like the projection row cache: the Diet
+repository owns a cache of computed league baselines keyed
+`(generation, season)` (`PlayerDietRepository`) that serves any caller that
+does not compose its own `baseline_cache`; `get_player_summaries` caches
+each composed `PlayerSeasonLogSummary` keyed by the snapshot generation,
+player, rate season type, and excluded focal game, only when a publication
+snapshot was supplied; and the publication reader caches the decoded Diet
+facts per stream keyed by the immutable row's `(publication_id, fence,
+version)`, so every miss (and every Lab edit) re-decodes the ~2 MB payload
+only when the publication actually changed — the availability, authority,
+and checksum checks still run on every read, while the reused decode serves
+the same facts a checksum-verified re-decode would have. All three are LRU
+by generation with a lock, matching `_summary_projection_cache`.
 
 What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
 `observed_diet_share`, both now module-level in `matchup.py` for that reason,

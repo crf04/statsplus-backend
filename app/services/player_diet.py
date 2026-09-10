@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from math import isfinite
 from statistics import fmean, pstdev
+import threading
 from types import MappingProxyType
 from typing import Any
 
@@ -305,6 +307,12 @@ class _ProviderDependencyUnavailable(ValueError):
 class PlayerDietRepository:
     """Persist available Bases while retaining prior facts for degraded Bases."""
 
+    #: Baselines are a pure function of one immutable Publication generation
+    #: and the season, so they are cached under that key and bounded to the
+    #: latest few generations -- an older one's baselines are worth nothing
+    #: once a newer one activates.
+    _BASELINE_CACHE_GENERATIONS = 2
+
     def __init__(
         self,
         engine: Engine,
@@ -319,6 +327,11 @@ class PlayerDietRepository:
         self._write_fence = write_fence
         self._publication_reader = publication_reader
         self._baseline_settings = baseline_settings or PlayerDietBaselineSettings()
+        # (generation, season) -> baselines, oldest first, LRU by generation.
+        self._baseline_cache: "OrderedDict[Any, dict[tuple[str, str], PlayerDietBaseline]]" = (
+            OrderedDict()
+        )
+        self._baseline_cache_lock = threading.Lock()
 
     def publish(
         self,
@@ -571,6 +584,11 @@ class PlayerDietRepository:
     ) -> PlayerDietResult:
         season = validate_canonical_season(season)
         requested = self._canonical_player_ids(player_ids)
+        if baseline_cache is None:
+            # The repository owns the cache when a caller does not compose
+            # one: the Target backtest and the preview path both reach this
+            # seam independently and share the generation-keyed build.
+            baseline_cache = self._baseline_cache
         publication_result = self._publication_result(
             season,
             requested,
@@ -708,11 +726,15 @@ class PlayerDietRepository:
             if publication_snapshot is None
             else (getattr(publication_snapshot, "generation", publication_snapshot), season)
         )
-        cached_baselines = (
-            baseline_cache.get(cache_key)
-            if baseline_cache is not None and cache_key is not None
-            else None
-        )
+        cached_baselines = None
+        if cache_key is not None and baseline_cache is not None:
+            if baseline_cache is self._baseline_cache:
+                with self._baseline_cache_lock:
+                    cached_baselines = baseline_cache.get(cache_key)
+                    if cached_baselines is not None:
+                        baseline_cache.move_to_end(cache_key)
+            else:
+                cached_baselines = baseline_cache.get(cache_key)
         if publication_snapshot is not None:
             publication_reads = {
                 stream_key: publication_snapshot.read(stream_key)
@@ -875,7 +897,17 @@ class PlayerDietRepository:
                 settings=self._baseline_settings,
             )
             if baseline_cache is not None and cache_key is not None:
-                baseline_cache[cache_key] = baselines
+                if baseline_cache is self._baseline_cache:
+                    with self._baseline_cache_lock:
+                        baseline_cache[cache_key] = baselines
+                        baseline_cache.move_to_end(cache_key)
+                        while (
+                            len(baseline_cache)
+                            > self._BASELINE_CACHE_GENERATIONS
+                        ):
+                            baseline_cache.popitem(last=False)
+                else:
+                    baseline_cache[cache_key] = baselines
         return PlayerDietResult(
             season=season,
             players={
