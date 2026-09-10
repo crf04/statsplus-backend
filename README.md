@@ -74,6 +74,8 @@ the most important variables:
 | `ENABLE_LLM_FALLBACK` | No | Enabled only when `OPENAI_API_KEY` is present |
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
+| `TARGET_BACKTEST_CACHE_ENABLED` | No | `true`; the saved-Target Backtest result cache (#279) served from and written to Redis under the Publication generation key |
+| `TARGET_BACKTEST_CACHE_TTL_SECONDS` | No | `86400`; TTL carried by every key the result cache writes |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |

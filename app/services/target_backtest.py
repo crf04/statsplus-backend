@@ -572,9 +572,7 @@ class TargetBacktestService:
         if not payload:
             return None
         try:
-            return json.loads(
-                zlib.decompress(payload, 6).decode("utf-8")
-            )
+            return json.loads(zlib.decompress(payload).decode("utf-8"))
         except (TypeError, ValueError, zlib.error, json.JSONDecodeError):
             return None
 
