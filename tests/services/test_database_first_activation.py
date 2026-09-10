@@ -1853,3 +1853,69 @@ def test_generation_matches_the_snapshot_generation_in_every_state(tmp_path):
     assert all(
         len(entry) == 4 for entry in reader.generation(keys, season="2025-26")
     )
+
+
+def test_generation_selects_no_payload_column(tmp_path):
+    import sqlalchemy as sa
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "generation_payload_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    service.compose(
+        "generation_payload_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("generation_payload_test",)
+
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        generation = reader.generation(keys, season="2025-26")
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record_statement)
+    assert generation == reader.snapshot(keys, season="2025-26").generation
+
+    # The pre-check ask alone must stay pointer-only: a generation that
+    # selected a ~2 MiB payload on every cache key check would price the
+    # cache at the capture it is meant to avoid.
+    assert all(
+        "publication_versions.payload" not in statement
+        for statement in statements
+    )
+
+
+def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
+    engine = _db(tmp_path)
+    PublicationService(engine, clock=lambda: NOW).register_stream(
+        "generation_disabled_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=False,
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("generation_disabled_test",)
+
+    generation = reader.generation(keys, season="2025-26")
+    snapshot = reader.snapshot(keys, season="2025-26")
+
+    # The same label the full read reports for a disabled stream, element by
+    # element: no publication of any generation, so only the fence could
+    # distinguish states readable through the legacy tables.
+    assert generation == snapshot.generation
+    assert snapshot.read(*keys).publication_id is None
+    assert generation == (
+        (keys[0], None, snapshot.read(*keys).fence, None),
+    )
