@@ -1799,6 +1799,18 @@ the game's player pool from one indexed query. The selection read does the same
 for one card: its snapshot is projection-only, and the head-to-head and
 archetype tables each resolve their opponent's rows from one query on the
 projection's `(publication_id, opponent_team_id, player_id, game_date)` index.
+Availability and authority checks run on every read regardless of shape. A third
+read shape is opt-in per `snapshot()` call via `decoded_only_keys` and covers
+only the four Player Diet (`_PLAYER_DIET_PUBLICATION_BASES`) streams: a caller
+that reads facts but never `.payload` names them decoded-only, the shared
+capture statement skips that stream's payload column, and the read serves the
+stream's decode cache alone — on a hit it returns `decoded` with
+`payload=None`, selecting no payload bytes at all; on a miss it loads the
+payload with one targeted select so the row's checksum is verified on the first
+decode of an immutable `(publication_id, fence, version)` row and its decoded
+facts are stored in the bounded Diet decode cache, which a later hit reuses
+without re-verify. Because a decoded-only hit serves no payload, callers that
+read `.payload` must not opt in.
 Composition and rollback write the
 projection in the publication transaction, while migration 036 backfills
 existing valid versions; the projection therefore preserves exact active and
