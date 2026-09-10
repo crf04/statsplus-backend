@@ -1251,6 +1251,9 @@ def test_get_player_summaries_generation_cache_reuses_composed_summaries(
         assert len(statements) == 1
         assert second is not None
         for player_id in (101, 202):
+            # The identical summary objects come back: a hit reuses them
+            # rather than re-composing fresh equal ones.
+            assert second[player_id] is first[player_id]
             assert second[player_id].season_rate == first[player_id].season_rate
             assert second[player_id].last_ten_minutes == (
                 first[player_id].last_ten_minutes
