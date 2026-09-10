@@ -1315,6 +1315,31 @@ def test_get_player_summaries_cache_holds_at_most_two_generations(tmp_path):
     }
 
 
+def test_summary_cache_lookup_never_takes_a_residency_slot(tmp_path):
+    """A lookup that fills nothing must not insert the generation.
+
+    A request whose compute never completes -- here the projection decode
+    raises -- leaves the generation absent from the season-summary cache: a
+    lookup may only recency-mark a generation already resident, never take
+    a residency slot for entries it never stored.
+    """
+
+    records = [_record(player_id=101, game_id="0022500001")]
+    repository, snapshot = _projected_publication_repository(tmp_path, records)
+
+    def raising_projection(_season, _player_ids, **_kwargs):
+        raise RuntimeError("compute failed")
+
+    repository._projected_summary_rows = raising_projection
+
+    with pytest.raises(RuntimeError):
+        repository.get_player_summaries(
+            SEASON, [101], publication_snapshot=snapshot
+        )
+
+    assert repository._season_summary_cache.get(snapshot.generation) is None
+
+
 def test_get_player_summaries_reuses_cached_publication_decode_across_calls(
     tmp_path,
 ):

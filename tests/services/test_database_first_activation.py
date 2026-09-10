@@ -1613,6 +1613,43 @@ def test_snapshot_diet_decode_hit_still_verifies_the_immutable_row(tmp_path):
     assert second.decoded is None
 
 
+def test_snapshot_diet_decoded_only_miss_still_verifies_the_immutable_row(
+    tmp_path,
+):
+    """A cold decoded-only read verifies checksum when it decodes.
+
+    On a cold decode cache a decoded-only read must still select the payload
+    column and reject a row whose stored payload does not match the row's own
+    checksum: the simplified shape only skips the payload on a hit, never the
+    checksum on the miss that would have populated the cache.  A refused row
+    stores nothing, so the cache stays empty.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_versions SET checksum = 'deadbeef' "
+                "WHERE publication_id = 'pub-diet-1'"
+            )
+        )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    read = reader.snapshot(
+        ("synergy_play_types",),
+        season="2025-26",
+        decoded_only_keys=frozenset({"synergy_play_types"}),
+    ).read("synergy_play_types")
+
+    assert read.available is False
+    assert read.unavailable_reason == "publication_checksum_mismatch"
+    assert read.decoded is None
+    assert reader._diet_decode_cache == {}
+
+
 def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path):
     """A new publication is a new key; the oldest version's decode is evicted."""
 
