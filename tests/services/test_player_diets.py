@@ -1439,3 +1439,16 @@ def test_baseline_accumulates_volume_across_the_base_not_just_the_last_slice():
         baselines = compute_player_diet_baselines(facts, settings=_BASELINE_SETTINGS)
         baseline = baselines[("play_types", "PRBallHandler")]
         assert baseline.league_average_share == pytest.approx(fmean([0.4, 0.7]))
+
+
+def test_every_accepted_qualifier_base_names_a_publication_stream():
+    """The result-cache eligibility set is built from this mapping (#279).
+
+    A Qualifier base the API accepts but the mapping lacks would count as
+    eligible without any stream to check, so the two must stay identical.
+    """
+
+    from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
+    from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAMS
+
+    assert set(PLAYER_DIET_PUBLICATION_STREAMS) == set(PLAYER_DIET_QUALIFIER_SLICES)

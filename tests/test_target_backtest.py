@@ -15,11 +15,15 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
+import json
+import zlib
 
 import pytest
+import redis
 from sqlalchemy import create_engine
 
 from app.config.settings import (
+    CacheSettings,
     NBASeasonSettings,
     MatchupScoreSettings,
     RuntimeSettings,
@@ -42,7 +46,11 @@ from app.services.player_game_log_repository import (
     PlayerSeasonRate,
 )
 from app.services.statistic_catalog import StatisticCatalog
-from app.services.target_backtest import TargetBacktestService
+from app.services.target_backtest import (
+    BACKTEST_PUBLICATION_STREAM_KEYS,
+    TargetBacktestService,
+    backtest_cache_key,
+)
 from app.services.user_service import UserService
 
 
@@ -79,6 +87,12 @@ SHOT_TYPE = {
     "slice_key": "Catch and Shoot",
     "comparator": "at_or_above",
     "threshold": 0.01,
+}
+ASSIST = {
+    "base": "assist_locations",
+    "slice_key": "Corner3Assists",
+    "comparator": "at_or_above",
+    "threshold": 0.1,
 }
 
 SHOT_ZONES = (
@@ -381,7 +395,14 @@ def build_backtest(targets, backtest_settings):
     unset = object()
 
     def _service(
-        *, logs=None, diets=unset, publication_reader=None, statistic_catalog=None
+        *,
+        logs=None,
+        diets=unset,
+        publication_reader=None,
+        statistic_catalog=None,
+        settings=None,
+        redis_client=None,
+        cache_clock=None,
     ):
         return TargetBacktestService(
             targets=targets,
@@ -392,8 +413,10 @@ def build_backtest(targets, backtest_settings):
                 if statistic_catalog is None
                 else statistic_catalog
             ),
-            settings=backtest_settings,
+            settings=settings or backtest_settings,
             publication_reader=publication_reader,
+            redis_client=redis_client,
+            cache_clock=cache_clock,
         )
 
     return _service
@@ -401,10 +424,14 @@ def build_backtest(targets, backtest_settings):
 
 @pytest.fixture
 def backtest(build_backtest):
-    """Backtest one of the caller's saved Targets by id."""
+    """Backtest one of the caller's saved Targets by id.
+
+    The service now returns ``(payload, cache_state)`; tests here ask about
+    the payload, and the cache tests below unpack the pair themselves.
+    """
 
     def _backtest(target_id, *, uid=OWNER, **seams):
-        return build_backtest(**seams).backtest(uid, target_id)
+        return build_backtest(**seams).backtest(uid, target_id)[0]
 
     return _backtest
 
@@ -545,7 +572,7 @@ def test_a_published_shot_type_diet_fits_targets_and_builds_display_baselines(
 
     payload = build_backtest(logs=logs, diets=diets).backtest(
         OWNER, created["id"]
-    )
+    )[0]
 
     assert [player["canonical_id"] for player in payload["players"]] == [
         TATUM,
@@ -662,7 +689,7 @@ def test_a_draft_backtests_exactly_as_a_saved_target_with_the_same_qualifiers(
 ):
     created = _create(targets)
 
-    saved = build_backtest(**_two_games()).backtest(OWNER, created["id"])
+    saved = build_backtest(**_two_games()).backtest(OWNER, created["id"])[0]
     draft = build_backtest(**_two_games()).backtest_target(DRAFT)
 
     # The draft is echoed as given: derived title, no id, no timestamps.
@@ -1007,7 +1034,7 @@ def test_game_default_values_follow_catalogue_components(targets, build_backtest
         ),
         diets=FakeDiets(zones={LEBRON: _zone_diet(0.2, 0.2)}),
         statistic_catalog=catalog,
-    ).backtest(OWNER, created["id"])
+    ).backtest(OWNER, created["id"])[0]
 
     assert payload["players"][0]["games"][0]["stats"]["FG2A"] == 12.0
 
@@ -1277,12 +1304,12 @@ def test_repeated_backtests_reuse_cached_publication_decode_and_keep_response_st
 
     event.listen(backtest_engine, "before_cursor_execute", record_statement)
     try:
-        first = service.backtest(OWNER, target_okc["id"])
-        second = service.backtest(OWNER, target_lal["id"])
+        first = service.backtest(OWNER, target_okc["id"])[0]
+        second = service.backtest(OWNER, target_lal["id"])[0]
         # A third ask for a player pool this generation has already fully
         # decoded -- OKC's, exactly as the first backtest asked -- costs no
         # further statement against the projection at all.
-        third = service.backtest(OWNER, target_okc["id"])
+        third = service.backtest(OWNER, target_okc["id"])[0]
     finally:
         event.remove(backtest_engine, "before_cursor_execute", record_statement)
 
@@ -1469,7 +1496,7 @@ def test_the_backtest_route_returns_the_backtest_for_the_targets_id(
     client, authenticate, backtest_service
 ):
     headers = authenticate()
-    backtest_service.backtest.return_value = BACKTESTED
+    backtest_service.backtest.return_value = (BACKTESTED, "-")
 
     response = client.get("/api/user/targets/7/backtest", headers=headers)
 
@@ -1715,7 +1742,7 @@ def test_identical_saved_and_draft_conditions_have_identical_evidence(targets, b
     created = targets.create_target(OWNER, opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
     draft = targets.validate_target_draft(opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
     service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}))
-    saved, preview = service.backtest(OWNER, created['id']), service.backtest_target(draft)
+    saved, preview = service.backtest(OWNER, created['id'])[0], service.backtest_target(draft)
     assert saved['players'] == preview['players']
     assert saved['summary'] == preview['summary']
     assert saved['games_considered'] == {'kept': 0, 'played': 1}
@@ -1743,7 +1770,7 @@ def test_identical_saved_and_draft_player_minutes_have_identical_evidence(
     )
     service = build_backtest(logs=logs, diets=diets)
 
-    saved = service.backtest(OWNER, created['id'])
+    saved = service.backtest(OWNER, created['id'])[0]
     preview = service.backtest_target(draft)
 
     expected_conditions = {
@@ -2048,7 +2075,7 @@ def test_a_saved_backtest_loads_its_target_on_the_request_scope_connection(
     ), mock_patch.object(
         targets, "get_target_in_session", side_effect=recording_loader
     ):
-        payload = service.backtest(OWNER, created["id"])
+        payload = service.backtest(OWNER, created["id"])[0]
 
     assert len(checkouts) == 1
     assert loads_through_scope == [(True, OWNER, created["id"])]
@@ -2074,3 +2101,637 @@ def test_the_scope_loaded_target_still_hides_an_unowned_one(
 
     with pytest.raises(ResourceNotFoundError):
         service.backtest(STRANGER, created["id"])
+
+
+# --- shared Redis result cache for saved Targets (#279) ----------------------
+
+
+class GenerationSnapshotReader:
+    """A reader answering generations pointer-only and capturing one frozen
+    snapshot: the split the real reader gives a request."""
+
+    def __init__(self, reads, generation):
+        self.reads = reads
+        self.frozen_generation = generation
+        self.snapshot_calls = []
+        self.generation_calls = []
+
+    def generation(self, stream_keys, *, season, session=None):
+        self.generation_calls.append((tuple(stream_keys), season, session))
+        return self.frozen_generation
+
+    def snapshot(
+        self,
+        stream_keys,
+        *,
+        season,
+        projection_only_keys=None,
+        decoded_only_keys=None,
+        session=None,
+    ):
+        self.snapshot_calls.append((tuple(stream_keys), season))
+        return SimpleNamespace(reads=self.reads, generation=self.frozen_generation)
+
+
+class FakeRedis:
+    """A Redis client recording GET and SETEX calls and storing bytes."""
+
+    def __init__(self):
+        self.store = {}
+        self.gets = []
+        self.sets = []
+
+    def get(self, key):
+        self.gets.append(key)
+        return self.store.get(key)
+
+    def setex(self, key, seconds, payload):
+        self.sets.append((key, seconds))
+        self.store[key] = payload
+
+
+class DeadRedis(FakeRedis):
+    """A Redis whose reads fail the way an outage does."""
+
+    def get(self, key):
+        raise redis.exceptions.ConnectionError("connection refused")
+
+
+def _cached_service(
+    build_backtest, *, reads=None, generation=None, redis_client=None
+):
+    reader = GenerationSnapshotReader(
+        reads if reads is not None else _available_reads(),
+        generation if generation is not None else _frozen_generation(),
+    )
+    ticks = iter(float(i) for i in range(10_000))
+    client = redis_client if redis_client is not None else FakeRedis()
+    service = build_backtest(
+        **_two_games(),
+        publication_reader=reader,
+        redis_client=client,
+        cache_clock=lambda: next(ticks),
+    )
+    return service, reader, client
+
+
+def _available_reads():
+    """All five streams read available, with no refusal labels."""
+
+    return {
+        key: PublicationRead(
+            stream_key=key,
+            publication_id=f"pub-1-{key}",
+            season=SEASON,
+            cutoff=None,
+            version=1,
+            status="active",
+            freshness="fresh",
+            age_seconds=0,
+            payload={"rows": []},
+        )
+        for key in BACKTEST_PUBLICATION_STREAM_KEYS
+    }
+
+
+def _frozen_generation():
+    return tuple(
+        (key, f"pub-1-{key}", 1, 1)
+        for key in BACKTEST_PUBLICATION_STREAM_KEYS
+    )
+
+
+def _key(
+    generation,
+    *,
+    qualifiers=(CORNER_THREE,),
+    conditions=None,
+    season=SEASON,
+    settings=None,
+):
+    """Build one cache key directly, the way the flow does."""
+
+    target = {
+        "id": 1,
+        "qualifiers": list(qualifiers),
+        "conditions": conditions,
+    }
+    return backtest_cache_key(
+        target,
+        generation,
+        season=season,
+        settings=settings
+        or RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+            matchup_scores=MatchupScoreSettings(),
+        ),
+    )
+
+
+def test_a_miss_files_its_field_under_the_generation_key(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, reader, client = _cached_service(build_backtest)
+
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "miss"
+
+    # The generation pre-check ran once with the request's season, and the
+    # one miss captured its snapshot and stored the evidence under it.
+    assert [season for _, season, _ in reader.generation_calls] == [SEASON]
+    assert len(reader.snapshot_calls) == 1
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+    assert len(client.sets) == 1
+    cache_key, ttl = client.sets[0]
+    assert cache_key.startswith("targets:backtest:v1:")
+    assert cache_key in client.gets
+    assert ttl == 86400
+    evidence = json.loads(
+        zlib.decompress(client.store[cache_key]).decode("utf-8")
+    )
+    assert set(evidence) == {
+        "players",
+        "summary",
+        "stat_columns",
+        "games_considered",
+        "season",
+    }
+    assert evidence["season"] == SEASON
+
+
+def test_a_hit_serves_the_stored_result_without_recomputing(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, _, _ = _cached_service(build_backtest)
+    service.backtest(OWNER, created["id"])
+
+    logs = service.player_logs
+    compute_calls_before = len(logs.opponent_calls)
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "hit"
+    assert len(logs.opponent_calls) == compute_calls_before
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+
+
+def test_a_hit_returns_a_body_byte_identical_to_a_miss(
+    targets, build_backtest
+):
+    """Composed at the route seam: a hit body and a miss body are equal
+    byte for byte, in construction order, not merely up to key sorting."""
+
+    from flask import Flask, g, jsonify
+
+    created = _create(targets)
+    service, _, _ = _cached_service(build_backtest)
+
+    app = Flask(__name__)
+    # Keep Flask from sorting keys: with the default sorter a store that
+    # reordered the evidence would serialize to the same bytes and hide the
+    # defect, so the fixture must serialize construction order verbatim.
+    app.json.sort_keys = False
+
+    @app.route("/backtest")
+    def _backtest():
+        payload, state = service.backtest(OWNER, created["id"])
+        g.targets_cache = state
+        return jsonify(payload)
+
+    test_client = app.test_client()
+    miss = test_client.get("/backtest")
+    hit = test_client.get("/backtest")
+
+    assert hit.status_code == miss.status_code == 200
+    assert hit.get_data() == miss.get_data()
+
+
+def test_each_of_the_five_streams_advancing_alone_changes_the_key():
+    base = _frozen_generation()
+    base_key = _key(base)
+    for stream_key in BACKTEST_PUBLICATION_STREAM_KEYS:
+        bumped = tuple(
+            (
+                entry[0],
+                "pub-2-entry",
+                entry[2],
+                entry[3],
+            )
+            if entry[0] == stream_key
+            else entry
+            for entry in base
+        )
+        assert _key(bumped) != base_key
+
+
+def test_a_qualifier_reorder_changes_the_key():
+    assert _key(_frozen_generation(), qualifiers=(LOW_RIM, CORNER_THREE)) != (
+        _key(_frozen_generation(), qualifiers=(CORNER_THREE, LOW_RIM))
+    )
+
+
+def test_raw_threshold_precision_sifies_two_qualifiers():
+    lower = dict(CORNER_THREE, threshold=0.4000001)
+    higher = dict(CORNER_THREE, threshold=0.4000004)
+    generation = _frozen_generation()
+    assert _key(generation, qualifiers=(lower,)) != _key(
+        generation, qualifiers=(higher,)
+    )
+
+
+def test_the_season_alone_changes_the_key():
+    assert _key(_frozen_generation(), season="2024-25") != _key(
+        _frozen_generation()
+    )
+
+
+def test_conditions_alone_change_the_key():
+    assert _key(
+        _frozen_generation(), conditions={"player_minutes": 10}
+    ) != _key(_frozen_generation())
+
+
+def test_the_diet_baseline_min_games_floor_alone_changes_the_key():
+    from app.config.settings import PlayerDietBaselineSettings
+
+    opened = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings(current_season=SEASON),
+        matchup_scores=MatchupScoreSettings(),
+        player_diet_baseline=PlayerDietBaselineSettings(min_games=1),
+    )
+    assert _key(_frozen_generation(), settings=opened) != _key(
+        _frozen_generation()
+    )
+
+
+def test_a_matchup_volume_floor_alone_changes_the_key():
+    from app.config.settings import PlayerDietBaselineSettings
+
+    flooded = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings(current_season=SEASON),
+        matchup_scores=MatchupScoreSettings(
+            shot_zones_min_volume_per_game=2.0
+        ),
+        player_diet_baseline=PlayerDietBaselineSettings(),
+    )
+    assert _key(_frozen_generation(), settings=flooded) != _key(
+        _frozen_generation()
+    )
+
+
+def test_a_schema_bump_changes_the_key(monkeypatch):
+    original = backtest_cache_key(
+        {"id": 1, "qualifiers": [CORNER_THREE], "conditions": None},
+        _frozen_generation(),
+        season=SEASON,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+            matchup_scores=MatchupScoreSettings(),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 2
+    )
+    bumped = backtest_cache_key(
+        {"id": 1, "qualifiers": [CORNER_THREE], "conditions": None},
+        _frozen_generation(),
+        season=SEASON,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+            matchup_scores=MatchupScoreSettings(),
+        ),
+    )
+    assert bumped != original
+    # One version knob: the schema constant is the namespace, so bumping it
+    # is not just a payload change but a different key prefix entirely.
+    assert bumped.startswith("targets:backtest:v2:")
+    assert not bumped.startswith("targets:backtest:v1:")
+
+
+def test_a_note_only_edit_still_hits_with_the_new_note(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, _, _ = _cached_service(build_backtest)
+    service.backtest(OWNER, created["id"])
+
+    updated = targets.update_target(
+        OWNER,
+        created["id"],
+        changes={"note": "season bet"},
+    )
+    reads_before = len(service.player_logs.opponent_calls)
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "hit"
+    # The stored row is reloaded every request, so note and updated_at are
+    # the fresh ones; the evidence came from the cache (no recompute).
+    assert payload["target"]["note"] == "season bet"
+    assert payload["target"]["updated_at"] == updated["updated_at"]
+    assert len(service.player_logs.opponent_calls) == reads_before
+
+
+def _refused_read(stream_key):
+    """One stream read with a refusal label, an unavailable stream."""
+
+    return PublicationRead(
+        stream_key=stream_key,
+        publication_id=None,
+        season=None,
+        cutoff=None,
+        version=None,
+        status="unavailable",
+        freshness="unavailable",
+        age_seconds=None,
+        payload=None,
+        unavailable_reason="publication_checksum_mismatch",
+    )
+
+
+def test_a_read_with_unavailable_reason_bypasses_the_write(
+    targets, build_backtest
+):
+    refused = _available_reads()
+    refused["player_game_logs"] = PublicationRead(
+        stream_key="player_game_logs",
+        publication_id=None,
+        season=None,
+        cutoff=None,
+        version=None,
+        status="unavailable",
+        freshness="unavailable",
+        age_seconds=None,
+        payload=None,
+        unavailable_reason="publication_checksum_mismatch",
+    )
+    created = _create(targets)
+    service, reader, client = _cached_service(
+        build_backtest, reads=refused
+    )
+
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "bypass"
+    # A generation containing a refusal is still looked up, but a result
+    # computed from refusal labels is written nowhere.
+    assert len(client.gets) == 1
+    assert client.sets == []
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+
+
+def test_an_unreferenced_stream_being_unavailable_still_caches(
+    targets, build_backtest
+):
+    """A Diet stream no Qualifier references cannot change the evidence.
+
+    The `player_assist_locations` stream was never activated in production,
+    and under the old all-streams eligibility that inert unavailability
+    made every real read bypass, leaving the cache perpetually empty.
+    """
+    created = _create(targets, qualifiers=(CORNER_THREE, TRANSITION))
+    refused = _available_reads()
+    refused["player_assist_locations"] = _refused_read(
+        "player_assist_locations"
+    )
+    service, _, client = _cached_service(build_backtest, reads=refused)
+
+    _, first = service.backtest(OWNER, created["id"])
+    _, second = service.backtest(OWNER, created["id"])
+
+    assert first == "miss"
+    assert second == "hit"
+    assert len(client.sets) == 1
+
+
+def test_a_referenced_stream_being_unavailable_bypasses_the_write(
+    targets, build_backtest
+):
+    """A Qualifier referencing the unavailable stream still bypasses.
+
+    An unavailable stream the Target does reference falls back to
+    unversioned legacy tables, so the read runs on evidence a future
+    generation may not reuse.
+    """
+    created = _create(targets, qualifiers=(ASSIST,))
+    refused = _available_reads()
+    refused["player_assist_locations"] = _refused_read(
+        "player_assist_locations"
+    )
+    service, _, client = _cached_service(build_backtest, reads=refused)
+
+    _, state = service.backtest(OWNER, created["id"])
+
+    assert state == "bypass"
+    assert client.sets == []
+
+
+def test_the_game_logs_being_unavailable_bypasses_regardless_of_qualifiers(
+    targets, build_backtest
+):
+    """The whole evidence composes the game logs, so its unavailability
+    bypasses no matter which Qualifiers the Target carries."""
+    created = _create(targets, qualifiers=(ASSIST,))
+    refused = _available_reads()
+    refused["player_game_logs"] = _refused_read("player_game_logs")
+    service, _, client = _cached_service(build_backtest, reads=refused)
+
+    _, state = service.backtest(OWNER, created["id"])
+
+    assert state == "bypass"
+    assert client.sets == []
+
+
+def test_a_referenced_stream_becoming_unavailable_turns_the_next_miss_bypass(
+    targets, build_backtest
+):
+    """Availability is judged on every read, not just the first: once a
+    stream the Target references goes unavailable, its stale entry is
+    recomputed under a bypass instead of reused."""
+    created = _create(targets, qualifiers=(CORNER_THREE,))
+    service, reader, client = _cached_service(build_backtest)
+
+    _, first = service.backtest(OWNER, created["id"])
+    client.store.clear()
+    reader.reads["exact_shot_zones"] = _refused_read("exact_shot_zones")
+    _, second = service.backtest(OWNER, created["id"])
+
+    assert first == "miss"
+    assert second == "bypass"
+    assert len(client.sets) == 1
+
+
+def test_a_redis_outage_is_computed_around_with_a_open_breaker(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, reader, client = _cached_service(
+        build_backtest, redis_client=DeadRedis()
+    )
+
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "miss"
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+    assert client.sets == []
+    # The circuit is now open, so the next read never contacts Redis again
+    # during the cooldown.
+    gets_after_first = len(client.gets)
+    second, second_state = service.backtest(OWNER, created["id"])
+    assert second_state == "miss"
+    assert len(client.gets) == gets_after_first
+    assert second["players"] == payload["players"]
+
+
+class RefusingRedis(FakeRedis):
+    """A Redis whose reads fail the way a protocol error, not an outage, does."""
+
+    def get(self, key):
+        self.gets.append(key)
+        raise redis.exceptions.ResponseError("bad command")
+
+
+def test_a_redis_protocol_error_misses_with_the_breaker_still_closed(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, reader, client = _cached_service(
+        build_backtest, redis_client=RefusingRedis()
+    )
+
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "miss"
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+    # A non-connection error is a miss, not an outage: the next call still
+    # reaches Redis rather than skipping it during a cooldown.
+    assert len(client.gets) == 1
+    second, second_state = service.backtest(OWNER, created["id"])
+    assert second_state == "miss"
+    assert len(client.gets) == 2
+    # The read never produced evidence, but the computed result is still
+    # filed like any other miss.
+    assert client.sets
+
+
+def test_the_lab_preview_never_touches_the_result_cache(
+    targets, build_backtest
+):
+    from app.services.target_preview import TargetPreviewService
+
+    reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
+    client = FakeRedis()
+    draft = targets.validate_target_draft(
+        opponent="OKC", qualifiers=[dict(CORNER_THREE)]
+    )
+    diagnostics = _two_games()
+    preview = TargetPreviewService(
+        backtests=TargetBacktestService(
+            targets=targets,
+            player_logs=diagnostics["logs"],
+            player_diets=diagnostics["diets"],
+            statistic_catalog=StatisticCatalog.load_default(),
+            settings=RuntimeSettings(
+                environment="testing",
+                nba=NBASeasonSettings(current_season=SEASON),
+                matchup_scores=MatchupScoreSettings(),
+            ),
+            publication_reader=reader,
+            redis_client=client,
+            cache_clock=lambda: 0.0,
+        ),
+        resolutions=SimpleNamespace(today=lambda _target, *, matchups: None),
+        matchups=object(),
+        injuries=object(),
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+            matchup_scores=MatchupScoreSettings(),
+        ),
+        publication_reader=reader,
+    )
+    payload = preview.preview(draft)
+
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+    assert client.gets == []
+    assert client.sets == []
+
+
+def test_the_flag_off_leaves_redis_entirely_alone(targets, build_backtest):
+    created = _create(targets)
+    client = FakeRedis()
+    service = build_backtest(
+        **_two_games(),
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season=SEASON),
+            matchup_scores=MatchupScoreSettings(),
+            cache=CacheSettings(target_backtest_enabled=False),
+        ),
+        redis_client=client,
+        publication_reader=GenerationSnapshotReader(
+            _available_reads(), _frozen_generation()
+        ),
+    )
+
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "-"
+    assert client.gets == []
+    assert client.sets == []
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+
+
+def test_the_request_log_sees_hit_miss_and_bypass(
+    client, authenticate, backtest_service, caplog
+):
+    """Through the real route, not the service: ``backtest`` reports the
+    cache outcome and the route stamps it on ``g``, so the app's request
+    log names the outcome for every request."""
+    import logging
+
+    headers = authenticate()
+    backtest_service.backtest.side_effect = [
+        (BACKTESTED, "miss"),
+        (BACKTESTED, "hit"),
+        (BACKTESTED, "bypass"),
+    ]
+
+    with caplog.at_level(logging.INFO, logger="app"):
+        for _ in range(3):
+            response = client.get(
+                "/api/user/targets/7/backtest", headers=headers
+            )
+            assert response.status_code == 200
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("request method=")
+    ]
+    assert len(lines) == 3
+    assert [line.split("targets_cache=")[1] for line in lines] == [
+        "miss",
+        "hit",
+        "bypass",
+    ]

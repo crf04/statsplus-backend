@@ -167,10 +167,15 @@ response header share one correlation key.
 one INFO lifecycle line for every route, including handled error responses:
 `request method=... rule=... status=... duration_ms=... request_id=...
 targets_cache=...` — the URL rule, the response status, the wall duration per
-request, the correlation ID, and the Target backtest cache decision. The
-`targets_cache` field is reserved: until the Targets result cache stamps
-`flask.g` (PR 2 of #279), it reports `-` on every line, and no request reports
-`hit`/`miss`/`bypass` yet. This line is
+request, the correlation ID, and the Target backtest cache decision. The route
+stamps the `targets_cache` field (#279) from the cache state the Target
+backtest service returns, as
+`hit` when the shared Redis result cache served the saved-Target Backtest, as
+`miss` when the request computed and wrote it, as `bypass` when some stream
+refused and the result is written nowhere, and stays `-` when the feature is
+off (no Redis client, or `TARGET_BACKTEST_CACHE_ENABLED=false`) — the Lab's
+Draft Target read never touches the cache, so it never stamps a decision.
+This line is
 the source for latency/regression triggers; the in-process telemetry deques
 are not. Unhandled catastrophic failures at shutdown skip after_request, so
 they are the one request shape without a line.
@@ -2144,6 +2149,34 @@ only when the publication actually changed — the availability, authority,
 and checksum checks still run on every read, while the reused decode serves
 the same facts a checksum-verified re-decode would have. All three are LRU
 by generation with a lock, matching `_summary_projection_cache`.
+
+Beyond the in-process caches, a saved-Target Backtest is also served from one
+shared Redis result-cache entry (#279). Before computing anything, the flow
+asks the publication reader's pointer-only `generation()` for the five
+streams' `(stream_key, publication_id, fence, version)` labels, builds
+`targets:backtest:v1:<sha256>` over canonical JSON of those labels plus the
+Target's qualifiers in stored `position` order (raw `repr(float(...))`
+thresholds, not the six-decimal signature), its conditions, the settings
+floors that change the computation, and `TARGET_BACKTEST_CACHE_SCHEMA` — so
+`note`/`title` edits hit, any five-stream advance misses, and two users with
+identical definitions share one entry with ownership still enforced by the
+Target load. A hit decompresses the stored evidence (`players`, `summary`,
+`stat_columns`, `games_considered`, `season`, zlib level-6) and assembles the
+response around the freshly loaded Target row, so a hit is byte-identical to
+a miss. A miss captures the full snapshot as today, and writes the result
+under the captured generation only when every stream the Target's Qualifiers
+reference — the game logs plus the Diet publication stream each qualifier
+`base` reads shares from — is available with no refusal label; a Diet stream
+no Qualifier references cannot change the evidence, so its unavailability
+must not block caching. An unavailable referenced stream (any
+`unavailable_reason`) seeds a `bypass` that computes and writes nothing. Every Redis-level error is a miss, never a 5xx, with the
+same 30 s circuit-breaker cooldown `NBAGameCache` uses; the flag off or no
+client leaves Redis untouched and `targets_cache` at `-`; and the Lab's
+Draft Target read never meets either. TTLs (`TARGET_BACKTEST_CACHE_TTL_SECONDS`,
+default 86400) clear dead generations, while in season the nightly
+Publication itself changes every key; the startup check warns once when
+Redis reports `maxmemory-policy` other than `allkeys-lru` or `maxmemory 0`,
+naming the expected configuration and never failing startup on the answer.
 
 What it must not restate, it shares. "Thin" is `diet_evidence_thin` over
 `observed_diet_share`, both now module-level in `matchup.py` for that reason,

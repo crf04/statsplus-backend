@@ -1793,3 +1793,144 @@ def test_snapshot_without_the_flag_always_returns_the_payload(tmp_path):
         assert read.available is True
         assert read.payload is not None
         assert read.decoded == warm.decoded
+
+
+def test_generation_matches_the_snapshot_generation_in_every_state(tmp_path):
+    """The pointer-only generation reader labels every state exactly as the
+    full snapshot labels it, without ever touching a payload.
+
+    The saved-Target backtest result cache (#279) keys entries on
+    ``generation()``; if that tuple ever differed from the snapshot the
+    request then captures, a miss would file its result under a key the
+    next request could not find, or a hit would serve evidence from a key
+    the state no longer describes.
+    """
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    for key in (
+        "generation_active_test",
+        "generation_missing_test",
+        "generation_season_test",
+    ):
+        service.register_stream(
+            key,
+            provider="ledger",
+            owner="railway",
+            required_observations=(),
+            publication_strategy="replace",
+            enabled=True,
+        )
+    service.compose(
+        "generation_active_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    # A second generation the pointer has since rolled past, plus a
+    # rollback, so the active and rollback states are both present.
+    service.compose(
+        "generation_active_test",
+        season="2025-26",
+        cutoff=NOW,
+        payload={"value": 2},
+        expected_fence=1,
+    )
+    service.rollback("generation_active_test", reason="restore last good")
+    # A season-mismatched publication the read refuses by season.
+    service.compose(
+        "generation_season_test", season="2024-25", cutoff=NOW, payload={"value": 1}
+    )
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = (
+        "generation_active_test",
+        "generation_missing_test",
+        "generation_season_test",
+    )
+    assert reader.generation(keys, season="2025-26") == (
+        reader.snapshot(keys, season="2025-26").generation
+    )
+    # A frozen schema version bump would not change the shape: the tuple is
+    # the identity, not a presentation.
+    assert all(
+        len(entry) == 4 for entry in reader.generation(keys, season="2025-26")
+    )
+
+
+def test_generation_selects_no_payload_column(tmp_path):
+    import sqlalchemy as sa
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "generation_payload_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    service.compose(
+        "generation_payload_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("generation_payload_test",)
+
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        generation = reader.generation(keys, season="2025-26")
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record_statement)
+    assert generation == reader.snapshot(keys, season="2025-26").generation
+
+    # The pre-check ask alone must stay pointer-only: a generation that
+    # selected a ~2 MiB payload on every cache key check would price the
+    # cache at the capture it is meant to avoid.
+    assert all(
+        "publication_versions.payload" not in statement
+        for statement in statements
+    )
+
+
+def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "generation_disabled_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    # A pointer only exists once something was composed, so the disabled
+    # stream below is one with history -- otherwise both branches degenerate
+    # to a fence-less None and the test could not tell them apart.
+    service.compose(
+        "generation_disabled_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    service.register_stream(
+        "generation_disabled_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=False,
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("generation_disabled_test",)
+
+    generation = reader.generation(keys, season="2025-26")
+    snapshot = reader.snapshot(keys, season="2025-26")
+
+    # The same label the full read reports for a disabled stream, element by
+    # element: no publication of any generation, so only the fence could
+    # distinguish states readable through the legacy tables.
+    assert generation == snapshot.generation
+    assert snapshot.read(*keys).publication_id is None
+    assert generation == (
+        (keys[0], None, snapshot.read(*keys).fence, None),
+    )

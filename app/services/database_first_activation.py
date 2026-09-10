@@ -1052,6 +1052,104 @@ class DatabaseFirstPublicationReader:
             session=session,
         )
 
+    def generation(
+        self,
+        stream_keys: Iterable[str],
+        *,
+        season: str | None = None,
+        session: Session | None = None,
+    ) -> tuple[tuple[str, str | None, int | None, int | None], ...]:
+        """Return one stream entry per key without any payload read.
+
+        The entry shape is exactly ``PublicationReadSnapshot.generation``:
+        ``(stream_key, publication_id, fence, version)`` per stream in sorted
+        key order.  A pointer/keyed consumer -- the saved-Target backtest
+        result cache (#279) -- asks this before deciding whether the full
+        read is worth capturing at all, so it must never decode, verify, or
+        even select a payload column, and it must label every state -- a
+        missing pointer, a disabled stream, a season-mismatched publication,
+        a rollback -- the same label ``snapshot()`` would give it.
+        """
+
+        keys = tuple(sorted(set(str(key) for key in stream_keys)))
+        if not keys:
+            return ()
+        with ExitStack() as stack:
+            if session is None:
+                session = stack.enter_context(self._session())
+                stack.enter_context(session.begin())
+            # The same three-table join ``_snapshot`` runs, with the payload
+            # column deferred: pointer, version label, and stream registry in
+            # one statement, so the generation cannot mix two generations.
+            rows = {
+                stream.stream_key: (stream, pointer, publication)
+                for stream, pointer, publication
+                in session.execute(
+                    select(PublicationStream, PublicationPointer, PublicationVersion)
+                    .outerjoin(
+                        PublicationPointer,
+                        PublicationPointer.stream_key
+                        == PublicationStream.stream_key,
+                    )
+                    .outerjoin(
+                        PublicationVersion,
+                        PublicationVersion.publication_id
+                        == PublicationPointer.active_publication_id,
+                    )
+                    .where(PublicationStream.stream_key.in_(keys))
+                    .options(defer(PublicationVersion.payload, raiseload=True))
+                ).all()
+            }
+        return tuple(
+            self._generation_entry(key, rows.get(key), season) for key in keys
+        )
+
+    @staticmethod
+    def _generation_entry(
+        stream_key: str, row: tuple | None, season: str | None
+    ) -> tuple[str, str | None, int | None, int | None]:
+        """Label one stream's generation the way ``_read_row`` would."""
+
+        stream, pointer, publication = row or (None, None, None)
+        if (
+            stream is None
+            or stream.publication_strategy == "never_schedule"
+            or str(stream.freshness_rule) == "unavailable"
+        ):
+            return (stream_key, None, None, None)
+        # A disabled stream reads as the legacy fallback the full read also
+        # reports: no publication, the pointer's fence, no version.
+        if not bool(stream.enabled):
+            return (
+                stream_key,
+                None,
+                pointer.fence if pointer is not None else None,
+                None,
+            )
+        if pointer is None or not pointer.active_publication_id:
+            return (stream_key, None, None, None)
+        if publication is None:
+            return (stream_key, None, None, None)
+        if (
+            publication.status in {"active", "rollback"}
+            and (season is None or publication.season == season)
+        ):
+            return (
+                stream_key,
+                publication.publication_id,
+                int(pointer.fence),
+                int(publication.version),
+            )
+        # Not active, or a season this read does not name: ``_read_row``
+        # reports the retained immutable row's labels beside the refusal, so
+        # the generation keeps them too.
+        return (
+            stream_key,
+            publication.publication_id,
+            pointer.fence,
+            int(publication.version),
+        )
+
     def snapshot_player_game_logs(
         self,
         *,

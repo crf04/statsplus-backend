@@ -5,7 +5,7 @@ Provides endpoints for user profile management, account information,
 and basic user statistics.
 """
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, g, request, jsonify
 from app.errors import (
     AuthenticationRequiredError,
     InvalidInputError,
@@ -413,9 +413,12 @@ def backtest_target(target_id):
     Returns:
         JSON response with the target, its stat columns, and the players
     """
-    backtested = target_backtest_service.backtest(
+    backtested, cache_state = target_backtest_service.backtest(
         _authenticated_uid(), target_id
     )
+    # The service stays HTTP-free; the route stamps the request log's
+    # ``targets_cache`` outcome here: hit, miss, bypass, or the unbilled '-'.
+    g.targets_cache = cache_state
     return jsonify({'success': True, **backtested})
 
 @user_bp.route('/targets/<int:target_id>', methods=['PATCH'])
