@@ -74,6 +74,8 @@ the most important variables:
 | `ENABLE_LLM_FALLBACK` | No | Enabled only when `OPENAI_API_KEY` is present |
 | `LLM_CONFIDENCE_THRESHOLD` | No | `0.7` |
 | `REDIS_URL` | No | If unavailable, caching falls back without blocking app startup |
+| `TARGET_BACKTEST_CACHE_ENABLED` | No | `true`; the saved-Target Backtest result cache (#279) served from and written to Redis under the Publication generation key |
+| `TARGET_BACKTEST_CACHE_TTL_SECONDS` | No | `86400`; TTL carried by every key the result cache writes |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
@@ -403,7 +405,7 @@ The code uses Firebase ID tokens in `Authorization: Bearer <token>` headers.
 - Protected routes fail closed when Firebase Admin is unavailable (`503 Service Unavailable`). Requests without a valid Firebase ID token receive `401 Unauthorized`.
 - Protected routes include `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin routes include `/api/user/admin/stats`, all `/api/data/*` endpoints, and `PUT /api/players/fetch`. They require a verified Firebase ID token with one of these custom claims: `admin=true`, `role=admin`, or `roles` containing `admin`.
-- For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment.
+- For local, credential-free development only, set `FLASK_ENV=development` and `FIREBASE_ADMIN_DISABLED=true`. This explicit bypass uses a synthetic `dev-user`, is rejected outside development/tests and in production, and must not be enabled in a deployed environment. On a non-demo database it provisions a `users` row for `dev-user` once per process (so Target writes satisfy `targets_firebase_uid_fkey`); the public read-only demo fixture is never written.
 - Player and team read routes remain optional-auth. `POST /api/user/activity/ping` also remains optional-auth.
 
 ## API examples

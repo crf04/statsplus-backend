@@ -19,12 +19,18 @@ from app.errors import (
 from app.config.settings import RuntimeSettings
 from app.dependencies import get_dependencies
 from app.services.user_service import UserService as UserService
+from app.utils.db import is_demo_database_url
 
 from .firebase_admin import get_firebase_app, verify_firebase_token
 
 logger = logging.getLogger(__name__)
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+#: Set once the bypass has provisioned its dev-user row in this process.  A
+#: database that maps to the read-only public demo fixture is never written.
+#: At most one provision costs one request; later bypass requests reuse it.
+_bypass_user_provisioned = False
 
 
 def _is_truthy(value: Any) -> bool:
@@ -106,6 +112,31 @@ def _auth_bypass_enabled() -> bool:
 def _set_local_bypass_user() -> None:
     """Attach the explicitly enabled synthetic administrator to the request."""
 
+    # The bypass must serve the same rows the verified-token path serves: a
+    # Target write is a durable user row away from failing its
+    # ``targets_firebase_uid_fkey`` on this synthetic uid.  A database that
+    # cannot provision it (an outage) still keeps the request alive, exactly
+    # as ``_sync_firebase_user`` tolerates errors -- and the public read-only
+    # demo fixture is never dirtied by it at all.
+    global _bypass_user_provisioned
+    dev_user_data = {
+        "uid": "dev-user",
+        "email": "dev@example.com",
+        "name": "Development User",
+    }
+    db_user = None
+    settings = getattr(get_dependencies(), "settings", None)
+    database_url = getattr(getattr(settings, "database", None), "url", "")
+    demo_database = is_demo_database_url(database_url)
+    if not demo_database and not _bypass_user_provisioned:
+        try:
+            db_user = get_dependencies().user_service.create_or_update_user(
+                dev_user_data
+            )
+            _bypass_user_provisioned = True
+        except Exception as error:
+            logger.warning("Failed to provision local bypass user row: %s", error)
+
     # Keep an internal marker separate from the claims so a local-only bypass
     # can be distinguished from a Firebase token in authorization checks.
     g.current_user = {
@@ -121,7 +152,7 @@ def _set_local_bypass_user() -> None:
         },
         "auth_method": "local_bypass",
         "is_dev_bypass": True,
-        "db_user": None,
+        "db_user": db_user,
     }
 
 

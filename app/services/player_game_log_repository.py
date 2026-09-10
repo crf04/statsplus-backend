@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -160,6 +160,14 @@ class PlayerGameLogRepository:
     #: nothing once a newer one activates.
     _SUMMARY_PROJECTION_CACHE_PUBLICATIONS = 2
 
+    #: A composed ``PlayerSeasonLogSummary`` is also pure evidence of the one
+    #: immutable publication generation it was read from, along with the rate
+    #: season type and focal-game exclusion the caller asked for.  Cached
+    #: summaries are keyed by all four parts and bounded to the latest few
+    #: generations, so a warm Target read skips both the projection decode
+    #: and the season-rate arithmetic for every player it has seen.
+    _SEASON_SUMMARY_CACHE_GENERATIONS = 2
+
     def __init__(
         self,
         engine: Engine,
@@ -184,6 +192,12 @@ class PlayerGameLogRepository:
         # publication_id -> {player_id: decoded season rows}, oldest first.
         self._summary_projection_cache: "OrderedDict[str, dict[int, tuple[PlayerGameLogRecord, ...]]]" = OrderedDict()
         self._summary_projection_cache_lock = threading.Lock()
+        # generation -> {(player_id, season, rate_season_type,
+        # exclude_game_id): PlayerSeasonLogSummary}, oldest first.
+        self._season_summary_cache: "OrderedDict[Any, dict[tuple[int, str, str | None, str | None], PlayerSeasonLogSummary]]" = (
+            OrderedDict()
+        )
+        self._season_summary_cache_lock = threading.Lock()
         self._stats_surface_max_age_seconds = exact_seconds(
             exact_timedelta(
                 exact_seconds(stats_surface_max_age),
@@ -592,6 +606,55 @@ class PlayerGameLogRepository:
         return tuple(
             record for player_id in player_ids for record in cache.get(player_id, ())
         )
+
+    def _cached_season_summaries(
+        self,
+        generation: Any,
+        exchange: tuple[str, str | None, str | None],
+        player_ids: tuple[int, ...],
+    ) -> dict[int, PlayerSeasonLogSummary]:
+        """Return the already-composed summaries one generation can reuse."""
+
+        with self._season_summary_cache_lock:
+            cache = self._season_summary_cache.get(generation)
+            if cache is None:
+                # An unseen generation is not inserted here: a lookup that
+                # fills nothing must not take a residency slot, or a failed
+                # compute could leave an unbounded number resident.
+                return {}
+            self._season_summary_cache.move_to_end(generation)
+            return {
+                player_id: cache[(player_id, *exchange)]
+                for player_id in player_ids
+                if (player_id, *exchange) in cache
+            }
+
+    def _store_season_summaries(
+        self,
+        generation: Any,
+        exchange: tuple[str, str | None, str | None],
+        summaries: Mapping[int, PlayerSeasonLogSummary],
+    ) -> None:
+        """Cache each composed summary under its generation, then evict old."""
+
+        if not summaries:
+            return
+        with self._season_summary_cache_lock:
+            cache = self._season_summary_cache.get(generation)
+            if cache is None:
+                # The generation may have been evicted while this computation
+                # ran; its keys carry the season and caller shape, so a stale
+                # entry can never be mis-keyed under a live generation.
+                cache = {}
+            self._season_summary_cache[generation] = cache
+            self._season_summary_cache.move_to_end(generation)
+            for player_id, summary in summaries.items():
+                cache[(player_id, *exchange)] = summary
+            while (
+                len(self._season_summary_cache)
+                > self._SEASON_SUMMARY_CACHE_GENERATIONS
+            ):
+                self._season_summary_cache.popitem(last=False)
 
     def _decode_projection(
         self, statement, *, season: str, connection: Connection | None = None
@@ -1049,12 +1112,30 @@ class PlayerGameLogRepository:
             rate_season_type = validate_player_game_log_season_type(
                 rate_season_type
             )
+        cached_summaries: dict[int, PlayerSeasonLogSummary] = {}
+        compute_ids = canonical_ids
+        if publication_snapshot is not None:
+            generation = getattr(
+                publication_snapshot, "generation", publication_snapshot
+            )
+            cached_summaries = self._cached_season_summaries(
+                generation,
+                (canonical_season, rate_season_type, exclude_game_id),
+                canonical_ids,
+            )
+            compute_ids = tuple(
+                player_id
+                for player_id in canonical_ids
+                if player_id not in cached_summaries
+            )
+            if not compute_ids:
+                return cached_summaries
         rows_by_player: dict[int, list[PlayerGameLogRecord]] = {
-            player_id: [] for player_id in canonical_ids
+            player_id: [] for player_id in compute_ids
         }
         projected_rows = self._projected_summary_rows(
             canonical_season,
-            canonical_ids,
+            compute_ids,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
@@ -1079,7 +1160,7 @@ class PlayerGameLogRepository:
                     self._published_rows_statement()
                     .where(
                         log_table.c.season == canonical_season,
-                        log_table.c.player_id.in_(canonical_ids),
+                        log_table.c.player_id.in_(compute_ids),
                     )
                     .order_by(
                         log_table.c.player_id.asc(),
@@ -1097,7 +1178,7 @@ class PlayerGameLogRepository:
                 ]
                 for player_id, rows in rows_by_player.items()
             }
-        return {
+        computed = {
             player_id: PlayerSeasonLogSummary(
                 season=canonical_season,
                 player_id=player_id,
@@ -1117,8 +1198,19 @@ class PlayerGameLogRepository:
                     row.minutes for row in rows_by_player[player_id][-10:]
                 ),
             )
-            for player_id in canonical_ids
+            for player_id in compute_ids
         }
+        summaries = {**cached_summaries, **computed}
+        if publication_snapshot is not None:
+            generation = getattr(
+                publication_snapshot, "generation", publication_snapshot
+            )
+            self._store_season_summaries(
+                generation,
+                (canonical_season, rate_season_type, exclude_game_id),
+                computed,
+            )
+        return summaries
 
     def _season_rate(
         self,

@@ -9,7 +9,6 @@ import json
 import pickle
 import logging
 import hashlib
-import threading
 import time
 from typing import Any, Callable, Optional, Union
 
@@ -22,10 +21,9 @@ from ..utils.cache_config import (
     is_cache_enabled
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.utils.redis_breaker import RedisCircuitBreaker
 
 logger = logging.getLogger(__name__)
-
-REDIS_FAILURE_COOLDOWN_SECONDS = 30
 
 class NBAGameCache:
     """
@@ -52,8 +50,7 @@ class NBAGameCache:
         self.redis_client = redis_client
         self.enabled = redis_client is not None and is_cache_enabled(self.settings)
         self.clock = clock
-        self._breaker_lock = threading.Lock()
-        self._open_until = 0.0
+        self._breaker = RedisCircuitBreaker(clock=clock)
         
         if self.enabled:
             logger.info("NBA cache initialized with Redis backend")
@@ -61,21 +58,10 @@ class NBAGameCache:
             logger.info("NBA cache disabled (no Redis client or cache disabled via config)")
 
     def _circuit_open(self) -> bool:
-        with self._breaker_lock:
-            return self.clock() < self._open_until
+        return self._breaker.is_open()
 
     def _open_circuit(self, error: Exception) -> None:
-        with self._breaker_lock:
-            now = self.clock()
-            already_open = now < self._open_until
-            self._open_until = now + REDIS_FAILURE_COOLDOWN_SECONDS
-        if already_open:
-            return
-        logger.warning(
-            "Redis unavailable (%s); bypassing cache for %ss",
-            error,
-            REDIS_FAILURE_COOLDOWN_SECONDS,
-        )
+        self._breaker.record_failure(error)
     
     def _generate_key(self, prefix: str, include_date: bool = False, 
                      function_name: str = '', *args, **kwargs) -> str:

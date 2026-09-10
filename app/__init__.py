@@ -69,12 +69,15 @@ def _verify_schema_is_current(app: "Flask") -> None:
 def _register_request_headers(app: "Flask") -> None:
     """Correlate every request with one safe ID and echo it to callers."""
 
+    import time
+
     from flask import g, request
     from app.utils.request_id import HEADER_NAME, resolve_request_id
 
     @app.before_request
     def bind_request_id() -> None:
         g.request_id = resolve_request_id(request.headers.get(HEADER_NAME))
+        g.request_started_at = time.perf_counter()
 
     @app.after_request
     def attach_request_id(response):  # type: ignore[no-untyped-def]
@@ -82,6 +85,27 @@ def _register_request_headers(app: "Flask") -> None:
         if not request_id:
             request_id = resolve_request_id(request.headers.get(HEADER_NAME))
         response.headers.setdefault(HEADER_NAME, request_id)
+        started_at = getattr(g, "request_started_at", None)
+        if started_at is not None:
+            rule = (
+                request.url_rule.rule
+                if request.url_rule is not None
+                else request.path
+            )
+            duration_ms = (time.perf_counter() - started_at) * 1000.0
+            # The route stamps ``targets_cache`` on g from the cache state
+            # the Target backtest service returned; until it exists every
+            # request reports the unbilled '-'.
+            logger.info(
+                "request method=%s rule=%s status=%s duration_ms=%.2f "
+                "request_id=%s targets_cache=%s",
+                request.method,
+                rule,
+                response.status_code,
+                duration_ms,
+                request_id,
+                getattr(g, "targets_cache", "-"),
+            )
         return response
 
 

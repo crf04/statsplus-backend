@@ -1452,3 +1452,485 @@ def test_non_shot_type_publication_never_carries_a_shooting_split():
     )
 
     assert decoded[0].shooting is None
+
+
+def _play_type_publication_row(**overrides):
+    row = {
+        "player_id": 2544,
+        "slice_key": "Transition",
+        "share": 0.32,
+        "volume": 480.0,
+        "games_played": 60,
+        "volume_unit": "possessions",
+        "provider": "nba_synergy",
+    }
+    row.update(overrides)
+    return row
+
+
+def _seed_diet_publication(engine, payload, *, version=1, fence=0):
+    """Register the play-type stream and hand-seed one active publication.
+
+    The governed publication composition demands an Event Catalog authority,
+    which the decode cache test does not exercise: the reader's own
+    availability, checksum, and decode decisions are what this seam tests.
+    The rows it inserts are exactly the rows a real activation writes.
+    """
+
+    from app.domain.publication_integrity import (
+        canonical_publication_json,
+        publication_payload_checksum,
+    )
+    from app.models.collection_control import (
+        PublicationPointer,
+        PublicationVersion,
+    )
+
+    publication_id = f"pub-diet-{version}"
+    encoded = canonical_publication_json(payload)
+    checksum = publication_payload_checksum(encoded)
+
+    service = PublicationService(engine, clock=lambda: NOW)
+    stream = service.register_stream(
+        "synergy_play_types",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    assert stream.publication_strategy == "replace"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM publication_pointers "
+                "WHERE stream_key = 'synergy_play_types'"
+            )
+        )
+        connection.execute(
+            PublicationVersion.__table__.insert().values(
+                publication_id=publication_id,
+                stream_key="synergy_play_types",
+                season="2025-26",
+                cutoff=NOW,
+                version=version,
+                status="active",
+                checksum=checksum,
+                payload=encoded,
+                created_at=NOW,
+                fence=fence,
+            )
+        )
+        connection.execute(
+            PublicationPointer.__table__.insert().values(
+                stream_key="synergy_play_types",
+                active_publication_id=publication_id,
+                previous_publication_id=None,
+                fence=fence,
+                updated_at=NOW,
+            )
+        )
+    return publication_id
+
+
+def test_snapshot_reuses_decoded_diet_facts_within_one_generation(tmp_path):
+    """Second snapshot of one Diet generation decodes once, not twice.
+
+    The four Diet stream payloads are whole-season documents, so decoding
+    them again on every request is the largest cost of a warm read. The
+    cached decode is keyed by the immutable publication row's own identity
+    (publication_id, fence, version) per stream, so two snapshot() calls
+    over the same generation return the identical decoded fact objects
+    while every availability, authority, and checksum check still runs.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row(), _play_type_publication_row(
+            player_id=2, slice_key="Isolation")]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    decodes: list[int] = []
+    import app.services.database_first_activation as activation
+    real_decode = activation.decode_player_diet
+
+    def counting_decode(payload, **kwargs):
+        decodes.append(1)
+        return real_decode(payload, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(activation, "decode_player_diet", counting_decode)
+        first = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        second = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+
+    assert first.available is True
+    assert second.available is True
+    assert len(decodes) == 1
+    assert second.decoded is first.decoded
+    assert second.decoded[0].slice_key == "Transition"
+    assert second.checksum == first.checksum
+
+
+def test_snapshot_diet_decode_hit_still_verifies_the_immutable_row(tmp_path):
+    """A cache hit never skips the checks the read itself makes.
+
+    Corrupt the stored checksum after a first read and the hit refuses the
+    row rather than serving facts it decoded while the row matched its own
+    checksum: a cached decode is reused only for the row still judged valid.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    first = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+        "synergy_play_types"
+    )
+    assert first.available is True
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_versions SET checksum = 'deadbeef' "
+                "WHERE publication_id = 'pub-diet-1'"
+            )
+        )
+
+    second = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+        "synergy_play_types"
+    )
+
+    assert second.available is False
+    assert second.unavailable_reason == "publication_checksum_mismatch"
+    assert second.decoded is None
+
+
+def test_snapshot_diet_decoded_only_miss_still_verifies_the_immutable_row(
+    tmp_path,
+):
+    """A cold decoded-only read verifies checksum when it decodes.
+
+    On a cold decode cache a decoded-only read must still select the payload
+    column and reject a row whose stored payload does not match the row's own
+    checksum: the simplified shape only skips the payload on a hit, never the
+    checksum on the miss that would have populated the cache.  A refused row
+    stores nothing, so the cache stays empty.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_versions SET checksum = 'deadbeef' "
+                "WHERE publication_id = 'pub-diet-1'"
+            )
+        )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    read = reader.snapshot(
+        ("synergy_play_types",),
+        season="2025-26",
+        decoded_only_keys=frozenset({"synergy_play_types"}),
+    ).read("synergy_play_types")
+
+    assert read.available is False
+    assert read.unavailable_reason == "publication_checksum_mismatch"
+    assert read.decoded is None
+    assert reader._diet_decode_cache == {}
+
+
+def test_snapshot_diet_decode_cache_misses_a_new_generation_and_bounds(tmp_path):
+    """A new publication is a new key; the oldest version's decode is evicted."""
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row(share=0.3)]},
+        version=1, fence=0,
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+
+    decodes: list[int] = []
+    import app.services.database_first_activation as activation
+    real_decode = activation.decode_player_diet
+
+    def counting_decode(payload, **kwargs):
+        decodes.append(1)
+        return real_decode(payload, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(activation, "decode_player_diet", counting_decode)
+        warm = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        assert warm.decoded[0].share == 0.3
+        assert len(decodes) == 1
+
+        # A second immutable publication of the same stream is a different
+        # key: it decodes again, and both bounded versions live side by side.
+        _seed_diet_publication(
+            engine, {"rows": [_play_type_publication_row(share=0.4)]},
+            version=2, fence=1,
+        )
+        newest = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        assert newest.decoded[0].share == 0.4
+        assert len(decodes) == 2
+        assert len(reader._diet_decode_cache) == 2
+
+        # A third composition evicts the two older versions down to the
+        # bounded pair, so naming the first again decodes once more.
+        _seed_diet_publication(
+            engine, {"rows": [_play_type_publication_row(share=0.5)]},
+            version=3, fence=2,
+        )
+        last = reader.snapshot(("synergy_play_types",), season="2025-26").read(
+            "synergy_play_types"
+        )
+        assert last.decoded[0].share == 0.5
+        assert len(decodes) == 3
+        assert len(reader._diet_decode_cache) == 2
+
+        # Bound 2 evicting: the surviving decodes are exactly the two newest
+        # versions.
+        assert set(key[1] for key in reader._diet_decode_cache) == {
+            "pub-diet-2",
+            "pub-diet-3",
+        }
+
+
+def test_snapshot_decoded_only_read_serves_the_decode_cache_without_the_payload(
+    tmp_path,
+):
+    """A decoded-only read never moves the rendered payload on a cache hit.
+
+    The Target backtest and the Lab preview consume only the decoded Diet
+    facts, so their captures may opt into the decode cache serving the facts
+    of an unchanged publication alone: the shared statement defers the ~2 MB
+    payload column and a hit selects it neither there nor with the miss's
+    redirected load. Availability, authority, and season checks still ran on
+    the hit read.
+    """
+
+    from sqlalchemy import event
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("synergy_play_types",)
+    decoded_only_keys = frozenset({"synergy_play_types"})
+
+    first_read = reader.snapshot(
+        keys, season="2025-26", decoded_only_keys=decoded_only_keys
+    ).read("synergy_play_types")
+
+    statements: list[str] = []
+
+    def record_statement(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(
+        reader.engine, "before_cursor_execute", record_statement
+    )
+    try:
+        second_read = reader.snapshot(
+            keys, season="2025-26", decoded_only_keys=decoded_only_keys
+        ).read("synergy_play_types")
+    finally:
+        event.remove(reader.engine, "before_cursor_execute", record_statement)
+
+    assert first_read.available is True
+    assert second_read.available is True
+    assert second_read.payload is None
+    assert second_read.decoded is first_read.decoded
+    assert second_read.publication_id == first_read.publication_id
+    assert second_read.checksum == first_read.checksum
+    # Exactly one statement ran for the hit -- the shared pointer statement
+    # that defers the payload column -- and none of it selected the payload.
+    assert len(statements) == 1
+    assert "publication_versions.payload" not in statements[0]
+
+
+def test_snapshot_without_the_flag_always_returns_the_payload(tmp_path):
+    """Only an opt-in read may be served from the decode cache alone.
+
+    A read that did not opt in -- ``read()``, ``read_many()``, any snapshot
+    without ``decoded_only_keys`` -- still loads, parses, and returns the
+    rendered payload even when the decode cache is already warm, because
+    consumers on that path (the Zone Shooting profile) decode the payload
+    themselves.
+    """
+
+    engine = _db(tmp_path)
+    _seed_diet_publication(
+        engine, {"rows": [_play_type_publication_row()]}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("synergy_play_types",)
+    decoded_only_keys = frozenset({"synergy_play_types"})
+
+    warm = reader.snapshot(
+        keys, season="2025-26", decoded_only_keys=decoded_only_keys
+    ).read("synergy_play_types")
+    unflagged_first = reader.read("synergy_play_types", season="2025-26")
+    unflagged_second = reader.read("synergy_play_types", season="2025-26")
+
+    assert warm.decoded is not None
+    for read in (unflagged_first, unflagged_second):
+        assert read.available is True
+        assert read.payload is not None
+        assert read.decoded == warm.decoded
+
+
+def test_generation_matches_the_snapshot_generation_in_every_state(tmp_path):
+    """The pointer-only generation reader labels every state exactly as the
+    full snapshot labels it, without ever touching a payload.
+
+    The saved-Target backtest result cache (#279) keys entries on
+    ``generation()``; if that tuple ever differed from the snapshot the
+    request then captures, a miss would file its result under a key the
+    next request could not find, or a hit would serve evidence from a key
+    the state no longer describes.
+    """
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    for key in (
+        "generation_active_test",
+        "generation_missing_test",
+        "generation_season_test",
+    ):
+        service.register_stream(
+            key,
+            provider="ledger",
+            owner="railway",
+            required_observations=(),
+            publication_strategy="replace",
+            enabled=True,
+        )
+    service.compose(
+        "generation_active_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    # A second generation the pointer has since rolled past, plus a
+    # rollback, so the active and rollback states are both present.
+    service.compose(
+        "generation_active_test",
+        season="2025-26",
+        cutoff=NOW,
+        payload={"value": 2},
+        expected_fence=1,
+    )
+    service.rollback("generation_active_test", reason="restore last good")
+    # A season-mismatched publication the read refuses by season.
+    service.compose(
+        "generation_season_test", season="2024-25", cutoff=NOW, payload={"value": 1}
+    )
+
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = (
+        "generation_active_test",
+        "generation_missing_test",
+        "generation_season_test",
+    )
+    assert reader.generation(keys, season="2025-26") == (
+        reader.snapshot(keys, season="2025-26").generation
+    )
+    # A frozen schema version bump would not change the shape: the tuple is
+    # the identity, not a presentation.
+    assert all(
+        len(entry) == 4 for entry in reader.generation(keys, season="2025-26")
+    )
+
+
+def test_generation_selects_no_payload_column(tmp_path):
+    import sqlalchemy as sa
+
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "generation_payload_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    service.compose(
+        "generation_payload_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("generation_payload_test",)
+
+    statements: list[str] = []
+
+    def record_statement(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    sa.event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        generation = reader.generation(keys, season="2025-26")
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", record_statement)
+    assert generation == reader.snapshot(keys, season="2025-26").generation
+
+    # The pre-check ask alone must stay pointer-only: a generation that
+    # selected a ~2 MiB payload on every cache key check would price the
+    # cache at the capture it is meant to avoid.
+    assert all(
+        "publication_versions.payload" not in statement
+        for statement in statements
+    )
+
+
+def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
+    engine = _db(tmp_path)
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "generation_disabled_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    # A pointer only exists once something was composed, so the disabled
+    # stream below is one with history -- otherwise both branches degenerate
+    # to a fence-less None and the test could not tell them apart.
+    service.compose(
+        "generation_disabled_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    service.register_stream(
+        "generation_disabled_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=False,
+    )
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: NOW)
+    keys = ("generation_disabled_test",)
+
+    generation = reader.generation(keys, season="2025-26")
+    snapshot = reader.snapshot(keys, season="2025-26")
+
+    # The same label the full read reports for a disabled stream, element by
+    # element: no publication of any generation, so only the fence could
+    # distinguish states readable through the legacy tables.
+    assert generation == snapshot.generation
+    assert snapshot.read(*keys).publication_id is None
+    assert generation == (
+        (keys[0], None, snapshot.read(*keys).fence, None),
+    )

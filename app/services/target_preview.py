@@ -41,6 +41,7 @@ from app.services.matchup_snapshot import (
     capture_publication_snapshot,
 )
 from app.services.target_backtest import (
+    BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
     BACKTEST_PUBLICATION_STREAM_KEYS,
 )
@@ -56,6 +57,11 @@ PREVIEW_PUBLICATION_STREAM_KEYS = tuple(
 #: Narrowed only where both reads resolve through the projection.
 PREVIEW_PROJECTION_ONLY_STREAM_KEYS = (
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS & MATCHUP_PROJECTION_ONLY_STREAM_KEYS
+)
+#: The Diet decode cache may serve the preview's capture: neither read touches
+#: the Diet payloads' rendered form, only their decoded facts.
+PREVIEW_DECODED_ONLY_STREAM_KEYS = BACKTEST_DECODED_ONLY_STREAM_KEYS & frozenset(
+    PREVIEW_PUBLICATION_STREAM_KEYS
 )
 
 
@@ -102,6 +108,7 @@ class TargetPreviewService:
             self.publication_reader,
             PREVIEW_PUBLICATION_STREAM_KEYS,
             projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
             season=self.settings.nba.current_season,
         )
         previewed = self.backtests.backtest_target(
@@ -117,5 +124,6 @@ class TargetPreviewService:
 __all__ = [
     "PREVIEW_PROJECTION_ONLY_STREAM_KEYS",
     "PREVIEW_PUBLICATION_STREAM_KEYS",
+    "PREVIEW_DECODED_ONLY_STREAM_KEYS",
     "TargetPreviewService",
 ]

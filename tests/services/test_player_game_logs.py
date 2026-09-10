@@ -1215,6 +1215,131 @@ def test_batch_summaries_use_one_rows_query_and_keep_phase_semantics(tmp_path):
     ] == ["Playoffs", "Playoffs", "Regular Season"]
 
 
+def test_get_player_summaries_generation_cache_reuses_composed_summaries(
+    tmp_path,
+):
+    """A warm read skips both the projection decode and the rate arithmetic.
+
+    A composed ``PlayerSeasonLogSummary`` is keyed by every part that shapes
+    it -- the snapshot's generation, the player, the rate season type, and
+    the excluded focal game -- so a second read of the same players under the
+    same generation reads no rows at all, while a different rate type or
+    exclusion is a miss that still reads its own evidence.
+    """
+
+    records = [
+        _record(player_id=101, game_id="0022500001"),
+        _record(player_id=202, game_id="0022500002"),
+    ]
+    repository, snapshot = _projected_publication_repository(tmp_path, records)
+
+    statements: list[str] = []
+
+    def record_statement(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(repository.engine, "before_cursor_execute", record_statement)
+    try:
+        first = repository.get_player_summaries(
+            SEASON, [101, 202], publication_snapshot=snapshot
+        )
+        assert len(statements) == 1
+        # A warm request in the same generation re-decodes nothing.
+        second = repository.get_player_summaries(
+            SEASON, [101, 202], publication_snapshot=snapshot
+        )
+        assert len(statements) == 1
+        assert second is not None
+        for player_id in (101, 202):
+            # The identical summary objects come back: a hit reuses them
+            # rather than re-composing fresh equal ones.
+            assert second[player_id] is first[player_id]
+            assert second[player_id].season_rate == first[player_id].season_rate
+            assert second[player_id].last_ten_minutes == (
+                first[player_id].last_ten_minutes
+            )
+            assert second[player_id].rate_rows == first[player_id].rate_rows
+        # A different focal-game exclusion and a different rate season type
+        # are different keys: each composes and stores its own summaries even
+        # though the underlying projection rows may already be decoded.
+        excluded = repository.get_player_summaries(
+            SEASON,
+            [101],
+            exclude_game_id="0022500001",
+            publication_snapshot=snapshot,
+        )
+        assert excluded[101].season_rate is None
+        playoffs = repository.get_player_summaries(
+            SEASON, [101], rate_season_type="Playoffs", publication_snapshot=snapshot
+        )
+        assert playoffs[101].season_rate is None
+        cached = repository._season_summary_cache[snapshot.generation]
+        regular = "Regular Season"
+        assert set(cached) == {
+            (101, SEASON, regular, None),
+            (202, SEASON, regular, None),
+            (101, SEASON, regular, "0022500001"),
+            (101, SEASON, "Playoffs", None),
+        }
+
+    finally:
+        event.remove(repository.engine, "before_cursor_execute", record_statement)
+
+
+def test_get_player_summaries_cache_holds_at_most_two_generations(tmp_path):
+    """The summary cache is bounded: a third generation evicts the oldest.
+
+    The season-summary cache is bounded to two generations; storing a third
+    evicts the least recently used, so residency never grows past the bound
+    even when the repository keeps serving requests the cache never warms.
+    """
+
+    from types import SimpleNamespace
+
+    records = [_record(player_id=101, game_id="0022500001")]
+    repository, _snapshot = _projected_publication_repository(tmp_path, records)
+
+    for index in (1, 2, 3):
+        stand_in = SimpleNamespace(
+            generation=("summary-generation", index),
+            read=_snapshot.read,
+        )
+        repository.get_player_summaries(
+            SEASON, [101], publication_snapshot=stand_in
+        )
+
+    assert len(repository._season_summary_cache) == 2
+    assert set(repository._season_summary_cache) == {
+        ("summary-generation", 2),
+        ("summary-generation", 3),
+    }
+
+
+def test_summary_cache_lookup_never_takes_a_residency_slot(tmp_path):
+    """A lookup that fills nothing must not insert the generation.
+
+    A request whose compute never completes -- here the projection decode
+    raises -- leaves the generation absent from the season-summary cache: a
+    lookup may only recency-mark a generation already resident, never take
+    a residency slot for entries it never stored.
+    """
+
+    records = [_record(player_id=101, game_id="0022500001")]
+    repository, snapshot = _projected_publication_repository(tmp_path, records)
+
+    def raising_projection(_season, _player_ids, **_kwargs):
+        raise RuntimeError("compute failed")
+
+    repository._projected_summary_rows = raising_projection
+
+    with pytest.raises(RuntimeError):
+        repository.get_player_summaries(
+            SEASON, [101], publication_snapshot=snapshot
+        )
+
+    assert repository._season_summary_cache.get(snapshot.generation) is None
+
+
 def test_get_player_summaries_reuses_cached_publication_decode_across_calls(
     tmp_path,
 ):

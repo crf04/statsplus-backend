@@ -114,3 +114,46 @@ def test_request_id_bound_to_g_flows_into_provider_events(app):
     event = telemetry.get_recorded_provider_events()[-1]
     assert event["request_id"] == generated
     assert _UUID_HEX.match(event["request_id"])
+
+def test_request_log_line_reports_duration_request_id_and_cache_state(client, caplog):
+    """The lifecycle log is the source for p95 triggers, not the telemetry
+    deques: it reports method, URL rule, status, duration, request id, and
+    the Target backtest cache decision (a dash until that seam stamps g)."""
+
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        response = client.get("/api/health/db", headers={"X-Request-ID": "req-log-1"})
+
+    assert response.status_code == 200
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "duration_ms=" in record.getMessage()
+    ]
+    assert len(lines) == 1
+    line = lines[0]
+    assert "method=GET" in line
+    assert "rule=/api/health/db" in line
+    assert "status=200" in line
+    assert "duration_ms=" in line
+    assert "request_id=req-log-1" in line
+    assert "targets_cache=-" in line
+
+
+def test_request_log_line_covers_a_missing_route(client, caplog):
+    """Errors are routes too: the log line carries the 404 status."""
+
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        response = client.get("/api/definitely-missing-route")
+
+    assert response.status_code == 404
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "duration_ms=" in record.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "status=404" in lines[0]
