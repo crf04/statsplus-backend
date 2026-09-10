@@ -167,8 +167,10 @@ response header share one correlation key.
 one INFO lifecycle line for every route, including handled error responses:
 `request method=... rule=... status=... duration_ms=... request_id=...
 targets_cache=...` — the URL rule, the response status, the wall duration per
-request, the correlation ID, and the Target backtest cache decision
-(`hit`/`miss`/`bypass`, or `-` when the seam never set `flask.g`). This line is
+request, the correlation ID, and the Target backtest cache decision. The
+`targets_cache` field is reserved: until the Targets result cache stamps
+`flask.g` (PR 2 of #279), it reports `-` on every line, and no request reports
+`hit`/`miss`/`bypass` yet. This line is
 the source for latency/regression triggers; the in-process telemetry deques
 are not. Unhandled catastrophic failures at shutdown skip after_request, so
 they are the one request shape without a line.
