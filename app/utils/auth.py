@@ -106,6 +106,24 @@ def _auth_bypass_enabled() -> bool:
 def _set_local_bypass_user() -> None:
     """Attach the explicitly enabled synthetic administrator to the request."""
 
+    # The bypass must serve the same rows the verified-token path serves: a
+    # Target write is a durable user row away from failing its
+    # ``targets_firebase_uid_fkey`` on this synthetic uid.  A database that
+    # cannot provision it (the demo fixture, an outage) still keeps the
+    # request alive, exactly as ``_sync_firebase_user`` tolerates errors.
+    dev_user_data = {
+        "uid": "dev-user",
+        "email": "dev@example.com",
+        "name": "Development User",
+    }
+    db_user = None
+    try:
+        db_user = get_dependencies().user_service.create_or_update_user(
+            dev_user_data
+        )
+    except Exception as error:
+        logger.warning("Failed to provision local bypass user row: %s", error)
+
     # Keep an internal marker separate from the claims so a local-only bypass
     # can be distinguished from a Firebase token in authorization checks.
     g.current_user = {
@@ -121,7 +139,7 @@ def _set_local_bypass_user() -> None:
         },
         "auth_method": "local_bypass",
         "is_dev_bypass": True,
-        "db_user": None,
+        "db_user": db_user,
     }
 
 

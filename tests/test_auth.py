@@ -327,3 +327,58 @@ def test_require_admin_allows_explicit_local_bypass(monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"uid": "dev-user"}
+
+
+def test_local_bypass_provisions_the_dev_users_row(monkeypatch):
+    """The bypass user needs a durable users row for its Target foreign key.
+
+    ``POST /api/user/targets`` writes ``targets_firebase_uid_fkey``; with the
+    bypass enabled the synthetic uid must therefore be provisioned the same
+    way a verified token syncs its row.
+    """
+
+    provisioned = []
+
+    class ProvisioningUserService:
+        def create_or_update_user(self, user_data):
+            provisioned.append(user_data)
+            return object()
+
+    app = _make_app(auth.require_auth)
+    app.extensions["dependencies"].user_service = ProvisioningUserService()
+    monkeypatch.delenv("FLASK_ENV", raising=False)
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+
+    response = app.test_client().get("/protected")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"uid": "dev-user"}
+    assert [data["uid"] for data in provisioned] == ["dev-user"]
+    assert provisioned[0]["email"] == "dev@example.com"
+
+
+def test_local_bypass_tolerates_a_failed_user_row_provision(monkeypatch, caplog):
+    """A failing provision keeps the bypass request alive, warning only."""
+
+    import logging
+
+    class FailingUserService:
+        def create_or_update_user(self, user_data):
+            raise RuntimeError("database is down")
+
+    app = _make_app(auth.require_auth)
+    app.extensions["dependencies"].user_service = FailingUserService()
+    monkeypatch.delenv("FLASK_ENV", raising=False)
+    monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+
+    with caplog.at_level(logging.WARNING):
+        response = app.test_client().get("/protected")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"uid": "dev-user"}
+    assert any(
+        "Failed to provision local bypass user row" in record.getMessage()
+        for record in caplog.records
+    )
