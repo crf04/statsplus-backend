@@ -418,10 +418,14 @@ def build_backtest(targets, backtest_settings):
 
 @pytest.fixture
 def backtest(build_backtest):
-    """Backtest one of the caller's saved Targets by id."""
+    """Backtest one of the caller's saved Targets by id.
+
+    The service now returns ``(payload, cache_state)`; tests here ask about
+    the payload, and the cache tests below unpack the pair themselves.
+    """
 
     def _backtest(target_id, *, uid=OWNER, **seams):
-        return build_backtest(**seams).backtest(uid, target_id)
+        return build_backtest(**seams).backtest(uid, target_id)[0]
 
     return _backtest
 
@@ -562,7 +566,7 @@ def test_a_published_shot_type_diet_fits_targets_and_builds_display_baselines(
 
     payload = build_backtest(logs=logs, diets=diets).backtest(
         OWNER, created["id"]
-    )
+    )[0]
 
     assert [player["canonical_id"] for player in payload["players"]] == [
         TATUM,
@@ -679,7 +683,7 @@ def test_a_draft_backtests_exactly_as_a_saved_target_with_the_same_qualifiers(
 ):
     created = _create(targets)
 
-    saved = build_backtest(**_two_games()).backtest(OWNER, created["id"])
+    saved = build_backtest(**_two_games()).backtest(OWNER, created["id"])[0]
     draft = build_backtest(**_two_games()).backtest_target(DRAFT)
 
     # The draft is echoed as given: derived title, no id, no timestamps.
@@ -1024,7 +1028,7 @@ def test_game_default_values_follow_catalogue_components(targets, build_backtest
         ),
         diets=FakeDiets(zones={LEBRON: _zone_diet(0.2, 0.2)}),
         statistic_catalog=catalog,
-    ).backtest(OWNER, created["id"])
+    ).backtest(OWNER, created["id"])[0]
 
     assert payload["players"][0]["games"][0]["stats"]["FG2A"] == 12.0
 
@@ -1294,12 +1298,12 @@ def test_repeated_backtests_reuse_cached_publication_decode_and_keep_response_st
 
     event.listen(backtest_engine, "before_cursor_execute", record_statement)
     try:
-        first = service.backtest(OWNER, target_okc["id"])
-        second = service.backtest(OWNER, target_lal["id"])
+        first = service.backtest(OWNER, target_okc["id"])[0]
+        second = service.backtest(OWNER, target_lal["id"])[0]
         # A third ask for a player pool this generation has already fully
         # decoded -- OKC's, exactly as the first backtest asked -- costs no
         # further statement against the projection at all.
-        third = service.backtest(OWNER, target_okc["id"])
+        third = service.backtest(OWNER, target_okc["id"])[0]
     finally:
         event.remove(backtest_engine, "before_cursor_execute", record_statement)
 
@@ -1486,7 +1490,7 @@ def test_the_backtest_route_returns_the_backtest_for_the_targets_id(
     client, authenticate, backtest_service
 ):
     headers = authenticate()
-    backtest_service.backtest.return_value = BACKTESTED
+    backtest_service.backtest.return_value = (BACKTESTED, "-")
 
     response = client.get("/api/user/targets/7/backtest", headers=headers)
 
@@ -1732,7 +1736,7 @@ def test_identical_saved_and_draft_conditions_have_identical_evidence(targets, b
     created = targets.create_target(OWNER, opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
     draft = targets.validate_target_draft(opponent='OKC', qualifiers=[CORNER_THREE], conditions=conditions)
     service = build_backtest(logs=logs, diets=FakeDiets(zones={LEBRON: _zone_diet(0.42, 0.2)}))
-    saved, preview = service.backtest(OWNER, created['id']), service.backtest_target(draft)
+    saved, preview = service.backtest(OWNER, created['id'])[0], service.backtest_target(draft)
     assert saved['players'] == preview['players']
     assert saved['summary'] == preview['summary']
     assert saved['games_considered'] == {'kept': 0, 'played': 1}
@@ -1760,7 +1764,7 @@ def test_identical_saved_and_draft_player_minutes_have_identical_evidence(
     )
     service = build_backtest(logs=logs, diets=diets)
 
-    saved = service.backtest(OWNER, created['id'])
+    saved = service.backtest(OWNER, created['id'])[0]
     preview = service.backtest_target(draft)
 
     expected_conditions = {
@@ -2065,7 +2069,7 @@ def test_a_saved_backtest_loads_its_target_on_the_request_scope_connection(
     ), mock_patch.object(
         targets, "get_target_in_session", side_effect=recording_loader
     ):
-        payload = service.backtest(OWNER, created["id"])
+        payload = service.backtest(OWNER, created["id"])[0]
 
     assert len(checkouts) == 1
     assert loads_through_scope == [(True, OWNER, created["id"])]
@@ -2195,15 +2199,21 @@ def _key(
     generation,
     *,
     qualifiers=(CORNER_THREE,),
+    conditions=None,
+    season=SEASON,
     settings=None,
 ):
     """Build one cache key directly, the way the flow does."""
 
-    target = {"id": 1, "qualifiers": list(qualifiers), "conditions": None}
+    target = {
+        "id": 1,
+        "qualifiers": list(qualifiers),
+        "conditions": conditions,
+    }
     return backtest_cache_key(
         target,
         generation,
-        season=SEASON,
+        season=season,
         settings=settings
         or RuntimeSettings(
             environment="testing",
@@ -2219,7 +2229,9 @@ def test_a_miss_files_its_field_under_the_generation_key(
     created = _create(targets)
     service, reader, client = _cached_service(build_backtest)
 
-    payload = service.backtest(OWNER, created["id"])
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "miss"
 
     # The generation pre-check ran once with the request's season, and the
     # one miss captured its snapshot and stored the evidence under it.
@@ -2255,8 +2267,9 @@ def test_a_hit_serves_the_stored_result_without_recomputing(
 
     logs = service.player_logs
     compute_calls_before = len(logs.opponent_calls)
-    payload = service.backtest(OWNER, created["id"])
+    payload, state = service.backtest(OWNER, created["id"])
 
+    assert state == "hit"
     assert len(logs.opponent_calls) == compute_calls_before
     assert [player["canonical_id"] for player in payload["players"]] == [
         LEBRON
@@ -2266,13 +2279,28 @@ def test_a_hit_serves_the_stored_result_without_recomputing(
 def test_a_hit_returns_a_body_byte_identical_to_a_miss(
     targets, build_backtest
 ):
+    """Composed at the route seam: a hit body and a miss body are equal
+    byte for byte, in construction order, not merely up to key sorting."""
+
+    from flask import Flask, g, jsonify
+
     created = _create(targets)
     service, _, _ = _cached_service(build_backtest)
 
-    miss = service.backtest(OWNER, created["id"])
-    hit = service.backtest(OWNER, created["id"])
+    app = Flask(__name__)
 
-    assert json.dumps(hit, sort_keys=True) == json.dumps(miss, sort_keys=True)
+    @app.route("/backtest")
+    def _backtest():
+        payload, state = service.backtest(OWNER, created["id"])
+        g.targets_cache = state
+        return jsonify(payload)
+
+    test_client = app.test_client()
+    miss = test_client.get("/backtest")
+    hit = test_client.get("/backtest")
+
+    assert hit.status_code == miss.status_code == 200
+    assert hit.get_data() == miss.get_data()
 
 
 def test_each_of_the_five_streams_advancing_alone_changes_the_key():
@@ -2308,6 +2336,48 @@ def test_raw_threshold_precision_sifies_two_qualifiers():
     )
 
 
+def test_the_season_alone_changes_the_key():
+    assert _key(_frozen_generation(), season="2024-25") != _key(
+        _frozen_generation()
+    )
+
+
+def test_conditions_alone_change_the_key():
+    assert _key(
+        _frozen_generation(), conditions={"player_minutes": 10}
+    ) != _key(_frozen_generation())
+
+
+def test_the_diet_baseline_min_games_floor_alone_changes_the_key():
+    from app.config.settings import PlayerDietBaselineSettings
+
+    opened = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings(current_season=SEASON),
+        matchup_scores=MatchupScoreSettings(),
+        player_diet_baseline=PlayerDietBaselineSettings(min_games=1),
+    )
+    assert _key(_frozen_generation(), settings=opened) != _key(
+        _frozen_generation()
+    )
+
+
+def test_a_matchup_volume_floor_alone_changes_the_key():
+    from app.config.settings import PlayerDietBaselineSettings
+
+    flooded = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings(current_season=SEASON),
+        matchup_scores=MatchupScoreSettings(
+            shot_zones_min_volume_per_game=2.0
+        ),
+        player_diet_baseline=PlayerDietBaselineSettings(),
+    )
+    assert _key(_frozen_generation(), settings=flooded) != _key(
+        _frozen_generation()
+    )
+
+
 def test_a_schema_bump_changes_the_key(monkeypatch):
     original = backtest_cache_key(
         {"id": 1, "qualifiers": [CORNER_THREE], "conditions": None},
@@ -2333,6 +2403,10 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
         ),
     )
     assert bumped != original
+    # One version knob: the schema constant is the namespace, so bumping it
+    # is not just a payload change but a different key prefix entirely.
+    assert bumped.startswith("targets:backtest:v2:")
+    assert not bumped.startswith("targets:backtest:v1:")
 
 
 def test_a_note_only_edit_still_hits_with_the_new_note(
@@ -2348,8 +2422,9 @@ def test_a_note_only_edit_still_hits_with_the_new_note(
         changes={"note": "season bet"},
     )
     reads_before = len(service.player_logs.opponent_calls)
-    payload = service.backtest(OWNER, created["id"])
+    payload, state = service.backtest(OWNER, created["id"])
 
+    assert state == "hit"
     # The stored row is reloaded every request, so note and updated_at are
     # the fresh ones; the evidence came from the cache (no recompute).
     assert payload["target"]["note"] == "season bet"
@@ -2378,8 +2453,9 @@ def test_a_read_with_unavailable_reason_bypasses_the_write(
         build_backtest, reads=refused
     )
 
-    payload = service.backtest(OWNER, created["id"])
+    payload, state = service.backtest(OWNER, created["id"])
 
+    assert state == "bypass"
     # A generation containing a refusal is still looked up, but a result
     # computed from refusal labels is written nowhere.
     assert len(client.gets) == 1
@@ -2397,8 +2473,9 @@ def test_a_redis_outage_is_computed_around_with_a_open_breaker(
         build_backtest, redis_client=DeadRedis()
     )
 
-    payload = service.backtest(OWNER, created["id"])
+    payload, state = service.backtest(OWNER, created["id"])
 
+    assert state == "miss"
     assert [player["canonical_id"] for player in payload["players"]] == [
         LEBRON
     ]
@@ -2406,7 +2483,8 @@ def test_a_redis_outage_is_computed_around_with_a_open_breaker(
     # The circuit is now open, so the next read never contacts Redis again
     # during the cooldown.
     gets_after_first = len(client.gets)
-    second = service.backtest(OWNER, created["id"])
+    second, second_state = service.backtest(OWNER, created["id"])
+    assert second_state == "miss"
     assert len(client.gets) == gets_after_first
     assert second["players"] == payload["players"]
 
@@ -2414,7 +2492,6 @@ def test_a_redis_outage_is_computed_around_with_a_open_breaker(
 def test_the_lab_preview_never_touches_the_result_cache(
     targets, build_backtest
 ):
-    from flask import Flask, g
     from app.services.target_preview import TargetPreviewService
 
     reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
@@ -2448,9 +2525,7 @@ def test_the_lab_preview_never_touches_the_result_cache(
         ),
         publication_reader=reader,
     )
-    with Flask(__name__).test_request_context():
-        payload = preview.preview(draft)
-        assert "targets_cache" not in g
+    payload = preview.preview(draft)
 
     assert [player["canonical_id"] for player in payload["players"]] == [
         LEBRON
@@ -2476,8 +2551,9 @@ def test_the_flag_off_leaves_redis_entirely_alone(targets, build_backtest):
         ),
     )
 
-    payload = service.backtest(OWNER, created["id"])
+    payload, state = service.backtest(OWNER, created["id"])
 
+    assert state == "-"
     assert client.gets == []
     assert client.sets == []
     assert [player["canonical_id"] for player in payload["players"]] == [
@@ -2485,42 +2561,36 @@ def test_the_flag_off_leaves_redis_entirely_alone(targets, build_backtest):
     ]
 
 
-def test_the_request_log_sees_hit_miss_and_bypass(targets, build_backtest):
-    from flask import Flask, g
+def test_the_request_log_sees_hit_miss_and_bypass(
+    client, authenticate, backtest_service, caplog
+):
+    """Through the real route, not the service: ``backtest`` reports the
+    cache outcome and the route stamps it on ``g``, so the app's request
+    log names the outcome for every request."""
+    import logging
 
-    created = _create(targets)
-    refused = _available_reads()
-    refused["grouped_shot_types"] = PublicationRead(
-        stream_key="grouped_shot_types",
-        publication_id=None,
-        season=None,
-        cutoff=None,
-        version=None,
-        status="unavailable",
-        freshness="unavailable",
-        age_seconds=None,
-        payload=None,
-        unavailable_reason="publication_payload_invalid",
-    )
-    client = FakeRedis()
-    service, reader, _ = _cached_service(build_backtest, redis_client=client)
-    app = Flask(__name__)
+    headers = authenticate()
+    backtest_service.backtest.side_effect = [
+        (BACKTESTED, "miss"),
+        (BACKTESTED, "hit"),
+        (BACKTESTED, "bypass"),
+    ]
 
-    # One healthy read: the first request is a miss and writes; the second
-    # is served and stamped as a hit.
-    with app.test_request_context():
-        service.backtest(OWNER, created["id"])
-        assert g.targets_cache == "miss"
-    with app.test_request_context():
-        service.backtest(OWNER, created["id"])
-        assert g.targets_cache == "hit"
-    # Then a stream refuses and the generation moves, so the same read is
-    # a bypass: computed, never written, stamped as such.
-    reader.reads = refused
-    reader.frozen_generation = tuple(
-        (stream_key, "pub-2-refused", fence, version)
-        for stream_key, _, fence, version in reader.frozen_generation
-    )
-    with app.test_request_context():
-        service.backtest(OWNER, created["id"])
-        assert g.targets_cache == "bypass"
+    with caplog.at_level(logging.INFO, logger="app"):
+        for _ in range(3):
+            response = client.get(
+                "/api/user/targets/7/backtest", headers=headers
+            )
+            assert response.status_code == 200
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("request method=")
+    ]
+    assert len(lines) == 3
+    assert [line.split("targets_cache=")[1] for line in lines] == [
+        "miss",
+        "hit",
+        "bypass",
+    ]
