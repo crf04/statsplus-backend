@@ -2168,8 +2168,8 @@ under the captured generation only when every stream the Target's Qualifiers
 reference — the game logs plus the Diet publication stream each qualifier
 `base` reads shares from — is available with no refusal label; a Diet stream
 no Qualifier references cannot change the evidence, so its unavailability
-must not block caching.  An unavailable referenced stream
-(`unavailable_reason` seeds a `bypass` that computes and writes nothing). Every Redis-level error is a miss, never a 5xx, with the
+must not block caching. An unavailable referenced stream (any
+`unavailable_reason`) seeds a `bypass` that computes and writes nothing. Every Redis-level error is a miss, never a 5xx, with the
 same 30 s circuit-breaker cooldown `NBAGameCache` uses; the flag off or no
 client leaves Redis untouched and `targets_cache` at `-`; and the Lab's
 Draft Target read never meets either. TTLs (`TARGET_BACKTEST_CACHE_TTL_SECONDS`,
