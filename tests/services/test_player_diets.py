@@ -1171,6 +1171,73 @@ def test_get_for_players_reuses_baselines_across_calls_sharing_one_generation(
     assert len(cache) == 2
 
 
+def test_repository_owns_a_baseline_cache_when_no_cache_is_composed(tmp_path):
+    """Without a caller-composed cache, the repository uses its own.
+
+    The Target backtest and the Lab preview reach ``get_for_players``
+    independently, each with no cache to compose, so the repository keeps one
+    itself: a second call sharing one Publication generation returns the
+    identical baselines object the first built, the same promise the explicit
+    ``baseline_cache`` seam already makes.
+    """
+
+    repository = _publication_repository_with_shared_facts(tmp_path)
+    snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
+    )
+
+    first = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=snapshot
+    )
+    second = repository.get_for_players(
+        "2025-26", [1005], publication_snapshot=snapshot
+    )
+
+    assert first.baselines is second.baselines
+
+
+def test_repository_baseline_cache_misses_a_new_generation_and_evicts_oldest(
+    tmp_path,
+):
+    """A generation the cache has not seen rebuilds and evicts the oldest.
+
+    The owned cache is bounded to two generations, LRU by generation: the
+    second generation fills the cache and evicts the first, so a later call
+    under the evicted generation rebuilds the baselines rather than returning
+    a stale generation's population.
+    """
+
+    repository = _publication_repository_with_shared_facts(tmp_path)
+    first_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
+    )
+    second_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-2",)
+    )
+    third_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-3",)
+    )
+
+    first = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=first_snapshot
+    )
+    repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=second_snapshot
+    )
+    repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=third_snapshot
+    )
+
+    # The cache is bounded to two generations, so the two oldest have been
+    # evicted: naming generation-1 again rebuilds rather than returning the
+    # original object, and the cache never grows past the bound.
+    again = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=first_snapshot
+    )
+    assert again.baselines is not first.baselines
+    assert len(repository._baseline_cache) == 2
+
+
 def test_legacy_and_publication_paths_agree_on_the_same_baseline_fixture(tmp_path):
     requested = [1001, 1005]
 
