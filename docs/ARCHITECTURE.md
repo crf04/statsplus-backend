@@ -167,8 +167,9 @@ response header share one correlation key.
 one INFO lifecycle line for every route, including handled error responses:
 `request method=... rule=... status=... duration_ms=... request_id=...
 targets_cache=...` — the URL rule, the response status, the wall duration per
-request, the correlation ID, and the Target backtest cache decision. The
-`targets_cache` field is stamped by the Target backtest cache seam (#279) as
+request, the correlation ID, and the Target backtest cache decision. The route
+stamps the `targets_cache` field (#279) from the cache state the Target
+backtest service returns, as
 `hit` when the shared Redis result cache served the saved-Target Backtest, as
 `miss` when the request computed and wrote it, as `bypass` when some stream
 refused and the result is written nowhere, and stays `-` when the feature is

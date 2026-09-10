@@ -93,8 +93,9 @@ def _register_request_headers(app: "Flask") -> None:
                 else request.path
             )
             duration_ms = (time.perf_counter() - started_at) * 1000.0
-            # ``targets_cache`` is stamped on g by the Target backtest cache
-            # seam; until it exists every request reports the unbilled '-'.
+            # The route stamps ``targets_cache`` on g from the cache state
+            # the Target backtest service returned; until it exists every
+            # request reports the unbilled '-'.
             logger.info(
                 "request method=%s rule=%s status=%s duration_ms=%.2f "
                 "request_id=%s targets_cache=%s",

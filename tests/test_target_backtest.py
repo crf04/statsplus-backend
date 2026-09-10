@@ -2288,6 +2288,10 @@ def test_a_hit_returns_a_body_byte_identical_to_a_miss(
     service, _, _ = _cached_service(build_backtest)
 
     app = Flask(__name__)
+    # Keep Flask from sorting keys: with the default sorter a store that
+    # reordered the evidence would serialize to the same bytes and hide the
+    # defect, so the fixture must serialize construction order verbatim.
+    app.json.sort_keys = False
 
     @app.route("/backtest")
     def _backtest():
@@ -2487,6 +2491,39 @@ def test_a_redis_outage_is_computed_around_with_a_open_breaker(
     assert second_state == "miss"
     assert len(client.gets) == gets_after_first
     assert second["players"] == payload["players"]
+
+
+class RefusingRedis(FakeRedis):
+    """A Redis whose reads fail the way a protocol error, not an outage, does."""
+
+    def get(self, key):
+        self.gets.append(key)
+        raise redis.exceptions.ResponseError("bad command")
+
+
+def test_a_redis_protocol_error_misses_with_the_breaker_still_closed(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, reader, client = _cached_service(
+        build_backtest, redis_client=RefusingRedis()
+    )
+
+    payload, state = service.backtest(OWNER, created["id"])
+
+    assert state == "miss"
+    assert [player["canonical_id"] for player in payload["players"]] == [
+        LEBRON
+    ]
+    # A non-connection error is a miss, not an outage: the next call still
+    # reaches Redis rather than skipping it during a cooldown.
+    assert len(client.gets) == 1
+    second, second_state = service.backtest(OWNER, created["id"])
+    assert second_state == "miss"
+    assert len(client.gets) == 2
+    # The read never produced evidence, but the computed result is still
+    # filed like any other miss.
+    assert client.sets
 
 
 def test_the_lab_preview_never_touches_the_result_cache(

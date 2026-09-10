@@ -1897,7 +1897,22 @@ def test_generation_selects_no_payload_column(tmp_path):
 
 def test_generation_labels_a_disabled_stream_as_snapshot_does(tmp_path):
     engine = _db(tmp_path)
-    PublicationService(engine, clock=lambda: NOW).register_stream(
+    service = PublicationService(engine, clock=lambda: NOW)
+    service.register_stream(
+        "generation_disabled_test",
+        provider="ledger",
+        owner="railway",
+        required_observations=(),
+        publication_strategy="replace",
+        enabled=True,
+    )
+    # A pointer only exists once something was composed, so the disabled
+    # stream below is one with history -- otherwise both branches degenerate
+    # to a fence-less None and the test could not tell them apart.
+    service.compose(
+        "generation_disabled_test", season="2025-26", cutoff=NOW, payload={"value": 1}
+    )
+    service.register_stream(
         "generation_disabled_test",
         provider="ledger",
         owner="railway",
