@@ -192,9 +192,9 @@ class PlayerGameLogRepository:
         # publication_id -> {player_id: decoded season rows}, oldest first.
         self._summary_projection_cache: "OrderedDict[str, dict[int, tuple[PlayerGameLogRecord, ...]]]" = OrderedDict()
         self._summary_projection_cache_lock = threading.Lock()
-        # generation -> {(season, rate_season_type, exclude_game_id,
-        # player_id): PlayerSeasonLogSummary}, oldest first.
-        self._season_summary_cache: "OrderedDict[Any, dict[tuple[Any, int], PlayerSeasonLogSummary]]" = (
+        # generation -> {(player_id, season, rate_season_type,
+        # exclude_game_id): PlayerSeasonLogSummary}, oldest first.
+        self._season_summary_cache: "OrderedDict[Any, dict[tuple[int, str, str | None, str | None], PlayerSeasonLogSummary]]" = (
             OrderedDict()
         )
         self._season_summary_cache_lock = threading.Lock()
@@ -618,8 +618,10 @@ class PlayerGameLogRepository:
         with self._season_summary_cache_lock:
             cache = self._season_summary_cache.get(generation)
             if cache is None:
-                cache = {}
-                self._season_summary_cache[generation] = cache
+                # An unseen generation is not inserted here: a lookup that
+                # fills nothing must not take a residency slot, or a failed
+                # compute could leave an unbounded number resident.
+                return {}
             self._season_summary_cache.move_to_end(generation)
             return {
                 player_id: cache[(player_id, *exchange)]

@@ -1238,6 +1238,53 @@ def test_repository_baseline_cache_misses_a_new_generation_and_evicts_oldest(
     assert len(repository._baseline_cache) == 2
 
 
+def test_repository_baseline_cache_lru_recency_keeps_a_touched_generation(
+    tmp_path,
+):
+    """The bound evicts the least recently used generation, not the oldest.
+    With two generations resident, reading the first refreshes its recency;
+    a third then evicts the second and the touched first survives -- so a
+    later read under the first generation returns the identical baselines
+    object rather than rebuilding.
+    """
+
+    repository = _publication_repository_with_shared_facts(tmp_path)
+    first_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-1",)
+    )
+    second_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-2",)
+    )
+    third_snapshot = _FakeGenerationSnapshot(
+        _SHARED_TRANSITION_FACTS, generation=("generation-3",)
+    )
+
+    first = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=first_snapshot
+    )
+    repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=second_snapshot
+    )
+    # Touch generation-1 while generation-2 is resident, then force the
+    # insertion of a third generation.
+    repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=first_snapshot
+    )
+    repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=third_snapshot
+    )
+
+    assert len(repository._baseline_cache) == 2
+    assert set(repository._baseline_cache) == {
+        (("generation-1",), "2025-26"),
+        (("generation-3",), "2025-26"),
+    }
+    touched = repository.get_for_players(
+        "2025-26", [1001], publication_snapshot=first_snapshot
+    )
+    assert touched.baselines is first.baselines
+
+
 def test_legacy_and_publication_paths_agree_on_the_same_baseline_fixture(tmp_path):
     requested = [1001, 1005]
 

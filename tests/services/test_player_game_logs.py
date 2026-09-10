@@ -1281,8 +1281,38 @@ def test_get_player_summaries_generation_cache_reuses_composed_summaries(
             (101, SEASON, regular, "0022500001"),
             (101, SEASON, "Playoffs", None),
         }
+
     finally:
         event.remove(repository.engine, "before_cursor_execute", record_statement)
+
+
+def test_get_player_summaries_cache_holds_at_most_two_generations(tmp_path):
+    """The summary cache is bounded: a third generation evicts the oldest.
+
+    The season-summary cache is bounded to two generations; storing a third
+    evicts the least recently used, so residency never grows past the bound
+    even when the repository keeps serving requests the cache never warms.
+    """
+
+    from types import SimpleNamespace
+
+    records = [_record(player_id=101, game_id="0022500001")]
+    repository, _snapshot = _projected_publication_repository(tmp_path, records)
+
+    for index in (1, 2, 3):
+        stand_in = SimpleNamespace(
+            generation=("summary-generation", index),
+            read=_snapshot.read,
+        )
+        repository.get_player_summaries(
+            SEASON, [101], publication_snapshot=stand_in
+        )
+
+    assert len(repository._season_summary_cache) == 2
+    assert set(repository._season_summary_cache) == {
+        ("summary-generation", 2),
+        ("summary-generation", 3),
+    }
 
 
 def test_get_player_summaries_reuses_cached_publication_decode_across_calls(
