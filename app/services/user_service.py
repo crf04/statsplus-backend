@@ -775,6 +775,20 @@ class UserService:
         finally:
             session.close()
 
+    def get_target_in_session(
+        self, session: Any, firebase_uid: str, target_id: int
+    ) -> Dict[str, Any]:
+        """Load one of the caller's targets on a caller-owned session.
+
+        A read composing several seams on one ``request_read_scope``
+        connection -- the backtest -- passes its session here so the Target
+        load joins that one checkout instead of opening a second.
+        Ownership semantics are those of ``get_target``: an unowned Target is
+        reported missing exactly as today.
+        """
+
+        return self._owned_target(session, firebase_uid, target_id).to_dict()
+
     def _validated_conditions(self, value, opponent):
         conditions = validate_conditions(value)
         if conditions and conditions['defender']:
