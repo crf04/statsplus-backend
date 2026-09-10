@@ -238,6 +238,13 @@ def _play_type_profile(table, team_id) -> dict:
     return stats
 
 
+def _play_type_points_profile(table, team_id) -> dict:
+    stats: dict = {}
+    for play_type in PLAY_TYPES:
+        _place(stats, play_type, table[f"{play_type}_PTS"], team_id)
+    return stats
+
+
 def _assist_profile(table, team_id) -> dict:
     stats: dict = {}
     for field, metric_key in _ASSIST_FIELDS.items():
@@ -294,6 +301,7 @@ def _shot_type_profile(table, team_id) -> list:
 _CATEGORIES: dict[str, tuple[str, Callable, Callable]] = {
     "Traditional": ("traditional", _traditional_profile, dict),
     "Playtypes": ("play_types", _play_type_profile, dict),
+    "Playtype Points": ("play_types", _play_type_points_profile, dict),
     "Assists": ("assist_locations", _assist_profile, dict),
     "Zone Shooting": ("shot_zones", _shot_zone_profile, dict),
     "Shooting Type": ("shot_types", _shot_type_profile, list),

@@ -1411,7 +1411,7 @@ GET /api/teams/stats
 Query parameters:
 
 - `team`: full team name, such as `Los Angeles Lakers`.
-- `category`: `Traditional`, `Playtypes`, `Assists`, `Zone Shooting`, or `Shooting Type`.
+- `category`: `Traditional`, `Playtypes`, `Playtype Points`, `Assists`, `Zone Shooting`, or `Shooting Type`.
 - `date`: accepted and ignored.  Rankings are always whole-season.
 
 Example:
@@ -1435,6 +1435,13 @@ and, except for `Playtypes` and `Assists`, a `_vs_avg_pct` of
 `(value / league average - 1) * 100`.  `Playtypes` and `Assists` carry their
 values as a ratio to the league average instead, because the panel's charts
 are centred on `1.0`.
+
+`Playtype Points` returns points allowed per 48 for every play type, under
+keys such as `Spotup`, `Spotup_RANK`, and `Spotup_vs_avg_pct`. It reads the
+same Season `Spotup_PTS` league column as the Matchup Defense Sheet. This is
+an additive category: `Playtypes` continues to return its existing PPP
+league index and rank, not points volume. A zero league mean yields a null
+percentage difference; missing publications retain the existing 404 behavior.
 
 `Traditional` derives `OPP_STL+BLK`, `OPP_FG_PCT`, and `OPP_FG3_PCT` from the
 published counts; `Assists` derives `AssistPoints` as

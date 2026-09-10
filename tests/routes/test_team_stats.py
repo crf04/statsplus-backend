@@ -8,7 +8,7 @@ the panel-visible shape is proven, not mocked.
 
 import pytest
 
-from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
+from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY, PLAY_TYPES
 from app.services.ledger_derivations import ASSIST_DERIVED_METRICS
 from tests.support.publication_stubs import (
     league,
@@ -261,3 +261,25 @@ def test_an_unknown_category_is_still_a_400_with_the_split_published(
     split_client,
 ):
     assert _get(split_client, "Rebounding").status_code == 400
+
+
+def test_playtype_points_are_volume_not_ppp(panel_client, dependencies):
+    reads = _seeded_reads()
+    reads["synergy_play_types_opponent_season"] = _read(
+        "synergy_play_types_opponent_season",
+        lambda tricode: {
+            key: (3.0 if key.endswith("_PTS") else 8.0)
+            * (1.5 if tricode == "LAL" else 1.0)
+            for key in NBA_PUBLICATION_TAXONOMY["play_types"]
+        },
+    )
+    dependencies.team_service = _team_service(reads)
+    response = _get(panel_client, "Playtype Points")
+    assert response.status_code == 200
+    body = response.get_json()
+    for play_type in PLAY_TYPES:
+        assert body[play_type] == pytest.approx(4.5)
+        assert body[f"{play_type}_RANK"] == 30
+        assert body[f"{play_type}_vs_avg_pct"] == pytest.approx(
+            (4.5 / ((4.5 + 29 * 3.0) / 30) - 1) * 100
+        )
