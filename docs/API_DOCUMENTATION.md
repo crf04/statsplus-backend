@@ -1446,7 +1446,11 @@ percentage difference; missing publications retain the existing 404 behavior.
 `Traditional` derives `OPP_STL+BLK`, `OPP_FG_PCT`, and `OPP_FG3_PCT` from the
 published counts; `Assists` derives `AssistPoints` as
 `2 x TwoPtAssists + 3 x ThreePtAssists`; `Shooting Type` returns one object
-per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M`.
+per shot type with a derived `PTS` of `2 x FG2M + 3 x FG3M` and additive
+`FGA`, `FGA_RANK`, `FGA_vs_avg_pct` fields. `FGA` is `FG2A + FG3A` per 48;
+its rank and comparison are computed from the combined attempt totals for all
+thirty teams, never averaged from component ranks. A zero league mean produces
+a null percentage difference. Existing component fields remain unchanged.
 
 `Traditional` also serves the opponent rebound split -- `OPP_OREB`,
 `OPP_OREB_RANK`, `OPP_OREB_vs_avg_pct`, `OPP_DREB`, `OPP_DREB_RANK`, and

@@ -289,6 +289,15 @@ def _shot_type_profile(table, team_id) -> list:
             ),
             team_id,
         )
+        _place(
+            stats,
+            "FGA",
+            _combined_column(
+                table,
+                ((f"{slice_key}_FG2A", 1.0), (f"{slice_key}_FG3A", 1.0)),
+            ),
+            team_id,
+        )
         for stat_key in SHOT_TYPE_STATS:
             _place(stats, stat_key, table[f"{slice_key}_{stat_key}"], team_id)
         profile.append(stats)

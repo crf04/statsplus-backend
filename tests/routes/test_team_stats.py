@@ -283,3 +283,32 @@ def test_playtype_points_are_volume_not_ppp(panel_client, dependencies):
         assert body[f"{play_type}_vs_avg_pct"] == pytest.approx(
             (4.5 / ((4.5 + 29 * 3.0) / 30) - 1) * 100
         )
+
+
+def test_shot_type_attempts_rank_the_combined_volume(panel_client, dependencies):
+    def shot_values(tricode):
+        two, three = {"LAL": (2.0, 8.0), "BOS": (8.0, 1.0)}.get(
+            tricode, (3.0, 3.0)
+        )
+        return {
+            key: two if key.endswith("_FG2A") else
+            three if key.endswith("_FG3A") else 1.0
+            for key in NBA_PUBLICATION_TAXONOMY["shot_types"]
+        }
+
+    reads = _seeded_reads()
+    reads["grouped_shot_types_opponent_season"] = _read(
+        "grouped_shot_types_opponent_season", shot_values
+    )
+    dependencies.team_service = _team_service(reads)
+    response = _get(panel_client, "Shooting Type")
+    assert response.status_code == 200
+    for row in response.get_json():
+        assert row["FGA"] == pytest.approx(10.0)
+        assert row["FGA_RANK"] == 30
+        assert row["FGA_vs_avg_pct"] == pytest.approx(
+            (10.0 / ((10.0 + 9.0 + 28 * 6.0) / 30) - 1) * 100
+        )
+        # Keep the old per-component columns for existing consumers.
+        assert row["FG2A_RANK"] == 1
+        assert row["FG3A_RANK"] == 30
