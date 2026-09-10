@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from logging import getLogger
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,43 @@ class ApplicationDependencies:
     target_preview_service: Any | None = None
     diet_baselines_service: Any | None = None
     target_season_minutes_service: Any | None = None
+
+
+logger = getLogger(__name__)
+
+
+def _warn_on_redis_eviction_policy(redis_client: Any) -> None:
+    """Warn once at startup when Redis cannot honor the result cache's TTLs.
+
+    Evicting a keyed entry is only ever a cold recompute, so the expected
+    policy is ``allkeys-lru`` with ``maxmemory`` above 0: an operator who
+    left ``noeviction`` (production's current shape) or ``maxmemory 0``
+    gets one WARNING naming the configuration, not a failed startup.
+    A Redis that refuses CONFIG is tolerated silently.
+    """
+
+    try:
+        config = redis_client.config_get("maxmemory-policy", "maxmemory")
+    except Exception:
+        return
+    items = {
+        (key if isinstance(key, str) else key.decode("utf-8")): (
+            value if isinstance(value, str) else value.decode("utf-8")
+        )
+        for key, value in config.items()
+    }
+    policy = items.get("maxmemory-policy")
+    maxmemory = items.get("maxmemory")
+    if policy == "allkeys-lru" and str(maxmemory) not in {"0", ""}:
+        return
+    logger.warning(
+        "Redis eviction policy does not match the expected configuration: "
+        "expected maxmemory-policy=allkeys-lru and maxmemory > 0, got "
+        "maxmemory-policy=%s maxmemory=%s; cache fills may fail writes or "
+        "evict entries the TTLs would otherwise clear",
+        policy,
+        maxmemory,
+    )
 
 
 def build_dependencies(
@@ -235,6 +273,8 @@ def build_dependencies(
         None if demo_database else InjurySnapshotRepository(engine)
     )
     redis_client = get_redis_client(settings) if settings.cache.enabled else None
+    if redis_client is not None:
+        _warn_on_redis_eviction_policy(redis_client)
     nba_stats_provider = NBAStatsAdapter(settings=settings)
     pbp_stats_provider = PBPStatsAdapter(settings=settings)
     pbp_game_logs_provider = PBPGameLogAdapter(settings=settings)
@@ -688,6 +728,7 @@ def build_dependencies(
         settings=settings,
         publication_reader=publication_reader,
         engine=engine,
+        redis_client=redis_client,
     )
     # A preview composes the two Target reads from one Publication snapshot
     # and reads injuries stored-only: the Matchup route may refresh them from

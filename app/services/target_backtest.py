@@ -41,9 +41,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
+from logging import getLogger
 from math import isfinite
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
+import hashlib
+import json
+import threading
+import time
+import zlib
 
+import redis
+from flask import g
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -57,6 +65,7 @@ from app.services.matchup import (
     observed_diet_share,
 )
 from app.services.player_diet import (
+    PLAYER_DIET_BASES,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
     PlayerDietResult,
 )
@@ -68,6 +77,7 @@ from app.services.player_game_log_repository import (
     PlayerGameLogRecord,
     PlayerSeasonLogSummary,
 )
+from app.services.nba_cache import REDIS_FAILURE_COOLDOWN_SECONDS
 from app.services.player_game_log_values import (
     player_game_log_focal_line,
     selected_player_game_log_market_values,
@@ -130,6 +140,74 @@ PROXY_NOTE = (
     "three-point attempts rather than as corner threes."
 )
 
+#: Bump whenever the backtest's computation or its stat catalogue changes
+#: (#279): a different schema must never be served from a cached value the
+#: older code shape wrote, and the constant is part of every key.
+TARGET_BACKTEST_CACHE_SCHEMA = 1
+
+#: The result cache lives in the shared Redis namespace under one schema.
+_TARGET_CACHE_KEY_PREFIX = "targets:backtest:v1:"
+
+#: Raw threshold precision in the cache key: the six-decimal
+#: ``qualifier_signature`` folds 0.4000001 and 0.4000004 onto one line, but
+#: those two Targets are different questions, so the key keeps ``repr`` of
+#: the full float.
+
+
+def backtest_cache_key(
+    target: Mapping[str, Any],
+    generation: Sequence[tuple[str, str | None, int | None, int | None]],
+    *,
+    season: str,
+    settings: RuntimeSettings,
+) -> str:
+    """Build ``targets:backtest:v1:<sha256>`` over the canonical key body.
+
+    Canonical JSON: sorted object keys, arrays in stored ``position`` order,
+    thresholds as ``repr(float(...))`` so raw precision separates two
+    qualifiers the wire signature would fold together.  ``note``, ``title``,
+    ``stat_preferences``, timestamps, and ``firebase_uid`` are excluded on
+    purpose: two users with identical definitions share one entry, and
+    ownership is enforced by the Target load before any lookup.
+    """
+
+    body = {
+        "schema": TARGET_BACKTEST_CACHE_SCHEMA,
+        "season": season,
+        "generation": [list(entry) for entry in generation],
+        "qualifiers": [
+            {
+                "base": qualifier["base"],
+                "slice_key": qualifier["slice_key"],
+                "comparator": qualifier["comparator"],
+                "threshold": repr(float(qualifier["threshold"])),
+            }
+            for qualifier in target["qualifiers"]
+        ],
+        "conditions": target.get("conditions"),
+        "thresholds": {
+            "matchup": {
+                "min_games": settings.matchup_scores.min_games,
+                "volume_per_game": {
+                    base: settings.matchup_scores.minimum_volume_per_game(base)
+                    for base in PLAYER_DIET_BASES
+                },
+            },
+            "diet_baseline": {
+                "min_games": settings.player_diet_baseline.min_games,
+                "volume_per_game": {
+                    base: settings.player_diet_baseline.minimum_volume_per_game(
+                        base
+                    )
+                    for base in PLAYER_DIET_BASES
+                },
+            },
+        },
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{_TARGET_CACHE_KEY_PREFIX}{digest}"
+
 
 class TargetReader(Protocol):
     def get_target(
@@ -186,6 +264,8 @@ class TargetBacktestService:
         settings: RuntimeSettings,
         publication_reader: Any | None = None,
         engine: Engine | None = None,
+        redis_client: Any | None = None,
+        cache_clock: Callable[[], float] | None = None,
     ) -> None:
         self.targets = targets
         self.player_logs = player_logs
@@ -196,6 +276,17 @@ class TargetBacktestService:
         # without an engine each seam keeps opening its own, exactly as the
         # Matchup and Selection reads default without one.
         self._engine = engine
+        # The saved-Target result cache (#279): shared Redis under the
+        # generation-keyed namespace.  No client, or the flag off, is a
+        # feature that is off -- never an error.
+        self._redis = redis_client
+        self._cache_enabled = (
+            redis_client is not None and settings.cache.target_backtest_enabled
+        )
+        self._cache_ttl_seconds = settings.cache.target_backtest_ttl_seconds
+        self._clock = cache_clock or time.monotonic
+        self._breaker_lock = threading.Lock()
+        self._open_until = 0.0
         self._statistics = {
             statistic.market_category: statistic
             for statistic in statistic_catalog.statistics
@@ -248,6 +339,30 @@ class TargetBacktestService:
         season = self.settings.nba.current_season
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
+        # A saved Target is the only caller whose response may be served from
+        # the shared Redis result cache (#279): ``backtest`` loads it through
+        # the request scope, so a cache hit still echoes that fresh row,
+        # whatever ``note`` or ``updated_at`` has since become.  The Lab
+        # hands its own snapshot in for a Draft Target the cache must never
+        # see.
+        cache_key = (
+            self._saved_backtest_cache_key(target, season, session)
+            if publication_snapshot is _OWN and target.get("id") is not None
+            else None
+        )
+        if cache_key is not None:
+            evidence = self._cache_read(cache_key)
+            if evidence is not None:
+                self._stamp_targets_cache("hit")
+                return {
+                    "target": dict(target),
+                    "season": evidence["season"],
+                    "proxy": PROXY_NOTE,
+                    "stat_columns": evidence["stat_columns"],
+                    "summary": evidence["summary"],
+                    "players": evidence["players"],
+                    "games_considered": evidence["games_considered"],
+                }
         with ExitStack() as scope:
             # One connection for every read this request composes, exactly as
             # the Matchup and Selection reads share theirs; a caller already
@@ -294,6 +409,44 @@ class TargetBacktestService:
                 player_minutes=player_minutes,
                 connection=connection,
             )
+            readings = getattr(snapshot, "reads", None)
+            eligible = (
+                snapshot is not None
+                and isinstance(readings, Mapping)
+                and all(
+                    read.available and read.unavailable_reason is None
+                    for read in readings.values()
+                )
+            )
+            if cache_key is not None:
+                if eligible:
+                    # A pointer advance between the pre-check generation and
+                    # this capture files the result under the captured
+                    # generation, so the next request's pre-check key finds
+                    # it or recomputes it -- never a torn hybrid.
+                    self._cache_write(
+                        self._cache_key(
+                            target,
+                            season,
+                            getattr(snapshot, "generation", ()),
+                        ),
+                        {
+                            "players": players,
+                            "summary": self._summary(players, markets),
+                            "stat_columns": list(markets),
+                            "games_considered": {
+                                "played": len({row.game_id for row in rows}),
+                                "kept": len({row.game_id for row in kept}),
+                            },
+                            "season": season,
+                        },
+                    )
+                    self._stamp_targets_cache("miss")
+                else:
+                    # An unavailable stream means the read ran on refusal
+                    # labels, not evidence; a result computed from those is
+                    # not one any future generation may reuse.
+                    self._stamp_targets_cache("bypass")
         return {
             "target": dict(target),
             "season": season,
@@ -351,6 +504,137 @@ class TargetBacktestService:
                 ),
             }
         return {"players": len(players), "games": len(lines), "columns": columns}
+
+    def _saved_backtest_cache_key(
+        self,
+        target: Mapping[str, Any],
+        season: str,
+        session: Session | None,
+    ) -> str | None:
+        """Build the generation-keyed cache key, or ``None`` when off.
+
+        A ``None`` key is the cache deciding it has nothing to say: the
+        feature flag off, no reader able to answer a generation, or no
+        Request scope session to read the pointers on.  Nothing Redis is
+        contacted in that case and ``targets_cache`` stays ``-``.
+        """
+
+        if not self._cache_enabled:
+            return None
+        reader = self.publication_reader
+        generation_reader = getattr(reader, "generation", None)
+        if not callable(generation_reader):
+            return None
+        try:
+            generation = generation_reader(
+                _PUBLICATION_STREAM_KEYS,
+                season=season,
+                session=session,
+            )
+        except Exception:
+            # The pre-check must not turn a Redis-or-reader outage into a
+            # failed request: answer as the uncached read answers.
+            return None
+        if generation is None:
+            return None
+        return self._cache_key(target, season, generation)
+
+    def _cache_key(
+        self,
+        target: Mapping[str, Any],
+        season: str,
+        generation: Sequence[tuple[str, str | None, int | None, int | None]],
+    ) -> str:
+        return backtest_cache_key(
+            target, generation, season=season, settings=self.settings
+        )
+
+    def _cache_read(self, key: str) -> dict[str, Any] | None:
+        """Return one cached result's evidence, or ``None`` to compute.
+
+        Every failure is a miss, never a 5xx: an open circuit skips the
+        read entirely, a Redis-level error opens the circuit and falls
+        through, and an unreadable stored value just misses this once.
+        """
+
+        if self._circuit_open():
+            return None
+        try:
+            payload = self._redis.get(key)
+        except (
+            redis.exceptions.ConnectionError,
+            redis.exceptions.TimeoutError,
+        ) as error:
+            self._open_circuit(error)
+            return None
+        except Exception:
+            return None
+        if not payload:
+            return None
+        try:
+            return json.loads(
+                zlib.decompress(payload, 6).decode("utf-8")
+            )
+        except (TypeError, ValueError, zlib.error, json.JSONDecodeError):
+            return None
+
+    def _cache_write(self, key: str, evidence: Mapping[str, Any]) -> None:
+        """Store one result's evidence under its generation key.
+
+        The stored document is the derived evidence only, zlib level-6
+        over canonical JSON, so a hit decompresses to the identical body a
+        miss would have serialized.  A write that fails is dropped: the
+        response has already been computed, and a full cache must not
+        block a read on its own room.
+        """
+
+        if self._circuit_open():
+            return
+        try:
+            payload = zlib.compress(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                ),
+                6,
+            )
+            self._redis.setex(key, self._cache_ttl_seconds, payload)
+        except (
+            redis.exceptions.ConnectionError,
+            redis.exceptions.TimeoutError,
+        ) as error:
+            self._open_circuit(error)
+        except Exception:
+            pass
+
+    def _circuit_open(self) -> bool:
+        with self._breaker_lock:
+            return self._clock() < self._open_until
+
+    def _open_circuit(self, error: Exception) -> None:
+        with self._breaker_lock:
+            now = self._clock()
+            already_open = now < self._open_until
+            self._open_until = now + REDIS_FAILURE_COOLDOWN_SECONDS
+        if already_open:
+            return
+        logger.warning(
+            "Targets result cache unavailable (%s); bypassing for %ss",
+            error,
+            REDIS_FAILURE_COOLDOWN_SECONDS,
+        )
+
+    @staticmethod
+    def _stamp_targets_cache(value: str) -> None:
+        """Stamp ``flask.g`` so the request log can report the cache seam.
+
+        Service callers outside a Request context (the tests) simply stay
+        unstamped; the log line's default already says ``-``.
+        """
+
+        try:
+            g.targets_cache = value
+        except RuntimeError:
+            pass
 
     def _publication_snapshot(self, season: str, *, session: Session | None = None):
         """Resolve this request's immutable Publication generation, if any.
@@ -658,3 +942,5 @@ class TargetBacktestService:
 
 
 __all__ = ["TargetBacktestService"]
+
+logger = getLogger(__name__)
