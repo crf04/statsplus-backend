@@ -22,6 +22,7 @@ from app.services.database_first_drills import (
     PBPRepairIdentitySnapshot,
     verify_new_pbp_repair_identities,
 )
+from app.services.ledger_materialization import LedgerCorrectionQueue
 from scripts.database_first_drills import _redact, _safe_command_result
 from scripts import database_first_drills as drill_script
 from app.services.database_first_drills import DatabaseIdentity
@@ -115,17 +116,7 @@ def test_pbp_repair_discovers_new_durable_ids_from_the_restored_database(
     new_observation_id = "random-new-observation"
     new_job_ids = {
         stream: f"random-{index}-job"
-        for index, stream in enumerate(
-            (
-                "player_game_logs",
-                "traditional_opponent_season",
-                "traditional_opponent_l15",
-                "assist_locations_season",
-                "assist_locations_l15",
-                "player_per36",
-            ),
-            start=1,
-        )
+        for index, stream in enumerate(LedgerCorrectionQueue.STREAMS, start=1)
     }
     with engine.begin() as connection:
         connection.execute(CollectionManifest.__table__.insert().values(
@@ -342,14 +333,7 @@ def test_pbp_repair_rejects_observation_without_manifest_acceptance(
         "status": "active",
     }
     manifest.update(manifest_changes)
-    streams = (
-        "player_game_logs",
-        "traditional_opponent_season",
-        "traditional_opponent_l15",
-        "assist_locations_season",
-        "assist_locations_l15",
-        "player_per36",
-    )
+    streams = LedgerCorrectionQueue.STREAMS
     with engine.begin() as connection:
         connection.execute(text(
             "CREATE TABLE collection_manifests ("

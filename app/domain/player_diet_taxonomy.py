@@ -76,8 +76,11 @@ PLAYER_DIET_QUALIFIER_SLICES = MappingProxyType({
 #: Shooting profile tab as well as the Diet's five zone slices.  What the three
 #: members share is the routing fact this set exists for -- a player-subject,
 #: season, Regular Season snapshot composed at the publication boundary from
-#: collector observations -- so they stay together rather than gaining a fourth
-#: composition route.
+#: collector observations -- so they stay together rather than gaining a
+#: fourth composition route.  The fourth Diet base, ``assist_locations``, is
+#: ledger-composed instead: its stream, ``player_assist_locations``, is
+#: derived from the canonical game ledger by ``LedgerMaterializationService``,
+#: like ``player_per36`` and ``player_game_logs``, and stays out of this set.
 PLAYER_DIET_OBSERVATION_STREAM_KEYS = frozenset({
     "grouped_shot_types", "synergy_play_types", "exact_shot_zones",
 })

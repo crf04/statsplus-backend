@@ -236,7 +236,16 @@ _SURFACE_REGISTRY_RAW: tuple[dict[str, Any], ...] = (
     # ``required_observations`` on every boot, so correcting it here reconciles
     # the already-registered production row without a migration.
     {"stream_key": "exact_shot_zones", "provider": "nba", "owner": "residential_collector", "scope": "season_l15", "required": ("exact_shot_zones",), "schema": (1, 2), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season", "l15"), "enabled": False},
-    {"stream_key": "player_assist_locations", "provider": "pbp", "owner": "railway", "scope": "season", "required": ("player_assists",), "schema": (1,), "complete": "base_complete", "strategy": "snapshot_replace", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
+    # The prior registration named a ``player_assists`` observation type
+    # nothing produces: no collector normalizer and no backend service ever
+    # emits it, so ingestion would refuse every real collection and
+    # completeness would refuse the stream a second time (statsplus#280).
+    # The stream is instead derived from the canonical game ledger, exactly
+    # as ``player_per36`` and ``player_game_logs`` are.
+    # ``register_default_streams`` rewrites provider/strategy/required on
+    # every boot, so correcting it here reconciles the already-registered
+    # production row without a migration.
+    {"stream_key": "player_assist_locations", "provider": "ledger", "owner": "railway", "scope": "season", "required": ("canonical_game_ledger",), "schema": (1,), "complete": "league_complete", "strategy": "ledger_compose", "freshness": "cutoff_current", "windows": ("season",), "enabled": False},
     # Opponent grouped surfaces are independent publications from their
     # player Diet counterparts.  Keeping a stream per subject/window is what
     # lets a cutover fence only the exact legacy table being refreshed.

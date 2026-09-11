@@ -233,7 +233,7 @@ def test_backfill_is_resumable_and_newest_first(tmp_path):
     assert progress.completed_game_ids == frozenset({"0022400001"})
     with engine.connect() as connection:
         jobs = connection.execute(select(CompositionJob)).mappings().all()
-        assert len(jobs) == 6
+        assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
         assert {job["manifest_id"] for job in jobs} == {"ledger-manifest"}
         accepted = connection.execute(select(CollectionObservation)).mappings().one()
     assert accepted["manifest_id"] == "ledger-manifest"
@@ -705,7 +705,7 @@ def test_manifest_superseded_while_provider_in_flight_commits_nothing_for_game(t
     assert {row["observation_id"] for row in observations} == {
         repository.get_game("race-success").source_observation_id,
     }
-    assert len(jobs) == 6
+    assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
 
 
 def _production_adapter(payload):

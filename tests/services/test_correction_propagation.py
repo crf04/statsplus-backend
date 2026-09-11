@@ -530,9 +530,9 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     baseline_durable = durable_state()
     assert len(baseline_durable["jobs"]) == len(LedgerCorrectionQueue.STREAMS)
     assert {row[2] for row in baseline_durable["jobs"]} == {"succeeded"}
-    assert len(baseline_durable["versions"]) == 6
+    assert len(baseline_durable["versions"]) == 7
     assert len(baseline_durable["collection_observations"]) == len(games)
-    assert len(baseline_durable["publication_lineage"]) == 1350
+    assert len(baseline_durable["publication_lineage"]) == 1575
     assert baseline_public["season_fact"].raw_value == 75
     assert baseline_public["l15_fact"].raw_value == 75
     assert baseline_public["season_metric"].rank == 1
@@ -623,8 +623,8 @@ def test_replay_successful_correction_is_idempotent(tmp_path):
     assert len(after_success_durable["collection_observations"]) == len(
         baseline_durable["collection_observations"]
     ) + 1
-    assert len(after_success_durable["versions"]) == 12
-    assert len(after_success_durable["publication_lineage"]) == 2700
+    assert len(after_success_durable["versions"]) == 14
+    assert len(after_success_durable["publication_lineage"]) == 3150
     assert all(row[2] == "succeeded" for row in after_success_durable["jobs"])
     assert all(
         row[6] is None
@@ -2651,6 +2651,8 @@ def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass
         l15_window = Window()
         assist_location_season = Window()
         assist_location_l15 = Window()
+        assist_locations = (object(),)
+        player_assist_diet = {"base": "assist_locations", "rows": [object()]}
 
     class Governance:
         def read_for_composition(self, season, cutoff, manifest_id=None):

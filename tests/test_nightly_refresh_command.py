@@ -216,6 +216,7 @@ def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
             "athlete_catalog": athlete_service,
             "nba_stats_provider": provider,
             "pbp_stats_provider": pbp_provider,
+            "write_fence": write_fence,
         }
         return player_diet_service
 

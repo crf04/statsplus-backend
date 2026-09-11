@@ -523,6 +523,7 @@ _SEASON_STREAMS = frozenset({
     "traditional_opponent_season",
     "player_per36",
     "assist_locations_season",
+    "player_assist_locations",
 })
 
 _MATCHUP_STREAMS = frozenset({
@@ -545,6 +546,8 @@ def _composition_failure_reason(
         if stream_key == "assist_locations_season"
         else materialization.assist_location_l15 is None
     ):
+        return "assist_location_evidence_incomplete"
+    if stream_key == "player_assist_locations" and materialization.player_assist_diet is None:
         return "assist_location_evidence_incomplete"
     window = (
         materialization.season_window
@@ -582,6 +585,11 @@ def _succeeded_ledger_streams(
         and materialization.l15_window.complete
     ):
         succeeded.add("assist_locations_l15")
+    if (
+        materialization.player_assist_diet is not None
+        and materialization.season_window.complete
+    ):
+        succeeded.add("player_assist_locations")
     return succeeded
 
 

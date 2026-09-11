@@ -11,6 +11,7 @@ from app.services.ledger_derivations import (
     LedgerDerivationUnavailable,
     competition_ranks,
     derive_assist_location_facts,
+    derive_player_assist_diet_rows,
     governed_assist_locations,
     nominal_team_minutes,
     nominal_window_minutes,
@@ -19,6 +20,7 @@ from app.services.ledger_derivations import (
     materialize_assist_location_window,
     materialize_team_window,
 )
+from app.services.database_first_activation import decode_player_diet
 from app.services.ledger_materialization import (
     LedgerMaterializationService,
     LedgerMaterializationUnavailable,
@@ -317,6 +319,136 @@ def test_per36_aggregates_traded_player_counts_and_retains_game_teams():
     assert result.game_count == 2
     assert result.team_ids_at_game == (game.home_team_id, game.away_team_id)
     assert result.points_per36 == 14.4
+
+
+def _reconciled(player, **overrides):
+    values = dict(
+        assists=3, two_point_assists=1, three_point_assists=2,
+        arc3_assists=1, corner3_assists=1, at_rim_assists=1,
+        short_mid_range_assists=0, long_mid_range_assists=0,
+    )
+    values.update(overrides)
+    return replace(player, **values)
+
+
+def _reconciled_game(game, overrides_by_id=None):
+    overrides_by_id = overrides_by_id or {}
+    players = tuple(
+        _reconciled(player, **overrides_by_id.get(player.player_id, {}))
+        for player in game.player_facts
+    )
+    return replace(game, player_facts=players)
+
+
+def test_assist_diet_totals_across_games_and_a_mid_season_team_change():
+    game = _game()
+    traded = game.player_facts[0]
+    reconciled_game = _reconciled_game(game)
+    second_traded = replace(
+        next(
+            player for player in reconciled_game.player_facts
+            if player.player_id == traded.player_id
+        ),
+        team_id=game.away_team_id,
+        team_tricode=game.away_team_tricode,
+    )
+    second_game = replace(
+        reconciled_game,
+        game_id="0022400002",
+        game_date=game.game_date.replace(day=16),
+        player_facts=(second_traded, *reconciled_game.player_facts[1:]),
+    )
+
+    rows = derive_player_assist_diet_rows((reconciled_game, second_game))
+
+    traded_rows = {
+        row["slice_key"]: row for row in rows if row["player_id"] == traded.player_id
+    }
+    assert set(traded_rows) == {"Arc3Assists", "Corner3Assists", "AtRimAssists"}
+    assert traded_rows["Arc3Assists"]["volume"] == 2.0
+    assert traded_rows["Arc3Assists"]["games_played"] == 2
+    assert traded_rows["Arc3Assists"]["share"] == 2 / 6
+    assert all(row["volume_unit"] == "assists" for row in traded_rows.values())
+    assert all(row["provider"] == "pbp_stats" for row in traded_rows.values())
+
+
+def test_assist_diet_zero_volume_slice_is_absent_without_a_synthetic_zero_fact():
+    game = _game()
+    reconciled_game = _reconciled_game(game)
+
+    rows = derive_player_assist_diet_rows((reconciled_game,))
+
+    slice_keys = {
+        row["slice_key"] for row in rows
+        if row["player_id"] == game.player_facts[0].player_id
+    }
+    assert slice_keys == {"Arc3Assists", "Corner3Assists", "AtRimAssists"}
+    assert "ShortMidRangeAssists" not in slice_keys
+    assert "LongMidRangeAssists" not in slice_keys
+
+
+def test_assist_diet_skips_a_zero_assist_player():
+    game = _game()
+    zero_id = game.player_facts[1].player_id
+    reconciled_game = _reconciled_game(game, overrides_by_id={
+        zero_id: dict(
+            assists=0, two_point_assists=0, three_point_assists=0,
+            arc3_assists=0, corner3_assists=0, at_rim_assists=0,
+            short_mid_range_assists=0, long_mid_range_assists=0,
+        ),
+    })
+
+    rows = derive_player_assist_diet_rows((reconciled_game,))
+
+    player_ids = {row["player_id"] for row in rows}
+    assert zero_id not in player_ids
+    assert game.player_facts[0].player_id in player_ids
+
+
+def test_assist_diet_games_played_counts_only_minutes_played():
+    game = _game()
+    reconciled_game = _reconciled_game(game)
+    active_id = game.player_facts[0].player_id
+    bench_game = replace(
+        reconciled_game,
+        game_id="0022400002",
+        game_date=game.game_date.replace(day=16),
+        player_facts=tuple(
+            replace(player, minutes=0.0) if player.player_id == active_id else player
+            for player in reconciled_game.player_facts
+        ),
+    )
+
+    rows = derive_player_assist_diet_rows((reconciled_game, bench_game))
+
+    row = next(
+        row for row in rows
+        if row["player_id"] == active_id and row["slice_key"] == "Arc3Assists"
+    )
+    assert row["games_played"] == 1
+    assert row["volume"] == 2.0
+
+
+def test_assist_diet_raises_on_incomplete_location_evidence():
+    game = _game()
+
+    with pytest.raises(LedgerDerivationUnavailable):
+        derive_player_assist_diet_rows((game,))
+
+
+def test_assist_diet_rows_decode_via_the_player_diet_decoder():
+    game = _game()
+    reconciled_game = _reconciled_game(game)
+
+    rows = derive_player_assist_diet_rows((reconciled_game,))
+    payload = {"base": "assist_locations", "rows": list(rows)}
+
+    decoded = decode_player_diet(
+        payload, base="assist_locations", retrieved_at=datetime.now(timezone.utc)
+    )
+
+    assert {fact.player_id for fact in decoded} == {row["player_id"] for row in rows}
+    assert len(decoded) == len(rows)
 
 
 def test_competition_ranks_are_deterministic_and_leave_gaps_after_ties():
@@ -739,13 +871,22 @@ def test_materialization_persists_full_payloads_and_inactive_control_versions(tm
         parity = connection.execute(
             select(LedgerParityArtifact.__table__)
         ).mappings().all()
-    assert len(ledger_payloads) == 8
+    assert len(ledger_payloads) == 9
     assert all(payload not in {"", "{}", "[]"} for payload in ledger_payloads)
-    assert len(candidates) == 6
+    assert len(candidates) == 7
     assert all(
         row.cutoff.replace(tzinfo=timezone.utc) == candidate_cutoff
         for row in candidates
     )
+    assist_diet_candidate = next(
+        row for row in candidates if row.stream_key == "player_assist_locations"
+    )
+    decoded = decode_player_diet(
+        json.loads(assist_diet_candidate.payload),
+        base="assist_locations",
+        retrieved_at=candidate_cutoff,
+    )
+    assert decoded
     assert len(parity) == 4
     assert {row["stream_key"] for row in parity} == {
         "player_game_logs",
@@ -934,6 +1075,12 @@ def test_missing_assist_evidence_does_not_block_independent_streams(tmp_path):
     }
     assert {row["status"] for row in unavailable.values()} == {"unavailable"}
     assert {row["payload"] for row in unavailable.values()} == {"[]"}
+    diet_row = next(
+        row for row in publications if row["stream_key"] == "player_assist_locations"
+    )
+    assert diet_row["status"] == "unavailable"
+    assert diet_row["reason"] == "assist_location_evidence_incomplete"
+    assert diet_row["payload"] == "{}"
 
 
 def test_one_unavailable_assist_window_does_not_suppress_healthy_sibling(

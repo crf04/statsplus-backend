@@ -1682,9 +1682,9 @@ repository, and composition seams. Every provider response is first stored as
 an accepted `CollectionObservation`; its durable ID is the ledger source and
 the only provenance allowed on an inactive candidate. Candidate truth is
 independent for player game logs Season, traditional opponent Season/L15,
-assist locations Season/L15, and player per-36 Regular Season. Missing assist
-primitives that the retained split cannot prove zero retain only the assist
-last-good candidates.
+assist locations Season/L15, player per-36 Regular Season, and the player
+assist-location Diet Season. Missing assist primitives that the retained
+split cannot prove zero retain only the assist last-good candidates.
 NBA-owned opponent play-type and shot publications use this same database-first
 read seam as independent surfaces: immutable rows are validated and composed
 alongside ledger-owned facts, never substituted from PBP or another NBA
@@ -2384,15 +2384,22 @@ refreshes and before team matchup facts. It exposes only
 stored bulk read and never contacts a provider. Player Diets are Season-only:
 there is no player Last-15 window and no traditional Diet Base.
 
-One refresh has a fixed 16-call plan: the 11 offensive `PLAY_TYPES` through
-player Synergy with `POSS_PCT`, `POSS`, and `GP`; the three `SHOOTING_TYPES`
-through league-wide `LeagueDashPlayerPtShot` GeneralRange calls with
-`FGA_FREQUENCY`, `FGA`, and `GP`, plus that response's made/attempted split
-(`FGM`, `FG2M`, `FG2A`, `FG2A_FREQUENCY`, `FG3M`, `FG3A`, `FG3A_FREQUENCY`)
-retained beside the fact as `shooting_detail`; one league-wide
-`LeagueDashPlayerShotLocations` call; and one PBP player-totals call. Shot-zone
-games played come from the three fixed player-shot observations; the joined
-union must cover every shot-location player and may not disagree on `GP`.
+One refresh has a fixed 16-call plan for its unfenced Bases: the 11 offensive
+`PLAY_TYPES` through player Synergy with `POSS_PCT`, `POSS`, and `GP`; the
+three `SHOOTING_TYPES` through league-wide `LeagueDashPlayerPtShot`
+GeneralRange calls with `FGA_FREQUENCY`, `FGA`, and `GP`, plus that response's
+made/attempted split (`FGM`, `FG2M`, `FG2A`, `FG2A_FREQUENCY`, `FG3M`, `FG3A`,
+`FG3A_FREQUENCY`) retained beside the fact as `shooting_detail`; one
+league-wide `LeagueDashPlayerShotLocations` call; and one PBP player-totals
+call. An activated stream fences its Base entirely before its provider is
+ever called: no request, no facts, no observation row for that Base (#280).
+Shot types remain the one exception while shot zones are unfenced: shot zones
+depend on shot types only for games-played evidence, so a fenced shot-type
+Base is still collected once, silently, purely to supply that dependency; its
+own facts and observation are published only when shot types are themselves
+unfenced. Shot-zone games played come from those three fixed player-shot
+observations; the joined union must cover every shot-location player and may
+not disagree on `GP`.
 When the shot-type Base is malformed or cannot join, the shot-zone response is
 still validated independently but cannot become a fact without authoritative
 games played. Prior valid zone facts remain stored, and the newer shot-zone
@@ -2430,11 +2437,17 @@ Migration 013 creates `player_diet_facts` and
 `player_diet_surface_observations` after landed migrations 011 and 012. Facts
 carry raw share, raw volume, games played, volume unit, provider, and a
 timezone-aware retrieval time. Observations are the single per-Base authority
-for `available`, `unavailable`, or `missing` plus a bounded reason. All four
-observations and every available Base are validated before one transaction.
-The transaction replaces available Bases and the observation set together;
+for `available`, `unavailable`, or `missing` plus a bounded reason. A
+publication covers the nonempty subset of Bases this refresh actually
+collected -- an activated Base is skipped upstream and contributes no
+observation at all (#280) -- never zero Bases, never a Base twice. That
+subset and every available Base in it are validated before one transaction.
+The transaction replaces the changed Bases and the observation set together;
 degraded Bases retain their last valid facts with their older retrieval time,
-while the newer observation states the degradation. A transport or database
+while the newer observation states the degradation, and the in-transaction
+`assert_writable` check on each changed Base still runs on the connection
+that performs the swap, so an activation landing between collection and
+publish still fails that Base's write closed. A transport or database
 failure publishes nothing, so Nightly's existing whole-unit retry starts again
 from stats. Bulk reads return even very small raw shares; display thresholds
 are deliberately outside this module, and absent requested players or slices
@@ -4045,6 +4058,9 @@ as absent rather than as zero. A split that breaks
 fails the candidate. The version binds the same manifest and Event Catalog
 authority the opponent streams bind, and the strict `decode_player_diet`
 read-side decoder must accept the exact candidate before its pointer moves.
+The fourth Diet stream, `player_assist_locations`, is composed from the
+canonical game ledger by `LedgerMaterializationService`, not from collector
+observations, and so stays out of `PLAYER_DIET_OBSERVATION_STREAM_KEYS`.
 
 `exact_shot_zones` is the third member of that set and the only one with two
 readers, so it is a third composition branch rather than a set entry: the

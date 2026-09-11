@@ -9,7 +9,9 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
+from app.domain.player_diet_taxonomy import ASSIST_SLICES
 from app.services.canonical_game_ledger import (
     CanonicalGame,
     LedgerValidationError,
@@ -480,6 +482,78 @@ def derive_player_per36_facts(
     return tuple(output)
 
 
+#: The Diet's five assist-location slice keys, mapped to the ledger counter
+#: each totals.  Same vocabulary and order as ``ASSIST_SLICES``; kept as its
+#: own mapping here because the Diet key and the ledger field name differ.
+_ASSIST_DIET_SLICE_METRICS = {
+    "Arc3Assists": "arc3_assists",
+    "Corner3Assists": "corner3_assists",
+    "AtRimAssists": "at_rim_assists",
+    "ShortMidRangeAssists": "short_mid_range_assists",
+    "LongMidRangeAssists": "long_mid_range_assists",
+}
+
+
+def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict[str, Any], ...]:
+    """Derive the player assist-location Diet rows from governed ledger facts.
+
+    Mirrors legacy ``PlayerDietService._collect_assists`` so a parity check
+    against ``player_diet_facts`` is meaningful: totals are summed by player
+    across the season (including across a mid-season team change), a player
+    with no assists is skipped, and a slice with no volume is omitted rather
+    than published as a synthetic zero -- the Diet reports an absent slice as
+    absent.  Raises ``LedgerDerivationUnavailable`` when any player-game fact
+    cannot prove complete assist-location evidence, the same fail-closed rule
+    ``derive_assist_location_facts`` applies, or when a player has assists but
+    no game with recorded minutes to attribute ``games_played`` to.
+    """
+
+    totals: dict[int, dict[str, int]] = {}
+    games_with_minutes: dict[int, set[str]] = defaultdict(set)
+    for game in _regular_games(games):
+        for player in game.player_facts:
+            values = governed_assist_locations(player)
+            if values is None:
+                raise LedgerDerivationUnavailable(
+                    "assist-location materialization requires a complete location observation"
+                )
+            entry = totals.setdefault(
+                player.player_id,
+                {"assists": 0, **{slice_key: 0 for slice_key in ASSIST_SLICES}},
+            )
+            entry["assists"] += player.assists
+            for slice_key, metric in _ASSIST_DIET_SLICE_METRICS.items():
+                entry[slice_key] += values[metric]
+            if player.minutes > 0:
+                games_with_minutes[player.player_id].add(game.game_id)
+
+    output: list[dict[str, Any]] = []
+    for player_id in sorted(totals):
+        entry = totals[player_id]
+        assists = entry["assists"]
+        if assists <= 0:
+            continue
+        games_played = len(games_with_minutes.get(player_id, ()))
+        if games_played < 1:
+            raise LedgerDerivationUnavailable(
+                "assist-location Diet requires a game with recorded minutes"
+            )
+        for slice_key in ASSIST_SLICES:
+            volume = entry[slice_key]
+            if volume == 0:
+                continue
+            output.append({
+                "player_id": player_id,
+                "slice_key": slice_key,
+                "share": volume / assists,
+                "volume": float(volume),
+                "games_played": games_played,
+                "volume_unit": "assists",
+                "provider": "pbp_stats",
+            })
+    return tuple(output)
+
+
 def competition_ranks(values: Mapping[int, float], *, descending: bool = True) -> dict[int, int]:
     """Return deterministic competition ranks (1, 1, 3) for metric values."""
 
@@ -824,6 +898,7 @@ __all__ = [
     "competition_ranks",
     "derive_assist_location_facts",
     "governed_assist_locations",
+    "derive_player_assist_diet_rows",
     "derive_player_per36_facts",
     "derive_traditional_opponent_facts",
     "materialize_assist_location_window",
