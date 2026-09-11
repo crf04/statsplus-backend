@@ -185,8 +185,15 @@ def test_correction_atomically_enqueues_every_affected_materialization(tmp_path)
     repository.replace_game(corrected)
 
     with engine.connect() as connection:
-        jobs = connection.execute(select(CompositionJob)).scalars().all()
-    assert len(jobs) == 6
+        jobs = connection.execute(select(CompositionJob)).mappings().all()
+    assert len(jobs) == len(LedgerCorrectionQueue.STREAMS)
+    # Literal, not derived from the constant: #280 must not silently drop the
+    # ledger-composed Diet stream from the enqueue set.
+    assert any(
+        job["stream_key"] == "player_assist_locations"
+        and job["trigger_game_id"] == corrected.game_id
+        for job in jobs
+    )
 
 
 def test_full_game_preserves_optional_assist_locations_and_fences_envelope_identity():
@@ -1455,7 +1462,7 @@ def test_stale_or_equal_bound_correction_is_a_noop_without_observation_or_queue(
             row[0]
             for row in connection.execute(select(CollectionObservation.observation_id))
         } == {first.source_observation_id, second.source_observation_id}
-        assert len(connection.execute(select(CompositionJob)).all()) == 6
+        assert len(connection.execute(select(CompositionJob)).all()) == len(LedgerCorrectionQueue.STREAMS)
 
 
 def test_bound_correction_failure_rolls_back_observation_raw_typed_and_jobs(tmp_path):

@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, event
 from app.config.settings import PlayerDietBaselineSettings
 from app.migrations import run_migrations
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
+from app.services.collection_control import ControlPlaneError
 from app.services.database_first_activation import PublicationRead
 from app.services.player_diet import (
     PlayerDietFact,
@@ -207,7 +208,28 @@ class RecordedPBPPlayerDiets:
         )
 
 
-def _service(tmp_path, *, player_ids=(2544,)):
+class RecordedFence:
+    """Fake ``LegacyWriteFence`` seam: pre-check plus in-transaction assert."""
+
+    def __init__(self, *, activated=(), unavailable=False):
+        self.activated = set(activated)
+        self.unavailable = unavailable
+        self.is_activated_calls = []
+        self.assert_writable_calls = []
+
+    def is_activated(self, stream_key, *, connection=None):
+        self.is_activated_calls.append(stream_key)
+        if self.unavailable:
+            raise ControlPlaneError("legacy_write_fence_unavailable")
+        return stream_key in self.activated
+
+    def assert_writable(self, stream_key, *, connection=None):
+        self.assert_writable_calls.append(stream_key)
+        if stream_key in self.activated:
+            raise ControlPlaneError("legacy_write_fenced")
+
+
+def _service(tmp_path, *, player_ids=(2544,), write_fence=None):
     engine = create_engine(f"sqlite:///{tmp_path / 'player-diets.sqlite3'}")
     run_migrations(engine)
     nba = RecordedNBAPlayerDiets()
@@ -219,6 +241,7 @@ def _service(tmp_path, *, player_ids=(2544,)):
             nba_stats_provider=nba,
             pbp_stats_provider=pbp,
             clock=lambda: NOW,
+            write_fence=write_fence,
         ),
         nba,
         pbp,
@@ -913,6 +936,181 @@ def test_unjoined_nba_identity_marks_each_affected_base_unavailable(tmp_path):
         ) == ("unavailable", "athlete_catalog_join_incomplete")
     assert result.players[2544][0].base == "assist_locations"
     assert 999999 not in result.players
+
+
+# --- Legacy write fence (activation skips a Diet base) ------------------
+
+
+def test_an_activated_base_is_skipped_while_other_bases_still_publish(tmp_path):
+    fence = RecordedFence()
+    service, nba, pbp = _service(tmp_path, write_fence=fence)
+    service.refresh("2025-26")
+    before = service.get_for_players("2025-26", [2544])
+    before_assist_facts = tuple(
+        fact for fact in before.players[2544] if fact.base == "assist_locations"
+    )
+    before_assist_observation = next(
+        item for item in before.observations if item.base == "assist_locations"
+    )
+
+    fence.activated = {"player_assist_locations"}
+    nba.play_share = 0.33
+    pbp.calls = []
+
+    service.refresh("2025-26")
+
+    assert pbp.calls == []
+    assert fence.is_activated_calls.count("player_assist_locations") >= 1
+    result = service.get_for_players("2025-26", [2544])
+    assert (
+        tuple(fact for fact in result.players[2544] if fact.base == "assist_locations")
+        == before_assist_facts
+    )
+    assert (
+        next(item for item in result.observations if item.base == "assist_locations")
+        == before_assist_observation
+    )
+    isolation = next(
+        fact for fact in result.players[2544]
+        if fact.base == "play_types" and fact.slice_key == "Isolation"
+    )
+    assert isolation.share == 0.33
+
+
+def test_fencing_only_shot_types_still_lets_shot_zones_publish_with_gp_evidence(tmp_path):
+    """F3: shot_zones depends on games_by_player, filled only by
+
+    _collect_shot_types.  Fencing shot_types alone must not starve the
+    unfenced shot_zones base of that GP evidence -- shot types are still
+    collected once (never published) purely to supply it.
+    """
+
+    fence = RecordedFence()
+    service, nba, pbp = _service(tmp_path, write_fence=fence)
+    service.refresh("2025-26")
+    before = service.get_for_players("2025-26", [2544])
+    before_shot_type_facts = tuple(
+        fact for fact in before.players[2544] if fact.base == "shot_types"
+    )
+    before_shot_type_observation = next(
+        item for item in before.observations if item.base == "shot_types"
+    )
+
+    fence.activated = {"grouped_shot_types"}
+    nba.calls = []
+
+    service.refresh("2025-26")
+
+    shot_type_calls = [call for call in nba.calls if call[0] == "shot_type"]
+    assert len(shot_type_calls) == len(SHOOTING_TYPES)
+    result = service.get_for_players("2025-26", [2544])
+    assert (
+        tuple(fact for fact in result.players[2544] if fact.base == "shot_types")
+        == before_shot_type_facts
+    )
+    assert (
+        next(item for item in result.observations if item.base == "shot_types")
+        == before_shot_type_observation
+    )
+    zone_observation = next(
+        item for item in result.observations if item.base == "shot_zones"
+    )
+    assert zone_observation.status == "available"
+    assert any(fact.base == "shot_zones" for fact in result.players[2544])
+
+
+def test_every_base_activated_publishes_nothing_and_returns(tmp_path):
+    fence = RecordedFence(activated={
+        "synergy_play_types", "grouped_shot_types", "exact_shot_zones",
+        "player_assist_locations",
+    })
+    service, nba, pbp = _service(tmp_path, write_fence=fence)
+
+    service.refresh("2025-26")
+
+    assert nba.calls == []
+    assert pbp.calls == []
+    assert service.get_for_players("2025-26", [2544]).players == {}
+
+
+def test_an_unreadable_fence_fails_the_refresh_closed(tmp_path):
+    fence = RecordedFence(unavailable=True)
+    service, nba, pbp = _service(tmp_path, write_fence=fence)
+
+    with pytest.raises(ControlPlaneError, match="legacy_write_fence_unavailable"):
+        service.refresh("2025-26")
+
+    assert nba.calls == []
+    assert pbp.calls == []
+
+
+def test_publish_writes_only_the_supplied_subset_of_bases(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'subset.sqlite3'}")
+    run_migrations(engine)
+    repository = PlayerDietRepository(engine)
+
+    repository.publish(
+        "2025-26",
+        [PlayerDietFact(
+            1001, "play_types", "Transition", 0.5, 10.0, 20,
+            "possessions", "nba_synergy",
+        )],
+        [PlayerDietObservation("play_types", "available")],
+        retrieved_at=NOW,
+    )
+
+    result = repository.get_for_players("2025-26", [1001])
+    assert {item.base for item in result.observations} == {"play_types"}
+    assert {fact.base for fact in result.players[1001]} == {"play_types"}
+
+    with pytest.raises(ValueError, match="at least one Base"):
+        repository.publish("2025-26", [], [], retrieved_at=NOW)
+
+    with pytest.raises(ValueError, match="cannot repeat a Base"):
+        repository.publish(
+            "2025-26", [],
+            [
+                PlayerDietObservation("play_types", "missing", "x"),
+                PlayerDietObservation("play_types", "missing", "x"),
+            ],
+            retrieved_at=NOW,
+        )
+
+    with pytest.raises(ValueError, match="Base is unsupported"):
+        repository.publish(
+            "2025-26", [],
+            [PlayerDietObservation("unknown_base", "missing", "x")],
+            retrieved_at=NOW,
+        )
+
+    with pytest.raises(ValueError, match="has no observation"):
+        repository.publish(
+            "2025-26",
+            [PlayerDietFact(
+                1001, "shot_types", "Catch and Shoot", 0.5, 10.0, 20,
+                "field_goal_attempts", "nba_stats",
+            )],
+            [PlayerDietObservation("play_types", "available")],
+            retrieved_at=NOW,
+        )
+
+
+def test_publish_raises_legacy_write_fenced_when_a_changed_base_is_activated(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fenced-publish.sqlite3'}")
+    run_migrations(engine)
+    fence = RecordedFence(activated={"synergy_play_types"})
+    repository = PlayerDietRepository(engine, write_fence=fence)
+
+    with pytest.raises(ControlPlaneError, match="legacy_write_fenced"):
+        repository.publish(
+            "2025-26",
+            [PlayerDietFact(
+                1001, "play_types", "Transition", 0.5, 10.0, 20,
+                "possessions", "nba_synergy",
+            )],
+            [PlayerDietObservation("play_types", "available")],
+            retrieved_at=NOW,
+        )
 
 
 # --- Diet Share league baseline (sigma_deviation) -----------------------

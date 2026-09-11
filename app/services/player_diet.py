@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
+import logging
 from math import isfinite
 from statistics import fmean, pstdev
 import threading
@@ -41,6 +42,8 @@ from app.services.database_first_activation import (
 from app.services.request_reads import read_connection
 from app.utils.db import is_demo_database_url
 from app.utils.telemetry import ProviderResponseError
+
+logger = logging.getLogger(__name__)
 
 
 PLAYER_DIET_BASES = (
@@ -508,10 +511,18 @@ class PlayerDietRepository:
         facts: tuple[PlayerDietFact, ...],
         observations: tuple[PlayerDietObservation, ...],
     ) -> None:
-        if tuple(sorted(observation.base for observation in observations)) != (
-            PLAYER_DIET_BASES
-        ):
-            raise ValueError("a player Diet publication needs each Base exactly once")
+        # A fenced Base is skipped entirely upstream rather than reported
+        # unavailable, so a publication may cover any nonempty subset of the
+        # four Bases -- never none, never a Base twice, never one this
+        # repository does not own.
+        observed_bases = [observation.base for observation in observations]
+        if not observed_bases:
+            raise ValueError("a player Diet publication needs at least one Base")
+        if len(set(observed_bases)) != len(observed_bases):
+            raise ValueError("a player Diet publication cannot repeat a Base")
+        if any(base not in PLAYER_DIET_BASES for base in observed_bases):
+            raise ValueError("a player Diet publication Base is unsupported")
+        observed_base_set = set(observed_bases)
         facts_by_base: dict[str, list[PlayerDietFact]] = defaultdict(list)
         identities = set()
         for fact in facts:
@@ -519,6 +530,11 @@ class PlayerDietRepository:
             if identity in identities:
                 raise ValueError("player Diet fact identities must be unique")
             identities.add(identity)
+            if fact.base not in observed_base_set:
+                # A fenced Base publishes no observation at all, so a fact
+                # whose Base has none is not a degraded observation -- it is
+                # evidence for a Base this publication never named.
+                raise ValueError("player Diet fact has no observation for its Base")
             facts_by_base[fact.base].append(fact)
             PlayerDietRepository._validate_fact(fact)
         for observation in observations:
@@ -973,42 +989,92 @@ class PlayerDietService:
         facts = []
         observations = []
         games_by_player: dict[int, int] = {}
-        play_facts, play_observation = self._collect_base(
-            "play_types",
-            lambda: self._collect_play_types(season, canonical_ids),
-        )
-        facts.extend(play_facts)
-        observations.append(play_observation)
-        shot_type_facts, shot_type_observation = self._collect_base(
-            "shot_types",
-            lambda: self._collect_shot_types(
-                season, canonical_ids, games_by_player=games_by_player
-            ),
-        )
-        facts.extend(shot_type_facts)
-        observations.append(shot_type_observation)
-        shot_zone_facts, shot_zone_observation = self._collect_base(
-            "shot_zones",
-            lambda: self._collect_shot_zones(
-                season,
-                canonical_ids,
-                games_by_player=games_by_player,
-                games_played_evidence_available=(
-                    shot_type_observation.status == "available"
+        shot_types_fenced = self._base_is_fenced("shot_types")
+        shot_zones_fenced = self._base_is_fenced("shot_zones")
+        if not self._base_is_fenced("play_types"):
+            play_facts, play_observation = self._collect_base(
+                "play_types",
+                lambda: self._collect_play_types(season, canonical_ids),
+            )
+            facts.extend(play_facts)
+            observations.append(play_observation)
+        # shot_zones' games-played evidence comes only from _collect_shot_types
+        # filling games_by_player as a side effect.  When shot_types alone is
+        # fenced but shot_zones is not, shot types must still be collected --
+        # once, exactly as an unfenced refresh would -- purely to supply that
+        # evidence; its own facts/observation are published only when its own
+        # Base is unfenced.
+        shot_type_gp_observation = None
+        if not shot_types_fenced:
+            shot_type_facts, shot_type_gp_observation = self._collect_base(
+                "shot_types",
+                lambda: self._collect_shot_types(
+                    season, canonical_ids, games_by_player=games_by_player
                 ),
-            ),
-        )
-        facts.extend(shot_zone_facts)
-        observations.append(shot_zone_observation)
-        assist_facts, assist_observation = self._collect_base(
-            "assist_locations",
-            lambda: self._collect_assists(season, canonical_ids),
-        )
-        facts.extend(assist_facts)
-        observations.append(assist_observation)
+            )
+            facts.extend(shot_type_facts)
+            observations.append(shot_type_gp_observation)
+        elif not shot_zones_fenced:
+            _, shot_type_gp_observation = self._collect_base(
+                "shot_types",
+                lambda: self._collect_shot_types(
+                    season, canonical_ids, games_by_player=games_by_player
+                ),
+            )
+        if not shot_zones_fenced:
+            shot_zone_facts, shot_zone_observation = self._collect_base(
+                "shot_zones",
+                lambda: self._collect_shot_zones(
+                    season,
+                    canonical_ids,
+                    games_by_player=games_by_player,
+                    games_played_evidence_available=(
+                        shot_type_gp_observation is not None
+                        and shot_type_gp_observation.status == "available"
+                    ),
+                ),
+            )
+            facts.extend(shot_zone_facts)
+            observations.append(shot_zone_observation)
+        if not self._base_is_fenced("assist_locations"):
+            assist_facts, assist_observation = self._collect_base(
+                "assist_locations",
+                lambda: self._collect_assists(season, canonical_ids),
+            )
+            facts.extend(assist_facts)
+            observations.append(assist_observation)
+        if not observations:
+            logger.warning(
+                "player Diet refresh published nothing for %s: every Base "
+                "is activated",
+                season,
+            )
+            return
         self.repository.publish(
             season, facts, observations, retrieved_at=retrieved_at
         )
+
+    def _base_is_fenced(self, base: str) -> bool:
+        """Report whether an activated stream must skip this Base entirely.
+
+        An activated Base is not collected at all: no provider call, no
+        facts, no observation row, exactly as ``DataService`` skips a fenced
+        legacy table.  Any other fence failure (an unreadable control plane)
+        propagates and fails the refresh closed rather than guessing.
+        """
+
+        fence = self.repository._write_fence
+        checker = getattr(fence, "is_activated", None)
+        if not callable(checker):
+            return False
+        stream_key = PLAYER_DIET_PUBLICATION_STREAMS[base]
+        if checker(stream_key):
+            logger.warning(
+                "player Diet Base %s is skipped; stream %s is activated",
+                base, stream_key,
+            )
+            return True
+        return False
 
     def get_for_players(
         self,

@@ -16,6 +16,7 @@ from app.models.collection_control import (
     CatalogPublication,
     CollectionManifest,
     CompositionJob,
+    PublicationVersion,
 )
 from app.models.event_catalog import EventCatalogEntry
 from app.services.ledger_runtime import (
@@ -585,6 +586,7 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     streams = (
         "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",
         "assist_locations_season", "assist_locations_l15", "player_per36",
+        "player_assist_locations",
     )
     with engine.begin() as connection:
         connection.execute(CompositionJob.__table__.insert(), [{
@@ -632,6 +634,150 @@ def test_composition_jobs_complete_independently_when_assists_are_missing(tmp_pa
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
+    assert jobs["player_assist_locations"]["status"] == "failed"
+    assert jobs["player_assist_locations"]["last_error"] == "assist_location_evidence_incomplete"
+
+
+def _seeded_league_runtime(tmp_path, db_name, games, *, streams):
+    engine = create_engine(f"sqlite:///{tmp_path / db_name}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    repository.replace_games_atomic(games)
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    team_ids = frozenset(range(1, 31))
+    expected = frozenset(game.game_id for game in games)
+    expected_l15 = {
+        team_id: frozenset(
+            game.game_id for game in games
+            if team_id in {game.home_team_id, game.away_team_id}
+        )
+        for team_id in team_ids
+    }
+    with engine.begin() as connection:
+        connection.execute(CompositionJob.__table__.insert(), [{
+            "job_id": stream, "stream_key": stream, "manifest_id": None,
+            "season": "2025-26", "cutoff": cutoff, "status": "queued",
+            "attempts": 0, "created_at": cutoff, "updated_at": cutoff,
+        } for stream in streams])
+
+    class Governance:
+        def read_for_composition(self, season, governed_cutoff, manifest_id=None):
+            return LedgerGovernance(season, governed_cutoff, expected, team_ids, expected_l15)
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=Governance(),
+        clock=lambda: cutoff,
+    )
+    return engine, runtime
+
+
+def test_a_diet_only_derivation_failure_fails_only_its_own_job(tmp_path, monkeypatch):
+    """F1: a Diet-only derivation failure must not abort the whole composed
+
+    slice.  Every other stream stands on complete, reconciled evidence and
+    must still succeed.
+    """
+    import app.services.ledger_materialization as materialization_module
+
+    def _raise_boom(*args, **kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(
+        materialization_module, "derive_player_assist_diet_rows", _raise_boom,
+    )
+
+    games = _league_games()
+
+    streams = (
+        "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",
+        "assist_locations_season", "assist_locations_l15", "player_per36",
+        "player_assist_locations",
+    )
+    engine, runtime = _seeded_league_runtime(
+        tmp_path, "diet-only-failure.sqlite3", games, streams=streams,
+    )
+
+    completed = runtime.compose_queued("2025-26")
+
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+        }
+    assert jobs["player_assist_locations"]["status"] == "failed"
+    assert jobs["player_assist_locations"]["last_error"] == "assist_location_evidence_incomplete"
+    for stream in streams:
+        if stream == "player_assist_locations":
+            continue
+        assert jobs[stream]["status"] == "succeeded", (stream, jobs[stream])
+    assert completed == len(streams) - 1
+
+
+def test_a_zero_assist_league_produces_no_diet_candidate_but_leaves_siblings_intact(tmp_path):
+    """F2: an all-zero-assist season derives non-empty facts (every count is a
+
+    governed zero) but zero Diet rows -- no player clears the ``assists <= 0``
+    skip -- so the job must fail with the same reason and no candidate is
+    composed, while sibling ledger streams are unaffected.
+    """
+
+    games = []
+    for game in _league_games():
+        players = tuple(
+            replace(
+                player,
+                assists=0, two_point_assists=0, three_point_assists=0,
+                arc3_assists=0, corner3_assists=0, at_rim_assists=0,
+                short_mid_range_assists=0, long_mid_range_assists=0,
+            )
+            for player in game.player_facts
+        )
+        updated = replace(game, player_facts=players, checksum=None)
+        games.append(
+            replace(updated, raw_rows=raw_rows_from_facts(updated)).with_checksum()
+        )
+    games = tuple(games)
+
+    streams = (
+        "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",
+        "assist_locations_season", "assist_locations_l15", "player_per36",
+        "player_assist_locations",
+    )
+    engine, runtime = _seeded_league_runtime(
+        tmp_path, "zero-assist-diet.sqlite3", games, streams=streams,
+    )
+
+    completed = runtime.compose_queued("2025-26")
+
+    with engine.connect() as connection:
+        jobs = {
+            row["stream_key"]: row
+            for row in connection.execute(select(CompositionJob.__table__)).mappings()
+        }
+        candidates = connection.execute(
+            select(PublicationVersion.stream_key).where(
+                PublicationVersion.stream_key == "player_assist_locations",
+            )
+        ).all()
+    assert candidates == []
+    assert jobs["player_assist_locations"]["status"] == "failed"
+    assert jobs["player_assist_locations"]["last_error"] == "assist_location_evidence_incomplete"
+    for stream in streams:
+        if stream == "player_assist_locations":
+            continue
+        assert jobs[stream]["status"] == "succeeded", (stream, jobs[stream])
+    assert completed == len(streams) - 1
 
 
 def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(tmp_path):
@@ -676,7 +822,7 @@ def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(t
         )
         for team_id in team_ids
     }
-    streams = ("assist_locations_season", "assist_locations_l15")
+    streams = ("assist_locations_season", "assist_locations_l15", "player_assist_locations")
     with engine.begin() as connection:
         connection.execute(CompositionJob.__table__.insert(), [{
             "job_id": stream, "stream_key": stream, "manifest_id": None,
@@ -713,6 +859,11 @@ def test_assist_l15_job_succeeds_when_only_season_assist_window_is_unavailable(t
     assert jobs["assist_locations_l15"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "failed"
     assert jobs["assist_locations_season"]["last_error"] == "assist_location_evidence_incomplete"
+    # The player assist-location Diet stands on the same season-wide governed
+    # evidence as ``assist_locations_season``, not the independent L15
+    # window, so one early game without a location observation fails it too.
+    assert jobs["player_assist_locations"]["status"] == "failed"
+    assert jobs["player_assist_locations"]["last_error"] == "assist_location_evidence_incomplete"
 
 
 def test_compose_queued_uses_eastern_slate_date_for_dst_utc_rollover(
@@ -1327,7 +1478,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
         clock=lambda: cutoff + timedelta(hours=1),
     )
 
-    assert runtime.compose_queued("2025-26") == 4
+    assert runtime.compose_queued("2025-26") == 5
 
     season = TeamMatchupRepository(engine).get_snapshot(
         TeamMatchupSnapshotScope("2025-26", cutoff.date())
@@ -1357,6 +1508,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
     assert jobs["traditional_opponent_season"]["status"] == "succeeded"
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "succeeded"
+    assert jobs["player_assist_locations"]["status"] == "succeeded"
     assert jobs["traditional_opponent_l15"]["status"] == "failed"
     assert jobs["traditional_opponent_l15"]["last_error"] == "insufficient_governed_games"
     assert jobs["assist_locations_l15"]["status"] == "failed"

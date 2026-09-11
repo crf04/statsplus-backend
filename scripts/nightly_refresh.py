@@ -185,6 +185,7 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
             athlete_catalog=athlete_service,
             nba_stats_provider=provider,
             pbp_stats_provider=pbp_provider,
+            write_fence=write_fence,
         )
         team_matchup_service = TeamMatchupRefreshService(
             repository=TeamMatchupRepository(engine, write_fence=write_fence),

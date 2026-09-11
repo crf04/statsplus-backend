@@ -47,6 +47,7 @@ from app.services.collection_control import (
     EmailAlertAdapter,
     NBA_TEAM_IDS,
 )
+from app.services.database_first_activation import decode_player_diet
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 
 
@@ -910,6 +911,32 @@ def test_publication_pointer_fences_stale_worker_and_rolls_back(control_db):
     with publications.session() as session:
         assert session.get(PublicationStream, "event_catalog").enabled is True
     assert any(row.enabled is False for row in publications.register_default_streams() if row.stream_key == "synergy:l15")
+
+
+def test_register_default_streams_rewrites_the_legacy_player_assist_locations_shape(control_db):
+    # Production registered this stream against a ``player_assists``
+    # observation type nothing has ever produced.  #280 makes it
+    # ledger-composed instead; register_default_streams must reconcile the
+    # already-registered row to the new shape on every boot, without a
+    # migration.
+    publications = PublicationService(control_db)
+    publications.register_stream(
+        "player_assist_locations", provider="pbp", owner="railway",
+        required_observations=["player_assists"], publication_strategy="snapshot_replace",
+        supported_windows=["season"], completeness_rule="base_complete",
+        freshness_rule="cutoff_current", enabled=False,
+    )
+
+    publications.register_default_streams()
+
+    with publications.session() as session:
+        row = session.get(PublicationStream, "player_assist_locations")
+        assert row.provider == "ledger"
+        assert row.owner == "railway"
+        assert json.loads(row.required_observations) == ["canonical_game_ledger"]
+        assert row.publication_strategy == "ledger_compose"
+        assert row.completeness_rule == "league_complete"
+        assert row.enabled is False
 
 
 def test_cycle_no_game_and_operations_are_bounded_and_audited(control_db):
@@ -2250,6 +2277,125 @@ def test_bound_nba_stream_still_requires_a_candidate_to_activate(control_db):
         operations.activate_stream(
             "synergy_play_types_opponent_season",
             actor="operator", reason="re-enable a bound stream",
+        )
+
+
+def test_player_assist_locations_ledger_candidate_activates_without_parity_evidence(control_db):
+    """#280: the Diet stream has no ledger-parity artifact (it is not in
+
+    ``parity_stream``), so a valid ledger-lineaged candidate activates with
+    only ``candidate_publication_id`` -- no ``parity_artifact_id``, no season
+    cohort check.  A second candidate whose payload the strict
+    ``decode_player_diet`` read-side decoder refuses must still be rejected at
+    activation, exactly as every other governed stream is.
+    """
+
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="assist-diet-event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="assist-diet-manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="assist-diet-manifest",
+            event_catalog_publication_id="assist-diet-event-catalog",
+            event_catalog_checksum=catalog_checksum,
+            status="active", created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:assist-diet-game",
+            client_observation_id="pbp:assist-diet-game",
+            collector_id="test",
+            manifest_id="assist-diet-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "assist-diet-game",
+                "surface": "canonical_game_ledger",
+            }),
+            season="2025-26",
+            cutoff=now,
+            schema_version=1,
+            checksum="assist-diet-observation",
+            payload="{}",
+            payload_bytes=2,
+            retrieved_at=now,
+            accepted_at=now,
+        ))
+    _bind_current_ledger_source(
+        control_db,
+        game_id="assist-diet-game",
+        observation_id="pbp:assist-diet-game",
+        cutoff=now,
+    )
+
+    candidate = publications.compose_inactive_ledger(
+        "player_assist_locations",
+        season="2025-26",
+        cutoff=now,
+        payload={
+            "base": "assist_locations",
+            "rows": [{
+                "player_id": 2544, "slice_key": "Arc3Assists", "share": 0.5,
+                "volume": 2.0, "games_played": 10, "volume_unit": "assists",
+                "provider": "pbp_stats",
+            }],
+        },
+        provenance={"pbp:assist-diet-game": "assist-diet-game"},
+    )
+
+    row = publications.activate_stream(
+        "player_assist_locations",
+        reason="activate ledger-composed assist diet",
+        candidate_publication_id=candidate.publication_id,
+        require_candidate=True,
+    )
+
+    assert row.enabled is True
+    with control_db.connect() as connection:
+        pointer = connection.execute(select(PublicationPointer).where(
+            PublicationPointer.stream_key == "player_assist_locations",
+        )).mappings().one()
+    assert pointer["active_publication_id"] == candidate.publication_id
+    decoded = decode_player_diet(
+        json.loads(candidate.payload), base="assist_locations", retrieved_at=now,
+    )
+    assert decoded[0].player_id == 2544
+    assert decoded[0].slice_key == "Arc3Assists"
+
+    malformed_candidate = publications.compose_inactive_ledger(
+        "player_assist_locations",
+        season="2025-26",
+        cutoff=now,
+        payload={
+            "base": "assist_locations",
+            "rows": [{
+                "player_id": 2544, "slice_key": "Arc3Assists", "share": 0.5,
+                "volume": 2.0, "games_played": 10, "volume_unit": "assists",
+                # A wrong provider is refused by ``decode_player_diet``, the
+                # strict read-side decoder ``_validate_activation_candidate_payload``
+                # must still run for this stream even without a parity gate.
+                "provider": "pbp",
+            }],
+        },
+        provenance={"pbp:assist-diet-game": "assist-diet-game"},
+    )
+
+    with pytest.raises(ControlPlaneError, match="publication_candidate_invalid"):
+        publications.activate_stream(
+            "player_assist_locations",
+            reason="reject a Diet-decoder-invalid candidate",
+            candidate_publication_id=malformed_candidate.publication_id,
+            require_candidate=True,
         )
 
 

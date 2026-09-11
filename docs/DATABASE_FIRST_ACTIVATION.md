@@ -47,6 +47,7 @@ fails closed with `ledger_parity_cohort_incomplete`.
 | `assist_locations_season` | ledger | yes |
 | `assist_locations_l15` | ledger | yes |
 | `player_per36` | ledger | yes |
+| `player_assist_locations` | ledger | yes |
 | `exact_shot_zones_opponent_*` | nba | no |
 | `grouped_shot_types_opponent_*` | nba | no |
 | `synergy_play_types_opponent_season` | nba | no |
@@ -121,8 +122,8 @@ over is frozen, not superseded.
 | `pbp_opponent_stats` | `assist_locations_season` | yes | fenced | n/a (refresh input) | `DataService.process_assist_data` input |
 | `player_play_types` | `synergy_play_types` | no | still refreshed | n/a | NL parser player names; player HTTP reads use Athlete Catalog + Player Diet (#231) |
 | `player_shooting_zones` | `exact_shot_zones` | no | still refreshed | yes — publication-first | `PlayerService._zone_shooting_frame`, only while the stream is disabled |
-| `processed_player_assists` | `player_assist_locations` | no | not collected by `update_database` (#231) | yes — superseded | none |
-| `pbp_player_stats` | `player_assist_locations` | no | not collected by `update_database` (#231) | n/a (retired refresh input) | none |
+| `processed_player_assists` | `player_assist_locations` (ledger-composed) | no | not collected by `update_database` (#231); activation also fences the separate nightly Diet refresh's `assist_locations` base | yes — superseded | none |
+| `pbp_player_stats` | `player_assist_locations` (ledger-composed) | no | not collected by `update_database` (#231); activation also fences the separate nightly Diet refresh's `assist_locations` base | n/a (retired refresh input) | none |
 | `player_information` | — (no stream) | n/a | always refreshed | n/a | player name resolution, `GameService` allowed tables |
 
 No **frozen** row remains: the Team Profile read cutover (crf04/statsplus#45)
@@ -204,6 +205,36 @@ Every one of these is the gate working. None should be worked around.
 | `stream_unavailable` | 400 | Legacy aggregate key, or a stream that cannot be activated. |
 | `activation_already_recorded` | 400 | This activation is already recorded. |
 | `stream_not_found` | 404 | Unknown stream key. |
+
+### Activating `player_assist_locations`
+
+The player assist-location Diet stream is ledger-composed, like `player_per36`
+and `player_game_logs`, but it is not part of the Matchups parity cohort and
+has no ledger-parity artifact: `activate_stream` does not list it in
+`parity_stream`, so its activation body needs only `reason` and
+`candidate_publication_id`. The operator sequence:
+
+1. Deploy. `register_default_streams` reconciles the registry row on boot.
+2. Run `PublicationService.reconcile_pending(season=..., cutoff=<latest ledger
+   cutoff>)`, or wait for the next accepted game to enqueue the composition
+   job.
+3. Run `scripts/ledger_refresh.py <season> --compose-only` to compose the
+   inactive candidate from already-accepted ledger evidence.
+4. Run `scripts/player_assist_parity.py --season <season> --players <ids>` to
+   compare the candidate against the legacy `player_diet_facts` rows before
+   activating. Expect the sampled players to be `exact`. A league-wide run
+   (no `--players`) exits 1 with `candidate_only` rows and that is not a
+   defect: the legacy table holds at most the 500 players the PBP totals
+   response returns, while the ledger covers every player who appeared, so
+   the candidate is a strict superset. Only `differs` or `legacy_only` rows
+   block activation. The 2026-09-11 rehearsal against the production snapshot
+   read 2412/2412 legacy rows exact and 174 candidate-only rows.
+5. `POST /admin/collection/streams/player_assist_locations/activate` with the
+   candidate's `candidate_publication_id`.
+6. Activation also fences the nightly Diet refresh's `assist_locations` base
+   (`PlayerDietService.refresh` skips it once `is_activated` reads true), and
+   Targets with an assist-location Qualifier become result-cache eligible
+   automatically.
 
 ## Confirming an activation
 

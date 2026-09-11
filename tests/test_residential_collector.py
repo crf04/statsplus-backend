@@ -1910,6 +1910,8 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
             l15_window=ledger_l15_window,
             assist_location_season=None,
             assist_location_l15=None,
+            assist_locations=(),
+            player_assist_diet=None,
         )
     ))
     runtime_repository = SimpleNamespace(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Mapping
+from typing import Any
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from uuid import uuid4
@@ -30,6 +31,7 @@ from app.services.ledger_derivations import (
     TeamWindowMaterialization,
     TraditionalOpponentFact,
     derive_assist_location_facts,
+    derive_player_assist_diet_rows,
     derive_player_per36_facts,
     derive_traditional_opponent_facts,
     materialize_team_window,
@@ -59,6 +61,14 @@ class LedgerMaterialization:
     l15_window: TeamWindowMaterialization
     assist_location_season: AssistLocationWindowMaterialization | None
     assist_location_l15: AssistLocationWindowMaterialization | None
+    #: ``None`` when the assist facts this base needs are unavailable, when
+    #: the Diet derivation itself raises (incomplete assist-location
+    #: evidence -- see ``derive_player_assist_diet_rows``), or when the
+    #: derived row list is empty (every player skipped).  Runtime
+    #: success/failure for ``player_assist_locations`` keys off this field,
+    #: never off ``assist_locations``: the two derivations share governed
+    #: evidence but fail independently.
+    player_assist_diet: Mapping[str, Any] | None = None
 
 
 class LedgerMaterializationService:
@@ -145,6 +155,23 @@ class LedgerMaterializationService:
             if require_assist_locations:
                 raise LedgerMaterializationUnavailable(str(error)) from error
             assists = ()
+        # The player assist-location Diet is ledger-composed like the other
+        # ledger streams and stands on the same governed evidence as
+        # ``assists`` above, but it is derived and failed independently: a
+        # Diet-only failure must not abort the rest of this slice (#280
+        # review F1).  ``player_assist_diet`` is ``None`` whenever ``assists``
+        # is unavailable, the Diet derivation raises, or its row list is
+        # empty (every player skipped) -- see F2.
+        player_assist_diet: dict[str, Any] | None = None
+        if assists:
+            try:
+                assist_diet_rows = list(derive_player_assist_diet_rows(eligible))
+            except ValueError as error:
+                if require_assist_locations:
+                    raise LedgerMaterializationUnavailable(str(error)) from error
+                assist_diet_rows = []
+            if assist_diet_rows:
+                player_assist_diet = {"base": "assist_locations", "rows": assist_diet_rows}
         per36 = derive_player_per36_facts(eligible, season=canonical_season, cutoff=as_of)
         if team_ids is None or expected_game_ids is None:
             raise LedgerMaterializationUnavailable(
@@ -189,6 +216,7 @@ class LedgerMaterializationService:
             l15_window=l15_window,
             assist_location_season=assist_season,
             assist_location_l15=assist_l15,
+            player_assist_diet=player_assist_diet,
         )
         retrieved_at = self.clock()
         player_game_logs = tuple(
@@ -239,6 +267,13 @@ class LedgerMaterializationService:
                 "rolling_games", 15,
                 l15_status if assist_l15 is not None else "unavailable",
                 l15_reason if assist_l15 is not None else "assist_location_evidence_incomplete",
+            ),
+            (
+                "player_assist_locations",
+                player_assist_diet if player_assist_diet is not None else {},
+                "season", 0,
+                season_status if player_assist_diet is not None else "unavailable",
+                season_reason if player_assist_diet is not None else "assist_location_evidence_incomplete",
             ),
         ))
         if candidate_stream_keys is not None:
@@ -313,6 +348,12 @@ class LedgerMaterializationService:
                     "assist_locations_l15",
                     assist_l15.teams if assist_l15 is not None else (),
                 ))
+            if season_window.complete and player_assist_diet is not None:
+                # Unlike the sibling windows above, an empty payload is never
+                # appended here: ``decode_player_diet`` refuses an empty
+                # publication, and a ``ControlPlaneError`` raised mid-batch
+                # would abort every other candidate in this slice.
+                candidates.append(("player_assist_locations", player_assist_diet))
             if candidate_stream_keys is not None:
                 candidates = [
                     candidate for candidate in candidates
@@ -464,6 +505,7 @@ class LedgerCorrectionQueue:
         "assist_locations_season",
         "assist_locations_l15",
         "player_per36",
+        "player_assist_locations",
     )
     STREAM_ORDER = {stream: index for index, stream in enumerate(STREAMS)}
 
@@ -497,7 +539,7 @@ class LedgerCorrectionQueue:
         # Every writer takes stream rows in this one order.  The runtime uses
         # the same mapping when it acquires PostgreSQL row locks; keeping the
         # enqueue traversal derived from the mapping prevents two correction
-        # writers from taking the six stream locks in opposite orders.
+        # writers from taking the stream locks in opposite orders.
         stream_order = tuple(
             stream
             for stream, _ in sorted(
