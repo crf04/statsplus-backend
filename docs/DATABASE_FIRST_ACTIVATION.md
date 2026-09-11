@@ -222,7 +222,13 @@ has no ledger-parity artifact: `activate_stream` does not list it in
    inactive candidate from already-accepted ledger evidence.
 4. Run `scripts/player_assist_parity.py --season <season> --players <ids>` to
    compare the candidate against the legacy `player_diet_facts` rows before
-   activating.
+   activating. Expect the sampled players to be `exact`. A league-wide run
+   (no `--players`) exits 1 with `candidate_only` rows and that is not a
+   defect: the legacy table holds at most the 500 players the PBP totals
+   response returns, while the ledger covers every player who appeared, so
+   the candidate is a strict superset. Only `differs` or `legacy_only` rows
+   block activation. The 2026-09-11 rehearsal against the production snapshot
+   read 2412/2412 legacy rows exact and 174 candidate-only rows.
 5. `POST /admin/collection/streams/player_assist_locations/activate` with the
    candidate's `candidate_publication_id`.
 6. Activation also fences the nightly Diet refresh's `assist_locations` base
