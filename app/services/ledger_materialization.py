@@ -62,9 +62,9 @@ class LedgerMaterialization:
     assist_location_season: AssistLocationWindowMaterialization | None
     assist_location_l15: AssistLocationWindowMaterialization | None
     #: ``None`` when the assist facts this base needs are unavailable, when
-    #: the Diet derivation itself raises (a player with assists but no game
-    #: with recorded minutes -- see ``derive_player_assist_diet_rows``), or
-    #: when the derived row list is empty (every player skipped).  Runtime
+    #: the Diet derivation itself raises (incomplete assist-location
+    #: evidence -- see ``derive_player_assist_diet_rows``), or when the
+    #: derived row list is empty (every player skipped).  Runtime
     #: success/failure for ``player_assist_locations`` keys off this field,
     #: never off ``assist_locations``: the two derivations share governed
     #: evidence but fail independently.
@@ -157,10 +157,8 @@ class LedgerMaterializationService:
             assists = ()
         # The player assist-location Diet is ledger-composed like the other
         # ledger streams and stands on the same governed evidence as
-        # ``assists`` above, but it fails independently: a player can clear
-        # ``derive_assist_location_facts`` yet still have no game with
-        # recorded minutes to attribute ``games_played`` to, which is a
-        # Diet-only failure and must not abort the rest of this slice (#280
+        # ``assists`` above, but it is derived and failed independently: a
+        # Diet-only failure must not abort the rest of this slice (#280
         # review F1).  ``player_assist_diet`` is ``None`` whenever ``assists``
         # is unavailable, the Diet derivation raises, or its row list is
         # empty (every player skipped) -- see F2.

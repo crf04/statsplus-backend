@@ -26,7 +26,7 @@ from app.services.ledger_runtime import (
 )
 from app.services.ledger_backfill import LedgerBackfillService
 from app.domain.nba_events import is_final_event, is_postponed_event, player_game_log_season_type
-from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, PlayerGameFact, raw_rows_from_facts
+from app.services.canonical_game_ledger import CanonicalGameLedgerRepository, raw_rows_from_facts
 from app.collector.normalizers import normalize_schedule_response
 from app.services.ledger_materialization import LedgerCorrectionQueue, LedgerMaterializationService
 from app.services.ledger_parity import LedgerParityArtifactRepository
@@ -682,65 +682,22 @@ def _seeded_league_runtime(tmp_path, db_name, games, *, streams):
     return engine, runtime
 
 
-def _with_zero_minute_assist_player(games, *, new_player_id, team_id, team_tricode):
-    """Add a bench player with assists but zero minutes to every game a team plays.
+def test_a_diet_only_derivation_failure_fails_only_its_own_job(tmp_path, monkeypatch):
+    """F1: a Diet-only derivation failure must not abort the whole composed
 
-    The extra player contributes zero to every count field except ``assists``
-    and its location split, so the team-level residual reconciliation
-    (``_sum_team_facts``) and ``team_minutes`` (summed from the *other*
-    players' real minutes) both stay exactly as they were -- only the new
-    player's own ``games_played`` evidence is absent.
+    slice.  Every other stream stands on complete, reconciled evidence and
+    must still succeed.
     """
+    import app.services.ledger_materialization as materialization_module
 
-    updated = []
-    for game in games:
-        if team_id not in (game.home_team_id, game.away_team_id):
-            updated.append(game)
-            continue
-        extra = PlayerGameFact(
-            player_id=new_player_id, player_name="Bench Reserve",
-            team_id=team_id, team_tricode=team_tricode, minutes=0.0,
-            points=0, field_goals_made=0, field_goals_attempted=0,
-            two_pointers_made=0, two_pointers_attempted=0,
-            three_pointers_made=0, three_pointers_attempted=0,
-            free_throws_made=0, free_throws_attempted=0,
-            offensive_rebounds=0, defensive_rebounds=0, rebounds=0,
-            assists=2, turnovers=0, steals=0, blocks=0, personal_fouls=0,
-            two_point_assists=2, three_point_assists=0,
-            arc3_assists=0, corner3_assists=0, at_rim_assists=2,
-            short_mid_range_assists=0, long_mid_range_assists=0,
-        )
-        new_team_facts = tuple(
-            replace(fact, assists=fact.assists + 2) if fact.team_id == team_id else fact
-            for fact in game.team_facts
-        )
-        new_participants = tuple(
-            (tid, (*ids, new_player_id)) if tid == team_id else (tid, ids)
-            for tid, ids in game.participant_ids_by_team
-        )
-        rebuilt = replace(
-            game,
-            player_facts=(*game.player_facts, extra),
-            team_facts=new_team_facts,
-            participant_ids_by_team=new_participants,
-            checksum=None,
-        )
-        updated.append(
-            replace(rebuilt, raw_rows=raw_rows_from_facts(rebuilt)).with_checksum()
-        )
-    return tuple(updated)
+    def _raise_boom(*args, **kwargs):
+        raise ValueError("boom")
 
-
-def test_a_diet_only_derivation_failure_fails_only_its_own_job(tmp_path):
-    """F1: a player with assists but no game with recorded minutes must not
-
-    abort the whole composed slice.  Every other stream stands on complete,
-    reconciled evidence and must still succeed.
-    """
-
-    games = _with_zero_minute_assist_player(
-        _league_games(), new_player_id=900001, team_id=1, team_tricode="T01",
+    monkeypatch.setattr(
+        materialization_module, "derive_player_assist_diet_rows", _raise_boom,
     )
+
+    games = _league_games()
 
     streams = (
         "player_game_logs", "traditional_opponent_season", "traditional_opponent_l15",

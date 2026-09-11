@@ -502,14 +502,17 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
     across the season (including across a mid-season team change), a player
     with no assists is skipped, and a slice with no volume is omitted rather
     than published as a synthetic zero -- the Diet reports an absent slice as
-    absent.  Raises ``LedgerDerivationUnavailable`` when any player-game fact
-    cannot prove complete assist-location evidence, the same fail-closed rule
-    ``derive_assist_location_facts`` applies, or when a player has assists but
-    no game with recorded minutes to attribute ``games_played`` to.
+    absent.  ``games_played`` counts distinct games with a retained
+    ``PlayerGameFact`` row -- an appearance, matching the provider's
+    ``GamesPlayed`` -- including a zero-minute appearance; a player with
+    assists necessarily has at least one such row.  Raises
+    ``LedgerDerivationUnavailable`` when any player-game fact cannot prove
+    complete assist-location evidence, the same fail-closed rule
+    ``derive_assist_location_facts`` applies.
     """
 
     totals: dict[int, dict[str, int]] = {}
-    games_with_minutes: dict[int, set[str]] = defaultdict(set)
+    games_by_player: dict[int, set[str]] = defaultdict(set)
     for game in _regular_games(games):
         for player in game.player_facts:
             values = governed_assist_locations(player)
@@ -524,8 +527,7 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
             entry["assists"] += player.assists
             for slice_key, metric in _ASSIST_DIET_SLICE_METRICS.items():
                 entry[slice_key] += values[metric]
-            if player.minutes > 0:
-                games_with_minutes[player.player_id].add(game.game_id)
+            games_by_player[player.player_id].add(game.game_id)
 
     output: list[dict[str, Any]] = []
     for player_id in sorted(totals):
@@ -533,11 +535,7 @@ def derive_player_assist_diet_rows(games: Iterable[CanonicalGame]) -> tuple[dict
         assists = entry["assists"]
         if assists <= 0:
             continue
-        games_played = len(games_with_minutes.get(player_id, ()))
-        if games_played < 1:
-            raise LedgerDerivationUnavailable(
-                "assist-location Diet requires a game with recorded minutes"
-            )
+        games_played = len(games_by_player[player_id])
         for slice_key in ASSIST_SLICES:
             volume = entry[slice_key]
             if volume == 0:

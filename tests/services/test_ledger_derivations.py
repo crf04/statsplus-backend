@@ -405,7 +405,11 @@ def test_assist_diet_skips_a_zero_assist_player():
     assert game.player_facts[0].player_id in player_ids
 
 
-def test_assist_diet_games_played_counts_only_minutes_played():
+def test_assist_diet_games_played_counts_a_zero_minute_appearance():
+    # Legacy semantics: a player-fact row is an appearance, matching the
+    # provider's ``GamesPlayed`` -- a zero-minute, zero-assist row still
+    # counts toward games_played, exactly like the other games this player
+    # appears in.
     game = _game()
     reconciled_game = _reconciled_game(game)
     active_id = game.player_facts[0].player_id
@@ -414,7 +418,12 @@ def test_assist_diet_games_played_counts_only_minutes_played():
         game_id="0022400002",
         game_date=game.game_date.replace(day=16),
         player_facts=tuple(
-            replace(player, minutes=0.0) if player.player_id == active_id else player
+            _reconciled(
+                player,
+                minutes=0.0, assists=0, two_point_assists=0, three_point_assists=0,
+                arc3_assists=0, corner3_assists=0, at_rim_assists=0,
+                short_mid_range_assists=0, long_mid_range_assists=0,
+            ) if player.player_id == active_id else player
             for player in reconciled_game.player_facts
         ),
     )
@@ -425,8 +434,7 @@ def test_assist_diet_games_played_counts_only_minutes_played():
         row for row in rows
         if row["player_id"] == active_id and row["slice_key"] == "Arc3Assists"
     )
-    assert row["games_played"] == 1
-    assert row["volume"] == 2.0
+    assert row["games_played"] == 2
 
 
 def test_assist_diet_raises_on_incomplete_location_evidence():
