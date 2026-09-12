@@ -1,0 +1,29 @@
+Command: /private/tmp/statsplus-145/final-review-standards/.venv/bin/python -m pytest -o addopts= -p no:cacheprovider -v --tb=short tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures
+Network: socket guard; no bytecode/cache writes
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/final-review-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/final-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures FAILED [100%]
+
+=================================== FAILURES ===================================
+_______ test_game_log_validation_details_skip_unknown_internal_failures ________
+tests/test_errors.py:659: in test_game_log_validation_details_skip_unknown_internal_failures
+    GameLogQuery(season_filter="2024-25", self_filters="oops")
+E   pydantic_core._pydantic_core.ValidationError: 1 validation error for GameLogQuery
+E   self_filters
+E     Value error, self_filters must be a stat range mapping or a list of typed filters [type=value_error, input_value='oops', input_type=str]
+E       For further information visit https://errors.pydantic.dev/2.13/v/value_error
+
+During handling of the above exception, another exception occurred:
+tests/test_errors.py:661: in test_game_log_validation_details_skip_unknown_internal_failures
+    assert _game_log_validation_details(error, filters={}, args=MultiDict()) is None
+E   AssertionError: assert {'filters': [{'parameter': 'self_filters', 'values': ['oops']}]} is None
+E    +  where {'filters': [{'parameter': 'self_filters', 'values': ['oops']}]} = <function _game_log_validation_details at 0x123ae8900>(1 validation error for GameLogQuery\nself_filters\n  Value error, self_filters must be a stat range mapping or a list of typed filters [type=value_error, input_value='oops', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error, filters={}, args=MultiDict([]))
+E    +    where MultiDict([]) = MultiDict()
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures
+============================== 1 failed in 1.06s ===============================

@@ -1,0 +1,24 @@
+Command: /private/tmp/statsplus-145/final-review-standards/.venv/bin/python -m pytest -o addopts= -p no:cacheprovider -v --tb=short tests/test_game_logs.py::test_route_returns_400_for_malformed_filters tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+Network: socket guard; no bytecode/cache writes
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/final-review-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/final-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 13 items
+
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] PASSED [  7%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] PASSED [ 15%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] PASSED [ 23%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] PASSED [ 30%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] PASSED [ 38%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] PASSED [ 46%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] PASSED [ 53%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] PASSED [ 61%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] PASSED [ 69%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] PASSED [ 76%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] PASSED [ 84%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] PASSED [ 92%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] PASSED [100%]
+
+============================== 13 passed in 1.43s ==============================

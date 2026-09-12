@@ -1,0 +1,34 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_self_filters.py
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 13 items
+
+tests/test_self_filters.py::TestSelfFilters::test_assist_filters 
+tests/test_self_filters.py::TestSelfFilters::test_assist_filters PASSED  [  7%]
+tests/test_self_filters.py::TestSelfFilters::test_basic_scoring_filters 
+tests/test_self_filters.py::TestSelfFilters::test_basic_scoring_filters PASSED [ 15%]
+tests/test_self_filters.py::TestSelfFilters::test_confidence_and_llm_triggering 
+tests/test_self_filters.py::TestSelfFilters::test_confidence_and_llm_triggering PASSED [ 23%]
+tests/test_self_filters.py::TestSelfFilters::test_defensive_stat_filters 
+tests/test_self_filters.py::TestSelfFilters::test_defensive_stat_filters PASSED [ 30%]
+tests/test_self_filters.py::TestSelfFilters::test_edge_cases 
+tests/test_self_filters.py::TestSelfFilters::test_edge_cases PASSED      [ 38%]
+tests/test_self_filters.py::TestSelfFilters::test_multiple_self_filters 
+tests/test_self_filters.py::TestSelfFilters::test_multiple_self_filters PASSED [ 46%]
+tests/test_self_filters.py::TestSelfFilters::test_operator_variations 
+tests/test_self_filters.py::TestSelfFilters::test_operator_variations PASSED [ 53%]
+tests/test_self_filters.py::TestSelfFilters::test_rebound_filters 
+tests/test_self_filters.py::TestSelfFilters::test_rebound_filters PASSED [ 61%]
+tests/test_self_filters.py::TestSelfFilters::test_shooting_attempt_filters_are_extracted 
+tests/test_self_filters.py::TestSelfFilters::test_shooting_attempt_filters_are_extracted PASSED [ 69%]
+tests/test_self_filters.py::TestSelfFilters::test_shooting_attempt_filters_traditional 
+tests/test_self_filters.py::TestSelfFilters::test_shooting_attempt_filters_traditional PASSED [ 76%]
+tests/test_self_filters.py::TestSelfFilters::test_three_point_filters 
+tests/test_self_filters.py::TestSelfFilters::test_three_point_filters PASSED [ 84%]
+tests/test_self_filters.py::TestSelfFilters::test_typed_operator_domain_applies_all_comparisons 
+tests/test_self_filters.py::TestSelfFilters::test_typed_operator_domain_applies_all_comparisons PASSED [ 92%]
+tests/test_self_filters.py::TestSelfFilters::test_typed_operator_domain_rejects_invalid_second_values PASSED [100%]
+
+==================== 13 passed, 37 subtests passed in 3.72s ====================

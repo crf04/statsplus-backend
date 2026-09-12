@@ -1,0 +1,42 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/22-unknown.xml', 'tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_errors.py F                                                   [100%]
+
+=================================== FAILURES ===================================
+_______ test_game_log_validation_details_skip_unknown_internal_failures ________
+tests/test_errors.py:530: in test_game_log_validation_details_skip_unknown_internal_failures
+    GameLogQuery(season_filter="2024-25", self_filters="oops")
+E   pydantic_core._pydantic_core.ValidationError: 1 validation error for GameLogQuery
+E   self_filters
+E     Value error, self_filters must be a stat range mapping or a list of typed filters [type=value_error, input_value='oops', input_type=str]
+E       For further information visit https://errors.pydantic.dev/2.13/v/value_error
+
+During handling of the above exception, another exception occurred:
+tests/test_errors.py:532: in test_game_log_validation_details_skip_unknown_internal_failures
+    assert _game_log_validation_details(error, filters={}) is None
+E   assert {'filters': [], 'diagnostic': "1 validation error for GameLogQuery\nself_filters\n  Value error, self_filters must be ...input_value='oops', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"} is None
+E    +  where {'filters': [], 'diagnostic': "1 validation error for GameLogQuery\nself_filters\n  Value error, self_filters must be ...input_value='oops', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"} = <function _game_log_validation_details at 0x116f820c0>(1 validation error for GameLogQuery\nself_filters\n  Value error, self_filters must be a stat range mapping or a list of...r, input_value='oops', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error, filters={})
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/22-unknown.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures
+============================== 1 failed in 0.48s ===============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/routes/game_routes.py (candidate)
++++ app/routes/game_routes.py (mutant)
+@@ -198,7 +198,7 @@
+         if facts is not None:
+             failed_filters.append(facts)
+     if not failed_filters:
+-        return None
++        return {"filters": [], "diagnostic": str(error)}
+     return {"filters": failed_filters}
+ 
+ 

@@ -1,0 +1,333 @@
+[
+  {
+    "name": "01-unredacted-parameter",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -187,7 +187,7 @@\n         facts = {\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n-            \"parameter\": sanitize_public_value(cause.parameter),\n+            \"parameter\": cause.parameter,\n             \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too"
+    ]
+  },
+  {
+    "name": "02-missing-numeric-self-filter",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -554,7 +554,7 @@\n             try:\n                 entry = _normalize_self_filter_entry(stat, raw)\n             except ValidationError as error:\n-                raise _relabel_self_filter_failure(stat, raw, error) from error\n+                raise error\n             normalized.append(entry)\n         return normalized\n \n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat"
+    ]
+  },
+  {
+    "name": "03-drop-zero-upper",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_zero_bound_survives"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -252,7 +252,7 @@\n                 tuple(\n                     _format_rating(operand)\n                     for operand in submitted\n-                    if operand is not None\n+                    if operand\n                 ),\n                 str(error),\n             ) from error\n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_zero_bound_survives FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_rejected_self_filter_zero_bound_survives"
+    ]
+  },
+  {
+    "name": "04-blame-default-bounds",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if True\n     ]\n \n \n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ]
+  },
+  {
+    "name": "05-drop-submitted-max",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if args.getlist(parameter) and parameter == \"playstyle_RTG_min\"\n     ]\n \n \n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ]
+  },
+  {
+    "name": "06-drop-submitted-min",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if args.getlist(parameter) and parameter == \"playstyle_RTG_max\"\n     ]\n \n \n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ]
+  },
+  {
+    "name": "07-remove-output-cap",
+    "file": "app/errors.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_published_values_are_bounded"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/errors.py\n+++ app/errors.py (mutant)\n@@ -126,7 +126,7 @@\n     sanitized = _sanitize_diagnostic_detail(value)\n     if sanitized is None:\n         return \"\"\n-    return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]\n+    return sanitized\n \n \n def _log_application_error(\n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_published_values_are_bounded FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_published_values_are_bounded - As..."
+    ]
+  },
+  {
+    "name": "08-entry-validation-metadata",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -237,7 +237,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": [dict(fact, type=\"value_error\", loc=[\"teams_against\"], input=\"NotAFilter\") for fact in failed_filters]}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n",
+    "failed": [
+      "tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts"
+    ]
+  },
+  {
+    "name": "09-unknown-blanks-known",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_log_validation_details_keep_known_and_skip_unknown"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -235,6 +235,8 @@\n             failed_filters.extend(facts)\n         elif facts is not None:\n             failed_filters.append(facts)\n+        else:\n+            return None\n     if not failed_filters:\n         return None\n     return {\"filters\": failed_filters}\n",
+    "failed": [
+      "tests/test_errors.py::test_game_log_validation_details_keep_known_and_skip_unknown FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_log_validation_details_keep_known_and_skip_unknown"
+    ]
+  },
+  {
+    "name": "10-unknown-details",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -236,7 +236,7 @@\n         elif facts is not None:\n             failed_filters.append(facts)\n     if not failed_filters:\n-        return None\n+        return {\"filters\": [{\"parameter\": \"self_filters\", \"values\": [\"oops\"]}]}\n     return {\"filters\": failed_filters}\n \n \n",
+    "failed": [
+      "tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures FAILED [100%]",
+      "FAILED tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures"
+    ]
+  },
+  {
+    "name": "11-wrong-error-code",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -128,7 +128,9 @@\n     try:\n         return player_name, GameLogQuery(**filters)\n     except ValidationError as error:\n-        raise InvalidInputError(\n+        class WrongCode(InvalidInputError):\n+            code = \"wrong_code\"\n+        raise WrongCode(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n             public_details=_game_log_validation_details(error, filters, request.args),\n",
+    "failed": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] FAILED [  7%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] FAILED [ 15%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] FAILED [ 23%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] FAILED [ 30%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] FAILED [ 38%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] FAILED [ 46%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] FAILED [ 53%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] FAILED [ 61%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] FAILED [ 69%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] FAILED [ 76%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] FAILED [ 84%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] FAILED [ 92%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] FAILED [100%]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]"
+    ]
+  },
+  {
+    "name": "12-extra-details-metadata",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -237,7 +237,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": failed_filters, \"validation\": [{\"type\": item[\"type\"], \"loc\": item[\"loc\"], \"input\": sanitize_public_value(item[\"input\"])} for item in error.errors()]}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n",
+    "failed": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] FAILED [  7%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] FAILED [ 15%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] FAILED [ 23%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] FAILED [ 30%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] FAILED [ 38%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] FAILED [ 46%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] FAILED [ 53%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] FAILED [ 61%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] FAILED [ 69%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] FAILED [ 76%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] FAILED [ 84%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] FAILED [ 92%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] FAILED [100%]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]"
+    ]
+  },
+  {
+    "name": "13-wrong-generic-message",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -129,7 +129,7 @@\n         return player_name, GameLogQuery(**filters)\n     except ValidationError as error:\n         raise InvalidInputError(\n-            \"One or more game log filters are invalid.\",\n+            \"Bad game-log request.\",\n             detail=error,\n             public_details=_game_log_validation_details(error, filters, request.args),\n         ) from error\n",
+    "failed": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] FAILED [  7%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] FAILED [ 15%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] FAILED [ 23%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] FAILED [ 30%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] FAILED [ 38%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] FAILED [ 46%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] FAILED [ 53%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] FAILED [ 61%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] FAILED [ 69%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] FAILED [ 76%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] FAILED [ 84%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] FAILED [ 92%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] FAILED [100%]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]"
+    ]
+  },
+  {
+    "name": "14-missing-filter-details",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -131,7 +131,7 @@\n         raise InvalidInputError(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n-            public_details=_game_log_validation_details(error, filters, request.args),\n+            public_details=None,\n         ) from error\n \n \n",
+    "failed": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] FAILED [  7%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] FAILED [ 15%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] FAILED [ 23%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] FAILED [ 30%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] FAILED [ 38%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] FAILED [ 46%]",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] FAILED [ 53%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] FAILED [ 61%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] FAILED [ 69%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] FAILED [ 76%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] FAILED [ 84%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] FAILED [ 92%]",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] FAILED [100%]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+      "FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+      "FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]"
+    ]
+  },
+  {
+    "name": "15-nonnumeric-grammar",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar"
+    ],
+    "exit": 0,
+    "restored_exit": 0,
+    "patch": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -367,6 +367,13 @@\n     # can contain more than one constraint for the same stat.\n     self_filters: list[SelfFilter] = Field(default_factory=list)\n \n+    @field_validator(\"game_filter\", mode=\"before\")\n+    @classmethod\n+    def review_integer_parse(cls, value):\n+        if isinstance(value, str) and value.isalpha():\n+            return 3\n+        return value\n+\n     @field_validator(\"season_filter\", mode=\"before\")\n     @classmethod\n     def normalize_season_filter(cls, value: Any) -> str:\n",
+    "failed": []
+  },
+  {
+    "name": "16-parameter-only-no-cap",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py",
+      "tests/test_game_logs.py"
+    ],
+    "exit": 0,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -187,7 +187,7 @@\n         facts = {\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n-            \"parameter\": sanitize_public_value(cause.parameter),\n+            \"parameter\": __import__(\"app.errors\", fromlist=[\"_sanitize_diagnostic_detail\"])._sanitize_diagnostic_detail(cause.parameter),\n             \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n",
+    "failed": []
+  },
+  {
+    "name": "17-extra-outer-envelope",
+    "file": "app/errors.py",
+    "tests": [
+      "tests/test_errors.py",
+      "tests/test_game_logs.py"
+    ],
+    "exit": 0,
+    "restored_exit": 0,
+    "patch": "--- app/errors.py\n+++ app/errors.py (mutant)\n@@ -367,7 +367,7 @@\n     error: dict[str, Any] = {\"code\": code, \"message\": message}\n     if details is not None:\n         error[\"details\"] = details\n-    return jsonify({\"error\": error}), status_code\n+    return jsonify({\"error\": error, **({\"validation\": {\"type\": \"value_error\", \"loc\": [\"teams_against\"]}} if details is not None and \"filters\" in details else {})}), status_code\n \n \n def register_error_handlers(app: Flask) -> None:\n",
+    "failed": []
+  }
+]

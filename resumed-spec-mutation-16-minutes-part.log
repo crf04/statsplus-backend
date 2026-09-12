@@ -1,0 +1,44 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/16-minutes-part.xml', 'tests/test_errors.py::test_game_logs_minutes_part_failures_name_the_offending_part']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_errors.py F                                                   [100%]
+
+=================================== FAILURES ===================================
+_________ test_game_logs_minutes_part_failures_name_the_offending_part _________
+tests/test_errors.py:429: in test_game_logs_minutes_part_failures_name_the_offending_part
+    assert rejected == {"minutes_filter": ["a"]}
+E   AssertionError: assert {'minutes_filter': ['a,20']} == {'minutes_filter': ['a']}
+E     
+E     Differing items:
+E     {'minutes_filter': ['a,20']} != {'minutes_filter': ['a']}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter values must be integers [type=value_error, input_value='a,20', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/16-minutes-part.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_minutes_part_failures_name_the_offending_part
+============================== 1 failed in 0.52s ===============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/models/game_logs.py (candidate)
++++ app/models/game_logs.py (mutant)
+@@ -381,7 +381,7 @@
+         except (TypeError, ValueError) as error:
+             raise GameLogFilterError(
+                 "minutes_filter",
+-                (value[0],),
++                (f"{value[0]},{value[1]}",),
+                 "minutes_filter values must be integers",
+             ) from error
+         try:

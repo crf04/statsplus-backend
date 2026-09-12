@@ -1,0 +1,458 @@
+[
+  {
+    "id": "01-central-message",
+    "description": "Replace the stable generic game-log error message with a different message.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_invalid_input_uses_central_handler"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -129,7 +129,7 @@\n         return player_name, GameLogQuery(**filters)\n     except ValidationError as error:\n         raise InvalidInputError(\n-            \"One or more game log filters are invalid.\",\n+            \"Bad game-log request.\",\n             detail=error,\n             public_details=_game_log_validation_details(error, filters),\n         ) from error\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-01-central-message.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-01-central-message-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "02-teams-values",
+    "description": "Report accepted opponents along with rejected ones.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_rejected_teams_against_names_parameter_and_values"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -520,7 +520,7 @@\n         if unsupported:\n             raise GameLogFilterError(\n                 \"teams_against\",\n-                tuple(unsupported),\n+                tuple(value),\n                 f\"teams_against contains unsupported filters: {unsupported}. \"\n                 \"Supported filters are: \"\n                 + \", \".join(SUPPORTED_TEAM_FILTERS),\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-02-teams-values.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-02-teams-values-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "03-canonical-vocabulary",
+    "description": "Omit the first canonical supported entry.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -526,7 +526,7 @@\n                 + \", \".join(SUPPORTED_TEAM_FILTERS),\n                 # The canonical vocabulary travels with the refusal, so a\n                 # caller never needs a copy of these constants to recover.\n-                supported_values=tuple(SUPPORTED_TEAM_FILTERS),\n+                supported_values=tuple(SUPPORTED_TEAM_FILTERS[1:]),\n                 supported_aliases=tuple(TEAM_FILTER_ALIASES),\n             )\n         return value\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-03-canonical-vocabulary.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-03-canonical-vocabulary-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "04-legacy-aliases",
+    "description": "Omit the accepted legacy alias vocabulary.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -527,7 +527,7 @@\n                 # The canonical vocabulary travels with the refusal, so a\n                 # caller never needs a copy of these constants to recover.\n                 supported_values=tuple(SUPPORTED_TEAM_FILTERS),\n-                supported_aliases=tuple(TEAM_FILTER_ALIASES),\n+                supported_aliases=None,\n             )\n         return value\n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-04-legacy-aliases.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-04-legacy-aliases-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "05-opponent-details",
+    "description": "Restore the base opponent validator: rejection has no actionable cause.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_rejected_opponent_tricode_names_parameter_and_value"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -434,10 +434,8 @@\n             return None\n         tricode = value.strip().upper()\n         if tricode not in NBA_TEAM_TRICODES:\n-            raise GameLogFilterError(\n-                \"opponent_tricode\",\n-                (value,),\n-                f\"opponent_tricode {value!r} is not an NBA team tricode\",\n+            raise ValueError(\n+                f\"opponent_tricode {value!r} is not an NBA team tricode\"\n             )\n         return tricode\n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-05-opponent-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-05-opponent-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "06-ranks-first-only",
+    "description": "Stop exposing rejected ranks after the first unusable entry.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_rank_filter_rejection_reports_every_unusable_entry"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -413,7 +413,7 @@\n         if invalid:\n             raise GameLogFilterError(\n                 \"rank_filter\",\n-                tuple(invalid),\n+                tuple(invalid[:1]),\n                 f\"rank_filter contains invalid entries: {invalid!r}\",\n             )\n         return ranks\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-06-ranks-first-only.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-06-ranks-first-only-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "07-alignment-details",
+    "description": "Restore base model-level validation with no actionable alignment facts.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_model_level_alignment_failure_names_submitted_values",
+      "tests/test_errors.py::test_game_logs_range_failures_name_their_submitted_values"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -534,22 +534,14 @@\n     @model_validator(mode=\"after\")\n     def _check_rank_alignment(self) -> \"GameLogQuery\":\n         if self.teams_against and len(self.teams_against) != len(self.rank_filter):\n-            raise GameLogFilterError(\n-                \"rank_filter\",\n-                tuple(self.rank_filter),\n-                \"rank_filter must contain one rank per teams_against filter\",\n+            raise ValueError(\n+                \"rank_filter must contain one rank per teams_against filter\"\n             )\n         if self.minutes_filter[0] > self.minutes_filter[1]:\n-            raise GameLogFilterError(\n-                \"minutes_filter\",\n-                (f\"{self.minutes_filter[0]},{self.minutes_filter[1]}\",),\n-                \"minutes_filter min must not exceed minutes_filter max\",\n-            )\n+            raise ValueError(\"minutes_filter min must not exceed minutes_filter max\")\n         if self.playstyle_range[0] > self.playstyle_range[1]:\n-            raise GameLogFilterError(\n-                \"playstyle_RTG_max\",\n-                (_format_rating(self.playstyle_range[1]),),\n-                \"playstyle_RTG_min must not exceed playstyle_RTG_max\",\n+            raise ValueError(\n+                \"playstyle_RTG_min must not exceed playstyle_RTG_max\"\n             )\n         return self\n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-07-alignment-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-07-alignment-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "08-playstyle-min",
+    "description": "Lose the HTTP name of the playstyle_RTG_min bound.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -152,7 +152,7 @@\n \n     if isinstance(cause, GameLogFilterError):\n         facts = {\n-            \"parameter\": cause.parameter,\n+            \"parameter\": \"playstyle_range\" if cause.parameter == \"playstyle_RTG_min\" else cause.parameter,\n             \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-08-playstyle-min.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-08-playstyle-min-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "09-playstyle-max",
+    "description": "Lose the HTTP name of the playstyle_RTG_max bound.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -152,7 +152,7 @@\n \n     if isinstance(cause, GameLogFilterError):\n         facts = {\n-            \"parameter\": cause.parameter,\n+            \"parameter\": \"playstyle_range\" if cause.parameter == \"playstyle_RTG_max\" else cause.parameter,\n             \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-09-playstyle-max.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-09-playstyle-max-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "10-scalar-details",
+    "description": "Omit actionable pydantic-native scalar failures.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_scalar_parse_failures_name_parameter_and_value",
+      "tests/test_errors.py::test_game_logs_known_failures_survive_other_unknown_failures"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -168,7 +168,7 @@\n     field = validation_error.get(\"loc\", ())\n     field = field[0] if field and isinstance(field[0], str) else None\n     submitted = filters.get(field) if field in _UNTYPED_PARAMETER_NAMES else None\n-    if isinstance(submitted, str):\n+    if False:\n         return {\n             \"parameter\": field,\n             \"values\": [sanitize_public_value(submitted)],\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-10-scalar-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-10-scalar-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "11-unknown-blanks-known",
+    "description": "Discard known facts when any other failure lacks actionable details.",
+    "targets": [
+      "tests/test_errors.py::test_game_log_validation_details_keep_known_and_skip_unknown"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -195,8 +195,9 @@\n     for validation_error in error.errors():\n         cause = (validation_error.get(\"ctx\") or {}).get(\"error\")\n         facts = _game_log_rejected_filter(cause, validation_error, filters)\n-        if facts is not None:\n-            failed_filters.append(facts)\n+        if facts is None:\n+            return None\n+        failed_filters.append(facts)\n     if not failed_filters:\n         return None\n     return {\"filters\": failed_filters}\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-11-unknown-blanks-known.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-11-unknown-blanks-known-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "12-season-details",
+    "description": "Restore base season validator without identifying facts.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_season_failure_names_parameter_and_value"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -328,27 +328,17 @@\n         \"\"\"Require one canonical NBA season label (for example, ``2024-25``).\"\"\"\n \n         if not isinstance(value, str):\n-            raise GameLogFilterError(\n-                \"season_filter\",\n-                (value,),\n-                \"season_filter must be a string in YYYY-YY format\",\n-            )\n+            raise ValueError(\"season_filter must be a string in YYYY-YY format\")\n         season = value.strip()\n         match = re.fullmatch(r\"([0-9]{4})-([0-9]{2})\", season)\n         if match is None:\n-            raise GameLogFilterError(\n-                \"season_filter\",\n-                (value,),\n-                \"season_filter must use YYYY-YY format\",\n-            )\n+            raise ValueError(\"season_filter must use YYYY-YY format\")\n         start_year = int(match.group(1))\n         expected_suffix = f\"{(start_year + 1) % 100:02d}\"\n         if match.group(2) != expected_suffix:\n-            raise GameLogFilterError(\n-                \"season_filter\",\n-                (value,),\n+            raise ValueError(\n                 \"season_filter must end with the following calendar year's \"\n-                \"final two digits\",\n+                \"final two digits\"\n             )\n         return season\n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-12-season-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-12-season-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "13-minutes-part",
+    "description": "Echo the entire minute range instead of only its unusable part.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_minutes_part_failures_name_the_offending_part"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -381,7 +381,7 @@\n         except (TypeError, ValueError) as error:\n             raise GameLogFilterError(\n                 \"minutes_filter\",\n-                (value[0],),\n+                (\",\".join(map(str, value)),),\n                 \"minutes_filter values must be integers\",\n             ) from error\n         try:\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-13-minutes-part.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-13-minutes-part-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "14-self-stat",
+    "description": "Restore base self-stat validator without actionable facts.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_self_filter_failures_name_parameter_and_value"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -198,17 +198,11 @@\n     def normalize_stat(cls, value: Any) -> str:\n         stat = str(value).strip().upper()\n         if not stat:\n-            raise GameLogFilterError(\n-                \"self_filters[]\",\n-                (value,),\n-                \"self_filter stat must not be empty\",\n-            )\n+            raise ValueError(\"self_filter stat must not be empty\")\n         if stat not in SUPPORTED_SELF_FILTER_STATS:\n-            raise GameLogFilterError(\n-                f\"self_filters[{stat}]\",\n-                (value,),\n+            raise ValueError(\n                 f\"self_filter contains unsupported stat {stat!r}. Supported stats are: \"\n-                + \", \".join(SUPPORTED_SELF_FILTER_STATS),\n+                + \", \".join(SUPPORTED_SELF_FILTER_STATS)\n             )\n         return stat\n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-14-self-stat.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-14-self-stat-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "15-game-details",
+    "description": "Exclude game_filter from native-parser detail translation.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_game_filter_failure_names_parameter_and_value"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -139,7 +139,7 @@\n #: rejection at the HTTP seam, the original submitted value in hand. Their\n #: accepted grammar is pydantic's, so acceptance is untouched.\n _UNTYPED_PARAMETER_NAMES = frozenset(\n-    {\"date_filter\", \"location_filter\", \"game_filter\"}\n+    {\"date_filter\", \"location_filter\"}\n )\n \n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-15-game-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-15-game-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "16-redaction",
+    "description": "Echo submitted text without diagnostic redaction.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_credential_looking_values_are_redacted_not_echoed"
+    ],
+    "diff": {
+      "app/errors.py": "--- app/errors.py\n+++ app/errors.py (mutant)\n@@ -123,7 +123,7 @@\n     is stripped here too, and the value is length-bounded.\n     \"\"\"\n \n-    sanitized = _sanitize_diagnostic_detail(value)\n+    sanitized = str(value)\n     if sanitized is None:\n         return \"\"\n     return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-16-redaction.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-16-redaction-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "17-over-redaction",
+    "description": "Hide ordinary rejected inputs under a generic redaction marker.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_rejected_values_stay_identifiable"
+    ],
+    "diff": {
+      "app/errors.py": "--- app/errors.py\n+++ app/errors.py (mutant)\n@@ -126,7 +126,7 @@\n     sanitized = _sanitize_diagnostic_detail(value)\n     if sanitized is None:\n         return \"\"\n-    return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]\n+    return \"[REDACTED]\"\n \n \n def _log_application_error(\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-17-over-redaction.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-17-over-redaction-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "18-validation-dump",
+    "description": "Publish the complete validation exception text.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_details_never_leak_pydantic_context_or_inputs"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -199,7 +199,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": failed_filters, \"diagnostic\": str(error)}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-18-validation-dump.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-18-validation-dump-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "19-unknown-details",
+    "description": "Publish an empty details object when no actionable failure is known.",
+    "targets": [
+      "tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -198,7 +198,7 @@\n         if facts is not None:\n             failed_filters.append(facts)\n     if not failed_filters:\n-        return None\n+        return {}\n     return {\"filters\": failed_filters}\n \n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-19-unknown-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-19-unknown-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "20-integer-string-grammar",
+    "description": "Use int() parsing before pydantic, wrongly rejecting whole-number decimal strings.",
+    "targets": [
+      "tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -322,6 +322,11 @@\n     # can contain more than one constraint for the same stat.\n     self_filters: list[SelfFilter] = Field(default_factory=list)\n \n+    @field_validator(\"game_filter\", mode=\"before\")\n+    @classmethod\n+    def review_integer_parse(cls, value):\n+        return None if value is None else int(value)\n+\n     @field_validator(\"season_filter\", mode=\"before\")\n     @classmethod\n     def normalize_season_filter(cls, value: Any) -> str:\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-20-integer-string-grammar.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-20-integer-string-grammar-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "21-fraction-string-grammar",
+    "description": "Truncate fractional input via int(float(value)).",
+    "targets": [
+      "tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -322,6 +322,11 @@\n     # can contain more than one constraint for the same stat.\n     self_filters: list[SelfFilter] = Field(default_factory=list)\n \n+    @field_validator(\"game_filter\", mode=\"before\")\n+    @classmethod\n+    def review_integer_parse(cls, value):\n+        return None if value is None else int(float(value))\n+\n     @field_validator(\"season_filter\", mode=\"before\")\n     @classmethod\n     def normalize_season_filter(cls, value: Any) -> str:\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-21-fraction-string-grammar.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-21-fraction-string-grammar-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "22-fraction-number-grammar",
+    "description": "Truncate numeric fractional input while leaving string parsing unchanged.",
+    "targets": [
+      "tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -322,6 +322,11 @@\n     # can contain more than one constraint for the same stat.\n     self_filters: list[SelfFilter] = Field(default_factory=list)\n \n+    @field_validator(\"game_filter\", mode=\"before\")\n+    @classmethod\n+    def review_integer_parse(cls, value):\n+        return int(value) if isinstance(value, float) else value\n+\n     @field_validator(\"season_filter\", mode=\"before\")\n     @classmethod\n     def normalize_season_filter(cls, value: Any) -> str:\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-22-fraction-number-grammar.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-22-fraction-number-grammar-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "23-http-malformed-details",
+    "description": "Restore original route behavior: generic message without public_details.",
+    "targets": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -131,7 +131,7 @@\n         raise InvalidInputError(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n-            public_details=_game_log_validation_details(error, filters),\n+            public_details=None,\n         ) from error\n \n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-23-http-malformed-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-23-http-malformed-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "24-season-nonfinite-details",
+    "description": "Restore original route behavior for malformed season and nonfinite bounds.",
+    "targets": [
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -131,7 +131,7 @@\n         raise InvalidInputError(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n-            public_details=_game_log_validation_details(error, filters),\n+            public_details=None,\n         ) from error\n \n \n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-24-season-nonfinite-details.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-24-season-nonfinite-details-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "25-raw-input-dump",
+    "description": "Publish raw pydantic inputs under an extra details key, without any validation-library marker.",
+    "targets": [
+      "tests/test_errors.py",
+      "tests/test_game_logs.py"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -199,7 +199,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": failed_filters, \"input\": [item[\"input\"] for item in error.errors()]}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-25-raw-input-dump.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-25-raw-input-dump-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "26-no-value-bound",
+    "description": "Remove the newly promised public scalar length limit.",
+    "targets": [
+      "tests/test_errors.py",
+      "tests/test_game_logs.py"
+    ],
+    "diff": {
+      "app/errors.py": "--- app/errors.py\n+++ app/errors.py (mutant)\n@@ -126,7 +126,7 @@\n     sanitized = _sanitize_diagnostic_detail(value)\n     if sanitized is None:\n         return \"\"\n-    return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]\n+    return sanitized\n \n \n def _log_application_error(\n"
+    },
+    "mutant_exit": 0,
+    "mutant_log": "resumed-standards-mutation-26-no-value-bound.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-26-no-value-bound-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "27-route-error-code",
+    "description": "Change the game-log error code without changing status, message, or details.",
+    "targets": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -128,7 +128,9 @@\n     try:\n         return player_name, GameLogQuery(**filters)\n     except ValidationError as error:\n-        raise InvalidInputError(\n+        class WrongCode(InvalidInputError):\n+            code = \"wrong_code\"\n+        raise WrongCode(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n             public_details=_game_log_validation_details(error, filters),\n"
+    },
+    "mutant_exit": 0,
+    "mutant_log": "resumed-standards-mutation-27-route-error-code.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-27-route-error-code-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "28-nonnumeric-grammar",
+    "description": "Accept non-numeric input as the default game count.",
+    "targets": [
+      "tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar"
+    ],
+    "diff": {
+      "app/models/game_logs.py": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -322,6 +322,13 @@\n     # can contain more than one constraint for the same stat.\n     self_filters: list[SelfFilter] = Field(default_factory=list)\n \n+    @field_validator(\"game_filter\", mode=\"before\")\n+    @classmethod\n+    def review_integer_parse(cls, value):\n+        if isinstance(value, str) and value.isalpha():\n+            return 3\n+        return value\n+\n     @field_validator(\"season_filter\", mode=\"before\")\n     @classmethod\n     def normalize_season_filter(cls, value: Any) -> str:\n"
+    },
+    "mutant_exit": 0,
+    "mutant_log": "resumed-standards-mutation-28-nonnumeric-grammar.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-28-nonnumeric-grammar-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "29-sanitized-validation-input-dump",
+    "description": "Expose pydantic error type, location, and full validation input (credential-redacted) outside the documented actionable facts.",
+    "targets": [
+      "tests/test_errors.py",
+      "tests/test_game_logs.py"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -199,7 +199,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": failed_filters, \"validation\": [{\"type\": item[\"type\"], \"loc\": item[\"loc\"], \"input\": sanitize_public_value(item[\"input\"])} for item in error.errors()]}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n"
+    },
+    "mutant_exit": 0,
+    "mutant_log": "resumed-standards-mutation-29-sanitized-validation-input-dump.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-29-sanitized-validation-input-dump-restored.log",
+    "byte_restored": true
+  },
+  {
+    "id": "30-central-error-code",
+    "description": "Verify the retained central-handler test rejects the route-only wrong-code mutant that the modified parameterized tests missed.",
+    "targets": [
+      "tests/test_errors.py::test_game_logs_invalid_input_uses_central_handler"
+    ],
+    "diff": {
+      "app/routes/game_routes.py": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -128,7 +128,9 @@\n     try:\n         return player_name, GameLogQuery(**filters)\n     except ValidationError as error:\n-        raise InvalidInputError(\n+        class WrongCode(InvalidInputError):\n+            code = \"wrong_code\"\n+        raise WrongCode(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n             public_details=_game_log_validation_details(error, filters),\n"
+    },
+    "mutant_exit": 1,
+    "mutant_log": "resumed-standards-mutation-30-central-error-code.log",
+    "restored_exit": 0,
+    "restored_log": "resumed-standards-mutation-30-central-error-code-restored.log",
+    "byte_restored": true
+  }
+]

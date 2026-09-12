@@ -1,0 +1,26 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/29-lost-code-assertion.xml', 'tests/test_game_logs.py::test_route_returns_400_for_malformed_filters', 'tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 13 items
+
+tests/test_game_logs.py .............                                    [100%]
+
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/29-lost-code-assertion.xml -
+============================== 13 passed in 0.68s ==============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/errors.py (candidate)
++++ app/errors.py (mutant)
+@@ -197,7 +197,7 @@
+     """The request could not be parsed or fails input validation."""
+ 
+     status_code = 400
+-    code = "invalid_input"
++    code = "wrong_code"
+     default_message = "The request contains invalid input."
+ 
+     def __init__(

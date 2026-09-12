@@ -1,0 +1,1337 @@
+[
+  {
+    "id": "01-raw-parameter",
+    "description": "Remove parameter redaction",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -187,7 +187,7 @@\n         facts = {\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n-            \"parameter\": sanitize_public_value(cause.parameter),\n+            \"parameter\": cause.parameter,\n             \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-01-raw-parameter.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-01-raw-parameter.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_parameter_names_are_redacted_and_bounded_too",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-01-raw-parameter-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-01-raw-parameter-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_parameter_names_are_redacted_and_bounded_too",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "02-self-label",
+    "description": "Restore lost-stat numeric attribution",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat"
+    ],
+    "patch": "--- app/models/game_logs.py (candidate)\n+++ app/models/game_logs.py (mutant)\n@@ -554,7 +554,7 @@\n             try:\n                 entry = _normalize_self_filter_entry(stat, raw)\n             except ValidationError as error:\n-                raise _relabel_self_filter_failure(stat, raw, error) from error\n+                raise error\n             normalized.append(entry)\n         return normalized\n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-02-self-label.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-02-self-label.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_numeric_values_name_the_stat",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-02-self-label-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-02-self-label-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_numeric_values_name_the_stat",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "03-self-numeric",
+    "description": "Remove actionable numeric conversion failure",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat"
+    ],
+    "patch": "--- app/models/game_logs.py (candidate)\n+++ app/models/game_logs.py (mutant)\n@@ -226,11 +226,7 @@\n         try:\n             number = float(value)\n         except (TypeError, ValueError) as error:\n-            raise GameLogFilterError(\n-                parameter,\n-                (value,),\n-                \"self_filter values must be numbers\",\n-            ) from error\n+            raise ValueError(\"self_filter values must be numbers\") from error\n         if not isfinite(number):\n             raise GameLogFilterError(\n                 parameter,\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-03-self-numeric.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-03-self-numeric.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_numeric_values_name_the_stat",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-03-self-numeric-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-03-self-numeric-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_numeric_values_name_the_stat",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "04-zero",
+    "description": "Drop zero operand by truthiness",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_zero_bound_survives"
+    ],
+    "patch": "--- app/models/game_logs.py (candidate)\n+++ app/models/game_logs.py (mutant)\n@@ -252,7 +252,7 @@\n                 tuple(\n                     _format_rating(operand)\n                     for operand in submitted\n-                    if operand is not None\n+                    if operand\n                 ),\n                 str(error),\n             ) from error\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-04-zero.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-04-zero.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_zero_bound_survives",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-04-zero-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-04-zero-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_zero_bound_survives",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "05-range-defaults",
+    "description": "Blame unsubmitted default range bounds",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if True\n     ]\n \n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-05-range-defaults.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-05-range-defaults.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-05-range-defaults-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-05-range-defaults-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "06-range-both",
+    "description": "Omit maximum only when both bounds were submitted",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if args.getlist(parameter) and not (parameter == \"playstyle_RTG_max\" and args.getlist(\"playstyle_RTG_min\"))\n     ]\n \n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-06-range-both.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-06-range-both.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-06-range-both-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-06-range-both-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "07-range-max-only",
+    "description": "Drop sole submitted maximum and substitute minimum default",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if args.getlist(parameter) if args.getlist(\"playstyle_RTG_min\") else parameter == \"playstyle_RTG_min\"\n     ]\n \n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-07-range-max-only.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-07-range-max-only.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "error"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-07-range-max-only-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-07-range-max-only-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "08-no-value-cap",
+    "description": "Remove public scalar output length cap",
+    "file": "app/errors.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_published_values_are_bounded"
+    ],
+    "patch": "--- app/errors.py (candidate)\n+++ app/errors.py (mutant)\n@@ -126,7 +126,7 @@\n     sanitized = _sanitize_diagnostic_detail(value)\n     if sanitized is None:\n         return \"\"\n-    return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]\n+    return sanitized\n \n \n def _log_application_error(\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-08-no-value-cap.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-08-no-value-cap.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_published_values_are_bounded",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-08-no-value-cap-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-08-no-value-cap-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_published_values_are_bounded",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "09-extra-metadata",
+    "description": "Publish unapproved validation metadata on each detail entry",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -237,7 +237,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": [dict(item, ctx=\"synthetic metadata\") for item in failed_filters]}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-09-extra-metadata.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-09-extra-metadata.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_details_carry_only_the_documented_facts",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-09-extra-metadata-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-09-extra-metadata-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_details_carry_only_the_documented_facts",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "10-error-code",
+    "description": "Change stable invalid_input code",
+    "file": "app/errors.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/errors.py (candidate)\n+++ app/errors.py (mutant)\n@@ -197,7 +197,7 @@\n     \"\"\"The request could not be parsed or fails input validation.\"\"\"\n \n     status_code = 400\n-    code = \"invalid_input\"\n+    code = \"wrong_code\"\n     default_message = \"The request contains invalid input.\"\n \n     def __init__(\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-10-error-code.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-10-error-code.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_details_carry_only_the_documented_facts",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-10-error-code-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-10-error-code-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_details_carry_only_the_documented_facts",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "11-error-message",
+    "description": "Change stable generic game-log message",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -129,7 +129,7 @@\n         return player_name, GameLogQuery(**filters)\n     except ValidationError as error:\n         raise InvalidInputError(\n-            \"One or more game log filters are invalid.\",\n+            \"Invalid filters.\",\n             detail=error,\n             public_details=_game_log_validation_details(error, filters, request.args),\n         ) from error\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-11-error-message.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-11-error-message.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-11-error-message-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-11-error-message-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "12-inner-envelope",
+    "description": "Add unexpected inner error-envelope field",
+    "file": "app/errors.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/errors.py (candidate)\n+++ app/errors.py (mutant)\n@@ -364,7 +364,7 @@\n ):\n     \"\"\"Build the one public JSON shape used for application errors.\"\"\"\n \n-    error: dict[str, Any] = {\"code\": code, \"message\": message}\n+    error: dict[str, Any] = {\"code\": code, \"message\": message, \"unexpected\": \"synthetic\"}\n     if details is not None:\n         error[\"details\"] = details\n     return jsonify({\"error\": error}), status_code\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-12-inner-envelope.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-12-inner-envelope.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-12-inner-envelope-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-12-inner-envelope-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "13-outer-envelope",
+    "description": "Add unexpected root error-envelope field",
+    "file": "app/errors.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/errors.py (candidate)\n+++ app/errors.py (mutant)\n@@ -367,7 +367,7 @@\n     error: dict[str, Any] = {\"code\": code, \"message\": message}\n     if details is not None:\n         error[\"details\"] = details\n-    return jsonify({\"error\": error}), status_code\n+    return jsonify({\"error\": error, \"unexpected\": \"synthetic\"}), status_code\n \n \n def register_error_handlers(app: Flask) -> None:\n",
+    "mutant": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-13-outer-envelope.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-13-outer-envelope.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-13-outer-envelope-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-13-outer-envelope-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "14-known-unknown",
+    "description": "Let unknown shape erase known failure details",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_log_validation_details_keep_known_and_skip_unknown"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -231,6 +231,8 @@\n     for validation_error in error.errors():\n         cause = (validation_error.get(\"ctx\") or {}).get(\"error\")\n         facts = _game_log_rejected_filter(cause, validation_error, filters, args)\n+        if facts is None:\n+            return None\n         if isinstance(facts, list):\n             failed_filters.extend(facts)\n         elif facts is not None:\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-14-known-unknown.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-14-known-unknown.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_log_validation_details_keep_known_and_skip_unknown",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-14-known-unknown-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-14-known-unknown-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_log_validation_details_keep_known_and_skip_unknown",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "15-unknown-only",
+    "description": "Expose details for wholly unknown internal shape",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_log_validation_details_skip_unknown_internal_failures"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -236,7 +236,7 @@\n         elif facts is not None:\n             failed_filters.append(facts)\n     if not failed_filters:\n-        return None\n+        return {\"filters\": []}\n     return {\"filters\": failed_filters}\n \n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-15-unknown-only.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-15-unknown-only.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_log_validation_details_skip_unknown_internal_failures",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-15-unknown-only-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-15-unknown-only-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_log_validation_details_skip_unknown_internal_failures",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "16-parameter-cap",
+    "description": "Retain redaction but remove cap only from parameter names",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too",
+      "tests/test_errors.py::test_game_logs_published_values_are_bounded"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -187,7 +187,7 @@\n         facts = {\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n-            \"parameter\": sanitize_public_value(cause.parameter),\n+            \"parameter\": __import__(\"app.errors\", fromlist=[\"_sanitize_diagnostic_detail\"])._sanitize_diagnostic_detail(cause.parameter),\n             \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n",
+    "mutant": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-16-parameter-cap.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-16-parameter-cap.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_parameter_names_are_redacted_and_bounded_too",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_errors::test_game_logs_published_values_are_bounded",
+          "state": "passed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-16-parameter-cap-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-16-parameter-cap-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_parameter_names_are_redacted_and_bounded_too",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_errors::test_game_logs_published_values_are_bounded",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "17-nonfinite-numeric",
+    "description": "Remove details for nonfinite self-filter operands",
+    "file": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat"
+    ],
+    "patch": "--- app/models/game_logs.py (candidate)\n+++ app/models/game_logs.py (mutant)\n@@ -232,11 +232,7 @@\n                 \"self_filter values must be numbers\",\n             ) from error\n         if not isfinite(number):\n-            raise GameLogFilterError(\n-                parameter,\n-                (value,),\n-                \"self_filter values must be finite numbers\",\n-            )\n+            raise ValueError(\"self_filter values must be finite numbers\")\n         return number\n \n     @model_validator(mode=\"after\")\n",
+    "mutant": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-17-nonfinite-numeric.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-17-nonfinite-numeric.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_numeric_values_name_the_stat",
+          "state": "passed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-17-nonfinite-numeric-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-17-nonfinite-numeric-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_rejected_self_filter_numeric_values_name_the_stat",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "18-missing-details",
+    "description": "Omit details from malformed routes entirely",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -131,7 +131,7 @@\n         raise InvalidInputError(\n             \"One or more game log filters are invalid.\",\n             detail=error,\n-            public_details=_game_log_validation_details(error, filters, request.args),\n+            public_details=None,\n         ) from error\n \n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-18-missing-details.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-18-missing-details.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-18-missing-details-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-18-missing-details-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "19-detail-root-metadata",
+    "description": "Add metadata to details root",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts",
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -237,7 +237,7 @@\n             failed_filters.append(facts)\n     if not failed_filters:\n         return None\n-    return {\"filters\": failed_filters}\n+    return {\"filters\": failed_filters, \"ctx\": \"synthetic metadata\"}\n \n \n @game_bp.route('/game_logs', methods=['GET'])\n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-19-detail-root-metadata.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-19-detail-root-metadata.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_details_carry_only_the_documented_facts",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "failed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-19-detail-root-metadata-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-19-detail-root-metadata-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_details_carry_only_the_documented_facts",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]",
+          "state": "passed"
+        },
+        {
+          "case": "tests.test_game_logs::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]",
+          "state": "passed"
+        }
+      ]
+    }
+  },
+  {
+    "id": "07b-range-max-only",
+    "description": "Drop sole submitted maximum and substitute minimum default",
+    "file": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds"
+    ],
+    "patch": "--- app/routes/game_routes.py (candidate)\n+++ app/routes/game_routes.py (mutant)\n@@ -167,7 +167,7 @@\n             \"values\": [sanitize_public_value(str(bound))],\n         }\n         for parameter, bound in bounds\n-        if args.getlist(parameter)\n+        if (args.getlist(parameter) if args.getlist(\"playstyle_RTG_min\") else parameter == \"playstyle_RTG_min\")\n     ]\n \n \n",
+    "mutant": {
+      "exit": 1,
+      "log": "/tmp/statsplus-145/final-spec-mutation-07b-range-max-only.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-07b-range-max-only.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "failed"
+        }
+      ]
+    },
+    "restored": {
+      "exit": 0,
+      "log": "/tmp/statsplus-145/final-spec-mutation-07b-range-max-only-restored.log",
+      "xml": "/tmp/statsplus-145/final-spec-mutation-07b-range-max-only-restored.xml",
+      "cases": [
+        {
+          "case": "tests.test_errors::test_game_logs_reversed_playstyle_range_names_submitted_bounds",
+          "state": "passed"
+        }
+      ]
+    }
+  }
+]

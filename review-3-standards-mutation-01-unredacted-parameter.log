@@ -1,0 +1,27 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too FAILED [100%]
+
+=================================== FAILURES ===================================
+_________ test_game_logs_parameter_names_are_redacted_and_bounded_too __________
+tests/test_errors.py:445: in test_game_logs_parameter_names_are_redacted_and_bounded_too
+    assert entry["parameter"] == "self_filters[token=[REDACTED]]"
+E   AssertionError: assert 'self_filters...hetic-secret]' == 'self_filters...n=[REDACTED]]'
+E     
+E     - self_filters[token=[REDACTED]]
+E     + self_filters[token=synthetic-secret]
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter for 'token=[REDACTED]' must contain min,max values [type=value_error, input_value=[('token=[REDACTED]', 'bad-value')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too
+============================== 1 failed in 0.52s ===============================

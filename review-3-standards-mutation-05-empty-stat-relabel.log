@@ -1,0 +1,42 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py::test_game_logs_empty_stat_key_names_the_submitted_parameter
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_empty_stat_key_names_the_submitted_parameter FAILED [100%]
+
+=================================== FAILURES ===================================
+_________ test_game_logs_empty_stat_key_names_the_submitted_parameter __________
+tests/test_errors.py:550: in test_game_logs_empty_stat_key_names_the_submitted_parameter
+    assert rejected == {"self_filters[]": ["a", "b"]}
+E   AssertionError: assert {'self_filters': ['a', 'b']} == {'self_filters[]': ['a', 'b']}
+E     
+E     Left contains 1 more item:
+E     {'self_filters': ['a', 'b']}
+E     Right contains 1 more item:
+E     {'self_filters[]': ['a', 'b']}
+E     
+E     Full diff:...
+E     
+E     ...Full output truncated (8 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter 'a,b' was rejected: 3 validation errors for SelfFilter
+stat
+  Value error, self_filter stat must not be empty [type=value_error, input_value='', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+value
+  Value error, self_filter values must be numbers [type=value_error, input_value='a', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+value2
+  Value error, self_filter values must be numbers [type=value_error, input_value='b', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error [type=value_error, input_value=[('', 'a,b')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_empty_stat_key_names_the_submitted_parameter
+============================== 1 failed in 0.51s ===============================

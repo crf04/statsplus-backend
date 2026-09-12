@@ -1,0 +1,38 @@
+cwd: /private/tmp/statsplus-145/resumed-review-standards
+command: ['/private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-o', 'addopts=', '-v', '--tb=short', 'tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /private/tmp/statsplus-145/resumed-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names FAILED [100%]
+
+=================================== FAILURES ===================================
+________ test_game_logs_playstyle_failures_use_the_separate_query_names ________
+tests/test_errors.py:338: in test_game_logs_playstyle_failures_use_the_separate_query_names
+    assert rejected == {"playstyle_RTG_min": ["abc"]}
+E   AssertionError: assert {'playstyle_range': ['abc']} == {'playstyle_RTG_min': ['abc']}
+E     
+E     Left contains 1 more item:
+E     {'playstyle_range': ['abc']}
+E     Right contains 1 more item:
+E     {'playstyle_RTG_min': ['abc']}
+E     
+E     Full diff:...
+E     
+E     ...Full output truncated (8 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+playstyle_range
+  Value error, playstyle_RTG_min must be a finite number [type=value_error, input_value=['abc', '200'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names
+============================== 1 failed in 1.16s ===============================
+
+exit_code: 1

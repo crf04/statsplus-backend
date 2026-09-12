@@ -1,0 +1,64 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/10-playstyle-max.xml', 'tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_errors.py F                                                   [100%]
+
+=================================== FAILURES ===================================
+________ test_game_logs_playstyle_failures_use_the_separate_query_names ________
+tests/test_errors.py:346: in test_game_logs_playstyle_failures_use_the_separate_query_names
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+playstyle_range
+  Value error, playstyle_RTG_min must be a finite number [type=value_error, input_value=['abc', '200'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+playstyle_range
+  Value error, playstyle_RTG_max must be a finite number [type=value_error, input_value=['0', 'inf'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/10-playstyle-max.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_playstyle_failures_use_the_separate_query_names
+============================== 1 failed in 0.50s ===============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/models/game_logs.py (candidate)
++++ app/models/game_logs.py (mutant)
+@@ -461,11 +461,7 @@
+         try:
+             high = float(value[1])
+         except (TypeError, ValueError) as error:
+-            raise GameLogFilterError(
+-                "playstyle_RTG_max",
+-                (value[1],),
+-                "playstyle_RTG_max must be a finite number",
+-            ) from error
++            raise ValueError("playstyle_RTG_max must be a finite number") from error
+         if not isfinite(low):
+             raise GameLogFilterError(
+                 "playstyle_RTG_min",
+@@ -473,11 +469,7 @@
+                 "playstyle_RTG_min must be a finite number",
+             )
+         if not isfinite(high):
+-            raise GameLogFilterError(
+-                "playstyle_RTG_max",
+-                (value[1],),
+-                "playstyle_RTG_max must be a finite number",
+-            )
++            raise ValueError("playstyle_RTG_max must be a finite number")
+         return (low, high)
+ 
+     @field_validator("self_filters", mode="before")

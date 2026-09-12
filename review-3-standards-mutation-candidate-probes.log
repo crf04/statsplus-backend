@@ -1,0 +1,137 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py -k test_review3_ -s
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 83 items / 53 deselected / 30 selected
+
+tests/test_errors.py::test_review3_intact_quoted_credentials['-token-minutes_filter] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-token-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-token-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-token-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-token-self_filters[]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-password-minutes_filter] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-password-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-password-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-password-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials['-password-self_filters[]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-token-minutes_filter] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-token-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-token-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-token-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-token-self_filters[]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-password-minutes_filter] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-password-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-password-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-password-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review3_intact_quoted_credentials["-password-self_filters[]] PASSED
+tests/test_errors.py::test_review3_empty_brackets[a-expected0] PASSED
+tests/test_errors.py::test_review3_empty_brackets[a,b-expected1] PASSED
+tests/test_errors.py::test_review3_empty_brackets[1,2-expected2] PASSED
+tests/test_errors.py::test_review3_empty_brackets[-expected3] PASSED
+tests/test_errors.py::test_review3_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-minutes_filter] REVIEW3 minutes_filter raw_length 302 facts [{'parameter': 'minutes_filter', 'values': ['0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']}]
+FAILED
+tests/test_errors.py::test_review3_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-self_filters[PTS]] REVIEW3 self_filters[PTS] raw_length 302 facts [{'parameter': 'self_filters[PTS]', 'values': ['0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']}]
+FAILED
+tests/test_errors.py::test_review3_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-minutes_filter] REVIEW3 minutes_filter raw_length 205 facts [{'parameter': 'minutes_filter', 'values': ['00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000']}]
+FAILED
+tests/test_errors.py::test_review3_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-self_filters[PTS]] REVIEW3 self_filters[PTS] raw_length 205 facts [{'parameter': 'self_filters[PTS]', 'values': ['00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000']}]
+FAILED
+tests/test_errors.py::test_review3_long_ordinary_fragments[a,20-expected2-minutes_filter] REVIEW3 minutes_filter raw_length 4 facts [{'parameter': 'minutes_filter', 'values': ['a']}]
+PASSED
+tests/test_errors.py::test_review3_long_ordinary_fragments[a,20-expected2-self_filters[PTS]] REVIEW3 self_filters[PTS] raw_length 4 facts [{'parameter': 'self_filters[PTS]', 'values': ['a']}]
+PASSED
+
+=================================== FAILURES ===================================
+_ test_review3_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-minutes_filter] _
+tests/test_errors.py:1111: in test_review3_long_ordinary_fragments
+    assert facts==[{'parameter':parameter,'values':expected}]
+E   AssertionError: assert [{'parameter'...AAAAAAAAAA']}] == [{'parameter'...AAAAAAAAAA']}]
+E     
+E     At index 0 diff: {'parameter': 'minutes_filter', 'values': ['0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']} != {'parameter': 'minutes_filter', 'values': ['AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']}
+E     
+E     Full diff:
+E       [
+E           {
+E               'parameter': 'minutes_filter',...
+E     
+E     ...Full output truncated (8 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter values must be integers [type=value_error, input_value='0,AAAAAAAAAAAAAAAAAAAAAA...AAAAAAAAAAAAAAAAAAAAAAA', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_review3_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-self_filters[PTS]] _
+tests/test_errors.py:1111: in test_review3_long_ordinary_fragments
+    assert facts==[{'parameter':parameter,'values':expected}]
+E   AssertionError: assert [{'parameter'...AAAAAAAAAA']}] == [{'parameter'...AAAAAAAAAA']}]
+E     
+E     At index 0 diff: {'parameter': 'self_filters[PTS]', 'values': ['0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']} != {'parameter': 'self_filters[PTS]', 'values': ['AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']}
+E     
+E     Full diff:
+E       [
+E           {
+E               'parameter': 'self_filters[PTS]',...
+E     
+E     ...Full output truncated (8 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter '0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' was rejected: 1 validation error for SelfFilter
+value2
+  Value error, self_filter values must be numbers [type=value_error, input_value='AAAAAAAAAAAAAAAAAAAAAAAA...AAAAAAAAAAAAAAAAAAAAAAA', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error [type=value_error, input_value=[('PTS', '0,AAAAAAAAAAAAA...AAAAAAAAAAAAAAAAAAAAA')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_review3_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-minutes_filter] _
+tests/test_errors.py:1111: in test_review3_long_ordinary_fragments
+    assert facts==[{'parameter':parameter,'values':expected}]
+E   AssertionError: assert [{'parameter'...0000000000']}] == [{'parameter'...es': ['bad']}]
+E     
+E     At index 0 diff: {'parameter': 'minutes_filter', 'values': ['00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000']} != {'parameter': 'minutes_filter', 'values': ['bad']}
+E     
+E     Full diff:
+E       [
+E           {
+E               'parameter': 'minutes_filter',...
+E     
+E     ...Full output truncated (6 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter values must be integers [type=value_error, input_value='000000000000000000000000...0000000000000000000,bad', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_review3_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-self_filters[PTS]] _
+tests/test_errors.py:1111: in test_review3_long_ordinary_fragments
+    assert facts==[{'parameter':parameter,'values':expected}]
+E   AssertionError: assert [{'parameter'...0000000000']}] == [{'parameter'...es': ['bad']}]
+E     
+E     At index 0 diff: {'parameter': 'self_filters[PTS]', 'values': ['00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000']} != {'parameter': 'self_filters[PTS]', 'values': ['bad']}
+E     
+E     Full diff:
+E       [
+E           {
+E               'parameter': 'self_filters[PTS]',...
+E     
+E     ...Full output truncated (6 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter '000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad' was rejected: 1 validation error for SelfFilter
+value2
+  Value error, self_filter values must be numbers [type=value_error, input_value='bad', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error [type=value_error, input_value=[('PTS', '000000000000000...00000000000000000,bad')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_review3_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-minutes_filter]
+FAILED tests/test_errors.py::test_review3_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-self_filters[PTS]]
+FAILED tests/test_errors.py::test_review3_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-minutes_filter]
+FAILED tests/test_errors.py::test_review3_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-self_filters[PTS]]
+================= 4 failed, 26 passed, 53 deselected in 0.77s ==================

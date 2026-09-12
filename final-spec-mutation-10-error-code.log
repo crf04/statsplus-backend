@@ -1,0 +1,318 @@
+Command: ['/private/tmp/statsplus-145/final-review-spec/.venv/bin/python', '-m', 'pytest', 'tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts', 'tests/test_game_logs.py::test_route_returns_400_for_malformed_filters', 'tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service', '-o', 'addopts=', '-p', 'no:cacheprovider', '-v', '--tb=short', '--junitxml=/tmp/statsplus-145/final-spec-mutation-10-error-code.xml']
+Offline guard: sitecustomize disables socket connection and DNS; fixtures inject provider dependencies.
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/final-review-spec/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/final-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 14 items
+
+tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts FAILED [  7%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] FAILED [ 14%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] FAILED [ 21%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] FAILED [ 28%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] FAILED [ 35%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] FAILED [ 42%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] FAILED [ 50%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] FAILED [ 57%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] FAILED [ 64%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] FAILED [ 71%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] FAILED [ 78%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] FAILED [ 85%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] FAILED [ 92%]
+tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] FAILED [100%]
+
+=================================== FAILURES ===================================
+____________ test_game_logs_details_carry_only_the_documented_facts ____________
+tests/test_errors.py:458: in test_game_logs_details_carry_only_the_documented_facts
+    assert error["code"] == "invalid_input"
+E   AssertionError: assert 'wrong_code' == 'invalid_input'
+E     
+E     - invalid_input
+E     + wrong_code
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=2 validation errors for GameLogQuery
+date_filter
+  Input should be a valid date or datetime, invalid character in year [type=date_from_datetime_parsing, input_value='not-a-date', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing
+teams_against
+  Value error, teams_against contains unsupported filters: ['NotAFilter', 'token=[REDACTED]']. Supported filters are: OPP_PTS, OPP_REB, OPP_AST, OPP_STOCKS, OPP_FTA, OPP_TOV, OPP_BLK, OPP_STL, OPP_FG3M, OPP_FG3A, C&S 3s, C&S PTS, C&S 3A, PU 2s, PU 3s, PU PTS, Less Than 10 ft, Transition, Isolation, PRBallHandler, PRRollMan, OffRebound, Spotup, Cut, Handoff, OffScreen, Misc, Postup, TwoPtAssists, ThreePtAssists, Arc3Assists, Corner3Assists, AtRimAssists, ShortMidRangeAssists, LongMidRangeAssists [type=value_error, input_value=['NotAFilter', 'token=[REDACTED]'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...-a-range']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter must contain two integer values [type=value_error, input_value='not-a-range', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...: ['home']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+location_filter
+  Input should be 'Home', 'Away' or 'Both' [type=literal_error, input_value='home', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/literal_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...alues': []}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (13 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+  Value error, rank_filter must contain one rank per teams_against filter [type=value_error, input_value={'season_filter': '2024-2...0'], 'self_filters': []}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...': ['XXX']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+opponent_tricode
+  Value error, opponent_tricode 'XXX' is not an NBA team tricode [type=value_error, input_value='XXX', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...ues': ['']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+opponent_tricode
+  Value error, opponent_tricode '' is not an NBA team tricode [type=value_error, input_value='', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...t-a-date']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+date_filter
+  Input should be a valid date or datetime, invalid character in year [type=date_from_datetime_parsing, input_value='not-a-date', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6] _
+tests/test_game_logs.py:936: in test_route_returns_400_for_malformed_filters
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...es': ['0']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+game_filter
+  Input should be greater than or equal to 1 [type=greater_than_equal, input_value='0', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/greater_than_equal
+_ test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0] _
+tests/test_game_logs.py:978: in test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...ues': ['']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+season_filter
+  Value error, season_filter must use YYYY-YY format [type=value_error, input_value='', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1] _
+tests/test_game_logs.py:978: in test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...['potato']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+season_filter
+  Value error, season_filter must use YYYY-YY format [type=value_error, input_value='potato', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2] _
+tests/test_game_logs.py:978: in test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...'2024-27']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+season_filter
+  Value error, season_filter must end with the following calendar year's final two digits [type=value_error, input_value='2024-27', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3] _
+tests/test_game_logs.py:978: in test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...': ['nan']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+playstyle_range
+  Value error, playstyle_RTG_min must be a finite number [type=value_error, input_value=['nan', '200'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4] _
+tests/test_game_logs.py:978: in test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...': ['inf']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+playstyle_range
+  Value error, playstyle_RTG_max must be a finite number [type=value_error, input_value=['0', 'inf'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5] _
+tests/test_game_logs.py:978: in test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service
+    assert response.get_json()["error"] == {
+E   AssertionError: assert {'code': 'wro...are invalid.'} == {'code': 'inv...: ['-inf']}]}}
+E     
+E     Omitting 2 identical items, use -vv to show
+E     Differing items:
+E     {'code': 'wrong_code'} != {'code': 'invalid_input'}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=wrong_code detail=1 validation error for GameLogQuery
+playstyle_range
+  Value error, playstyle_RTG_min must be a finite number [type=value_error, input_value=['-inf', '200'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- generated xml file: /tmp/statsplus-145/final-spec-mutation-10-error-code.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_details_carry_only_the_documented_facts
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_filters0]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_filters1]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_filters2]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_filters3]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_filters4]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_filters5]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_filters6]
+FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=-expected_filters0]
+FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=potato-expected_filters1]
+FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[season_filter=2024-27-expected_filters2]
+FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=nan-expected_filters3]
+FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_max=inf-expected_filters4]
+FAILED tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service[playstyle_RTG_min=-inf-expected_filters5]
+============================== 14 failed in 1.61s ==============================

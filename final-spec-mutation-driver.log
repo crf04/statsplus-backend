@@ -1,0 +1,39 @@
+START 01-raw-parameter
+DONE 01-raw-parameter mutant 1 restored 0
+START 02-self-label
+DONE 02-self-label mutant 1 restored 0
+START 03-self-numeric
+DONE 03-self-numeric mutant 1 restored 0
+START 04-zero
+DONE 04-zero mutant 1 restored 0
+START 05-range-defaults
+DONE 05-range-defaults mutant 1 restored 0
+START 06-range-both
+DONE 06-range-both mutant 1 restored 0
+START 07-range-max-only
+DONE 07-range-max-only mutant 1 restored 0
+START 08-no-value-cap
+DONE 08-no-value-cap mutant 1 restored 0
+START 09-extra-metadata
+DONE 09-extra-metadata mutant 1 restored 0
+START 10-error-code
+DONE 10-error-code mutant 1 restored 0
+START 11-error-message
+DONE 11-error-message mutant 1 restored 0
+START 12-inner-envelope
+DONE 12-inner-envelope mutant 1 restored 0
+START 13-outer-envelope
+DONE 13-outer-envelope mutant 0 restored 0
+START 14-known-unknown
+DONE 14-known-unknown mutant 1 restored 0
+START 15-unknown-only
+DONE 15-unknown-only mutant 1 restored 0
+START 16-parameter-cap
+DONE 16-parameter-cap mutant 0 restored 0
+START 17-nonfinite-numeric
+DONE 17-nonfinite-numeric mutant 0 restored 0
+START 18-missing-details
+DONE 18-missing-details mutant 1 restored 0
+START 19-detail-root-metadata
+DONE 19-detail-root-metadata mutant 1 restored 0
+ALL COMPLETE: candidate bytes and full diff preserved

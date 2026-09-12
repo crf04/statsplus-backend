@@ -1,0 +1,45 @@
+Command: /private/tmp/statsplus-145/review-4-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-4-standards/.review4/runner.py tests/test_errors.py -k test_review4_ -s
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-4-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-4-standards
+configfile: pytest.ini
+collecting ... collected 86 items / 56 deselected / 30 selected
+
+tests/test_errors.py::test_review4_intact_quoted_credentials['-token-minutes_filter] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-token-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-token-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-token-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-token-self_filters[]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-password-minutes_filter] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-password-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-password-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-password-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials['-password-self_filters[]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-token-minutes_filter] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-token-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-token-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-token-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-token-self_filters[]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-password-minutes_filter] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-password-self_filters[PTS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-password-self_filters[ pts ]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-password-self_filters[BOGUS]] PASSED
+tests/test_errors.py::test_review4_intact_quoted_credentials["-password-self_filters[]] PASSED
+tests/test_errors.py::test_review4_empty_brackets[a-expected0] PASSED
+tests/test_errors.py::test_review4_empty_brackets[a,b-expected1] PASSED
+tests/test_errors.py::test_review4_empty_brackets[1,2-expected2] PASSED
+tests/test_errors.py::test_review4_empty_brackets[-expected3] PASSED
+tests/test_errors.py::test_review4_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-minutes_filter] REVIEW3 minutes_filter raw_length 302 facts [{'parameter': 'minutes_filter', 'values': ['AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']}]
+PASSED
+tests/test_errors.py::test_review4_long_ordinary_fragments[0,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-expected0-self_filters[PTS]] REVIEW3 self_filters[PTS] raw_length 302 facts [{'parameter': 'self_filters[PTS]', 'values': ['AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA']}]
+PASSED
+tests/test_errors.py::test_review4_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-minutes_filter] REVIEW3 minutes_filter raw_length 205 facts [{'parameter': 'minutes_filter', 'values': ['bad']}]
+PASSED
+tests/test_errors.py::test_review4_long_ordinary_fragments[000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,bad-expected1-self_filters[PTS]] REVIEW3 self_filters[PTS] raw_length 205 facts [{'parameter': 'self_filters[PTS]', 'values': ['bad']}]
+PASSED
+tests/test_errors.py::test_review4_long_ordinary_fragments[a,20-expected2-minutes_filter] REVIEW3 minutes_filter raw_length 4 facts [{'parameter': 'minutes_filter', 'values': ['a']}]
+PASSED
+tests/test_errors.py::test_review4_long_ordinary_fragments[a,20-expected2-self_filters[PTS]] REVIEW3 self_filters[PTS] raw_length 4 facts [{'parameter': 'self_filters[PTS]', 'values': ['a']}]
+PASSED
+
+====================== 30 passed, 56 deselected in 0.76s =======================

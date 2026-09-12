@@ -1,0 +1,28 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_errors.py F                                                   [100%]
+
+=================================== FAILURES ===================================
+____ test_game_logs_untyped_rejections_keep_generic_message_without_details ____
+tests/test_errors.py:328: in test_game_logs_untyped_rejections_keep_generic_message_without_details
+    assert response.get_json() == {
+E   AssertionError: assert {'error': {'c...re invalid.'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'details': {'filters': []}, 'message': 'One or more game log filters are invalid.'}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+season_filter
+  Value error, season_filter must use YYYY-YY format [type=value_error, input_value='potato', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_untyped_rejections_keep_generic_message_without_details
+============================== 1 failed in 0.41s ===============================

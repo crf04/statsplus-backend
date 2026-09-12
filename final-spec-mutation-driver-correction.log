@@ -1,0 +1,3 @@
+START 07b-range-max-only
+DONE 07b-range-max-only mutant 1 restored 0
+ALL COMPLETE: candidate bytes and full diff preserved

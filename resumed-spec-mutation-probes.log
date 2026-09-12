@@ -1,0 +1,19 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 9 items
+
+tests/test_review_spec_probes_tmp.py QUERY {"self_filters[token=synthetic-secret]": "1,2"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[TOKEN=SYNTHETIC-SECRET]", "values": ["token=[REDACTED]"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"self_filters[token=synthetic-secret]": "bad-range"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[token=synthetic-secret]", "values": ["bad-range"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"self_filters[BOGUS]": "a,b"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[BOGUS]", "values": ["BOGUS"]}, {"parameter": "self_filters[None]", "values": ["a"]}, {"parameter": "self_filters[None]", "values": ["b"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"self_filters[PTS]": "2,0"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[PTS]", "values": ["2.0"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"self_filters[PTS]": "bad,10", "self_filters[REB]": "bad,10"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[PTS]", "values": ["bad"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"playstyle_RTG_min": "201"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "playstyle_RTG_max", "values": ["200"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"minutes_filter": "a,b"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "minutes_filter", "values": ["a"]}]}, "message": "One or more game log filters are invalid."}}
+.QUERY {"playstyle_RTG_min": "bad", "playstyle_RTG_max": "also-bad"} STATUS 400 BODY {"error": {"code": "invalid_input", "details": {"filters": [{"parameter": "playstyle_RTG_min", "values": ["bad"]}]}, "message": "One or more game log filters are invalid."}}
+.BOUND {"parameter_length": 1014, "value_length": 200}
+.
+
+============================== 9 passed in 1.13s ===============================

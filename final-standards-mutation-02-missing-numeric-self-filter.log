@@ -1,0 +1,41 @@
+Command: /private/tmp/statsplus-145/final-review-standards/.venv/bin/python -m pytest -o addopts= -p no:cacheprovider -v --tb=short tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat
+Network: socket guard; no bytecode/cache writes
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/final-review-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/final-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat FAILED [100%]
+
+=================================== FAILURES ===================================
+_______ test_game_logs_rejected_self_filter_numeric_values_name_the_stat _______
+tests/test_errors.py:399: in test_game_logs_rejected_self_filter_numeric_values_name_the_stat
+    assert rejected == {"self_filters[BOGUS]": ["a", "b"]}
+E   AssertionError: assert {'self_filter...lters': ['b']} == {'self_filter...': ['a', 'b']}
+E     
+E     Differing items:
+E     {'self_filters[BOGUS]': ['BOGUS']} != {'self_filters[BOGUS]': ['a', 'b']}
+E     Left contains 1 more item:
+E     {'self_filters': ['b']}
+E     
+E     Full diff:...
+E     
+E     ...Full output truncated (11 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=3 validation errors for GameLogQuery
+self_filters.stat
+  Value error, self_filter contains unsupported stat 'BOGUS'. Supported stats are: MIN, PTS, REB, AST, STL, BLK, TOV, FGA, FG3A, FTA, FGM, FG3M, FTM, FG_PCT, OREB, DREB, PF, PRA, PA, PR, RA, STKS, FD_PTS [type=value_error, input_value='BOGUS', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+self_filters.value
+  Value error, self_filter values must be numbers [type=value_error, input_value='a', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+self_filters.value2
+  Value error, self_filter values must be numbers [type=value_error, input_value='b', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_rejected_self_filter_numeric_values_name_the_stat
+============================== 1 failed in 1.69s ===============================

@@ -1,0 +1,435 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- button "Open search":
+  - img
+- button "Back to search": ←
+- button "Save Filter Set"
+- button "Saved Filter Sets"
+- text: LJ
+- heading "LeBron James" [level=4]
+- img
+- text: POINTS 23.0 +2.1 vs Season
+- img
+- text: REBOUNDS 6.6 +0.5 vs Season
+- img
+- text: ASSISTS 9.2 +2.0 vs Season
+- img
+- text: STOCKS 2.6 +0.8 vs Season
+- img
+- text: MINUTES 29.2 -3.9 vs Season
+- img
+- text: FG% 53.0% +2.0% vs Season
+- img
+- text: FANTASY POINTS 49.3 +7.9 vs Season
+- img
+- text: "TOV 3.2 +0.2 vs Season Player:"
+- combobox "Player:": LeBron James
+- text: "Line Type:"
+- combobox "Line Type:":
+  - option "None"
+  - option "PTS" [selected]
+  - option "FD_PTS"
+  - option "PRA"
+  - option "PA"
+  - option "RA"
+  - option "PR"
+  - option "AST"
+  - option "REB"
+  - option "FTM"
+  - option "FTA"
+  - option "STL"
+  - option "BLK"
+  - option "STKS"
+  - option "FG3M"
+  - option "FG3A"
+  - option "FG2M"
+  - option "FG2A"
+  - option "FGM"
+  - option "FGA"
+  - option "TOV"
+- text: "Line Value:"
+- textbox "Line Value:":
+  - /placeholder: Enter value
+  - text: "23.0"
+- img
+- text: 9.89%
+- heading "Raw" [level=3]
+- text: 23.00 from 20.93
+- img
+- text: 24.68%
+- heading "Per-36" [level=3]
+- text: 28.36 from 22.74 (60.00%)
+- heading "Hit Rate" [level=3]
+- text: "3/5 L3/5 L3/5 Player: LeBron James Season: 2025-26 GAMES <= 5"
+- img
+- text: "Player Filter:"
+- combobox "Player Filter:"
+- group:
+  - radio "ON" [checked]
+  - text: "ON"
+  - radio "OFF"
+  - text: "OFF"
+- button "Add"
+- text: "Date Filter:"
+- textbox "Date Filter:"
+- text: "Location:"
+- group:
+  - radio "Both" [checked]
+  - text: Both
+  - radio "Home"
+  - text: Home
+  - radio "Away"
+  - text: Away
+- text: "Last N games:"
+- spinbutton "Last N games:": "5"
+- text: "Playtype Matchup Rating: 0 - 200"
+- slider "Lower thumb": "0"
+- slider "Upper thumb": "200"
+- text: "Minute Range: 0 - 48"
+- slider "Lower thumb": "0"
+- slider "Upper thumb": "48"
+- text: "Defensive Filter:"
+- button "General" [pressed]
+- button "Shot type"
+- button "Play type"
+- button "Assists"
+- combobox "Defensive Filter:":
+  - option "None" [selected]
+  - option "Points Allowed"
+  - option "Rebounds Allowed"
+  - option "Assists Allowed"
+  - option "Steals + Blocks"
+  - option "Steals"
+  - option "Blocks"
+  - option "Free Throws Allowed"
+  - option "Turnovers Forced"
+- textbox "Defensive filter rank":
+  - /placeholder: Number
+- button "Add" [disabled]
+- text: Positive rank = top defenses, negative = bottom
+- button "Self Filters:"
+- button "Apply Filters"
+- heading "Player Profile" [level=4]
+- group:
+  - radio "Playtypes" [checked]
+  - text: Playtypes
+  - radio "Assists"
+  - text: Assists
+  - radio "Archetype"
+  - text: Archetype
+  - radio "Shooting Type"
+  - text: Shooting Type
+  - radio "Zone Shooting"
+  - text: Zone Shooting
+- heading "LeBron James vs Atlanta Hawks" [level=6]
+- img: Transition Postup Isolation PRBallHandler Spotup Cut OffScreen Misc PRRollMan OffRebound Handoff 0 7 14 21 28 Player Frequency (%) 0.5 0.75 1 1.25 1.5 Team Defense Multiplier
+- list:
+  - listitem:
+    - img
+    - text: Player Frequency (%)
+  - listitem:
+    - img
+    - text: Team Defense
+- strong: "Total Matchup Rating:"
+- text: "99.63"
+- heading "Opposing Team Profile" [level=4]
+- combobox:
+  - option "Choose a team"
+  - option "Atlanta Hawks" [selected]
+  - option "Boston Celtics"
+  - option "Cleveland Cavaliers"
+  - option "New Orleans Pelicans"
+  - option "Chicago Bulls"
+  - option "Dallas Mavericks"
+  - option "Denver Nuggets"
+  - option "Golden State Warriors"
+  - option "Houston Rockets"
+  - option "Los Angeles Clippers"
+  - option "Los Angeles Lakers"
+  - option "Miami Heat"
+  - option "Milwaukee Bucks"
+  - option "Minnesota Timberwolves"
+  - option "Brooklyn Nets"
+  - option "New York Knicks"
+  - option "Orlando Magic"
+  - option "Indiana Pacers"
+  - option "Philadelphia 76ers"
+  - option "Phoenix Suns"
+  - option "Portland Trail Blazers"
+  - option "Sacramento Kings"
+  - option "San Antonio Spurs"
+  - option "Oklahoma City Thunder"
+  - option "Toronto Raptors"
+  - option "Utah Jazz"
+  - option "Memphis Grizzlies"
+  - option "Washington Wizards"
+  - option "Detroit Pistons"
+  - option "Charlotte Hornets"
+- combobox:
+  - option "Traditional" [selected]
+  - option "Playtypes"
+  - option "Assists"
+  - option "Zone Shooting"
+  - option "Shooting Type"
+- textbox
+- table:
+  - rowgroup:
+    - row "Stat Value (Rank & vs Avg %)":
+      - columnheader "Stat"
+      - columnheader "Value (Rank & vs Avg %)"
+  - rowgroup:
+    - row "PTS 115.61 20 0.52%":
+      - cell "PTS"
+      - cell "115.61 20 0.52%"
+    - row "FGM 42.19 20 1.08%":
+      - cell "FGM"
+      - cell "42.19 20 1.08%"
+    - row "FGA 89.11 19 0.55%":
+      - cell "FGA"
+      - cell "89.11 19 0.55%"
+    - row "FG PCT 0.47 18 0.55%":
+      - cell "FG PCT"
+      - cell "0.47 18 0.55%"
+    - row "FG3M 12.83 13 -3.03%":
+      - cell "FG3M"
+      - cell "12.83 13 -3.03%"
+    - row "FG3A 36.56 11 -1.81%":
+      - cell "FG3A"
+      - cell "36.56 11 -1.81%"
+    - row "FG3 PCT 0.35 13 -1.22%":
+      - cell "FG3 PCT"
+      - cell "0.35 13 -1.22%"
+    - row "FTA 23.16 14 -0.87%":
+      - cell "FTA"
+      - cell "23.16 14 -0.87%"
+- table:
+  - rowgroup:
+    - row "Stat Value (Rank & vs Avg %)":
+      - columnheader "Stat"
+      - columnheader "Value (Rank & vs Avg %)"
+  - rowgroup:
+    - row "OREB 11.10 12 -1.90%":
+      - cell "OREB"
+      - cell "11.10 12 -1.90%"
+    - row "DREB 33.97 25 5.42%":
+      - cell "DREB"
+      - cell "33.97 25 5.42%"
+    - row "REB 45.07 22 3.52%":
+      - cell "REB"
+      - cell "45.07 22 3.52%"
+    - row "AST 26.55 15 -0.21%":
+      - cell "AST"
+      - cell "26.55 15 -0.21%"
+    - row "TOV 15.99 26 10.77%":
+      - cell "TOV"
+      - cell "15.99 26 10.77%"
+    - row "STL 8.44 16 0.80%":
+      - cell "STL"
+      - cell "8.44 16 0.80%"
+    - row "BLK 4.88 17 1.39%":
+      - cell "BLK"
+      - cell "4.88 17 1.39%"
+    - row "STL+BLK 13.33 18 1.02%":
+      - cell "STL+BLK"
+      - cell "13.33 18 1.02%"
+- heading "Per 36 Minutes Comparison" [level=4]
+- text: "Filtered vs Season Player: LeBron James Season: 2025-26 GAMES <= 5"
+- group:
+  - radio "Shooting" [checked]
+  - text: Shooting
+  - radio "Reb/Ast"
+  - text: Reb/Ast
+  - radio "Defense"
+  - text: Defense
+  - radio "Combo"
+  - text: Combo
+  - radio "Misc"
+  - text: Misc
+- heading "Scoring" [level=6]
+- text: PTS ↗ 28.4 vs 22.7
+- heading "Field Goals" [level=6]
+- text: FGM ↗ 10.4 vs 8.6 FGA ↗ 19.0 vs 16.6 FG_PCT → 53.0% vs 51.0%
+- heading "Two-Point" [level=6]
+- text: FG2M ↗ 8.6 vs 7.2 FG2A ↗ 14.1 vs 12.2
+- heading "Three-Point" [level=6]
+- text: FG3M ↗ 1.7 vs 1.4 FG3A ↗ 4.9 vs 4.4
+- heading "Free Throws" [level=6]
+- text: FTM ↗ 5.9 vs 4.2 FTA ↗ 8.6 vs 5.7
+- heading "Game Logs" [level=4]
+- text: "Player: LeBron James Season: 2025-26 GAMES <= 5"
+- table:
+  - rowgroup:
+    - row "Sort by Date (ascending) Sort by OPP (ascending) Sort by W/L (ascending) Sort by MIN (ascending) Sort by PTS (ascending) Sort by FGM (ascending) Sort by FGA (ascending) Sort by FG% (ascending) Sort by 3PM (ascending) Sort by 3PA (ascending) Sort by 3P% (ascending) Sort by FTM (ascending) Sort by FTA (ascending) Sort by REB (ascending) Sort by AST (ascending) Sort by STL (ascending) Sort by BLK (ascending) Sort by TOV (ascending) Sort by PRA (ascending) Sort by PR (ascending) Sort by PA (ascending) Sort by AR (ascending)":
+      - columnheader "Sort by Date (ascending)":
+        - button "Sort by Date (ascending)": Date
+      - columnheader "Sort by OPP (ascending)":
+        - button "Sort by OPP (ascending)": OPP
+      - columnheader "Sort by W/L (ascending)":
+        - button "Sort by W/L (ascending)": W/L
+      - columnheader "Sort by MIN (ascending)":
+        - button "Sort by MIN (ascending)": MIN
+      - columnheader "Sort by PTS (ascending)":
+        - button "Sort by PTS (ascending)": PTS
+      - columnheader "Sort by FGM (ascending)":
+        - button "Sort by FGM (ascending)": FGM
+      - columnheader "Sort by FGA (ascending)":
+        - button "Sort by FGA (ascending)": FGA
+      - columnheader "Sort by FG% (ascending)":
+        - button "Sort by FG% (ascending)": FG%
+      - columnheader "Sort by 3PM (ascending)":
+        - button "Sort by 3PM (ascending)": 3PM
+      - columnheader "Sort by 3PA (ascending)":
+        - button "Sort by 3PA (ascending)": 3PA
+      - columnheader "Sort by 3P% (ascending)":
+        - button "Sort by 3P% (ascending)": 3P%
+      - columnheader "Sort by FTM (ascending)":
+        - button "Sort by FTM (ascending)": FTM
+      - columnheader "Sort by FTA (ascending)":
+        - button "Sort by FTA (ascending)": FTA
+      - columnheader "Sort by REB (ascending)":
+        - button "Sort by REB (ascending)": REB
+      - columnheader "Sort by AST (ascending)":
+        - button "Sort by AST (ascending)": AST
+      - columnheader "Sort by STL (ascending)":
+        - button "Sort by STL (ascending)": STL
+      - columnheader "Sort by BLK (ascending)":
+        - button "Sort by BLK (ascending)": BLK
+      - columnheader "Sort by TOV (ascending)":
+        - button "Sort by TOV (ascending)": TOV
+      - columnheader "Sort by PRA (ascending)":
+        - button "Sort by PRA (ascending)": PRA
+      - columnheader "Sort by PR (ascending)":
+        - button "Sort by PR (ascending)": PR
+      - columnheader "Sort by PA (ascending)":
+        - button "Sort by PA (ascending)": PA
+      - columnheader "Sort by AR (ascending)":
+        - button "Sort by AR (ascending)": AR
+  - rowgroup:
+    - row "4/12 UTA - 17 18 6 15 40% 0 3 N/A 6 7 4 6 3 0 4 28 22 24 10":
+      - cell "4/12"
+      - cell "UTA"
+      - cell "-"
+      - cell "17"
+      - cell "18"
+      - cell "6"
+      - cell "15"
+      - cell "40%"
+      - cell "0"
+      - cell "3"
+      - cell "N/A"
+      - cell "6"
+      - cell "7"
+      - cell "4"
+      - cell "6"
+      - cell "3"
+      - cell "0"
+      - cell "4"
+      - cell "28"
+      - cell "22"
+      - cell "24"
+      - cell "10"
+    - row "4/10 PHX - 32 28 10 16 63% 2 2 N/A 6 9 6 12 4 0 2 46 34 40 18":
+      - cell "4/10"
+      - cell "PHX"
+      - cell "-"
+      - cell "32"
+      - cell "28"
+      - cell "10"
+      - cell "16"
+      - cell "63%"
+      - cell "2"
+      - cell "2"
+      - cell "N/A"
+      - cell "6"
+      - cell "9"
+      - cell "6"
+      - cell "12"
+      - cell "4"
+      - cell "0"
+      - cell "2"
+      - cell "46"
+      - cell "34"
+      - cell "40"
+      - cell "18"
+    - row "4/9 GSW - 32 26 11 17 65% 3 5 N/A 1 2 8 11 2 1 4 45 34 37 19":
+      - cell "4/9"
+      - cell "GSW"
+      - cell "-"
+      - cell "32"
+      - cell "26"
+      - cell "11"
+      - cell "17"
+      - cell "65%"
+      - cell "3"
+      - cell "5"
+      - cell "N/A"
+      - cell "1"
+      - cell "2"
+      - cell "8"
+      - cell "11"
+      - cell "2"
+      - cell "1"
+      - cell "4"
+      - cell "45"
+      - cell "34"
+      - cell "37"
+      - cell "19"
+    - row "4/5 DAL - 39 30 12 22 55% 1 6 N/A 5 9 9 15 1 0 4 54 39 45 24":
+      - cell "4/5"
+      - cell "DAL"
+      - cell "-"
+      - cell "39"
+      - cell "30"
+      - cell "12"
+      - cell "22"
+      - cell "55%"
+      - cell "1"
+      - cell "6"
+      - cell "N/A"
+      - cell "5"
+      - cell "9"
+      - cell "9"
+      - cell "15"
+      - cell "1"
+      - cell "0"
+      - cell "4"
+      - cell "54"
+      - cell "39"
+      - cell "45"
+      - cell "24"
+    - row "4/2 OKC - 26 13 3 7 43% 1 4 N/A 6 8 6 2 1 1 2 21 19 15 8":
+      - cell "4/2"
+      - cell "OKC"
+      - cell "-"
+      - cell "26"
+      - cell "13"
+      - cell "3"
+      - cell "7"
+      - cell "43%"
+      - cell "1"
+      - cell "4"
+      - cell "N/A"
+      - cell "6"
+      - cell "8"
+      - cell "6"
+      - cell "2"
+      - cell "1"
+      - cell "1"
+      - cell "2"
+      - cell "21"
+      - cell "19"
+      - cell "15"
+      - cell "8"

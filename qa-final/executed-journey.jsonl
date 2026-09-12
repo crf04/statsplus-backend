@@ -1,0 +1,13 @@
+{"action":"open","path":"/?player_name=LeBron+James&teams_against%5B%5D=DefinitelyUnsupported&rank_filter%5B%5D=10"}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","teams_against[]":"DefinitelyUnsupported","rank_filter[]":"10"},"status":400}
+{"action":"assert","target":{"text":"One or more game log filters are invalid."}}
+{"action":"assert","target":{"role":"heading","name":"No game logs to display"}}
+{"action":"proof","name":"invalid-filter-qa"}
+{"action":"open","path":"/?player_name=LeBron+James&season_filter=2025-26&game_filter=5"}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","season_filter":"2025-26","game_filter":"5"},"status":200}
+{"action":"assert","target":{"role":"heading","name":"Game Logs"}}
+{"action":"proof","name":"valid-game-logs-qa"}
+{"action":"reload"}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","season_filter":"2025-26","game_filter":"5"},"status":200}
+{"action":"assert","target":{"role":"heading","name":"Game Logs"}}
+{"action":"cleanup"}

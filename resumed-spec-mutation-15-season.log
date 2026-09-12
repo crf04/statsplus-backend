@@ -1,0 +1,65 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/15-season.xml', 'tests/test_errors.py::test_game_logs_season_failure_names_parameter_and_value']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_errors.py F                                                   [100%]
+
+=================================== FAILURES ===================================
+___________ test_game_logs_season_failure_names_parameter_and_value ____________
+tests/test_errors.py:416: in test_game_logs_season_failure_names_parameter_and_value
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+season_filter
+  Value error, season_filter must use YYYY-YY format [type=value_error, input_value='potato', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/15-season.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_season_failure_names_parameter_and_value
+============================== 1 failed in 0.51s ===============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/models/game_logs.py (candidate)
++++ app/models/game_logs.py (mutant)
+@@ -328,28 +328,16 @@
+         """Require one canonical NBA season label (for example, ``2024-25``)."""
+ 
+         if not isinstance(value, str):
+-            raise GameLogFilterError(
+-                "season_filter",
+-                (value,),
+-                "season_filter must be a string in YYYY-YY format",
+-            )
++            raise ValueError("season_filter must be a string in YYYY-YY format")
+         season = value.strip()
+         match = re.fullmatch(r"([0-9]{4})-([0-9]{2})", season)
+         if match is None:
+-            raise GameLogFilterError(
+-                "season_filter",
+-                (value,),
+-                "season_filter must use YYYY-YY format",
+-            )
++            raise ValueError("season_filter must use YYYY-YY format")
+         start_year = int(match.group(1))
+         expected_suffix = f"{(start_year + 1) % 100:02d}"
+         if match.group(2) != expected_suffix:
+-            raise GameLogFilterError(
+-                "season_filter",
+-                (value,),
+-                "season_filter must end with the following calendar year's "
+-                "final two digits",
+-            )
++            raise ValueError("season_filter must end with the following calendar year's "
++                "final two digits")
+         return season
+ 
+     @field_validator("minutes_filter", mode="before")

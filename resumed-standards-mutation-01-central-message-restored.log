@@ -1,0 +1,15 @@
+cwd: /private/tmp/statsplus-145/resumed-review-standards
+command: ['/private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-o', 'addopts=', '-v', '--tb=short', 'tests/test_errors.py::test_game_logs_invalid_input_uses_central_handler']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /private/tmp/statsplus-145/resumed-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_invalid_input_uses_central_handler PASSED [100%]
+
+============================== 1 passed in 1.13s ===============================
+
+exit_code: 0

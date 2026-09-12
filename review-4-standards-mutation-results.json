@@ -1,0 +1,26 @@
+[
+  {
+    "mutation": "01-truncation-is-redaction",
+    "tests": [
+      "test_game_logs_long_ordinary_ranges_keep_the_invalid_operand"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0
+  },
+  {
+    "mutation": "02-empty-key-malformed-range",
+    "tests": [
+      "test_game_logs_empty_stat_key_names_the_submitted_parameter_for_ranges"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0
+  },
+  {
+    "mutation": "03-cross-entry-context",
+    "tests": [
+      "test_game_logs_repeated_same_stat_keeps_ordinary_fragments"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0
+  }
+]

@@ -1,0 +1,123 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 7 items
+
+tests/test_game_logs.py FFFFFFF                                          [100%]
+
+=================================== FAILURES ===================================
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...value_error'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\nminutes_filter\n  Value error, mi...lue='not-a-range', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter must contain two integer values [type=value_error, input_value='not-a-range', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...teral_error'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\nlocation_filter\n  Input should b...ut_value='home', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/literal_error"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+location_filter
+  Input should be 'Home', 'Away' or 'Both' [type=literal_error, input_value='home', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/literal_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...value_error'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\n  Value error, rank_filter must c...lf_filters': []}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+  Value error, rank_filter must contain one rank per teams_against filter [type=value_error, input_value={'season_filter': '2024-2...0'], 'self_filters': []}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...value_error'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\nopponent_tricode\n  Value error, ...input_value='XXX', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+opponent_tricode
+  Value error, opponent_tricode 'XXX' is not an NBA team tricode [type=value_error, input_value='XXX', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...value_error'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\nopponent_tricode\n  Value error, ...r, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+opponent_tricode
+  Value error, opponent_tricode '' is not an NBA team tricode [type=value_error, input_value='', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...ime_parsing'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\ndate_filter\n  Input should be a ...e', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+date_filter
+  Input should be a valid date or datetime, invalid character in year [type=date_from_datetime_parsing, input_value='not-a-date', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0] _
+tests/test_game_logs.py:899: in test_route_returns_400_for_malformed_filters
+    assert payload == {
+E   assert {'error': {'c...value_error'}} == {'error': {'c...re invalid.'}}
+E     
+E     Differing items:
+E     {'error': {'code': 'invalid_input', 'message': "1 validation error for GameLogQuery\ngame_filter\n  Value error, game_..., input_value='0', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/value_error"}} != {'error': {'code': 'invalid_input', 'message': 'One or more game log filters are invalid.'}}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:136 Application error code=invalid_input detail=1 validation error for GameLogQuery
+game_filter
+  Value error, game_filter must be at least 1 [type=value_error, input_value='0', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0]
+============================== 7 failed in 0.54s ===============================

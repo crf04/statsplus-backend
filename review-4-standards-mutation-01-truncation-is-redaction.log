@@ -1,0 +1,33 @@
+Command: /private/tmp/statsplus-145/review-4-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-4-standards/.review4/runner.py tests/test_errors.py::test_game_logs_long_ordinary_ranges_keep_the_invalid_operand
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-4-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-4-standards
+configfile: pytest.ini
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_long_ordinary_ranges_keep_the_invalid_operand FAILED [100%]
+
+=================================== FAILURES ===================================
+_________ test_game_logs_long_ordinary_ranges_keep_the_invalid_operand _________
+tests/test_errors.py:568: in test_game_logs_long_ordinary_ranges_keep_the_invalid_operand
+    assert rejected == {"minutes_filter": ["bad"]}
+E   AssertionError: assert {'minutes_fil...00000000000']} == {'minutes_filter': ['bad']}
+E     
+E     Differing items:
+E     {'minutes_filter': ['00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000']} != {'minutes_filter': ['bad']}
+E     
+E     Full diff:
+E       {
+E           'minutes_filter': [...
+E     
+E     ...Full output truncated (4 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:165 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter values must be integers [type=value_error, input_value='000000000000000000000000...0000000000000000000,bad', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_long_ordinary_ranges_keep_the_invalid_operand
+============================== 1 failed in 0.51s ===============================

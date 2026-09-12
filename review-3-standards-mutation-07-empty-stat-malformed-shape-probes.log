@@ -1,0 +1,57 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py -k test_review3_empty_brackets
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 83 items / 79 deselected / 4 selected
+
+tests/test_errors.py::test_review3_empty_brackets[a-expected0] FAILED    [ 25%]
+tests/test_errors.py::test_review3_empty_brackets[a,b-expected1] PASSED  [ 50%]
+tests/test_errors.py::test_review3_empty_brackets[1,2-expected2] PASSED  [ 75%]
+tests/test_errors.py::test_review3_empty_brackets[-expected3] FAILED     [100%]
+
+=================================== FAILURES ===================================
+___________________ test_review3_empty_brackets[a-expected0] ___________________
+tests/test_errors.py:1101: in test_review3_empty_brackets
+    assert response.get_json()['error']['details']=={'filters':[{'parameter':'self_filters[]','values':expected}]}
+E   AssertionError: assert {'filters': [...ues': ['a']}]} == {'filters': [...ues': ['a']}]}
+E     
+E     Differing items:
+E     {'filters': [{'parameter': 'self_filters', 'values': ['a']}]} != {'filters': [{'parameter': 'self_filters[]', 'values': ['a']}]}
+E     
+E     Full diff:
+E       {
+E           'filters': [...
+E     
+E     ...Full output truncated (10 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter for '' must contain min,max values [type=value_error, input_value=[('', 'a')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+___________________ test_review3_empty_brackets[-expected3] ____________________
+tests/test_errors.py:1101: in test_review3_empty_brackets
+    assert response.get_json()['error']['details']=={'filters':[{'parameter':'self_filters[]','values':expected}]}
+E   AssertionError: assert {'filters': [...lues': ['']}]} == {'filters': [...lues': ['']}]}
+E     
+E     Differing items:
+E     {'filters': [{'parameter': 'self_filters', 'values': ['']}]} != {'filters': [{'parameter': 'self_filters[]', 'values': ['']}]}
+E     
+E     Full diff:
+E       {
+E           'filters': [...
+E     
+E     ...Full output truncated (10 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter for '' must contain min,max values [type=value_error, input_value=[('', '')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_review3_empty_brackets[a-expected0] - Asser...
+FAILED tests/test_errors.py::test_review3_empty_brackets[-expected3] - Assert...
+================== 2 failed, 2 passed, 79 deselected in 0.51s ==================

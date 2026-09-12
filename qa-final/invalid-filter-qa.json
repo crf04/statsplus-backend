@@ -1,0 +1,39 @@
+{
+  "url": "http://127.0.0.1:5188/?player_name=LeBron+James&teams_against%5B%5D=DefinitelyUnsupported&rank_filter%5B%5D=10",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "screenshot": "/tmp/statsplus-145/qa-final/invalid-filter-qa.png",
+  "aria": "/tmp/statsplus-145/qa-final/invalid-filter-qa.aria.txt",
+  "responses": [
+    {
+      "at": "2026-09-12T18:25:38.006Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/players/profile",
+      "status": 200
+    },
+    {
+      "at": "2026-09-12T18:25:38.193Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/players",
+      "status": 200
+    },
+    {
+      "at": "2026-09-12T18:25:38.196Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-09-12T18:25:38.206Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 400
+    }
+  ]
+}

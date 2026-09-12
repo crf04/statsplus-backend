@@ -1,0 +1,76 @@
+[
+  {
+    "label": "01-unredacted-parameter",
+    "path": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -239,7 +239,7 @@\n         facts = {\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n-            \"parameter\": sanitize_public_value(cause.parameter),\n+            \"parameter\": cause.parameter,\n             \"values\": _redacted_split_values(\n                 list(cause.values),\n                 _complete_game_log_values(cause.parameter, filters),\n"
+  },
+  {
+    "label": "02-parameter-only-no-cap",
+    "path": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_published_parameter_names_are_bounded",
+      "tests/test_errors.py::test_game_logs_parameter_names_are_redacted_and_bounded_too"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -239,7 +239,7 @@\n         facts = {\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n-            \"parameter\": sanitize_public_value(cause.parameter),\n+            \"parameter\": __import__(\"app.errors\", fromlist=[\"_sanitize_diagnostic_detail\"])._sanitize_diagnostic_detail(cause.parameter),\n             \"values\": _redacted_split_values(\n                 list(cause.values),\n                 _complete_game_log_values(cause.parameter, filters),\n"
+  },
+  {
+    "label": "03-fragment-only-redaction",
+    "path": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_split_credential_values_redact_the_complete_value",
+      "tests/test_errors.py::test_game_logs_quoted_password_across_split_is_redacted",
+      "tests/test_errors.py::test_game_logs_split_credential_in_minutes_is_redacted"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -240,10 +240,7 @@\n             # Caller-supplied content can appear inside a parameter name\n             # (a self_filter's stat), so it is redacted like the values.\n             \"parameter\": sanitize_public_value(cause.parameter),\n-            \"values\": _redacted_split_values(\n-                list(cause.values),\n-                _complete_game_log_values(cause.parameter, filters),\n-            ),\n+            \"values\": [sanitize_public_value(value) for value in cause.values],\n         }\n         if cause.supported_values is not None:\n             facts[\"supported_values\"] = list(cause.supported_values)\n"
+  },
+  {
+    "label": "04-whole-ordinary-values",
+    "path": "app/routes/game_routes.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_ordinary_split_values_stay_identifiable"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/routes/game_routes.py\n+++ app/routes/game_routes.py (mutant)\n@@ -211,7 +211,7 @@\n                 candidate\n                 for candidate in complete_values\n                 if fragment in candidate\n-                and sanitize_public_value(candidate) != candidate\n+                and True\n             ),\n             None,\n         )\n"
+  },
+  {
+    "label": "05-empty-stat-relabel",
+    "path": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_empty_stat_key_names_the_submitted_parameter"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -339,7 +339,7 @@\n         return error\n     # An empty stat is still a submitted key value (``self_filters[]``);\n     # only a missing stat (typed, non-HTTP calls) stays unnamed.\n-    label = f\"self_filters[{stat}]\" if stat is not None else \"self_filters\"\n+    label = f\"self_filters[{stat}]\" if stat else \"self_filters\"\n     return GameLogFilterError(\n         label,\n         tuple(rejected_values),\n"
+  },
+  {
+    "label": "06-extra-outer-envelope",
+    "path": "app/errors.py",
+    "tests": [
+      "tests/test_game_logs.py::test_route_returns_400_for_malformed_filters",
+      "tests/test_game_logs.py::test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service"
+    ],
+    "mutant_exit": 1,
+    "restored_exit": 0,
+    "patch": "--- app/errors.py\n+++ app/errors.py (mutant)\n@@ -367,7 +367,7 @@\n     error: dict[str, Any] = {\"code\": code, \"message\": message}\n     if details is not None:\n         error[\"details\"] = details\n-    return jsonify({\"error\": error}), status_code\n+    return jsonify({\"error\": error, **({\"validation\": {\"type\": \"value_error\", \"loc\": [\"teams_against\"]}} if details is not None and \"filters\" in details else {})}), status_code\n \n \n def register_error_handlers(app: Flask) -> None:\n"
+  },
+  {
+    "label": "07-empty-stat-malformed-shape",
+    "path": "app/models/game_logs.py",
+    "tests": [
+      "tests/test_errors.py::test_game_logs_empty_stat_key_names_the_submitted_parameter"
+    ],
+    "mutant_exit": 0,
+    "restored_exit": 0,
+    "patch": "--- app/models/game_logs.py\n+++ app/models/game_logs.py (mutant)\n@@ -305,7 +305,7 @@\n         )\n     if len(parts) != 2:\n         raise GameLogFilterError(\n-            f\"self_filters[{stat}]\" if stat is not None else \"self_filters\",\n+            f\"self_filters[{stat}]\" if stat else \"self_filters\",\n             (str(raw),),\n             f\"self_filter for {stat!r} must contain min,max values\",\n         )\n"
+  }
+]

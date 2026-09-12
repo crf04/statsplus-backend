@@ -1,0 +1,158 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - button "CQ CourtAI QA":
+      - text: CQ CourtAI QA
+      - img
+- button "Open search":
+  - img
+- alert: One or more game log filters are invalid.
+- button "Back to search": ←
+- button "Save Filter Set"
+- button "Saved Filter Sets"
+- text: "Player:"
+- combobox "Player:": LeBron James
+- text: "Line Type:"
+- combobox "Line Type:":
+  - option "None"
+  - option "PTS" [selected]
+  - option "FD_PTS"
+  - option "PRA"
+  - option "PA"
+  - option "RA"
+  - option "PR"
+  - option "AST"
+  - option "REB"
+  - option "FTM"
+  - option "FTA"
+  - option "STL"
+  - option "BLK"
+  - option "STKS"
+  - option "FG3M"
+  - option "FG3A"
+  - option "FG2M"
+  - option "FG2A"
+  - option "FGM"
+  - option "FGA"
+  - option "TOV"
+- text: "Line Value:"
+- textbox "Line Value:":
+  - /placeholder: Enter value
+- text: "Player Filter:"
+- combobox "Player Filter:"
+- group:
+  - radio "ON" [checked]
+  - text: "ON"
+  - radio "OFF"
+  - text: "OFF"
+- button "Add"
+- text: "Date Filter:"
+- textbox "Date Filter:"
+- text: "Location:"
+- group:
+  - radio "Both" [checked]
+  - text: Both
+  - radio "Home"
+  - text: Home
+  - radio "Away"
+  - text: Away
+- text: "Last N games:"
+- spinbutton "Last N games:": "0"
+- text: "Playtype Matchup Rating: 0 - 200"
+- slider "Lower thumb": "0"
+- slider "Upper thumb": "200"
+- text: "Minute Range: 0 - 48"
+- slider "Lower thumb": "0"
+- slider "Upper thumb": "48"
+- text: "Defensive Filter:"
+- button "General" [pressed]
+- button "Shot type"
+- button "Play type"
+- button "Assists"
+- combobox "Defensive Filter:":
+  - option "None" [selected]
+  - option "Points Allowed"
+  - option "Rebounds Allowed"
+  - option "Assists Allowed"
+  - option "Steals + Blocks"
+  - option "Steals"
+  - option "Blocks"
+  - option "Free Throws Allowed"
+  - option "Turnovers Forced"
+- textbox "Defensive filter rank":
+  - /placeholder: Number
+- button "Add" [disabled]
+- text: Positive rank = top defenses, negative = bottom DefinitelyUnsupported (10)
+- button "Remove DefinitelyUnsupported filter": ×
+- button "Self Filters:"
+- button "Apply Filters"
+- heading "Player Profile" [level=4]
+- group:
+  - radio "Playtypes" [checked]
+  - text: Playtypes
+  - radio "Assists"
+  - text: Assists
+  - radio "Archetype"
+  - text: Archetype
+  - radio "Shooting Type"
+  - text: Shooting Type
+  - radio "Zone Shooting"
+  - text: Zone Shooting
+- heading "LeBron James vs All" [level=6]
+- img: Transition Postup Isolation PRBallHandler Spotup Cut OffScreen Misc PRRollMan OffRebound Handoff 0 7 14 21 28 Player Frequency (%)
+- list:
+  - listitem:
+    - img
+    - text: Player Frequency (%)
+- heading "Opposing Team Profile" [level=4]
+- combobox:
+  - option "Choose a team" [selected]
+  - option "Atlanta Hawks"
+  - option "Boston Celtics"
+  - option "Cleveland Cavaliers"
+  - option "New Orleans Pelicans"
+  - option "Chicago Bulls"
+  - option "Dallas Mavericks"
+  - option "Denver Nuggets"
+  - option "Golden State Warriors"
+  - option "Houston Rockets"
+  - option "Los Angeles Clippers"
+  - option "Los Angeles Lakers"
+  - option "Miami Heat"
+  - option "Milwaukee Bucks"
+  - option "Minnesota Timberwolves"
+  - option "Brooklyn Nets"
+  - option "New York Knicks"
+  - option "Orlando Magic"
+  - option "Indiana Pacers"
+  - option "Philadelphia 76ers"
+  - option "Phoenix Suns"
+  - option "Portland Trail Blazers"
+  - option "Sacramento Kings"
+  - option "San Antonio Spurs"
+  - option "Oklahoma City Thunder"
+  - option "Toronto Raptors"
+  - option "Utah Jazz"
+  - option "Memphis Grizzlies"
+  - option "Washington Wizards"
+  - option "Detroit Pistons"
+  - option "Charlotte Hornets"
+- combobox:
+  - option "Traditional" [selected]
+  - option "Playtypes"
+  - option "Assists"
+  - option "Zone Shooting"
+  - option "Shooting Type"
+- textbox
+- paragraph: Select a team and category to view stats.
+- heading "Per 36 Minutes Comparison" [level=4]
+- text: "Filtered vs Season Player: LeBron James DefinitelyUnsupported (10)"
+- heading "Game Logs" [level=4]
+- heading "No game logs to display" [level=4]

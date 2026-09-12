@@ -1,0 +1,11 @@
+Three material spec findings remain:
+
+1. **P1 — Split operands bypass credential redaction.** [game_routes.py:191](/tmp/statsplus-145/final-review-spec/app/routes/game_routes.py:191) sanitizes operands after splitting. `self_filters[PTS]=token='synthetic-left,synthetic-right'` exposes both secret fragments; the intact value sanitizes correctly. `minutes_filter` also leaks. Violates “No credential, provider, or internal diagnostic material becomes reachable through the new field” and [API documentation:1295](/tmp/statsplus-145/final-review-spec/docs/API_DOCUMENTATION.md:1295). Three HTTP reproduction assertions fail.
+
+2. **P2 — Empty stats identify the wrong parameter.** [game_logs.py:338](/tmp/statsplus-145/final-review-spec/app/models/game_logs.py:338) reports `self_filters[]=a,b` as parameter `self_filters`, losing the submitted brackets. The malformed-range path does likewise. Violates “the parameter that failed and the offending values” and [API documentation:1279](/tmp/statsplus-145/final-review-spec/docs/API_DOCUMENTATION.md:1279), requiring the actual stat. Two reproduction assertions fail.
+
+3. **P2 — Existing outer-envelope checks remain weakened.** [test_game_logs.py:936](/tmp/statsplus-145/final-review-spec/tests/test_game_logs.py:936) and [:978](/tmp/statsplus-145/final-review-spec/tests/test_game_logs.py:978) now compare only `payload["error"]`; the base compared the complete response. An unexpected top-level field survives all 13 cases. Violates “existing error-contract tests are extended rather than replaced” and the [documented stable envelope](/tmp/statsplus-145/final-review-spec/docs/API_DOCUMENTATION.md:42).
+
+**Verification:** 131 affected tests pass. All 10 recent changed test functions / 21 cases were mutation-tested: 16 of 19 valid mutants caught; three survived. Every restored run passed. The full gate was left to the parent. All candidate files and the complete diff remain byte-for-byte unchanged.
+
+[Detailed mutation report, reproductions, and logs](final-spec-mutations.md).

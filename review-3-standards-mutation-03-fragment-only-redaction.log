@@ -1,0 +1,82 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py::test_game_logs_split_credential_values_redact_the_complete_value tests/test_errors.py::test_game_logs_quoted_password_across_split_is_redacted tests/test_errors.py::test_game_logs_split_credential_in_minutes_is_redacted
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 3 items
+
+tests/test_errors.py::test_game_logs_split_credential_values_redact_the_complete_value FAILED [ 33%]
+tests/test_errors.py::test_game_logs_quoted_password_across_split_is_redacted FAILED [ 66%]
+tests/test_errors.py::test_game_logs_split_credential_in_minutes_is_redacted FAILED [100%]
+
+=================================== FAILURES ===================================
+_______ test_game_logs_split_credential_values_redact_the_complete_value _______
+tests/test_errors.py:484: in test_game_logs_split_credential_values_redact_the_complete_value
+    assert entry["values"] == ["token=[REDACTED]"]
+E   assert ["token='synt...hetic-right'"] == ['token=[REDACTED]']
+E     
+E     At index 0 diff: "token='synthetic-left" != 'token=[REDACTED]'
+E     Left contains one more item: "synthetic-right'"
+E     
+E     Full diff:
+E       [
+E     -     'token=[REDACTED]',...
+E     
+E     ...Full output truncated (3 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter "token=[REDACTED]" was rejected: 2 validation errors for SelfFilter
+value
+  Value error, self_filter values must be numbers [type=value_error, input_value="token=[REDACTED]", input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error [type=value_error, input_value=[('PTS', "token=[REDACTED]")], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+___________ test_game_logs_quoted_password_across_split_is_redacted ____________
+tests/test_errors.py:499: in test_game_logs_quoted_password_across_split_is_redacted
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
+E   assert ['password="s...hetic-right"'] == ['password=[REDACTED]']
+E     
+E     At index 0 diff: 'password="synthetic-left' != 'password=[REDACTED]'
+E     Left contains one more item: 'synthetic-right"'
+E     
+E     Full diff:
+E       [
+E     -     'password=[REDACTED]',...
+E     
+E     ...Full output truncated (3 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+self_filters
+  Value error, self_filter 'password=[REDACTED]' was rejected: 2 validation errors for SelfFilter
+value
+  Value error, self_filter values must be numbers [type=value_error, input_value='password=[REDACTED]', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error [type=value_error, input_value=[('PTS', 'password=[REDACTED]')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+____________ test_game_logs_split_credential_in_minutes_is_redacted ____________
+tests/test_errors.py:514: in test_game_logs_split_credential_in_minutes_is_redacted
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
+E   assert ["token='synthetic-left"] == ['token=[REDACTED]']
+E     
+E     At index 0 diff: "token='synthetic-left" != 'token=[REDACTED]'
+E     
+E     Full diff:
+E       [
+E     -     'token=[REDACTED]',
+E     +     "token='synthetic-left",
+E       ]
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter values must be integers [type=value_error, input_value="token=[REDACTED]", input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_split_credential_values_redact_the_complete_value
+FAILED tests/test_errors.py::test_game_logs_quoted_password_across_split_is_redacted
+FAILED tests/test_errors.py::test_game_logs_split_credential_in_minutes_is_redacted
+============================== 3 failed in 0.54s ===============================

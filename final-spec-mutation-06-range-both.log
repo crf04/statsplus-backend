@@ -1,0 +1,40 @@
+Command: ['/private/tmp/statsplus-145/final-review-spec/.venv/bin/python', '-m', 'pytest', 'tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds', '-o', 'addopts=', '-p', 'no:cacheprovider', '-v', '--tb=short', '--junitxml=/tmp/statsplus-145/final-spec-mutation-06-range-both.xml']
+Offline guard: sitecustomize disables socket connection and DNS; fixtures inject provider dependencies.
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/final-review-spec/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/final-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds FAILED [100%]
+
+=================================== FAILURES ===================================
+________ test_game_logs_reversed_playstyle_range_names_submitted_bounds ________
+tests/test_errors.py:373: in test_game_logs_reversed_playstyle_range_names_submitted_bounds
+    assert rejected == {"playstyle_RTG_min": ["150"], "playstyle_RTG_max": ["50"]}
+E   AssertionError: assert {'playstyle_RTG_min': ['150']} == {'playstyle_R..._max': ['50']}
+E     
+E     Omitting 1 identical items, use -vv to show
+E     Right contains 1 more item:
+E     {'playstyle_RTG_max': ['50']}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (7 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+  Value error, playstyle_RTG_min must not exceed playstyle_RTG_max [type=value_error, input_value={'season_filter': '2025-2...0'], 'self_filters': []}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+  Value error, playstyle_RTG_min must not exceed playstyle_RTG_max [type=value_error, input_value={'season_filter': '2025-2...0'], 'self_filters': []}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- generated xml file: /tmp/statsplus-145/final-spec-mutation-06-range-both.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds
+============================== 1 failed in 1.23s ===============================

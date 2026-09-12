@@ -1,0 +1,29 @@
+{
+  "startedAt": "2026-09-12T17:28:58.683Z",
+  "coordination": {
+    "root": "/Users/chrisfu/.t3/worktrees/statsplus/t3code-4ed26896",
+    "branch": "t3code/4ed26896",
+    "head": "54a4cb6fcb78b29d8ccc65c9859d54f50ee30ca5"
+  },
+  "qaRuntimeSha256": "e6786c7112588af821453e83d4bec5f518f3ae563a613589ab0f18e00c2b46ef",
+  "productionGuardSha256": "f94bf27b53f0d05949fd6ae6d4c75d548d4451f4e064e53f3ad014829d10502b",
+  "helperSha256": "ea4cc49ec588e7bf599e0718cff3174cfd9853809d81b91fc2c20f388d39555c",
+  "responseTrackerSha256": "e7fff71a907fc47cd4eead40b28430a3fe3d1cc72e920e7bcd25d1fce7955232",
+  "frontend": {
+    "root": "/Users/chrisfu/statsplus-145-frontend-qa",
+    "branch": "",
+    "head": "96d6b965b81c25c45d5872db7e76d0e0f4bb8a09",
+    "fingerprint": "a61c5c60ec4cda45e2a4420e334e933daa2dd85cc3c41352389a9502924c8c10"
+  },
+  "backendSource": {
+    "root": "/Users/chrisfu/statsplus-backend",
+    "branch": "research/wnba-additional-data",
+    "head": "af5574d5d3a8e821bb63d21fc90684d5203aefed"
+  },
+  "environment": "production",
+  "deployedBackendRevision": "unknown",
+  "api": "https://statsplus-backend-production.up.railway.app",
+  "origin": "http://127.0.0.1:5188",
+  "out": "/tmp/statsplus-145/production-resumed",
+  "runtime": "/var/folders/vl/c4y_fblx7bg4lgkdxnmsbj_h0000gn/T/statsplus-runtime-gFc2NS"
+}

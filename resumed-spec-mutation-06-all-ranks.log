@@ -1,0 +1,44 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/06-all-ranks.xml', 'tests/test_errors.py::test_game_logs_rank_filter_rejection_reports_every_unusable_entry']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_errors.py F                                                   [100%]
+
+=================================== FAILURES ===================================
+______ test_game_logs_rank_filter_rejection_reports_every_unusable_entry _______
+tests/test_errors.py:298: in test_game_logs_rank_filter_rejection_reports_every_unusable_entry
+    assert rejected == {"rank_filter": ["abc", "xyz"]}
+E   AssertionError: assert {'rank_filter': ['abc']} == {'rank_filter...'abc', 'xyz']}
+E     
+E     Differing items:
+E     {'rank_filter': ['abc']} != {'rank_filter': ['abc', 'xyz']}
+E     Use -v to get more diff
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+rank_filter
+  Value error, rank_filter contains invalid entries: ['abc', 'xyz'] [type=value_error, input_value=['abc', '5', 'xyz'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/06-all-ranks.xml -
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_rank_filter_rejection_reports_every_unusable_entry
+============================== 1 failed in 0.51s ===============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/models/game_logs.py (candidate)
++++ app/models/game_logs.py (mutant)
+@@ -413,7 +413,7 @@
+         if invalid:
+             raise GameLogFilterError(
+                 "rank_filter",
+-                tuple(invalid),
++                tuple(invalid[:1]),
+                 f"rank_filter contains invalid entries: {invalid!r}",
+             )
+         return ranks

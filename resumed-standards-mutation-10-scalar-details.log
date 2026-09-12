@@ -1,0 +1,58 @@
+cwd: /private/tmp/statsplus-145/resumed-review-standards
+command: ['/private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-o', 'addopts=', '-v', '--tb=short', 'tests/test_errors.py::test_game_logs_scalar_parse_failures_name_parameter_and_value', 'tests/test_errors.py::test_game_logs_known_failures_survive_other_unknown_failures']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /private/tmp/statsplus-145/resumed-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 2 items
+
+tests/test_errors.py::test_game_logs_scalar_parse_failures_name_parameter_and_value FAILED [ 50%]
+tests/test_errors.py::test_game_logs_known_failures_survive_other_unknown_failures FAILED [100%]
+
+=================================== FAILURES ===================================
+________ test_game_logs_scalar_parse_failures_name_parameter_and_value _________
+tests/test_errors.py:360: in test_game_logs_scalar_parse_failures_name_parameter_and_value
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=2 validation errors for GameLogQuery
+date_filter
+  Input should be a valid date or datetime, invalid character in year [type=date_from_datetime_parsing, input_value='not-a-date', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing
+location_filter
+  Input should be 'Home', 'Away' or 'Both' [type=literal_error, input_value='home', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/literal_error
+_________ test_game_logs_known_failures_survive_other_unknown_failures _________
+tests/test_errors.py:382: in test_game_logs_known_failures_survive_other_unknown_failures
+    assert rejected == {
+E   AssertionError: assert {'teams_again...'NotAFilter']} == {'date_filter...'NotAFilter']}
+E     
+E     Omitting 1 identical items, use -vv to show
+E     Right contains 1 more item:
+E     {'date_filter': ['not-a-date']}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (7 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=2 validation errors for GameLogQuery
+date_filter
+  Input should be a valid date or datetime, invalid character in year [type=date_from_datetime_parsing, input_value='not-a-date', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing
+teams_against
+  Value error, teams_against contains unsupported filters: ['NotAFilter']. Supported filters are: OPP_PTS, OPP_REB, OPP_AST, OPP_STOCKS, OPP_FTA, OPP_TOV, OPP_BLK, OPP_STL, OPP_FG3M, OPP_FG3A, C&S 3s, C&S PTS, C&S 3A, PU 2s, PU 3s, PU PTS, Less Than 10 ft, Transition, Isolation, PRBallHandler, PRRollMan, OffRebound, Spotup, Cut, Handoff, OffScreen, Misc, Postup, TwoPtAssists, ThreePtAssists, Arc3Assists, Corner3Assists, AtRimAssists, ShortMidRangeAssists, LongMidRangeAssists [type=value_error, input_value=['NotAFilter'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_scalar_parse_failures_name_parameter_and_value
+FAILED tests/test_errors.py::test_game_logs_known_failures_survive_other_unknown_failures
+============================== 2 failed in 1.53s ===============================
+
+exit_code: 1

@@ -1,0 +1,1548 @@
+diff --git a/app/errors.py b/app/errors.py
+index fa256a05..2808dd93 100644
+--- a/app/errors.py
++++ b/app/errors.py
+@@ -108,6 +108,35 @@ def _sanitize_diagnostic_detail(detail: Any) -> str | None:
+     )
+ 
+ 
++#: Bounds on one published detail value, so unusable caller input cannot
++#: blow up the error payload. Values are redacted like the diagnostics but
++#: truncated after matching, keeping ordinary rejected values identifiable.
++_PUBLIC_VALUE_MAX_LENGTH = 200
++
++
++def redact_public_value(value: Any) -> str:
++    """Credential redaction only, without the published length bound.
++
++    The split-value facts compare redacted and raw text to detect a
++    credential that splitting destroyed; distinguishing redaction from
++    mere length truncation requires the unbounded form.
++    """
++
++    sanitized = _sanitize_diagnostic_detail(value)
++    return sanitized or ""
++
++
++def sanitize_public_value(value: Any) -> str:
++    """One value a caller may see: the diagnostics redaction, bounded.
++
++    The ``details`` facts on invalid-input responses echo submitted text
++    back to the submitter, but they are published on a route other callers
++    of the same API can reach, so anything the sanitiser strips from logs
++    is stripped here too, and the value is length-bounded.
++    """
++
++    return redact_public_value(value)[:_PUBLIC_VALUE_MAX_LENGTH]
++
+ def _log_application_error(
+     error: AppError,
+     *,
+@@ -179,6 +208,20 @@ class InvalidInputError(AppError):
+     code = "invalid_input"
+     default_message = "The request contains invalid input."
+ 
++    def __init__(
++        self,
++        message: str | None = None,
++        *,
++        detail: Any = None,
++        public_details: dict[str, Any] | None = None,
++    ) -> None:
++        self._public_details = public_details
++        super().__init__(message, detail=detail)
++
++    @property
++    def public_details(self) -> dict[str, Any] | None:
++        return self._public_details
++
+ 
+ class ResourceNotFoundError(AppError):
+     """The requested resource does not exist."""
+diff --git a/app/models/game_logs.py b/app/models/game_logs.py
+index 2a24a492..e4b503b7 100644
+--- a/app/models/game_logs.py
++++ b/app/models/game_logs.py
+@@ -30,7 +30,14 @@ from operator import eq, ge, gt, le, lt
+ import re
+ from typing import Any, Callable, Literal
+ 
+-from pydantic import BaseModel, Field, field_validator, model_validator
++from pydantic import (
++    BaseModel,
++    Field,
++    ValidationError,
++    ValidationInfo,
++    field_validator,
++    model_validator,
++)
+ 
+ from app.domain.nba_teams import NBA_TEAM_TRICODES
+ from app.models.catalogs import (
+@@ -42,6 +49,41 @@ from app.models.catalogs import (
+ Location = Literal["Home", "Away", "Both"]
+ 
+ 
++class GameLogFilterError(ValueError):
++    """One validation failure that names the filter a caller can act on.
++
++    Raised by :class:`GameLogQuery` validators instead of a bare
++    :class:`ValueError` when the facts a caller needs -- the parameter that
++    failed and the submitted values that were unusable -- are safe to publish.
++    The message still stays the generic one; only these facts and, where the
++    service owns the accepted vocabulary, the canonical supported values are
++    read into the error payload's ``details``. The route layer builds them
++    with the same redaction the diagnostics get.
++    """
++
++    def __init__(
++        self,
++        parameter: str,
++        values: tuple[Any, ...],
++        message: str,
++        *,
++        supported_values: tuple[str, ...] | None = None,
++        supported_aliases: tuple[str, ...] | None = None,
++        context: str | None = None,
++    ) -> None:
++        super().__init__(message)
++        self.parameter = parameter
++        self.values = tuple(str(value) for value in values)
++        self.supported_values = supported_values
++        self.supported_aliases = supported_aliases
++        # The complete submitted value a published value was extracted
++        # from, when the model split it (a ``min,max`` range or part).
++        # Splitting can destroy the context a credential pattern needs,
++        # so the route sanitizes this whole text and publishes it instead
++        # of a leaky fragment.
++        self.context = context
++
++
+ @dataclass(frozen=True, slots=True)
+ class _SelfFilterOperatorDescriptor:
+     """Comparison behavior owned by one member of the closed operator set."""
+@@ -154,35 +196,73 @@ class SelfFilter(BaseModel):
+ 
+         return self.stat
+ 
++    def _describe(self) -> str:
++        """The HTTP parameter name ``self_filters[STAT]`` for this filter."""
++
++        return f"self_filters[{self.stat}]"
++
+     @field_validator("stat", mode="before")
+     @classmethod
+     def normalize_stat(cls, value: Any) -> str:
+         stat = str(value).strip().upper()
+         if not stat:
+-            raise ValueError("self_filter stat must not be empty")
++            raise GameLogFilterError(
++                "self_filters[]",
++                (value,),
++                "self_filter stat must not be empty",
++            )
+         if stat not in SUPPORTED_SELF_FILTER_STATS:
+-            raise ValueError(
++            raise GameLogFilterError(
++                f"self_filters[{stat}]",
++                (value,),
+                 f"self_filter contains unsupported stat {stat!r}. Supported stats are: "
+-                + ", ".join(SUPPORTED_SELF_FILTER_STATS)
++                + ", ".join(SUPPORTED_SELF_FILTER_STATS),
+             )
+         return stat
+ 
+     @field_validator("value", "value2", mode="before")
+     @classmethod
+-    def normalize_numeric_value(cls, value: Any) -> float | None:
++    def normalize_numeric_value(cls, value: Any, info: ValidationInfo) -> float | None:
+         if value is None:
+             return None
++        # When the stat itself was already rejected it is not in the
++        # validated data; the parent self_filters validator then re-labels
++        # these facts under the actual submitted stat.
++        stat = info.data.get("stat")
++        parameter = f"self_filters[{stat}]" if stat else "self_filters"
+         try:
+             number = float(value)
+         except (TypeError, ValueError) as error:
+-            raise ValueError("self_filter values must be numbers") from error
++            raise GameLogFilterError(
++                parameter,
++                (value,),
++                "self_filter values must be numbers",
++            ) from error
+         if not isfinite(number):
+-            raise ValueError("self_filter values must be finite numbers")
++            raise GameLogFilterError(
++                parameter,
++                (value,),
++                "self_filter values must be finite numbers",
++            )
+         return number
+ 
+     @model_validator(mode="after")
+     def validate_operator_values(self) -> "SelfFilter":
+-        self.operator.validate_values(self.value, self.value2)
++        try:
++            self.operator.validate_values(self.value, self.value2)
++        except ValueError as error:
++            # A rejected bound is a submitted value even when it is zero,
++            # so report every submitted operand, not only the truthy ones.
++            submitted = (self.value, self.value2)
++            raise GameLogFilterError(
++                self._describe(),
++                tuple(
++                    _format_rating(operand)
++                    for operand in submitted
++                    if operand is not None
++                ),
++                str(error),
++            ) from error
+         return self
+ 
+     def apply(self, values: Any) -> Any:
+@@ -223,14 +303,60 @@ def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
+     elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
+         parts = list(raw)
+     else:
+-        raise ValueError(
+-            f"self_filter for {stat!r} must be a range or typed comparison"
++        # An empty stat is still a submitted key value (``self_filters[]``);
++        # only a missing stat (typed, non-HTTP calls) stays unnamed.
++        raise GameLogFilterError(
++            f"self_filters[{stat}]" if stat is not None else "self_filters",
++            (str(raw),),
++            f"self_filter for {stat!r} must be a range or typed comparison",
+         )
+     if len(parts) != 2:
+-        raise ValueError(f"self_filter for {stat!r} must contain min,max values")
++        raise GameLogFilterError(
++            f"self_filters[{stat}]" if stat is not None else "self_filters",
++            (str(raw),),
++            f"self_filter for {stat!r} must contain min,max values",
++        )
+     return SelfFilter(stat=stat, operator="between", value=parts[0], value2=parts[1])
+ 
+ 
++def _relabel_self_filter_failure(
++    stat: Any,
++    raw: Any,
++    error: ValidationError,
++) -> GameLogFilterError | ValidationError:
++    """Re-label one nested self-filter rejection under the actual stat.
++
++    When the stat itself is rejected, pydantic can no longer attribute the
++    stat's range failures to it -- the validated fields no longer carry the
++    rejected stat name. Re-labeling here keeps every fact under the
++    parameter the caller actually submitted, ``self_filters[STAT]``,
++    without leaking the nested rejection wholesale.
++    """
++
++    rejected_values = []
++    for nested in error.errors():
++        cause = (nested.get("ctx") or {}).get("error")
++        if (
++            isinstance(cause, GameLogFilterError)
++            and nested.get("loc")
++            and nested["loc"][-1] != "stat"
++        ):
++            rejected_values.extend(cause.values)
++    if not rejected_values:
++        return error
++    # An empty stat is still a submitted key value (``self_filters[]``);
++    # only a missing stat (typed, non-HTTP calls) stays unnamed.
++    label = f"self_filters[{stat}]" if stat is not None else "self_filters"
++    return GameLogFilterError(
++        label,
++        tuple(rejected_values),
++        f"self_filter {raw!r} was rejected: {error}",
++        # The range the caller submitted: the fragments named above came
++        # from splitting it, so credential context survives the split.
++        context=raw if isinstance(raw, str) else None,
++    )
++
++
+ class GameLogQuery(BaseModel):
+     """One typed, validated game-log filter request.
+ 
+@@ -261,17 +387,27 @@ class GameLogQuery(BaseModel):
+         """Require one canonical NBA season label (for example, ``2024-25``)."""
+ 
+         if not isinstance(value, str):
+-            raise ValueError("season_filter must be a string in YYYY-YY format")
++            raise GameLogFilterError(
++                "season_filter",
++                (value,),
++                "season_filter must be a string in YYYY-YY format",
++            )
+         season = value.strip()
+         match = re.fullmatch(r"([0-9]{4})-([0-9]{2})", season)
+         if match is None:
+-            raise ValueError("season_filter must use YYYY-YY format")
++            raise GameLogFilterError(
++                "season_filter",
++                (value,),
++                "season_filter must use YYYY-YY format",
++            )
+         start_year = int(match.group(1))
+         expected_suffix = f"{(start_year + 1) % 100:02d}"
+         if match.group(2) != expected_suffix:
+-            raise ValueError(
++            raise GameLogFilterError(
++                "season_filter",
++                (value,),
+                 "season_filter must end with the following calendar year's "
+-                "final two digits"
++                "final two digits",
+             )
+         return season
+ 
+@@ -282,17 +418,46 @@ class GameLogQuery(BaseModel):
+             return (0, 48)
+         if isinstance(value, tuple):
+             return value
++        complete: str | None = None
+         if isinstance(value, str):
++            complete = value
+             parts = value.split(",")
+             if len(parts) != 2:
+-                raise ValueError("minutes_filter must contain two integer values")
++                raise GameLogFilterError(
++                    "minutes_filter",
++                    (value,),
++                    "minutes_filter must contain two integer values",
++                )
+             value = tuple(parts)
+         if not isinstance(value, (list, tuple)) or len(value) != 2:
+-            raise ValueError("minutes_filter must contain min,max minutes")
++            raise GameLogFilterError(
++                "minutes_filter",
++                (str(value),),
++                "minutes_filter must contain min,max minutes",
++            )
++        # Name the offending part, not the whole pair: the working bound
++        # stays untouched while the unusable one identifies itself. The
++        # complete submitted value travels along, so even a part cut out
++        # of a credential can be sanitized in context.
++        try:
++            low = int(value[0])
++        except (TypeError, ValueError) as error:
++            raise GameLogFilterError(
++                "minutes_filter",
++                (value[0],),
++                "minutes_filter values must be integers",
++                context=complete,
++            ) from error
+         try:
+-            return (int(value[0]), int(value[1]))
++            high = int(value[1])
+         except (TypeError, ValueError) as error:
+-            raise ValueError("minutes_filter values must be integers") from error
++            raise GameLogFilterError(
++                "minutes_filter",
++                (value[1],),
++                "minutes_filter values must be integers",
++                context=complete,
++            ) from error
++        return (low, high)
+ 
+     @field_validator("rank_filter", mode="before")
+     @classmethod
+@@ -301,14 +466,21 @@ class GameLogQuery(BaseModel):
+             return []
+         if isinstance(value, (int, str)):
+             value = [value]
++        # Like teams_against, report every unusable entry and leave the
++        # parseable ranks out of the details.
+         ranks: list[int] = []
++        invalid: list[Any] = []
+         for entry in value:
+             try:
+                 ranks.append(int(entry))
+-            except (TypeError, ValueError) as error:
+-                raise ValueError(
+-                    f"rank_filter entry {entry!r} is not a valid integer"
+-                ) from error
++            except (TypeError, ValueError):
++                invalid.append(entry)
++        if invalid:
++            raise GameLogFilterError(
++                "rank_filter",
++                tuple(invalid),
++                f"rank_filter contains invalid entries: {invalid!r}",
++            )
+         return ranks
+ 
+     @field_validator("opponent_tricode", mode="before")
+@@ -327,8 +499,10 @@ class GameLogQuery(BaseModel):
+             return None
+         tricode = value.strip().upper()
+         if tricode not in NBA_TEAM_TRICODES:
+-            raise ValueError(
+-                f"opponent_tricode {value!r} is not an NBA team tricode"
++            raise GameLogFilterError(
++                "opponent_tricode",
++                (value,),
++                f"opponent_tricode {value!r} is not an NBA team tricode",
+             )
+         return tricode
+ 
+@@ -339,13 +513,37 @@ class GameLogQuery(BaseModel):
+             return (0.0, 200.0)
+         if not isinstance(value, (list, tuple)) or len(value) != 2:
+             raise ValueError("playstyle_range must contain min,max ratings")
++        # The two bounds are separate query parameters, so each failure
++        # carries the parameter it was submitted as.
+         try:
+-            normalized = (float(value[0]), float(value[1]))
++            low = float(value[0])
+         except (TypeError, ValueError) as error:
+-            raise ValueError("playstyle_range values must be numbers") from error
+-        if not all(isfinite(number) for number in normalized):
+-            raise ValueError("playstyle_range values must be finite numbers")
+-        return normalized
++            raise GameLogFilterError(
++                "playstyle_RTG_min",
++                (value[0],),
++                "playstyle_RTG_min must be a finite number",
++            ) from error
++        try:
++            high = float(value[1])
++        except (TypeError, ValueError) as error:
++            raise GameLogFilterError(
++                "playstyle_RTG_max",
++                (value[1],),
++                "playstyle_RTG_max must be a finite number",
++            ) from error
++        if not isfinite(low):
++            raise GameLogFilterError(
++                "playstyle_RTG_min",
++                (value[0],),
++                "playstyle_RTG_min must be a finite number",
++            )
++        if not isfinite(high):
++            raise GameLogFilterError(
++                "playstyle_RTG_max",
++                (value[1],),
++                "playstyle_RTG_max must be a finite number",
++            )
++        return (low, high)
+ 
+     @field_validator("self_filters", mode="before")
+     @classmethod
+@@ -365,12 +563,18 @@ class GameLogQuery(BaseModel):
+                 for entry in value
+             )
+         else:
++            # Only internally reached (the route always sends ordered
++            # pairs); it stays an unknown-shape rejection, so the generic
++            # message with no details remains the contract here.
+             raise ValueError(
+                 "self_filters must be a stat range mapping or a list of typed filters"
+             )
+         normalized: list[SelfFilter] = []
+         for stat, raw in entries:
+-            entry = _normalize_self_filter_entry(stat, raw)
++            try:
++                entry = _normalize_self_filter_entry(stat, raw)
++            except ValidationError as error:
++                raise _relabel_self_filter_failure(stat, raw, error) from error
+             normalized.append(entry)
+         return normalized
+ 
+@@ -385,28 +589,50 @@ class GameLogQuery(BaseModel):
+             item for item in value if item not in SUPPORTED_TEAM_FILTERS
+         ]
+         if unsupported:
+-            raise ValueError(
++            raise GameLogFilterError(
++                "teams_against",
++                tuple(unsupported),
+                 f"teams_against contains unsupported filters: {unsupported}. "
+                 "Supported filters are: "
+-                + ", ".join(SUPPORTED_TEAM_FILTERS)
++                + ", ".join(SUPPORTED_TEAM_FILTERS),
++                # The canonical vocabulary travels with the refusal, so a
++                # caller never needs a copy of these constants to recover.
++                supported_values=tuple(SUPPORTED_TEAM_FILTERS),
++                supported_aliases=tuple(TEAM_FILTER_ALIASES),
+             )
+         return value
+ 
+     @model_validator(mode="after")
+     def _check_rank_alignment(self) -> "GameLogQuery":
+         if self.teams_against and len(self.teams_against) != len(self.rank_filter):
+-            raise ValueError(
+-                "rank_filter must contain one rank per teams_against filter"
++            raise GameLogFilterError(
++                "rank_filter",
++                tuple(self.rank_filter),
++                "rank_filter must contain one rank per teams_against filter",
+             )
+         if self.minutes_filter[0] > self.minutes_filter[1]:
+-            raise ValueError("minutes_filter min must not exceed minutes_filter max")
++            raise GameLogFilterError(
++                "minutes_filter",
++                (f"{self.minutes_filter[0]},{self.minutes_filter[1]}",),
++                "minutes_filter min must not exceed minutes_filter max",
++            )
+         if self.playstyle_range[0] > self.playstyle_range[1]:
+-            raise ValueError(
+-                "playstyle_RTG_min must not exceed playstyle_RTG_max"
++            raise GameLogFilterError(
++                "playstyle_RTG_range",
++                (_format_rating(self.playstyle_range[0]), _format_rating(self.playstyle_range[1])),
++                "playstyle_RTG_min must not exceed playstyle_RTG_max",
+             )
+         return self
+ 
+ 
++def _format_rating(raw: float) -> str:
++    """One submitted rating bound, spelled the way decimals read."""
++
++    if raw.is_integer():
++        return str(int(raw))
++    return str(raw)
++
++
+ class GameLogResponse(BaseModel):
+     """The public game-log response contract.
+ 
+@@ -422,6 +648,7 @@ class GameLogResponse(BaseModel):
+ 
+ 
+ __all__ = [
++    "GameLogFilterError",
+     "GameLogQuery",
+     "GameLogResponse",
+     "Location",
+diff --git a/app/routes/game_routes.py b/app/routes/game_routes.py
+index b30c30c6..4816e6a7 100644
+--- a/app/routes/game_routes.py
++++ b/app/routes/game_routes.py
+@@ -9,6 +9,7 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
+ """
+ 
+ import re
++from typing import Any
+ 
+ import requests
+ from flask import Blueprint, jsonify, request
+@@ -18,8 +19,10 @@ from ..errors import (
+     InvalidInputError,
+     ProviderUnavailableError,
+     ResourceNotFoundError,
++    redact_public_value,
++    sanitize_public_value,
+ )
+-from ..models.game_logs import GameLogQuery
++from ..models.game_logs import GameLogFilterError, GameLogQuery
+ from ..utils.auth import require_auth
+ from ._service_proxy import CurrentAppService
+ 
+@@ -127,10 +130,154 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
+         return player_name, GameLogQuery(**filters)
+     except ValidationError as error:
+         raise InvalidInputError(
+-            "One or more game log filters are invalid.", detail=error
++            "One or more game log filters are invalid.",
++            detail=error,
++            public_details=_game_log_validation_details(error, filters, request.args),
+         ) from error
+ 
+ 
++#: Parsers the typed models do not own, translated from one pydantic-native
++#: rejection at the HTTP seam, the original submitted value in hand. Their
++#: accepted grammar is pydantic's, so acceptance is untouched.
++_UNTYPED_PARAMETER_NAMES = frozenset(
++    {"date_filter", "location_filter", "game_filter"}
++)
++
++
++def _playstyle_range_failures(
++    filters: dict[str, Any],
++    args: Any,
++) -> list[dict[str, str]]:
++    """Facts for an inverted playstyle range, per submitted bound.
++
++    The range spans two query parameters. Only the ones the caller actually
++    submitted are named with the bound as it arrived, so a default the
++    caller never sent is never blamed for a rejection.
++    """
++
++    low, high = filters["playstyle_range"]
++    bounds = (
++        ("playstyle_RTG_min", low),
++        ("playstyle_RTG_max", high),
++    )
++    return [
++        {
++            "parameter": parameter,
++            # The filters hold exactly the queried bound (the omitted one
++            # replaced by its documented default), as submitted strings.
++            "values": [sanitize_public_value(str(bound))],
++        }
++        for parameter, bound in bounds
++        if args.getlist(parameter)
++    ]
++
++
++def _redacted_split_values(
++    fragments: list[str],
++    complete_values: list[str],
++) -> list[str]:
++    """Publish fragments that keep the sanitization context of the whole value.
++
++    Validators report the bounds or parts of one submitted value
++    individually, and splitting on ``,`` can break the context a credential
++    pattern needs to match (a quoted value spanning the split). When a
++    fragment came from a complete value the sanitizer redacts, the
++    sanitized complete value is published instead; ordinary invalid
++    fragments -- including long ones the sanitizer only truncates -- are
++    untouched, because redaction and length bounding are compared apart.
++    """
++
++    published = []
++    for fragment in fragments:
++        complete = next(
++            (
++                candidate
++                for candidate in complete_values
++                if fragment in candidate
++                and redact_public_value(candidate) != candidate
++            ),
++            None,
++        )
++        published.append(
++            sanitize_public_value(complete)
++            if complete is not None
++            else sanitize_public_value(fragment)
++        )
++    return list(dict.fromkeys(published))
++
++
++def _game_log_rejected_filter(
++    cause: GameLogFilterError | None,
++    validation_error: dict[str, Any],
++    filters: dict[str, Any],
++    args: Any,
++) -> dict[str, Any] | list[dict[str, Any]] | None:
++    """One rejected filter as published facts, or none if not safely known."""
++
++    if isinstance(cause, GameLogFilterError):
++        if cause.parameter == "playstyle_RTG_range":
++            # Internal two-parameter marker, never published as a name:
++            # report the bounds the caller actually submitted.
++            return _playstyle_range_failures(filters, args)
++        facts = {
++            # Caller-supplied content can appear inside a parameter name
++            # (a self_filter's stat), so it is redacted like the values.
++            "parameter": sanitize_public_value(cause.parameter),
++            "values": _redacted_split_values(
++                list(cause.values),
++                [cause.context] if isinstance(cause.context, str) else [],
++            ),
++        }
++        if cause.supported_values is not None:
++            facts["supported_values"] = list(cause.supported_values)
++        if cause.supported_aliases is not None:
++            facts["supported_aliases"] = list(cause.supported_aliases)
++        return facts
++
++    # A parser pydantic owns (``date_filter``, ``location_filter``) has no
++    # typed cause, but the route holds exactly the value the caller
++    # submitted and it is a scalar string, so publish that. Anything still
++    # unknown is skipped, keeping the other rejected filters' facts.
++    field = validation_error.get("loc", ())
++    field = field[0] if field and isinstance(field[0], str) else None
++    submitted = filters.get(field) if field in _UNTYPED_PARAMETER_NAMES else None
++    if isinstance(submitted, str):
++        return {
++            "parameter": field,
++            "values": [sanitize_public_value(submitted)],
++        }
++    return None
++
++
++def _game_log_validation_details(
++    error: ValidationError,
++    filters: dict[str, Any],
++    args: Any,
++) -> dict[str, Any] | None:
++    """The failed game-log parameters a caller can act on, or none.
++
++    Each rejection is translated separately: typed
++    :class:`GameLogFilterError` causes name the parameter, the unusable
++    submitted values, and where the service owns the vocabulary, the
++    canonical accepted values. A failure with no safely actionable detail
++    -- an unknown internal one -- is skipped rather than blanking the
++    whole payload, and none of them publishes Pydantic context or input:
++    only redacted, bounded scalars reach ``details``.
++    """
++
++    failed_filters = []
++    for validation_error in error.errors():
++        cause = (validation_error.get("ctx") or {}).get("error")
++        facts = _game_log_rejected_filter(cause, validation_error, filters, args)
++        if isinstance(facts, list):
++            failed_filters.extend(facts)
++        elif facts is not None:
++            failed_filters.append(facts)
++    if not failed_filters:
++        return None
++    return {"filters": failed_filters}
++
++
+ @game_bp.route('/game_logs', methods=['GET'])
+ @require_auth
+ def get_game_logs():
+diff --git a/docs/API_DOCUMENTATION.md b/docs/API_DOCUMENTATION.md
+index 2d0df05f..fbf84561 100644
+--- a/docs/API_DOCUMENTATION.md
++++ b/docs/API_DOCUMENTATION.md
+@@ -75,7 +75,6 @@ Unexpected failures return `internal_error` with status `500`. Internal
+ exception details are logged for operators and are never included in the
+ response. Game-log records and averages are ordinary JSON arrays, not nested
+ pandas JSON strings.
+-
+ For local, credential-free development only, set
+ `FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
+ for local requests. The bypass is rejected when `FLASK_ENV=production`; never
+@@ -1251,6 +1250,52 @@ joins the malformed values of the #9 note and returns a `400` `invalid_input`.
+   `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
+   per one) return a `400` error with code `invalid_input` and message:
+   `One or more game log filters are invalid.`
++- Rejected filter details (#145): a rejected game-log filter names the
++  parameter that failed and the offending submitted values in a bounded
++  `details` object:
++
++  ```json
++  {
++    "code": "invalid_input",
++    "message": "One or more game log filters are invalid.",
++    "details": {
++      "filters": [
++        {
++          "parameter": "teams_against",
++          "values": ["NotAFilter"],
++          "supported_values": ["OPP_PTS", "..."],
++          "supported_aliases": ["<10 Ft"]
++        }
++      ]
++    }
++  }
++  ```
++
++  Each entry's `parameter` is the canonical filter name: `teams_against`,
++  `rank_filter`, `opponent_tricode`, `minutes_filter`, `game_filter`,
++  `season_filter`, `date_filter`, `location_filter`,
++  `playstyle_RTG_min`/`playstyle_RTG_max` (the reversed range names only
++  the bounds the caller actually submitted, each as its own entry), or
++  `self_filters[STAT]` with the actual stat. `values` lists the unusable
++  submitted values, redacted and length-bounded like the diagnostics: only
++  the unusable entries appear, so a `teams_against` request mixing
++  supported and unsupported names reports only the unsupported ones, and a
++  reversed `minutes_filter` range reports the submitted `min,max` pair.
++  Failures that identify no single value (for example `rank_filter[]` not
++  matching `teams_against[]`) report the submitted ranks. For
++  `teams_against`, `supported_values` carries the authoritative canonical
++  vocabulary from the backend's own constant and `supported_aliases` the
++  accepted legacy spellings, so a caller never needs a copy of either;
++  other entries omit them. Each rejection is translated separately, so one
++  failure with no safely actionable detail (unknown internal shapes) is
++  skipped rather than blanking the known ones, and if nothing is
++  actionable the generic message stands alone with no `details` object.
++  Parameter names are redacted and length-bounded the same way values are,
++  because caller-controlled text can appear inside one (a self_filter's
++  stat). No validation-library context, raw input dump, or provider
++  material is ever included, and anything credential-shaped is redacted
++  the same way the diagnostics are. The presence of `details` never
++  changes the message.
+ - `game_logs`, `averages`, and `season_averages` are ordinary JSON arrays.
+   Earlier versions nested pandas JSON strings in these fields; callers that
+   parsed those strings must instead read the arrays directly. `next_game`
+@@ -1268,7 +1313,7 @@ Query parameters:
+ | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
+ | `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
+ | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
+-| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings |
++| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145) |
+ | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
+ | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
+ | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
+diff --git a/tests/test_errors.py b/tests/test_errors.py
+index 4191e768..3a98b187 100644
+--- a/tests/test_errors.py
++++ b/tests/test_errors.py
+@@ -3,9 +3,11 @@
+ from __future__ import annotations
+ 
+ import logging
++import urllib.parse
+ 
+ import pytest
+ from flask import Flask
++from werkzeug.datastructures import MultiDict
+ 
+ from app.errors import (
+     AppError,
+@@ -211,14 +213,623 @@ def test_game_logs_invalid_input_uses_central_handler(client) -> None:
+     )
+ 
+     assert response.status_code == 400
+-    assert response.get_json() == {
+-        "error": {
+-            "code": "invalid_input",
+-            "message": "One or more game log filters are invalid.",
+-        }
++    error = response.get_json()["error"]
++    assert error["code"] == "invalid_input"
++    assert error["message"] == "One or more game log filters are invalid."
++
++
++# Synthetic marker for the redaction test: never a real credential.
++REDACTED_TEAM_VALUE = "token=[REDACTED]"
++
++
++def _rejected_filters(details):
++    """Map one details payload to parameter -> values for assertions."""
++
++    return {
++        entry["parameter"]: entry["values"]
++        for entry in details["filters"]
++    }
++
++
++def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&teams_against%5B%5D=Arc3Assists"
++        "&teams_against%5B%5D=NotAFilter"
++        "&rank_filter%5B%5D=5"
++        "&rank_filter%5B%5D=6"
++    )
++
++    assert response.status_code == 400
++    payload = response.get_json()
++    assert payload["error"]["message"] == "One or more game log filters are invalid."
++    # Only the unsupported entry names itself; the honoured Arc3Assists does
++    # not appear as unusable.
++    rejected = _rejected_filters(payload["error"]["details"])
++    assert rejected == {"teams_against": ["NotAFilter"]}
++
++
++def test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary(
++    client,
++) -> None:
++    from app.models.catalogs import TEAM_FILTER_ALIASES, SUPPORTED_TEAM_FILTERS
++
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&teams_against%5B%5D=NotAFilter"
++        "&rank_filter%5B%5D=5"
++    )
++
++    assert response.status_code == 400
++    details = response.get_json()["error"]["details"]["filters"][0]
++    # The full authoritative vocabulary travels with the rejection, sourced
++    # from the backend constant, so a caller never holds a drifting copy.
++    assert details["supported_values"] == list(SUPPORTED_TEAM_FILTERS)
++    assert "Arc3Assists" in details["supported_values"]
++    assert details["supported_aliases"] == list(TEAM_FILTER_ALIASES)
++    assert "<10 Ft" in details["supported_aliases"]
++
++
++def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&opponent_tricode=XXX"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"opponent_tricode": ["XXX"]}
++
++
++def test_game_logs_rank_filter_rejection_reports_every_unusable_entry(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&rank_filter%5B%5D=abc"
++        "&rank_filter%5B%5D=5"
++        "&rank_filter%5B%5D=xyz"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # All unusable entries, with the parseable 5 left out.
++    assert rejected == {"rank_filter": ["abc", "xyz"]}
++
++
++def test_game_logs_model_level_alignment_failure_names_submitted_values(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&teams_against%5B%5D=OPP_PTS"
++        "&rank_filter%5B%5D=5"
++        "&rank_filter%5B%5D=9"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"rank_filter": ["5", "9"]}
++
++
++def test_game_logs_range_failures_name_their_submitted_values(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&minutes_filter=40,20"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"minutes_filter": ["40,20"]}
++
++
++def test_game_logs_playstyle_failures_use_the_separate_query_names(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&playstyle_RTG_min=abc"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"playstyle_RTG_min": ["abc"]}
++
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&playstyle_RTG_max=inf"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"playstyle_RTG_max": ["inf"]}
++
++
++def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
++    client,
++) -> None:
++    # Only the minimum was submitted; the untouched 200 default must never
++    # be blamed, and the submitted minimum must not disappear.
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&playstyle_RTG_min=201"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"playstyle_RTG_min": ["201"]}
++
++    # With both bounds submitted, each names itself with its own value.
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&playstyle_RTG_min=150&playstyle_RTG_max=50"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"playstyle_RTG_min": ["150"], "playstyle_RTG_max": ["50"]}
++
++    # A submitted maximum below the minimum default blames only itself.
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&playstyle_RTG_max=-5"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"playstyle_RTG_max": ["-5"]}
++
++
++def test_game_logs_rejected_self_filter_numeric_values_name_the_stat(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5BBOGUS%5D=a,b"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # An unsupported stat never blinds the range facts: the numeric
++    # failures still attribute to the stat the caller submitted.
++    assert rejected == {"self_filters[BOGUS]": ["a", "b"]}
++
++
++def test_game_logs_rejected_self_filter_zero_bound_survives(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&self_filters%5BPTS%5D=2,0"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # Zero is a submitted value, not one to drop by truthiness.
++    assert rejected == {"self_filters[PTS]": ["2", "0"]}
++
++
++def test_game_logs_parameter_names_are_redacted_and_bounded_too(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5Btoken%3Dsynthetic-secret%5D=bad-value"
++    )
++
++    assert response.status_code == 400
++    entry = response.get_json()["error"]["details"]["filters"][0]
++    assert entry["parameter"] == "self_filters[token=[REDACTED]]"
++    assert "synthetic-secret" not in response.get_data(as_text=True)
++    # The ordinary rejected value stays verbatim.
++    assert entry["values"] == ["bad-value"]
++
++
++def test_game_logs_published_parameter_names_are_bounded(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5B" + "A" * 300 + "%5D=1,2"
++    )
++
++    assert response.status_code == 400
++    entry = response.get_json()["error"]["details"]["filters"][0]
++    # The caller-controlled stat inside a parameter name is truncated to
++    # the same bound as values; removing only truncation must fail here.
++    assert len(entry["parameter"]) == 200
++    assert entry["parameter"].startswith("self_filters[")
++
++
++SPLIT_TOKEN_VALUE = "token='synthetic-left,synthetic-right'"
++SPLIT_PASSWORD_VALUE = 'password="synthetic-left,synthetic-right"'
++
++
++def test_game_logs_split_credential_values_redact_the_complete_value(
++    client,
++) -> None:
++    # Splitting a submitted value on ',' can destroy the context its
++    # sanitization needs (a quoted value spanning the split), so the
++    # complete submitted value is sanitized and published instead.
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5BPTS%5D=" + urllib.parse.quote(SPLIT_TOKEN_VALUE, safe="")
++    )
++
++    assert response.status_code == 400
++    entry = response.get_json()["error"]["details"]["filters"][0]
++    assert entry["values"] == ["token=[REDACTED]"]
++    body = response.get_data(as_text=True)
++    assert "synthetic-left" not in body
++    assert "synthetic-right" not in body
++
++
++def test_game_logs_quoted_password_across_split_is_redacted(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5BPTS%5D="
++        + urllib.parse.quote(SPLIT_PASSWORD_VALUE, safe="")
++    )
++
++    assert response.status_code == 400
++    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
++        "password=[REDACTED]"
++    ]
++    assert "synthetic-left" not in response.get_data(as_text=True)
++    assert "synthetic-right" not in response.get_data(as_text=True)
++
++
++def test_game_logs_split_credential_in_minutes_is_redacted(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&minutes_filter=" + urllib.parse.quote(SPLIT_TOKEN_VALUE, safe="")
++    )
++
++    assert response.status_code == 400
++    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
++        "token=[REDACTED]"
++    ]
++    assert "synthetic-left" not in response.get_data(as_text=True)
++    assert "synthetic-right" not in response.get_data(as_text=True)
++
++
++def test_game_logs_ordinary_split_values_stay_identifiable(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&self_filters%5BPTS%5D=high,low"
++        "&minutes_filter=a,20"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # Values without credentials are published per part, untouched.
++    assert rejected == {
++        "self_filters[PTS]": ["high", "low"],
++        "minutes_filter": ["a"],
++    }
++
++
++def test_game_logs_empty_stat_key_names_the_submitted_parameter(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5B%5D=a,b"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # The submitted key self_filters[] names itself; only the typed,
++    # non-HTTP calls without a stat use the unnamed form.
++    assert rejected == {"self_filters[]": ["a", "b"]}
++
++
++def test_game_logs_empty_stat_key_names_the_submitted_parameter_for_ranges(
++    client,
++) -> None:
++    # A malformed one-part range under the empty key must still name the
++    # actual submitted key, not fall back to the unnamed form.
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5B%5D=a"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"self_filters[]": ["a"]}
++
++
++def test_game_logs_long_ordinary_ranges_keep_the_invalid_operand(
++    client,
++) -> None:
++    # A complete value long enough to hit the published bound is not a
++    # credential: redaction and length bounding are distinguished, so the
++    # actionable invalid operand is named instead of buried in zeroes.
++    long_zeroes = "0" * 250
++
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&minutes_filter=" + long_zeroes + ",bad"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"minutes_filter": ["bad"]}
++
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5BPTS%5D=" + long_zeroes + ",bad"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"self_filters[PTS]": ["bad"]}
++
++
++def test_game_logs_repeated_same_stat_keeps_ordinary_fragments(client) -> None:
++    # One value contains the ordinary fragment inside a sensitive whole one.
++    # Each pair carries its own complete value, so the ordinary rejection is
++    # not rewritten by another same-stat input's redaction.
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5BPTS%5D=bad"
++        "&self_filters%5BPTS%5D="
++        + urllib.parse.quote("token='bad,synthetic-right'", safe="")
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"self_filters[PTS]": ["bad"]}
++    assert "synthetic-right" not in response.get_data(as_text=True)
++
++
++def test_game_logs_published_values_are_bounded(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&teams_against%5B%5D=" + "A" * 300 +
++        "&rank_filter%5B%5D=1"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"teams_against": ["A" * 200]}
++
++
++def test_game_logs_details_carry_only_the_documented_facts(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&date_filter=not-a-date"
++        "&teams_against%5B%5D=NotAFilter"
++        "&teams_against%5B%5D=token%3Dsecret-token"
++        "&rank_filter%5B%5D=1"
++    )
++
++    assert response.status_code == 400
++    error = response.get_json()["error"]
++    assert error["code"] == "invalid_input"
++    # Structure, not just substrings: every entry carries only the keys
++    # the documented contract allows, and values are scalars.
++    documented = {
++        "supported_values",
++        "supported_aliases",
++        "values",
++        "parameter",
++    }
++    for entry in error["details"]["filters"]:
++        assert set(entry) <= documented
++        for key in ("ctx", "input", "url", "loc", "type", "msg"):
++            assert key not in entry
++    body = response.get_data(as_text=True)
++    assert "secret-token" not in body
++    assert "ValueError" not in body
++    assert "pydantic" not in body
++    assert "errors.pydantic.dev" not in body
++    assert "input_value" not in body
++
++
++def test_game_logs_scalar_parse_failures_name_parameter_and_value(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&date_filter=not-a-date"
++        "&location_filter=home"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {
++        "date_filter": ["not-a-date"],
++        "location_filter": ["home"],
+     }
+ 
+ 
++def test_game_logs_known_failures_survive_other_unknown_failures(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&date_filter=not-a-date"
++        "&teams_against%5B%5D=NotAFilter"
++        "&rank_filter%5B%5D=5"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # Each rejection translates separately: a date parse failure never
++    # blanks the teams_against refusal.
++    assert rejected == {
++        "date_filter": ["not-a-date"],
++        "teams_against": ["NotAFilter"],
++    }
++
++
++def test_game_log_validation_details_keep_known_and_skip_unknown() -> None:
++    from pydantic import ValidationError
++
++    from app.models.game_logs import GameLogQuery
++    from app.routes.game_routes import _game_log_validation_details
++
++    # One typed refusal plus one internal unknown shape: the known detail
++    # survives, the unknown one is skipped rather than blanking the payload.
++    try:
++        GameLogQuery(
++            season_filter="2024-25",
++            teams_against=["NotAFilter"],
++            self_filters="oops",
++        )
++    except ValidationError as error:
++        details = _game_log_validation_details(error, filters={}, args=MultiDict())
++        assert _rejected_filters(details) == {"teams_against": ["NotAFilter"]}
++    else:
++        pytest.fail("the malformed request must be rejected")
++
++
++def test_game_logs_season_failure_names_parameter_and_value(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James&season_filter=potato"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"season_filter": ["potato"]}
++
++
++def test_game_logs_minutes_part_failures_name_the_offending_part(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs?player_name=LeBron%20James&minutes_filter=a,20"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"minutes_filter": ["a"]}
++
++
++def test_game_logs_self_filter_failures_name_parameter_and_value(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&self_filters%5BBOGUS%5D=1,2"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"self_filters[BOGUS]": ["BOGUS"]}
++
++
++def test_game_logs_game_filter_failure_names_parameter_and_value(client) -> None:
++    response = client.get(
++        "/api/games/game_logs?player_name=LeBron%20James&game_filter=0"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {"game_filter": ["0"]}
++
++
++def test_game_logs_credential_looking_values_are_redacted_not_echoed(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&teams_against%5B%5D=token%3Dsecret-token"
++        "&rank_filter%5B%5D=1"
++    )
++
++    assert response.status_code == 400
++    body = response.get_data(as_text=True)
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    assert rejected == {
++        "teams_against": [
++            REDACTED_TEAM_VALUE,
++        ]
++    }
++    assert REDACTED_TEAM_VALUE in body
++    assert "secret-token" not in body
++    assert "token=secret-token" not in body
++    # The vocabulary in the same payload is untouched by the redaction.
++    details = response.get_json()["error"]["details"]["filters"][0]
++    assert "OPP_PTS" in details["supported_values"]
++
++
++def test_game_logs_rejected_values_stay_identifiable(client) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&teams_against%5B%5D=NotAFilter"
++        "&rank_filter%5B%5D=1"
++    )
++
++    assert response.status_code == 400
++    rejected = _rejected_filters(response.get_json()["error"]["details"])
++    # Ordinary rejected input is echoed verbatim; redaction only strips
++    # credential-shaped text.
++    assert rejected == {"teams_against": ["NotAFilter"]}
++
++
++def test_game_logs_details_never_leak_pydantic_context_or_inputs(
++    client,
++) -> None:
++    response = client.get(
++        "/api/games/game_logs"
++        "?player_name=LeBron%20James"
++        "&date_filter=not-a-date"
++        "&teams_against%5B%5D=NotAFilter"
++        "&rank_filter%5B%5D=1"
++    )
++
++    assert response.status_code == 400
++    body = response.get_data(as_text=True)
++    # Only bounded facts appear: no Pydantic error text, no full-input dump,
++    # no internal type names or error URLs in the published payload.
++    assert "ValueError" not in body
++    assert "GameLogFilterError" not in body
++    assert "pydantic" not in body
++    assert "errors.pydantic.dev" not in body
++    assert "input_value" not in body
++    assert "input_type" not in body
++
++
++def test_game_log_validation_details_skip_unknown_internal_failures() -> None:
++    from pydantic import ValidationError
++
++    from app.models.game_logs import GameLogQuery
++    from app.routes.game_routes import _game_log_validation_details
++
++    # An internal error shape with no identifying facts (here, a self
++    # Filters payload no route would send) yields no details at all, so the
++    # generic message stays the full answer.
++    try:
++        GameLogQuery(season_filter="2024-25", self_filters="oops")
++    except ValidationError as error:
++        assert _game_log_validation_details(error, filters={}, args=MultiDict()) is None
++    else:
++        pytest.fail("the malformed self_filters payload must be rejected")
++
++
++
+ def test_player_profile_missing_resource_uses_central_handler(client, monkeypatch) -> None:
+     from app.routes import player_routes
+ 
+diff --git a/tests/test_game_logs.py b/tests/test_game_logs.py
+index 1e14f382..8df0932c 100644
+--- a/tests/test_game_logs.py
++++ b/tests/test_game_logs.py
+@@ -97,6 +97,23 @@ def test_game_log_query_rejects_malformed_filters(kwargs):
+         GameLogQuery(season_filter="2024-25", **dict(kwargs))
+ 
+ 
++def test_game_log_query_game_filter_keeps_the_http_integer_grammar():
++    """#145 revision check: the details work must not change acceptance.
++
++    Redaction and details are presentation, so the parse stays pydantic's:
++    whole-number strings such as ``3.0`` are accepted, and both fractional
++    and non-numeric input is rejected, exactly as with the plain ``ge=1``
++    field only.
++    """
++
++    assert GameLogQuery(season_filter="2024-25", game_filter="3.0").game_filter == 3
++    assert GameLogQuery(season_filter="2024-25", game_filter=3.0).game_filter == 3
++    with pytest.raises(Exception):
++        GameLogQuery(season_filter="2024-25", game_filter="2.9")
++    with pytest.raises(Exception):
++        GameLogQuery(season_filter="2024-25", game_filter=2.9)
++
++
+ @pytest.mark.parametrize(
+     "kwargs",
+     [
+@@ -875,44 +892,69 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
+ 
+ 
+ @pytest.mark.parametrize(
+-    "query_string",
++    "query_string,expected_filters",
+     [
+-        "player_name=LeBron%20James&minutes_filter=not-a-range",
+-        "player_name=LeBron%20James&location_filter=home",
+-        "player_name=LeBron%20James&teams_against[]=OPP_PTS",
+-        "player_name=LeBron%20James&opponent_tricode=XXX",
+-        "player_name=LeBron%20James&opponent_tricode=",
+-        "player_name=LeBron%20James&date_filter=not-a-date",
+-        "player_name=LeBron%20James&game_filter=0",
++        (
++            "player_name=LeBron%20James&minutes_filter=not-a-range",
++            [{"parameter": "minutes_filter", "values": ["not-a-range"]}],
++        ),
++        (
++            "player_name=LeBron%20James&location_filter=home",
++            [{"parameter": "location_filter", "values": ["home"]}],
++        ),
++        (
++            "player_name=LeBron%20James&teams_against[]=OPP_PTS",
++            [{"parameter": "rank_filter", "values": []}],
++        ),
++        (
++            "player_name=LeBron%20James&opponent_tricode=XXX",
++            [{"parameter": "opponent_tricode", "values": ["XXX"]}],
++        ),
++        (
++            "player_name=LeBron%20James&opponent_tricode=",
++            [{"parameter": "opponent_tricode", "values": [""]}],
++        ),
++        (
++            "player_name=LeBron%20James&date_filter=not-a-date",
++            [{"parameter": "date_filter", "values": ["not-a-date"]}],
++        ),
++        (
++            "player_name=LeBron%20James&game_filter=0",
++            [{"parameter": "game_filter", "values": ["0"]}],
++        ),
+     ],
+ )
+-def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_string):
++def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_string, expected_filters):
+     _stub_route_settings(monkeypatch)
+ 
+     response = client.get(f"/api/games/game_logs?{query_string}")
+ 
+     assert response.status_code == 400
++    # #145: the whole response stays exactly the generic-plus-details shape
++    # -- the code is still invalid_input and nothing other than "error" is
++    # published beside it, so no validation metadata can sneak through.
+     assert response.get_json() == {
+         "error": {
+             "code": "invalid_input",
+             "message": "One or more game log filters are invalid.",
++            "details": {"filters": expected_filters},
+         }
+     }
+ 
+ 
+ @pytest.mark.parametrize(
+-    "query_string",
++    "query_string,expected_filters",
+     [
+-        "season_filter=",
+-        "season_filter=potato",
+-        "season_filter=2024-27",
+-        "playstyle_RTG_min=nan",
+-        "playstyle_RTG_max=inf",
+-        "playstyle_RTG_min=-inf",
++        ("season_filter=", [{"parameter": "season_filter", "values": [""]}]),
++        ("season_filter=potato", [{"parameter": "season_filter", "values": ["potato"]}]),
++        ("season_filter=2024-27", [{"parameter": "season_filter", "values": ["2024-27"]}]),
++        ("playstyle_RTG_min=nan", [{"parameter": "playstyle_RTG_min", "values": ["nan"]}]),
++        ("playstyle_RTG_max=inf", [{"parameter": "playstyle_RTG_max", "values": ["inf"]}]),
++        ("playstyle_RTG_min=-inf", [{"parameter": "playstyle_RTG_min", "values": ["-inf"]}]),
+     ],
+ )
+ def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
+-    client, monkeypatch, query_string
++    client, monkeypatch, query_string, expected_filters
+ ):
+     from app.routes import game_routes
+ 
+@@ -933,10 +975,14 @@ def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
+     )
+ 
+     assert response.status_code == 400
++    # The generic message and invalid_input code stay; #145 adds details
++    # naming the failed parameter and its submitted value, with nothing
++    # published beside "error".
+     assert response.get_json() == {
+         "error": {
+             "code": "invalid_input",
+             "message": "One or more game log filters are invalid.",
++            "details": {"filters": expected_filters},
+         }
+     }
+     assert calls == []

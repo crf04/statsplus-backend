@@ -1,0 +1,58 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /private/tmp/statsplus-145/resumed-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 6 items
+
+tests/test_review_145_repro.py::test_review_parameter_boundary[self_filters[token=review-synthetic-marker]-bad] {"request_parameter": "self_filters[token=review-synthetic-marker]", "value": "bad", "response": {"parameter": "self_filters[token=review-synthetic-marker]", "values": ["bad"]}, "sanitizer_would_produce": "self_filters[token=[REDACTED]]"}
+PASSED
+tests/test_review_145_repro.py::test_review_parameter_boundary[self_filters[TOKEN=REVIEW-SYNTHETIC-MARKER]-1,2] {"request_parameter": "self_filters[TOKEN=REVIEW-SYNTHETIC-MARKER]", "value": "1,2", "response": {"parameter": "self_filters[TOKEN=REVIEW-SYNTHETIC-MARKER]", "values": ["TOKEN=[REDACTED]"]}, "sanitizer_would_produce": "self_filters[TOKEN=[REDACTED]]"}
+PASSED
+tests/test_review_145_repro.py::test_review_parameter_boundary[self_filters[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]-bad] {"request_parameter": "self_filters[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]", "value": "bad", "response": {"parameter": "self_filters[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx]", "values": ["bad"]}, "sanitizer_would_produce": "self_filters[xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+PASSED
+tests/test_review_145_repro.py::test_review_uncovered_rejections[self_filters[PTS]-10,0] {"request_parameter": "self_filters[PTS]", "value": "10,0", "error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[PTS]", "values": ["10.0"]}]}, "message": "One or more game log filters are invalid."}}
+PASSED
+tests/test_review_145_repro.py::test_review_uncovered_rejections[self_filters[BOGUS]-a,2] {"request_parameter": "self_filters[BOGUS]", "value": "a,2", "error": {"code": "invalid_input", "details": {"filters": [{"parameter": "self_filters[BOGUS]", "values": ["BOGUS"]}, {"parameter": "self_filters[None]", "values": ["a"]}]}, "message": "One or more game log filters are invalid."}}
+PASSED
+tests/test_review_145_repro.py::test_review_uncovered_rejections[minutes_filter-a,b] {"request_parameter": "minutes_filter", "value": "a,b", "error": {"code": "invalid_input", "details": {"filters": [{"parameter": "minutes_filter", "values": ["a"]}]}, "message": "One or more game log filters are invalid."}}
+PASSED
+
+============================== 6 passed in 1.09s ===============================
+
+Review probe source (removed after execution):
+"""Temporary review reproductions, removed before handoff. All markers synthetic."""
+import json
+import pytest
+
+@pytest.mark.parametrize('parameter,value', [
+    ('self_filters[token=review-synthetic-marker]', 'bad'),
+    ('self_filters[TOKEN=REVIEW-SYNTHETIC-MARKER]', '1,2'),
+    ('self_filters[' + 'x' * 600 + ']', 'bad'),
+])
+def test_review_parameter_boundary(client, parameter, value):
+    from app.errors import sanitize_public_value
+    response = client.get('/api/games/game_logs', query_string={
+        'player_name':'LeBron James', parameter: value,
+    })
+    assert response.status_code == 400
+    detail = response.get_json()['error']['details']['filters'][0]
+    print(json.dumps({'request_parameter': parameter, 'value': value, 'response': detail, 'sanitizer_would_produce': sanitize_public_value(detail['parameter'])}))
+    if len(parameter) > 200:
+        assert len(detail['parameter']) > 200
+    else:
+        assert 'SYNTHETIC-MARKER' in detail['parameter'].upper()
+        assert 'SYNTHETIC-MARKER' not in sanitize_public_value(detail['parameter']).upper()
+
+@pytest.mark.parametrize('parameter,value', [
+    ('self_filters[PTS]', '10,0'),
+    ('self_filters[BOGUS]', 'a,2'),
+    ('minutes_filter', 'a,b'),
+])
+def test_review_uncovered_rejections(client, parameter, value):
+    response = client.get('/api/games/game_logs', query_string={
+        'player_name': 'LeBron James', parameter: value,
+    })
+    assert response.status_code == 400
+    print(json.dumps({'request_parameter':parameter,'value':value,'error':response.get_json()['error']}))

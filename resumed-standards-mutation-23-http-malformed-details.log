@@ -1,0 +1,113 @@
+cwd: /private/tmp/statsplus-145/resumed-review-standards
+command: ['/private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-o', 'addopts=', '-v', '--tb=short', 'tests/test_game_logs.py::test_route_returns_400_for_malformed_filters']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/resumed-review-standards/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /private/tmp/statsplus-145/resumed-review-standards
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 7 items
+
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_details0] FAILED [ 14%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_details1] FAILED [ 28%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_details2] FAILED [ 42%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_details3] FAILED [ 57%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_details4] FAILED [ 71%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_details5] FAILED [ 85%]
+tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_details6] FAILED [100%]
+
+=================================== FAILURES ===================================
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_details0] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+minutes_filter
+  Value error, minutes_filter must contain two integer values [type=value_error, input_value='not-a-range', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_details1] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+location_filter
+  Input should be 'Home', 'Away' or 'Both' [type=literal_error, input_value='home', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/literal_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_details2] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+  Value error, rank_filter must contain one rank per teams_against filter [type=value_error, input_value={'season_filter': '2024-2...0'], 'self_filters': []}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_details3] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+opponent_tricode
+  Value error, opponent_tricode 'XXX' is not an NBA team tricode [type=value_error, input_value='XXX', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_details4] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+opponent_tricode
+  Value error, opponent_tricode '' is not an NBA team tricode [type=value_error, input_value='', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_details5] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+date_filter
+  Input should be a valid date or datetime, invalid character in year [type=date_from_datetime_parsing, input_value='not-a-date', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/date_from_datetime_parsing
+_ test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_details6] _
+tests/test_game_logs.py:939: in test_route_returns_400_for_malformed_filters
+    for entry in payload["error"]["details"]["filters"]
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   KeyError: 'details'
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=1 validation error for GameLogQuery
+game_filter
+  Input should be greater than or equal to 1 [type=greater_than_equal, input_value='0', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/greater_than_equal
+=========================== short test summary info ============================
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&minutes_filter=not-a-range-expected_details0]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&location_filter=home-expected_details1]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&teams_against[]=OPP_PTS-expected_details2]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=XXX-expected_details3]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&opponent_tricode=-expected_details4]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&date_filter=not-a-date-expected_details5]
+FAILED tests/test_game_logs.py::test_route_returns_400_for_malformed_filters[player_name=LeBron%20James&game_filter=0-expected_details6]
+============================== 7 failed in 1.65s ===============================
+
+exit_code: 1

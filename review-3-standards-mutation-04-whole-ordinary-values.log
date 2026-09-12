@@ -1,0 +1,42 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py::test_game_logs_ordinary_split_values_stay_identifiable
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_ordinary_split_values_stay_identifiable FAILED [100%]
+
+=================================== FAILURES ===================================
+____________ test_game_logs_ordinary_split_values_stay_identifiable ____________
+tests/test_errors.py:531: in test_game_logs_ordinary_split_values_stay_identifiable
+    assert rejected == {
+E   AssertionError: assert {'minutes_fil... ['high,low']} == {'self_filter...ilter': ['a']}
+E     
+E     Differing items:
+E     {'self_filters[PTS]': ['high,low']} != {'self_filters[PTS]': ['high', 'low']}
+E     {'minutes_filter': ['a,20']} != {'minutes_filter': ['a']}
+E     
+E     Full diff:
+E       {...
+E     
+E     ...Full output truncated (13 lines hidden), use '-vv' to show
+------------------------------ Captured log call -------------------------------
+WARNING  app.utils.firebase_admin:firebase_admin.py:31 Firebase Admin disabled via FIREBASE_ADMIN_DISABLED - local dev only
+WARNING  app.utils.auth:auth.py:229 Firebase unavailable; using explicitly enabled local auth bypass
+ERROR    app.errors:errors.py:157 Application error code=invalid_input detail=2 validation errors for GameLogQuery
+minutes_filter
+  Value error, minutes_filter values must be integers [type=value_error, input_value='a,20', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+self_filters
+  Value error, self_filter 'high,low' was rejected: 2 validation errors for SelfFilter
+value
+  Value error, self_filter values must be numbers [type=value_error, input_value='high', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+value2
+  Value error, self_filter values must be numbers [type=value_error, input_value='low', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error [type=value_error, input_value=[('PTS', 'high,low')], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/value_error
+=========================== short test summary info ============================
+FAILED tests/test_errors.py::test_game_logs_ordinary_split_values_stay_identifiable
+============================== 1 failed in 0.53s ===============================

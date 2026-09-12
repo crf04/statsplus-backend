@@ -1,0 +1,29 @@
+Command: ['/private/tmp/statsplus-145/final-review-spec/.venv/bin/python', '-m', 'pytest', 'tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds', '-o', 'addopts=', '-p', 'no:cacheprovider', '-v', '--tb=short', '--junitxml=/tmp/statsplus-145/final-spec-mutation-07-range-max-only.xml']
+Offline guard: sitecustomize disables socket connection and DNS; fixtures inject provider dependencies.
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/final-review-spec/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/final-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collecting ... collected 1 item
+
+tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds ERROR [100%]
+
+==================================== ERRORS ====================================
+_ ERROR at setup of test_game_logs_reversed_playstyle_range_names_submitted_bounds _
+tests/conftest.py:110: in app
+    return create_app({
+app/__init__.py:52: in create_app
+    _register_blueprints(app)
+app/__init__.py:180: in _register_blueprints
+    from app.routes.data_update_routes import data_bp
+app/routes/__init__.py:2: in <module>
+    from .game_routes import game_bp
+E     File "/private/tmp/statsplus-145/final-review-spec/app/routes/game_routes.py", line 170
+E       if args.getlist(parameter) if args.getlist("playstyle_RTG_min") else parameter == "playstyle_RTG_min"
+E                                                                       ^^^^
+E   SyntaxError: invalid syntax
+- generated xml file: /tmp/statsplus-145/final-spec-mutation-07-range-max-only.xml -
+=========================== short test summary info ============================
+ERROR tests/test_errors.py::test_game_logs_reversed_playstyle_range_names_submitted_bounds
+=============================== 1 error in 1.78s ===============================

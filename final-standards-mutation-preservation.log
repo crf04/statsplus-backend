@@ -1,0 +1,17 @@
+Base/HEAD: e1db9337bf9fdfeac980a77841578e6e13440b75
+Full candidate diff sha256: a29232bf20e8a08c548f48f8d85cf94155ca22c7369f6645461fd1a5879773d8
+Candidate diff byte-identical: yes
+d596b7f49fdc43cae52a49858a8401218f42657ae533571a5e74b2c7d426534b  app/errors.py
+f177c886f459f1d1b8d0f79f70e55abe1c7958edf291482e97a6d8865116cf37  app/models/game_logs.py
+649a0330f6b9c058f7fb69f515b9f1873f82b7bfb76c3ae3be6a076b21d0c9ae  app/routes/game_routes.py
+967a0cd1fb28f7834441a0f065b7cc2bb7597b22108802985cecb2e1b0e57970  docs/API_DOCUMENTATION.md
+4cd5d44783a21080cfee54fcf58442b8277d683a9ad7be2494e34ee6a4c1e6fb  tests/test_errors.py
+3bd0868b1f8396ee01cd7cae103e9a7315e4b94c3e9cc36c87dd32f0d0c2385e  tests/test_game_logs.py
+
+Final cleanup complete. Candidate file hashes and full diff reverified after all supplementary runs.
+ M app/errors.py
+ M app/models/game_logs.py
+ M app/routes/game_routes.py
+ M docs/API_DOCUMENTATION.md
+ M tests/test_errors.py
+ M tests/test_game_logs.py

@@ -1,0 +1,14 @@
+01-unredacted-parameter 1
+01-unredacted-parameter-restored 0
+02-parameter-only-no-cap 1
+02-parameter-only-no-cap-restored 0
+03-fragment-only-redaction 1
+03-fragment-only-redaction-restored 0
+04-whole-ordinary-values 1
+04-whole-ordinary-values-restored 0
+05-empty-stat-relabel 1
+05-empty-stat-relabel-restored 0
+06-extra-outer-envelope 1
+06-extra-outer-envelope-restored 0
+07-empty-stat-malformed-shape 0
+07-empty-stat-malformed-shape-restored 0

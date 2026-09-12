@@ -1,0 +1,13 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/25-malformed-cases-restored.xml', 'tests/test_game_logs.py::test_route_returns_400_for_malformed_filters']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 7 items
+
+tests/test_game_logs.py .......                                          [100%]
+
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/25-malformed-cases-restored.xml -
+============================== 7 passed in 0.59s ===============================

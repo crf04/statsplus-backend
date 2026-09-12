@@ -1,0 +1,13 @@
+Command: /private/tmp/statsplus-145/review-4-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-4-standards/.review4/runner.py tests/test_errors.py -k test_review4_empty_brackets -s
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-4-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-4-standards
+configfile: pytest.ini
+collecting ... collected 86 items / 82 deselected / 4 selected
+
+tests/test_errors.py::test_review4_empty_brackets[a-expected0] PASSED
+tests/test_errors.py::test_review4_empty_brackets[a,b-expected1] PASSED
+tests/test_errors.py::test_review4_empty_brackets[1,2-expected2] PASSED
+tests/test_errors.py::test_review4_empty_brackets[-expected3] PASSED
+
+======================= 4 passed, 82 deselected in 0.46s =======================

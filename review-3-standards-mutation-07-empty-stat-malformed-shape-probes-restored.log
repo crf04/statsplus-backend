@@ -1,0 +1,13 @@
+Command: /private/tmp/statsplus-145/review-3-standards/.venv/bin/python -B /private/tmp/statsplus-145/review-3-standards/.review3/runner.py tests/test_errors.py -k test_review3_empty_brackets
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0 -- /private/tmp/statsplus-145/review-3-standards/.venv/bin/python
+rootdir: /private/tmp/statsplus-145/review-3-standards
+configfile: pytest.ini
+collecting ... collected 83 items / 79 deselected / 4 selected
+
+tests/test_errors.py::test_review3_empty_brackets[a-expected0] PASSED    [ 25%]
+tests/test_errors.py::test_review3_empty_brackets[a,b-expected1] PASSED  [ 50%]
+tests/test_errors.py::test_review3_empty_brackets[1,2-expected2] PASSED  [ 75%]
+tests/test_errors.py::test_review3_empty_brackets[-expected3] PASSED     [100%]
+
+======================= 4 passed, 79 deselected in 0.46s =======================

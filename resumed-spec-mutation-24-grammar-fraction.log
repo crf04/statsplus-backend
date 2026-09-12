@@ -1,0 +1,36 @@
+Worktree: /private/tmp/statsplus-145/resumed-review-spec
+Command: ['/private/tmp/statsplus-145/resumed-review-spec/.venv/bin/python', '-B', '-m', 'pytest', '-p', 'offline_guard', '-q', '--tb=short', '--junitxml=/private/tmp/statsplus-145/resumed-review-spec/.review-spec/24-grammar-fraction.xml', 'tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar']
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-145/resumed-review-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_game_logs.py F                                                [100%]
+
+=================================== FAILURES ===================================
+________ test_game_log_query_game_filter_keeps_the_http_integer_grammar ________
+tests/test_game_logs.py:111: in test_game_log_query_game_filter_keeps_the_http_integer_grammar
+    with pytest.raises(Exception):
+E   Failed: DID NOT RAISE Exception
+- generated xml file: /private/tmp/statsplus-145/resumed-review-spec/.review-spec/24-grammar-fraction.xml -
+=========================== short test summary info ============================
+FAILED tests/test_game_logs.py::test_game_log_query_game_filter_keeps_the_http_integer_grammar
+============================== 1 failed in 0.49s ===============================
+
+EXACT MUTATION AGAINST CANDIDATE
+--- app/models/game_logs.py (candidate)
++++ app/models/game_logs.py (mutant)
+@@ -322,6 +322,11 @@
+     # can contain more than one constraint for the same stat.
+     self_filters: list[SelfFilter] = Field(default_factory=list)
+ 
++    @field_validator("game_filter", mode="before")
++    @classmethod
++    def mutation_parse_game_filter(cls, value):
++        return None if value is None else int(float(value))
++
+     @field_validator("season_filter", mode="before")
+     @classmethod
+     def normalize_season_filter(cls, value: Any) -> str:
