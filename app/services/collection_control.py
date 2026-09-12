@@ -350,6 +350,34 @@ def _collector_scope_descriptors(
     return descriptors
 
 
+def _manifest_l15_ready(
+    engine: Engine,
+    manifest: CollectionManifest | None,
+) -> bool:
+    """Whether this manifest's governed Last-15 window has opened.
+
+    Read-only and derived from the manifest's own immutable Event Catalog, so
+    descriptor issuance, cycle completion, validation, and maintenance all
+    agree on the same state.  A manifest that cannot prove readiness -- a
+    legacy manifest or temporarily unavailable governance -- is treated as
+    ready, so only a proven waiting state suppresses the missing-work signal.
+    """
+
+    if manifest is None:
+        return True
+    from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+
+    try:
+        governance = ActiveManifestLedgerGovernanceReader(
+            engine
+        ).read_for_composition(
+            manifest.season, _aware(manifest.cutoff), manifest.manifest_id,
+        )
+    except PublicationGovernanceUnavailable:
+        return True
+    return governance.l15_ready
+
+
 def _manifest_l15_date_from_by_team(
     engine: Engine,
     manifest: CollectionManifest,
@@ -361,6 +389,11 @@ def _manifest_l15_date_from_by_team(
     governance = ActiveManifestLedgerGovernanceReader(engine).read_for_composition(
         manifest.season, _aware(manifest.cutoff), manifest.manifest_id,
     )
+    if not governance.l15_ready:
+        # Last 15 is league-wide: until every canonical team has a provable
+        # exact window, issue no L15 descriptor for any team.  The window opens
+        # on the first cycle where the Event Catalog proves all 30 teams ready.
+        return {}
     return governance.expected_l15_date_from_by_team
 
 
@@ -3160,11 +3193,16 @@ class CollectionControlService(_SessionService):
                 if manifest is None:
                     raise ControlPlaneError("manifest_expired")
                 enabled = _manifest_streams(session, manifest)
+                l15_ready = _manifest_l15_ready(self.engine, manifest)
                 missing = []
                 for stream in enabled:
                     if stream.publication_strategy in {"request_time", "never_schedule"}:
                         continue
                     if stream.stream_key in exempt:
+                        continue
+                    if not l15_ready and stream.stream_key.endswith("_l15"):
+                        # The Last-15 window has not opened; its absence is a
+                        # designed waiting state, not missing work.
                         continue
                     pointer = session.get(PublicationPointer, stream.stream_key)
                     publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
@@ -6140,8 +6178,13 @@ class CollectionOperationsService(_SessionService):
                 missing = []
                 manifest = session.get(CollectionManifest, cycle.manifest_id)
                 streams = _manifest_streams(session, manifest) if manifest is not None else []
+                l15_ready = _manifest_l15_ready(self.engine, manifest)
                 for stream in streams:
                     if stream.publication_strategy in {"request_time", "never_schedule"} or stream.stream_key in governed:
+                        continue
+                    if not l15_ready and stream.stream_key.endswith("_l15"):
+                        # A closed Last-15 window is a designed waiting state,
+                        # not missing work that should alert.
                         continue
                     pointer = session.get(PublicationPointer, stream.stream_key)
                     publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None
@@ -6370,11 +6413,15 @@ class CollectionOperationsService(_SessionService):
             )))
             manifest = session.get(CollectionManifest, cycle.manifest_id)
             streams = _manifest_streams(session, manifest) if manifest is not None else []
+            l15_ready = _manifest_l15_ready(self.engine, manifest)
             missing: list[str] = []
             for stream in streams:
                 if stream.publication_strategy in {"request_time", "never_schedule"}:
                     continue
                 if stream.stream_key in governed:
+                    continue
+                if not l15_ready and stream.stream_key.endswith("_l15"):
+                    # A closed Last-15 window is not missing work.
                     continue
                 pointer = session.get(PublicationPointer, stream.stream_key)
                 publication = session.get(PublicationVersion, pointer.active_publication_id) if pointer and pointer.active_publication_id else None

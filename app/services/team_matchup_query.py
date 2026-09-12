@@ -33,6 +33,7 @@ from app.services.traditional_opponent_publications import (
     normalize_traditional_opponent_window,
 )
 from app.services.team_matchup_publications import (
+    INSUFFICIENT_GOVERNED_GAMES_REASON,
     NBA_PUBLICATION_BASES,
     NBA_PUBLICATION_STREAMS,
     PublicationGovernanceUnavailable,
@@ -401,7 +402,33 @@ class TeamMatchupQueryService:
             # traditional/assist surfaces retain that compatibility path.
             if base in NBA_PUBLICATION_BASES or not read.legacy_fallback_allowed
         }
-        if not active:
+        legacy_observations = () if legacy is None else legacy.observations
+        # Durable Last-15 observations are league-wide authority for their own
+        # scope.  The waiting reason outranks any older still-active
+        # publication -- the pre-15 window must not leak a previous cycle's
+        # numbers -- and the permanent Synergy unsupported reason keeps its
+        # precedence too.  A later ready materialization replaces the waiting
+        # observation for the scope, which releases the window with no latch.
+        durable_l15_reasons = (
+            INSUFFICIENT_GOVERNED_GAMES_REASON,
+            "provider_window_unsupported",
+        )
+        withheld_bases = (
+            frozenset(
+                observation.surface
+                for observation in legacy_observations
+                if observation.unavailable_reason in durable_l15_reasons
+            )
+            if window_games is not None
+            else frozenset()
+        )
+        if withheld_bases:
+            active = {
+                base: read
+                for base, read in active.items()
+                if base not in withheld_bases
+            }
+        if not active and not withheld_bases:
             return legacy
         base_windows: dict[str, TeamMatchupWindow | None] = {}
         validation_failures: dict[str, str] = {}
@@ -509,16 +536,23 @@ class TeamMatchupQueryService:
         )
         legacy_league = () if legacy is None else legacy.league_metrics
         legacy_team = {} if legacy is None else legacy.team_metrics
-        legacy_observations = () if legacy is None else legacy.observations
         legacy_observation_retrieved = {
             observation.surface: observation.retrieved_at
             for observation in legacy_observations
         }
         legacy_fact_scopes = {} if legacy is None else legacy.fact_scopes
         legacy_retrieved = {} if legacy is None else legacy.fact_retrieved_at
-        league = [metric for metric in legacy_league if metric.base not in active]
+        league = [
+            metric
+            for metric in legacy_league
+            if metric.base not in active and metric.base not in withheld_bases
+        ]
         team_metrics = {
-            team_id: [metric for metric in metrics if metric.base not in active]
+            team_id: [
+                metric
+                for metric in metrics
+                if metric.base not in active and metric.base not in withheld_bases
+            ]
             for team_id, metrics in legacy_team.items()
         }
         observations = [
@@ -529,12 +563,12 @@ class TeamMatchupQueryService:
         fact_scopes = {
             base: fact_scope
             for base, fact_scope in legacy_fact_scopes.items()
-            if base not in active
+            if base not in active and base not in withheld_bases
         }
         fact_retrieved = {
             base: retrieved
             for base, retrieved in legacy_retrieved.items()
-            if base not in active
+            if base not in active and base not in withheld_bases
         }
         for base, read in active.items():
             window = base_windows[base]

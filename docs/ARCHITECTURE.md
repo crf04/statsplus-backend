@@ -2627,7 +2627,26 @@ than 30 governed teams) publishes fact-free
 `missing/governed_team_roster_incomplete` observations for both windows.
 Before every governed team has 15 eligible games the league L15 is explicitly
 `missing/insufficient_governed_games`, never approximated from partial
-evidence. A complete 30-team window carries deterministic competition ranks
+evidence. Last 15 is league-wide, so that pre-15 period is a designed waiting
+state rather than a failure. `LedgerGovernance.l15_ready` fails closed on set
+equality against the canonical 30-team roster, so it is false while any team
+is short of 15 completed governed games or absent from the governed event set.
+While it is false, collection withholds `DateFrom` for every team rather than
+skipping only the teams that are short, the governed NBA Last-15 surfaces
+persist `missing/insufficient_governed_games` (Synergy keeps its permanent
+`unavailable/provider_window_unsupported` precedence), and the Last-15
+composition jobs settle as successes instead of opening a cycle failure or
+alert. Release needs no trigger, flag, or operator action: readiness is
+re-derived from the Event Catalog on every ordinary cycle, so the first cycle
+after the 30th team reaches its 15th completed game issues the descriptors and
+publishes the exact-15 window. The Season window is unaffected throughout.
+Cycle completion, validation, and maintenance read the same state, so a closed
+window is not counted as missing work and opens no failure or attention alert;
+the governed read keeps the durable waiting reason ahead of an older still
+active publication, so a previous cycle's Last-15 numbers cannot leak into the
+closed window, and the next ready materialization replaces that observation to
+release it. A
+complete 30-team window carries deterministic competition ranks
 (`1, 1, 3` ties) derived only after the governed window is selected, and an
 incomplete window publishes no league ranking. Missing assist-location
 evidence degrades only the `assist_locations` surface

@@ -14,6 +14,8 @@ from app.migrations import MIGRATIONS, run_migrations
 from app.models.collection_control import (
     ActiveSeason,
     CatalogPublication,
+    CollectionAlert,
+    CollectionCycle,
     CollectionManifest,
     CompositionJob,
     PublicationVersion,
@@ -37,9 +39,13 @@ from app.services.team_matchup_repository import (
 )
 from app.services.collection_control import (
     CollectionControlService,
+    CollectionOperationsService,
     PublicationService,
 )
 from tests.services.test_ledger_derivations import _league_games
+from tests.services.test_nba_publication_matchup_materialization import (
+    _canonical_league_games,
+)
 from tests.services.test_collection_control import (
     L15_ZONES,
     SEASON_ZONES,
@@ -136,6 +142,81 @@ def test_runtime_governance_fails_closed_without_active_manifest(tmp_path):
         ).read(
             "2025-26", datetime(2025, 11, 1, tzinfo=timezone.utc)
         )
+
+
+def test_l15_ready_requires_the_full_canonical_team_roster():
+    from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
+
+    canonical = tuple(sorted(NBA_TEAM_ID_TO_TRICODE))
+    cutoff = datetime(2025, 11, 1, tzinfo=timezone.utc)
+
+    def governance(team_game_counts):
+        return LedgerGovernance(
+            season="2025-26",
+            cutoff=cutoff,
+            expected_game_ids=frozenset(),
+            team_ids=frozenset(team_game_counts),
+            expected_l15_game_ids={
+                team_id: frozenset(
+                    f"{team_id}-{index}" for index in range(count)
+                )
+                for team_id, count in team_game_counts.items()
+            },
+        )
+
+    assert governance({team: 15 for team in canonical}).l15_ready is True
+    # A team absent from the governed event set is absent from the dict, and
+    # set equality -- not a bare per-team count -- is what withholds it.
+    assert governance({team: 15 for team in canonical[:-1]}).l15_ready is False
+    short = {team: 15 for team in canonical}
+    short[canonical[-1]] = 14
+    assert governance(short).l15_ready is False
+    assert governance({}).l15_ready is False
+
+
+def test_manifest_l15_boundaries_are_withheld_until_the_league_is_ready(tmp_path):
+    from app.services.collection_control import _manifest_l15_date_from_by_team
+
+    def manifest_for(name, games):
+        engine = create_engine(f"sqlite:///{tmp_path / name}")
+        run_migrations(engine)
+        repository = CanonicalGameLedgerRepository(engine)
+        repository.replace_games_atomic(games)
+        cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+        events = _catalog_events(games, cutoff)
+        with engine.begin() as connection:
+            connection.execute(ActiveSeason.__table__.insert().values(
+                season="2025-26", phase="Regular Season", status="active",
+                cutoff=cutoff, activated_at=cutoff, activated_by="test",
+            ))
+            connection.execute(CatalogPublication.__table__.insert().values(
+                **_immutable_event_catalog(events, cutoff)
+            ))
+            connection.execute(CollectionManifest.__table__.insert().values(
+                manifest_id="manifest", season="2025-26", cutoff=cutoff,
+                collect_before=cutoff + timedelta(hours=1), accepted_versions="[1]",
+                scopes="[\"canonical_game_ledger\"]", checksum="manifest",
+                **_manifest_catalog_binding(events, cutoff),
+                status="active", created_at=cutoff,
+            ))
+            connection.execute(EventCatalogEntry.__table__.insert(), events)
+        with sessionmaker(bind=engine)() as session:
+            manifest = session.scalars(select(CollectionManifest).where(
+                CollectionManifest.manifest_id == "manifest"
+            )).one()
+        return engine, manifest
+
+    ready_engine, ready_manifest = manifest_for(
+        "l15-ready.sqlite3", _canonical_league_games()
+    )
+    withheld_engine, withheld_manifest = manifest_for(
+        "l15-withheld.sqlite3", _canonical_league_games()[:-1]
+    )
+
+    assert len(_manifest_l15_date_from_by_team(ready_engine, ready_manifest)) == 30
+    # 28 teams have an exact 15 and only two are short; the window is still
+    # withheld for every team rather than issued for the ones that qualify.
+    assert _manifest_l15_date_from_by_team(withheld_engine, withheld_manifest) == {}
 
 
 def test_manifest_catalog_binding_migration_backfills_only_unambiguous_rows(
@@ -1394,29 +1475,51 @@ def test_compose_queued_with_incomplete_governed_roster_persists_missing(tmp_pat
         clock=lambda: cutoff + timedelta(hours=1),
     )
 
-    assert runtime.compose_queued("2025-26") == 0
+    assert runtime.compose_queued("2025-26") == 2
 
-    for window_games in (None, 15):
-        snapshot = TeamMatchupRepository(engine).get_snapshot(
-            TeamMatchupSnapshotScope("2025-26", cutoff.date(), window_games)
-        )
-        assert snapshot.facts == ()
-        assert {
-            (item.surface, item.status, item.unavailable_reason)
-            for item in snapshot.observations
-        } == {
-            ("assist_locations", "missing", "governed_team_roster_incomplete"),
-            ("traditional", "missing", "governed_team_roster_incomplete"),
-        }
+    season = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date())
+    )
+    assert season.facts == ()
+    assert {
+        (item.surface, item.status, item.unavailable_reason)
+        for item in season.observations
+    } == {
+        ("assist_locations", "missing", "governed_team_roster_incomplete"),
+        ("traditional", "missing", "governed_team_roster_incomplete"),
+    }
+    # An absent team keeps the Season roster reason but reports the Last-15
+    # waiting state, which is league-wide and takes precedence there.
+    l15 = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff.date(), 15)
+    )
+    assert l15.facts == ()
+    assert {
+        (item.surface, item.status, item.unavailable_reason)
+        for item in l15.observations
+    } == {
+        ("assist_locations", "missing", "insufficient_governed_games"),
+        ("traditional", "missing", "insufficient_governed_games"),
+    }
     with engine.connect() as connection:
         jobs = {
             row["stream_key"]: row
             for row in connection.execute(select(CompositionJob.__table__)).mappings()
         }
-    assert all(job["status"] == "failed" for job in jobs.values())
+    # A roster too incomplete to prove any exact window withholds Last 15 as a
+    # designed waiting state; the Season window still fails and alerts.
+    season_jobs = {
+        stream: job for stream, job in jobs.items()
+        if not stream.endswith("_l15")
+    }
+    l15_jobs = {
+        stream: job for stream, job in jobs.items() if stream.endswith("_l15")
+    }
+    assert all(job["status"] == "failed" for job in season_jobs.values())
     assert {
-        job["last_error"] for job in jobs.values()
+        job["last_error"] for job in season_jobs.values()
     } == {"governed_team_roster_incomplete"}
+    assert all(job["status"] == "succeeded" for job in l15_jobs.values())
 
 
 def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
@@ -1478,7 +1581,7 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
         clock=lambda: cutoff + timedelta(hours=1),
     )
 
-    assert runtime.compose_queued("2025-26") == 5
+    assert runtime.compose_queued("2025-26") == 7
 
     season = TeamMatchupRepository(engine).get_snapshot(
         TeamMatchupSnapshotScope("2025-26", cutoff.date())
@@ -1509,10 +1612,197 @@ def test_compose_queued_with_incomplete_governed_l15_persists_missing(tmp_path):
     assert jobs["player_per36"]["status"] == "succeeded"
     assert jobs["assist_locations_season"]["status"] == "succeeded"
     assert jobs["player_assist_locations"]["status"] == "succeeded"
-    assert jobs["traditional_opponent_l15"]["status"] == "failed"
-    assert jobs["traditional_opponent_l15"]["last_error"] == "insufficient_governed_games"
-    assert jobs["assist_locations_l15"]["status"] == "failed"
-    assert jobs["assist_locations_l15"]["last_error"] == "insufficient_governed_games"
+    # A withheld Last 15 is a designed waiting state, not a failure.
+    assert jobs["traditional_opponent_l15"]["status"] == "succeeded"
+    assert jobs["traditional_opponent_l15"]["last_error"] is None
+    assert jobs["assist_locations_l15"]["status"] == "succeeded"
+    assert jobs["assist_locations_l15"]["last_error"] is None
+
+
+def test_compose_queued_releases_l15_when_the_last_team_reaches_15(tmp_path):
+    from app.services.collection_control import _manifest_l15_date_from_by_team
+    from app.services.ledger_matchup_materialization import (
+        LedgerMatchupMaterializationService,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'l15-release.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    # Two canonical teams are one completed game short of the exact 15 the
+    # league requires; the next cycle advances them with no other change.
+    near_ready = _canonical_league_games()[:-1]
+    full = _canonical_league_games()
+    repository.replace_games_atomic(near_ready)
+    cutoff_one = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    cutoff_two = cutoff_one + timedelta(days=1)
+    events_one = _catalog_events(near_ready, cutoff_one)
+    events_two = _catalog_events(full, cutoff_two)
+    stream = "traditional_opponent_l15"
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff_two, activated_at=cutoff_one, activated_by="test",
+        ))
+        connection.execute(CatalogPublication.__table__.insert(), [
+            _immutable_event_catalog(events_one, cutoff_one),
+            _immutable_event_catalog(events_two, cutoff_two),
+        ])
+        connection.execute(CollectionManifest.__table__.insert(), [
+            {
+                "manifest_id": "manifest-one", "season": "2025-26",
+                "cutoff": cutoff_one,
+                "collect_before": cutoff_two + timedelta(days=1),
+                "accepted_versions": "[1]",
+                "scopes": json.dumps(["canonical_game_ledger", stream]),
+                "checksum": "manifest-one",
+                **_manifest_catalog_binding(events_one, cutoff_one),
+                "status": "active", "created_at": cutoff_one,
+            },
+            {
+                "manifest_id": "manifest-two", "season": "2025-26",
+                "cutoff": cutoff_two,
+                "collect_before": cutoff_two + timedelta(days=1),
+                "accepted_versions": "[1]",
+                "scopes": json.dumps(["canonical_game_ledger", stream]),
+                "checksum": "manifest-two",
+                **_manifest_catalog_binding(events_two, cutoff_two),
+                "status": "active", "created_at": cutoff_two,
+            },
+        ])
+    with sessionmaker(bind=engine)() as session:
+        manifest_one = session.get(CollectionManifest, "manifest-one")
+        manifest_two = session.get(CollectionManifest, "manifest-two")
+
+    class Parity:
+        def read(self, stream_key):
+            return ()
+
+    runtime = LedgerRuntime(
+        backfill=None,
+        repository=repository,
+        materialization=LedgerMaterializationService(
+            repository,
+            parity_repository=LedgerParityArtifactRepository(engine),
+            parity_reader=Parity(),
+        ),
+        governance=ActiveManifestLedgerGovernanceReader(engine),
+        matchup_materialization=LedgerMatchupMaterializationService(
+            repository,
+            TeamMatchupRepository(engine),
+            clock=lambda: cutoff_two + timedelta(hours=1),
+        ),
+        clock=lambda: cutoff_two + timedelta(hours=1),
+    )
+
+    def queue_l15_jobs(manifest_id, cutoff):
+        with engine.begin() as connection:
+            connection.execute(CompositionJob.__table__.delete())
+            connection.execute(CompositionJob.__table__.insert(), [
+                {
+                    "job_id": f"job-{l15_stream}-{manifest_id}",
+                    "stream_key": l15_stream,
+                    "manifest_id": manifest_id,
+                    "season": "2025-26",
+                    "cutoff": cutoff,
+                    "status": "queued",
+                    "attempts": 0,
+                    "created_at": cutoff,
+                    "updated_at": cutoff,
+                }
+                for l15_stream in ("traditional_opponent_l15", "assist_locations_l15")
+            ])
+
+    # Cycle one: the whole league is not ready, so no L15 descriptor is
+    # issued for any team and the window is recorded as a waiting state.
+    assert _manifest_l15_date_from_by_team(engine, manifest_one) == {}
+    queue_l15_jobs("manifest-one", cutoff_one)
+    assert runtime.compose_queued("2025-26") == 2
+    withheld = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff_one.date(), 15)
+    )
+    assert withheld.facts == ()
+    assert {
+        (item.surface, item.status, item.unavailable_reason)
+        for item in withheld.observations
+    } == {
+        ("assist_locations", "missing", "insufficient_governed_games"),
+        ("traditional", "missing", "insufficient_governed_games"),
+    }
+
+    # Cycle two: the last canonical team reaches 15 on the next ordinary cycle
+    # with no other input change and no operator action.
+    repository.replace_games_atomic(full)
+    boundaries = _manifest_l15_date_from_by_team(engine, manifest_two)
+    assert len(boundaries) == 30
+    queue_l15_jobs("manifest-two", cutoff_two)
+    assert runtime.compose_queued("2025-26") == 2
+    released = TeamMatchupRepository(engine).get_snapshot(
+        TeamMatchupSnapshotScope("2025-26", cutoff_two.date(), 15)
+    )
+    assert released.facts
+    assert all(item.status == "available" for item in released.observations)
+    with engine.connect() as connection:
+        rows = connection.execute(select(CompositionJob.__table__)).mappings().all()
+    assert {row["status"] for row in rows} == {"succeeded"}
+
+
+def test_withheld_l15_completes_cycle_without_alerts(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'l15-waiting-cycle.sqlite3'}")
+    run_migrations(engine)
+    stream = "exact_shot_zones_opponent_l15"
+    cutoff = datetime(2025, 10, 15, 5, 22, tzinfo=timezone.utc)
+    games = _canonical_league_games()[:-1]
+    events = _catalog_events(games, cutoff)
+    with engine.begin() as connection:
+        connection.execute(ActiveSeason.__table__.insert().values(
+            season="2025-26", phase="Regular Season", status="active",
+            cutoff=cutoff, activated_at=cutoff, activated_by="test",
+        ))
+        connection.execute(CatalogPublication.__table__.insert().values(
+            **_immutable_event_catalog(events, cutoff)
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="manifest", season="2025-26", cutoff=cutoff,
+            collect_before=cutoff + timedelta(days=1), accepted_versions="[1]",
+            scopes=json.dumps(["canonical_game_ledger", stream]),
+            checksum="manifest", **_manifest_catalog_binding(events, cutoff),
+            status="active", created_at=cutoff,
+        ))
+        connection.execute(CollectionCycle.__table__.insert().values(
+            cycle_id="cycle", manifest_id="manifest", season="2025-26",
+            cutoff=cutoff, status="collecting", completed_game_count=len(games),
+            created_at=cutoff,
+        ))
+        connection.execute(CompositionJob.__table__.insert().values(
+            job_id="job", stream_key=stream, manifest_id="manifest",
+            season="2025-26", cutoff=cutoff, status="succeeded",
+            attempts=0, created_at=cutoff, updated_at=cutoff,
+        ))
+    PublicationService(engine).register_stream(
+        stream, provider="nba", owner="collector", required_observations=[],
+        publication_strategy="replace", supported_windows=["l15"], enabled=True,
+    )
+    alerts = []
+    control = CollectionControlService(
+        engine, clock=lambda: cutoff + timedelta(hours=7)
+    )
+    operations = CollectionOperationsService(
+        engine, collection_control=control,
+        alert_adapter=SimpleNamespace(send=lambda **kwargs: alerts.append(kwargs)),
+        clock=lambda: cutoff + timedelta(hours=7),
+    )
+
+    completeness = operations.validate_completeness(cycle_id="cycle")
+    assert completeness["complete"] is True
+    assert completeness["missing_streams"] == []
+
+    control.finish_cycle("cycle", status="complete")
+
+    maintenance = operations.run_maintenance(season="2025-26", cutoff=cutoff)
+    assert maintenance["cycles_attention"] == 0
+    assert alerts == []
+    with engine.connect() as connection:
+        assert connection.execute(select(CollectionAlert)).first() is None
 
 
 def test_refresh_fails_governance_before_any_backfill_or_provider_work():
