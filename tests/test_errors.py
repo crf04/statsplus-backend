@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 
 import pytest
 from flask import Flask
@@ -428,6 +429,171 @@ def test_game_logs_parameter_names_are_redacted_and_bounded_too(
     assert "synthetic-secret" not in response.get_data(as_text=True)
     # The ordinary rejected value stays verbatim.
     assert entry["values"] == ["bad-value"]
+
+
+def test_game_logs_published_parameter_names_are_bounded(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5B" + "A" * 300 + "%5D=1,2"
+    )
+
+    assert response.status_code == 400
+    entry = response.get_json()["error"]["details"]["filters"][0]
+    # The caller-controlled stat inside a parameter name is truncated to
+    # the same bound as values; removing only truncation must fail here.
+    assert len(entry["parameter"]) == 200
+    assert entry["parameter"].startswith("self_filters[")
+
+
+SPLIT_TOKEN_VALUE = "token='synthetic-left,synthetic-right'"
+SPLIT_PASSWORD_VALUE = 'password="synthetic-left,synthetic-right"'
+
+
+def test_game_logs_split_credential_values_redact_the_complete_value(
+    client,
+) -> None:
+    # Splitting a submitted value on ',' can destroy the context its
+    # sanitization needs (a quoted value spanning the split), so the
+    # complete submitted value is sanitized and published instead.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D=" + urllib.parse.quote(SPLIT_TOKEN_VALUE, safe="")
+    )
+
+    assert response.status_code == 400
+    entry = response.get_json()["error"]["details"]["filters"][0]
+    assert entry["values"] == ["token=[REDACTED]"]
+    body = response.get_data(as_text=True)
+    assert "synthetic-left" not in body
+    assert "synthetic-right" not in body
+
+
+def test_game_logs_quoted_password_across_split_is_redacted(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D="
+        + urllib.parse.quote(SPLIT_PASSWORD_VALUE, safe="")
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
+        "password=[REDACTED]"
+    ]
+    assert "synthetic-left" not in response.get_data(as_text=True)
+    assert "synthetic-right" not in response.get_data(as_text=True)
+
+
+def test_game_logs_split_credential_in_minutes_is_redacted(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&minutes_filter=" + urllib.parse.quote(SPLIT_TOKEN_VALUE, safe="")
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
+        "token=[REDACTED]"
+    ]
+    assert "synthetic-left" not in response.get_data(as_text=True)
+    assert "synthetic-right" not in response.get_data(as_text=True)
+
+
+def test_game_logs_ordinary_split_values_stay_identifiable(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&self_filters%5BPTS%5D=high,low"
+        "&minutes_filter=a,20"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Values without credentials are published per part, untouched.
+    assert rejected == {
+        "self_filters[PTS]": ["high", "low"],
+        "minutes_filter": ["a"],
+    }
+
+
+def test_game_logs_empty_stat_key_names_the_submitted_parameter(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5B%5D=a,b"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # The submitted key self_filters[] names itself; only the typed,
+    # non-HTTP calls without a stat use the unnamed form.
+    assert rejected == {"self_filters[]": ["a", "b"]}
+
+
+def test_game_logs_empty_stat_key_names_the_submitted_parameter_for_ranges(
+    client,
+) -> None:
+    # A malformed one-part range under the empty key must still name the
+    # actual submitted key, not fall back to the unnamed form.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5B%5D=a"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[]": ["a"]}
+
+
+def test_game_logs_long_ordinary_ranges_keep_the_invalid_operand(
+    client,
+) -> None:
+    # A complete value long enough to hit the published bound is not a
+    # credential: redaction and length bounding are distinguished, so the
+    # actionable invalid operand is named instead of buried in zeroes.
+    long_zeroes = "0" * 250
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&minutes_filter=" + long_zeroes + ",bad"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"minutes_filter": ["bad"]}
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D=" + long_zeroes + ",bad"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[PTS]": ["bad"]}
+
+
+def test_game_logs_repeated_same_stat_keeps_ordinary_fragments(client) -> None:
+    # One value contains the ordinary fragment inside a sensitive whole one.
+    # Each pair carries its own complete value, so the ordinary rejection is
+    # not rewritten by another same-stat input's redaction.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D=bad"
+        "&self_filters%5BPTS%5D="
+        + urllib.parse.quote("token='bad,synthetic-right'", safe="")
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[PTS]": ["bad"]}
+    assert "synthetic-right" not in response.get_data(as_text=True)
 
 
 def test_game_logs_published_values_are_bounded(client) -> None:

@@ -69,12 +69,19 @@ class GameLogFilterError(ValueError):
         *,
         supported_values: tuple[str, ...] | None = None,
         supported_aliases: tuple[str, ...] | None = None,
+        context: str | None = None,
     ) -> None:
         super().__init__(message)
         self.parameter = parameter
         self.values = tuple(str(value) for value in values)
         self.supported_values = supported_values
         self.supported_aliases = supported_aliases
+        # The complete submitted value a published value was extracted
+        # from, when the model split it (a ``min,max`` range or part).
+        # Splitting can destroy the context a credential pattern needs,
+        # so the route sanitizes this whole text and publishes it instead
+        # of a leaky fragment.
+        self.context = context
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,14 +303,16 @@ def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
     elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
         parts = list(raw)
     else:
+        # An empty stat is still a submitted key value (``self_filters[]``);
+        # only a missing stat (typed, non-HTTP calls) stays unnamed.
         raise GameLogFilterError(
-            f"self_filters[{stat}]" if stat else "self_filters",
+            f"self_filters[{stat}]" if stat is not None else "self_filters",
             (str(raw),),
             f"self_filter for {stat!r} must be a range or typed comparison",
         )
     if len(parts) != 2:
         raise GameLogFilterError(
-            f"self_filters[{stat}]" if stat else "self_filters",
+            f"self_filters[{stat}]" if stat is not None else "self_filters",
             (str(raw),),
             f"self_filter for {stat!r} must contain min,max values",
         )
@@ -335,11 +344,16 @@ def _relabel_self_filter_failure(
             rejected_values.extend(cause.values)
     if not rejected_values:
         return error
-    label = f"self_filters[{stat}]" if stat else "self_filters"
+    # An empty stat is still a submitted key value (``self_filters[]``);
+    # only a missing stat (typed, non-HTTP calls) stays unnamed.
+    label = f"self_filters[{stat}]" if stat is not None else "self_filters"
     return GameLogFilterError(
         label,
         tuple(rejected_values),
         f"self_filter {raw!r} was rejected: {error}",
+        # The range the caller submitted: the fragments named above came
+        # from splitting it, so credential context survives the split.
+        context=raw if isinstance(raw, str) else None,
     )
 
 
@@ -404,7 +418,9 @@ class GameLogQuery(BaseModel):
             return (0, 48)
         if isinstance(value, tuple):
             return value
+        complete: str | None = None
         if isinstance(value, str):
+            complete = value
             parts = value.split(",")
             if len(parts) != 2:
                 raise GameLogFilterError(
@@ -420,7 +436,9 @@ class GameLogQuery(BaseModel):
                 "minutes_filter must contain min,max minutes",
             )
         # Name the offending part, not the whole pair: the working bound
-        # stays untouched while the unusable one identifies itself.
+        # stays untouched while the unusable one identifies itself. The
+        # complete submitted value travels along, so even a part cut out
+        # of a credential can be sanitized in context.
         try:
             low = int(value[0])
         except (TypeError, ValueError) as error:
@@ -428,6 +446,7 @@ class GameLogQuery(BaseModel):
                 "minutes_filter",
                 (value[0],),
                 "minutes_filter values must be integers",
+                context=complete,
             ) from error
         try:
             high = int(value[1])
@@ -436,6 +455,7 @@ class GameLogQuery(BaseModel):
                 "minutes_filter",
                 (value[1],),
                 "minutes_filter values must be integers",
+                context=complete,
             ) from error
         return (low, high)
 

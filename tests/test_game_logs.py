@@ -930,13 +930,15 @@ def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_stri
     response = client.get(f"/api/games/game_logs?{query_string}")
 
     assert response.status_code == 400
-    # #145: the whole envelope stays generic-plus-details — the code is
-    # still invalid_input and each known rejection names its parameter and
-    # submitted values in the documented shape only.
-    assert response.get_json()["error"] == {
-        "code": "invalid_input",
-        "message": "One or more game log filters are invalid.",
-        "details": {"filters": expected_filters},
+    # #145: the whole response stays exactly the generic-plus-details shape
+    # -- the code is still invalid_input and nothing other than "error" is
+    # published beside it, so no validation metadata can sneak through.
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "One or more game log filters are invalid.",
+            "details": {"filters": expected_filters},
+        }
     }
 
 
@@ -974,11 +976,14 @@ def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
 
     assert response.status_code == 400
     # The generic message and invalid_input code stay; #145 adds details
-    # naming the failed parameter and its submitted value.
-    assert response.get_json()["error"] == {
-        "code": "invalid_input",
-        "message": "One or more game log filters are invalid.",
-        "details": {"filters": expected_filters},
+    # naming the failed parameter and its submitted value, with nothing
+    # published beside "error".
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "One or more game log filters are invalid.",
+            "details": {"filters": expected_filters},
+        }
     }
     assert calls == []
 

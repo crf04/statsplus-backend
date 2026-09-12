@@ -19,6 +19,7 @@ from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
+    redact_public_value,
     sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
@@ -171,6 +172,40 @@ def _playstyle_range_failures(
     ]
 
 
+def _redacted_split_values(
+    fragments: list[str],
+    complete_values: list[str],
+) -> list[str]:
+    """Publish fragments that keep the sanitization context of the whole value.
+
+    Validators report the bounds or parts of one submitted value
+    individually, and splitting on ``,`` can break the context a credential
+    pattern needs to match (a quoted value spanning the split). When a
+    fragment came from a complete value the sanitizer redacts, the
+    sanitized complete value is published instead; ordinary invalid
+    fragments -- including long ones the sanitizer only truncates -- are
+    untouched, because redaction and length bounding are compared apart.
+    """
+
+    published = []
+    for fragment in fragments:
+        complete = next(
+            (
+                candidate
+                for candidate in complete_values
+                if fragment in candidate
+                and redact_public_value(candidate) != candidate
+            ),
+            None,
+        )
+        published.append(
+            sanitize_public_value(complete)
+            if complete is not None
+            else sanitize_public_value(fragment)
+        )
+    return list(dict.fromkeys(published))
+
+
 def _game_log_rejected_filter(
     cause: GameLogFilterError | None,
     validation_error: dict[str, Any],
@@ -188,7 +223,10 @@ def _game_log_rejected_filter(
             # Caller-supplied content can appear inside a parameter name
             # (a self_filter's stat), so it is redacted like the values.
             "parameter": sanitize_public_value(cause.parameter),
-            "values": [sanitize_public_value(value) for value in cause.values],
+            "values": _redacted_split_values(
+                list(cause.values),
+                [cause.context] if isinstance(cause.context, str) else [],
+            ),
         }
         if cause.supported_values is not None:
             facts["supported_values"] = list(cause.supported_values)

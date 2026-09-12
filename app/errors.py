@@ -114,6 +114,18 @@ def _sanitize_diagnostic_detail(detail: Any) -> str | None:
 _PUBLIC_VALUE_MAX_LENGTH = 200
 
 
+def redact_public_value(value: Any) -> str:
+    """Credential redaction only, without the published length bound.
+
+    The split-value facts compare redacted and raw text to detect a
+    credential that splitting destroyed; distinguishing redaction from
+    mere length truncation requires the unbounded form.
+    """
+
+    sanitized = _sanitize_diagnostic_detail(value)
+    return sanitized or ""
+
+
 def sanitize_public_value(value: Any) -> str:
     """One value a caller may see: the diagnostics redaction, bounded.
 
@@ -123,11 +135,7 @@ def sanitize_public_value(value: Any) -> str:
     is stripped here too, and the value is length-bounded.
     """
 
-    sanitized = _sanitize_diagnostic_detail(value)
-    if sanitized is None:
-        return ""
-    return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]
-
+    return redact_public_value(value)[:_PUBLIC_VALUE_MAX_LENGTH]
 
 def _log_application_error(
     error: AppError,
