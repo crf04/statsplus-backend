@@ -42,6 +42,22 @@ from app.models.catalogs import (
 Location = Literal["Home", "Away", "Both"]
 
 
+class GameLogFilterError(ValueError):
+    """One validation failure that names the filter a caller can act on.
+
+    Raised by :class:`GameLogQuery` validators instead of a bare
+    :class:`ValueError` when the facts a caller needs -- the parameter that
+    failed and the submitted values that were unusable -- are safe to publish.
+    The route layer reads them into the error payload's ``details``; the
+    message stays the generic one.
+    """
+
+    def __init__(self, parameter: str, values: tuple[Any, ...] | None, message: str) -> None:
+        super().__init__(message)
+        self.parameter = parameter
+        self.values = values
+
+
 @dataclass(frozen=True, slots=True)
 class _SelfFilterOperatorDescriptor:
     """Comparison behavior owned by one member of the closed operator set."""
@@ -255,6 +271,29 @@ class GameLogQuery(BaseModel):
     # can contain more than one constraint for the same stat.
     self_filters: list[SelfFilter] = Field(default_factory=list)
 
+    @field_validator("game_filter", mode="before")
+    @classmethod
+    def normalize_game_filter(cls, value: Any) -> Any:
+        """Name the submitted value when ``game_filter`` is not a usable count."""
+
+        if value is None:
+            return None
+        try:
+            count = int(value)
+        except (TypeError, ValueError) as error:
+            raise GameLogFilterError(
+                "game_filter",
+                (value,),
+                "game_filter must be a whole number of games",
+            ) from error
+        if count < 1:
+            raise GameLogFilterError(
+                "game_filter",
+                (value,),
+                "game_filter must be at least 1",
+            )
+        return value
+
     @field_validator("season_filter", mode="before")
     @classmethod
     def normalize_season_filter(cls, value: Any) -> str:
@@ -306,8 +345,8 @@ class GameLogQuery(BaseModel):
             try:
                 ranks.append(int(entry))
             except (TypeError, ValueError) as error:
-                raise ValueError(
-                    f"rank_filter entry {entry!r} is not a valid integer"
+                raise GameLogFilterError(
+                    "rank_filter", (entry,), f"rank_filter entry {entry!r} is not a valid integer"
                 ) from error
         return ranks
 
@@ -327,8 +366,10 @@ class GameLogQuery(BaseModel):
             return None
         tricode = value.strip().upper()
         if tricode not in NBA_TEAM_TRICODES:
-            raise ValueError(
-                f"opponent_tricode {value!r} is not an NBA team tricode"
+            raise GameLogFilterError(
+                "opponent_tricode",
+                (value,),
+                f"opponent_tricode {value!r} is not an NBA team tricode",
             )
         return tricode
 
@@ -385,7 +426,9 @@ class GameLogQuery(BaseModel):
             item for item in value if item not in SUPPORTED_TEAM_FILTERS
         ]
         if unsupported:
-            raise ValueError(
+            raise GameLogFilterError(
+                "teams_against",
+                tuple(unsupported),
                 f"teams_against contains unsupported filters: {unsupported}. "
                 "Supported filters are: "
                 + ", ".join(SUPPORTED_TEAM_FILTERS)
@@ -395,14 +438,22 @@ class GameLogQuery(BaseModel):
     @model_validator(mode="after")
     def _check_rank_alignment(self) -> "GameLogQuery":
         if self.teams_against and len(self.teams_against) != len(self.rank_filter):
-            raise ValueError(
-                "rank_filter must contain one rank per teams_against filter"
+            raise GameLogFilterError(
+                "rank_filter",
+                None,
+                "rank_filter must contain one rank per teams_against filter",
             )
         if self.minutes_filter[0] > self.minutes_filter[1]:
-            raise ValueError("minutes_filter min must not exceed minutes_filter max")
+            raise GameLogFilterError(
+                "minutes_filter",
+                None,
+                "minutes_filter min must not exceed minutes_filter max",
+            )
         if self.playstyle_range[0] > self.playstyle_range[1]:
-            raise ValueError(
-                "playstyle_RTG_min must not exceed playstyle_RTG_max"
+            raise GameLogFilterError(
+                "playstyle_RTG_min",
+                None,
+                "playstyle_RTG_min must not exceed playstyle_RTG_max",
             )
         return self
 
@@ -422,6 +473,7 @@ class GameLogResponse(BaseModel):
 
 
 __all__ = [
+    "GameLogFilterError",
     "GameLogQuery",
     "GameLogResponse",
     "Location",

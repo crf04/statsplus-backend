@@ -9,6 +9,7 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 """
 
 import re
+from typing import Any
 
 import requests
 from flask import Blueprint, jsonify, request
@@ -19,7 +20,7 @@ from ..errors import (
     ProviderUnavailableError,
     ResourceNotFoundError,
 )
-from ..models.game_logs import GameLogQuery
+from ..models.game_logs import GameLogFilterError, GameLogQuery
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
@@ -127,8 +128,35 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         return player_name, GameLogQuery(**filters)
     except ValidationError as error:
         raise InvalidInputError(
-            "One or more game log filters are invalid.", detail=error
+            "One or more game log filters are invalid.",
+            detail=error,
+            public_details=_game_log_validation_details(error),
         ) from error
+
+
+def _game_log_validation_details(error: ValidationError) -> dict[str, Any] | None:
+    """The failed game-log parameters a caller can act on, or none.
+
+    Pydantic reports each rejection with the filter it came from; only
+    :class:`GameLogFilterError` rejections carry the bounded facts -- the
+    parameter name and the unusable submitted values -- this contract
+    publishes. Everything else keeps the generic message with no details,
+    and no Pydantic context, input, or provider material ever reaches a
+    caller.
+    """
+
+    failed_filters = []
+    for validation_error in error.errors():
+        cause = (validation_error.get("ctx") or {}).get("error")
+        if not isinstance(cause, GameLogFilterError):
+            return None
+        failed_filters.append(
+            {
+                "parameter": cause.parameter,
+                "values": list(cause.values) if cause.values is not None else None,
+            }
+        )
+    return {"filters": failed_filters}
 
 
 @game_bp.route('/game_logs', methods=['GET'])

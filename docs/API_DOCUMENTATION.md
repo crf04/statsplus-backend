@@ -75,7 +75,6 @@ Unexpected failures return `internal_error` with status `500`. Internal
 exception details are logged for operators and are never included in the
 response. Game-log records and averages are ordinary JSON arrays, not nested
 pandas JSON strings.
-
 For local, credential-free development only, set
 `FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
 for local requests. The bypass is rejected when `FLASK_ENV=production`; never
@@ -1251,6 +1250,36 @@ joins the malformed values of the #9 note and returns a `400` `invalid_input`.
   `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
   per one) return a `400` error with code `invalid_input` and message:
   `One or more game log filters are invalid.`
+- Rejected filter details (#145): when the validation failure identifies the
+  parameter that failed and the submitted values that were unusable, the `400`
+  response also carries a bounded `details` object:
+
+  ```json
+  {
+    "code": "invalid_input",
+    "message": "One or more game log filters are invalid.",
+    "details": {
+      "filters": [
+        {"parameter": "teams_against", "values": ["NotAFilter"]}
+      ]
+    }
+  }
+  ```
+
+  Each entry's `parameter` is the canonical filter name (`teams_against`,
+  `rank_filter`, `opponent_tricode`, `minutes_filter`, `game_filter`,
+  `playstyle_RTG_min`) and `values` lists the unusable submitted values, with
+  `null` when a range or alignment failure names no single value (for example
+  `rank_filter[]` not matching `teams_against[]`, or `minutes_filter` min
+  above max). Only the unusable entries are named: a `teams_against` request
+  mixing supported and unsupported names reports only the unsupported ones.
+  The supported vocabulary is never duplicated into the response; it stays
+  discoverable from the backend's game-log documentation. Failures with no
+  safely actionable detail (for example a malformed `season_filter`) keep the
+  generic message with no `details` object, and no validation-library
+  context, raw input dump, or provider material is ever included. The
+  `details` object is the error contract's optional `details` field; its
+  presence does not change the message for any failure.
 - `game_logs`, `averages`, and `season_averages` are ordinary JSON arrays.
   Earlier versions nested pandas JSON strings in these fields; callers that
   parsed those strings must instead read the arrays directly. `next_game`

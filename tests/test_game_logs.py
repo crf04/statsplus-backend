@@ -892,7 +892,11 @@ def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_stri
     response = client.get(f"/api/games/game_logs?{query_string}")
 
     assert response.status_code == 400
-    assert response.get_json() == {
+    payload = response.get_json()
+    # The message stays generic; a caller-actionable rejection may add
+    # bounded details naming the failed parameter (issue #145).
+    payload["error"].pop("details", None)
+    assert payload == {
         "error": {
             "code": "invalid_input",
             "message": "One or more game log filters are invalid.",

@@ -179,6 +179,20 @@ class InvalidInputError(AppError):
     code = "invalid_input"
     default_message = "The request contains invalid input."
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        public_details: dict[str, Any] | None = None,
+    ) -> None:
+        self._public_details = public_details
+        super().__init__(message, detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any] | None:
+        return self._public_details
+
 
 class ResourceNotFoundError(AppError):
     """The requested resource does not exist."""

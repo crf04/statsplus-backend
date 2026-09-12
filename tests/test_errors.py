@@ -219,6 +219,140 @@ def test_game_logs_invalid_input_uses_central_handler(client) -> None:
     }
 
 
+def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=Arc3Assists"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=6"
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"]["message"] == "One or more game log filters are invalid."
+    assert payload["error"]["details"] == {
+        "filters": [
+            {
+                "parameter": "teams_against",
+                "values": ["NotAFilter"],
+            }
+        ]
+    }
+
+
+def test_game_logs_details_omit_supported_vocabulary(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=NotAFilter"
+        "&teams_against%5B%5D=AlsoNotAFilter"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=6"
+    )
+
+    assert response.status_code == 400
+    body = response.get_data(as_text=True)
+    # The supported vocabulary stays discoverable from the backend and is
+    # never duplicated into the error payload.
+    assert "OPP_PTS" not in body
+    assert response.get_json()["error"]["details"] == {
+        "filters": [
+            {"parameter": "teams_against", "values": ["NotAFilter", "AlsoNotAFilter"]}
+        ]
+    }
+
+
+def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&opponent_tricode=XXX"
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {
+        "filters": [{"parameter": "opponent_tricode", "values": ["XXX"]}]
+    }
+
+
+def test_game_logs_model_level_alignment_failure_names_parameter(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=OPP_PTS"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=9"
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {
+        "filters": [{"parameter": "rank_filter", "values": None}]
+    }
+
+
+def test_game_logs_range_failures_name_their_parameters(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&minutes_filter=40,20"
+    )
+
+    assert response.status_code == 400
+    details = response.get_json()["error"]["details"]
+    assert details == {
+        "filters": [{"parameter": "minutes_filter", "values": None}]
+    }
+
+
+def test_game_logs_game_filter_failure_names_parameter_and_value(client) -> None:
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&game_filter=0"
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"] == {
+        "filters": [{"parameter": "game_filter", "values": ["0"]}]
+    }
+
+
+def test_game_logs_untyped_rejections_keep_generic_message_without_details(
+    client,
+) -> None:
+    # A malformed season has no typed, caller-actionable detail yet, so the
+    # response stays exactly the pre-#145 generic shape.
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=potato"
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": {
+            "code": "invalid_input",
+            "message": "One or more game log filters are invalid.",
+        }
+    }
+
+
+def test_game_logs_details_never_leak_pydantic_context_or_inputs(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=NotAFilter"
+    )
+
+    assert response.status_code == 400
+    body = response.get_data(as_text=True)
+    # Only the bounded facts appear: no Pydantic error text, no full-input
+    # dump, no supported-vocabulary echo, no internal type names or URLs.
+    assert "ValueError" not in body
+    assert "GameLogFilterError" not in body
+    assert "pydantic" not in body
+    assert "errors.pydantic.dev" not in body
+    assert "season_filter" not in body
+    assert "input_value" not in body
+    assert "Supported filters are" not in body
+
+
 def test_player_profile_missing_resource_uses_central_handler(client, monkeypatch) -> None:
     from app.routes import player_routes
 
