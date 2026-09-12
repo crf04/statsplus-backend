@@ -578,7 +578,11 @@ status authority:
 When the status is not `available`, every metric value for that Base/window is
 `null`. In particular, exact Synergy play types Last-15 is always `null` with
 `status: "unavailable"` and `unavailable_reason: "provider_window_unsupported"`;
-Season values are never substituted. Independently published Season and
+Season values are never substituted. Before every canonical team has 15
+completed governed games the Last-15 window has not opened: each Last-15
+defense Base reports `status: "missing"` with
+`unavailable_reason: "insufficient_governed_games"` league-wide, while Synergy
+play types keeps its permanent `provider_window_unsupported` precedence. Independently published Season and
 Last-15 scopes can contain different metric identities; the affected
 Base/window becomes `unavailable/legacy_surface_incomplete` rather than making
 the request fail or inventing the absent metric. An event team outside the

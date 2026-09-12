@@ -2332,7 +2332,7 @@ def test_recomposition_failure_after_first_staged_stream_rolls_back_batch(tmp_pa
         def read_for_composition(self, season, cutoff, manifest_id=None):
             return type("Governance", (), {
                 "expected_game_ids": frozenset(), "expected_l15_game_ids": {},
-                "team_ids": frozenset(),
+                "team_ids": frozenset(), "l15_ready": True,
             })()
 
     class Materialization:
@@ -2663,6 +2663,7 @@ def test_correction_accepted_during_composition_survives_claim_cas_for_next_pass
                     "expected_game_ids": frozenset(),
                     "expected_l15_game_ids": {},
                     "team_ids": frozenset(),
+                    "l15_ready": True,
                 },
             )()
 

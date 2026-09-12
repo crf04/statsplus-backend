@@ -49,6 +49,7 @@ from app.services.database_first_activation import (
     decode_team_window,
 )
 from app.services.team_matchup_publications import (
+    INSUFFICIENT_GOVERNED_GAMES_REASON,
     NBA_PUBLICATION_STREAMS,
     NBA_PUBLICATION_WINDOWS,
     PublicationGovernanceUnavailable,
@@ -74,7 +75,7 @@ EASTERN = ZoneInfo("America/New_York")
 LEDGER_SOURCE = "ledger"
 
 ROSTER_INCOMPLETE_REASON = "governed_team_roster_incomplete"
-INSUFFICIENT_GAMES_REASON = "insufficient_governed_games"
+INSUFFICIENT_GAMES_REASON = INSUFFICIENT_GOVERNED_GAMES_REASON
 ASSIST_INCOMPLETE_REASON = "assist_location_evidence_incomplete"
 
 NBA_PUBLICATION_SOURCE = "nba_publication"
@@ -148,6 +149,7 @@ class LedgerMatchupMaterializationService:
         write_authority: _LedgerRecompositionAuthority | None = None,
         claimed_streams: frozenset[str] | None = None,
         session: Session | None = None,
+        l15_ready: bool = True,
     ) -> LedgerMatchupMaterialization:
         """Publish ledger-owned Season and exact L15 matchup facts at ``as_of``.
 
@@ -219,6 +221,15 @@ class LedgerMatchupMaterializationService:
         )
         games_by_id = {game.game_id: game for game in games}
         roster_incomplete = len(team_ids) != 30
+        # A closed Last-15 window is league-wide and takes precedence over the
+        # roster reason: every L15 defense surface reports the waiting state,
+        # while the Season window keeps its own roster/window reason.  A window
+        # the ledger itself already proved complete is published normally.
+        l15_withheld_reason = (
+            INSUFFICIENT_GAMES_REASON
+            if not l15_ready and not l15_window.complete
+            else None
+        )
         season_facts, season_observations = self._window_read_model(
             season_window,
             assist_season,
@@ -236,6 +247,7 @@ class LedgerMatchupMaterializationService:
             roster_incomplete=roster_incomplete,
             cutoff=cutoff,
             recomposition_reason=recomposition_reason,
+            withheld_reason=l15_withheld_reason,
         )
         if self.publication_reader is not None:
             season_game_ids_by_team = {
@@ -277,8 +289,18 @@ class LedgerMatchupMaterializationService:
                         reads=publication_reads,
                         expected_game_ids_by_team=season_game_ids_by_team,
                         expected_team_ids=set(team_ids),
+                        l15_ready=l15_ready,
                     )
                 )
+                season_facts = (*season_facts, *season_publication_facts)
+                season_observations = (
+                    *season_observations,
+                    *season_publication_observations,
+                )
+            if publication_reads or not l15_ready:
+                # The withheld branch needs no prior NBA generation, so a
+                # closed window still records its waiting observations even
+                # when a legacy ledger-only manifest discards the reads above.
                 l15_publication_facts, l15_publication_observations = (
                     self._publication_read_model(
                         canonical_season,
@@ -287,12 +309,8 @@ class LedgerMatchupMaterializationService:
                         reads=publication_reads,
                         expected_game_ids_by_team=expected_l15_game_ids,
                         expected_team_ids=set(team_ids),
+                        l15_ready=l15_ready,
                     )
-                )
-                season_facts = (*season_facts, *season_publication_facts)
-                season_observations = (
-                    *season_observations,
-                    *season_publication_observations,
                 )
                 l15_facts = (*l15_facts, *l15_publication_facts)
                 l15_observations = (
@@ -477,6 +495,7 @@ class LedgerMatchupMaterializationService:
         expected_l15_game_ids: Mapping[int, frozenset[str]],
         team_ids: frozenset[int],
         session: Session | None = None,
+        l15_ready: bool = True,
     ) -> None:
         """Persist newly composed NBA surfaces without rebuilding ledger facts.
 
@@ -516,6 +535,7 @@ class LedgerMatchupMaterializationService:
                 reads=reads,
                 expected_game_ids_by_team=game_ids_by_team,
                 expected_team_ids=expected_teams,
+                l15_ready=l15_ready,
             )
             snapshots.append((
                 TeamMatchupSnapshotScope(
@@ -539,6 +559,7 @@ class LedgerMatchupMaterializationService:
         reads: Mapping[str, object],
         expected_game_ids_by_team: Mapping[int, frozenset[str]] | None,
         expected_team_ids: set[int],
+        l15_ready: bool = True,
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Project governed NBA team-window publications into raw facts.
 
@@ -550,6 +571,11 @@ class LedgerMatchupMaterializationService:
         while retaining the immutable publication lineage beside it.
         """
 
+        if window == "l15" and not l15_ready:
+            # The Last-15 window has not opened league-wide.  Record the
+            # designed waiting state instead of a per-surface publication
+            # failure; Synergy keeps its permanent provider precedence.
+            return (), self._withheld_l15_observations()
         stream_by_base = {
             base: publication_stream(base, window)
             for base in NBA_PUBLICATION_STREAMS
@@ -582,6 +608,30 @@ class LedgerMatchupMaterializationService:
             facts.extend(surface_facts)
             observations.append(observation)
         return tuple(facts), tuple(observations)
+
+    @staticmethod
+    def _withheld_l15_observations() -> tuple[TeamMatchupObservation, ...]:
+        """The designed league-wide waiting state for a closed Last 15.
+
+        Every NBA-owned defense surface reports the withheld window; play
+        types keep their permanent ``provider_window_unsupported`` precedence
+        because Synergy has no bounded Last-15 window at all.
+        """
+
+        return tuple(
+            TeamMatchupObservation(
+                surface=base,
+                status=(
+                    "unavailable" if base == "play_types" else "missing"
+                ),
+                unavailable_reason=(
+                    "provider_window_unsupported"
+                    if base == "play_types"
+                    else INSUFFICIENT_GAMES_REASON
+                ),
+            )
+            for base in NBA_PUBLICATION_STREAMS
+        )
 
     def _publication_reads(
         self,
@@ -890,13 +940,16 @@ class LedgerMatchupMaterializationService:
         roster_incomplete: bool,
         cutoff: datetime | None,
         recomposition_reason: str | None,
+        withheld_reason: str | None = None,
     ) -> tuple[tuple[TeamMatchupFact, ...], tuple[TeamMatchupObservation, ...]]:
         """Build disposable facts and observations for one window.
 
         The observations always persist the truthful surface availability plus
         the ledger-owned lineage (the governed/selected game IDs and their
         deterministic ledger checksum), even when roster or window completeness
-        blocks facts and ranks.
+        blocks facts and ranks.  ``withheld_reason`` records the designed
+        league-wide Last-15 waiting state, which takes precedence over the
+        roster/window reason so both reasons are never blended.
         """
 
         governed_game_ids = window.governed_game_ids
@@ -905,6 +958,16 @@ class LedgerMatchupMaterializationService:
         source_observation_ids = _source_observation_ids(
             governed_game_ids, games_by_id
         )
+        if withheld_reason is not None:
+            return (), self._missing_observations(
+                withheld_reason,
+                game_ids=governed_game_ids,
+                ledger_checksum=ledger_checksum,
+                source_observation_ids=source_observation_ids,
+                game_set_checksum=game_set_checksum,
+                cutoff=cutoff,
+                recomposition_reason=recomposition_reason,
+            )
         if roster_incomplete:
             return (), self._missing_observations(
                 ROSTER_INCOMPLETE_REASON,
