@@ -292,6 +292,15 @@ class LedgerMatchupMaterializationService:
                         l15_ready=l15_ready,
                     )
                 )
+                season_facts = (*season_facts, *season_publication_facts)
+                season_observations = (
+                    *season_observations,
+                    *season_publication_observations,
+                )
+            if publication_reads or not l15_ready:
+                # The withheld branch needs no prior NBA generation, so a
+                # closed window still records its waiting observations even
+                # when a legacy ledger-only manifest discards the reads above.
                 l15_publication_facts, l15_publication_observations = (
                     self._publication_read_model(
                         canonical_season,
@@ -302,11 +311,6 @@ class LedgerMatchupMaterializationService:
                         expected_team_ids=set(team_ids),
                         l15_ready=l15_ready,
                     )
-                )
-                season_facts = (*season_facts, *season_publication_facts)
-                season_observations = (
-                    *season_observations,
-                    *season_publication_observations,
                 )
                 l15_facts = (*l15_facts, *l15_publication_facts)
                 l15_observations = (

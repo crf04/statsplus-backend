@@ -3163,6 +3163,131 @@ def test_materialize_withholds_l15_for_an_absent_canonical_team(tmp_path):
     } == {("missing", "insufficient_governed_games")}
 
 
+def _register_nba_streams(engine):
+    publications = PublicationService(engine)
+    for template in NBA_PUBLICATION_STREAMS.values():
+        if template.startswith("synergy_"):
+            continue
+        for window in ("season", "l15"):
+            publications.register_stream(
+                template.format(window=window), provider="nba",
+                owner="collector", required_observations=[],
+                publication_strategy="snapshot_replace",
+                supported_windows=[window], enabled=True,
+            )
+    return publications
+
+
+def _fresh_generation_engine(tmp_path, name):
+    """A control plane with registered NBA streams but no publications yet."""
+
+    engine = create_engine(f"sqlite:///{tmp_path / name}")
+    run_migrations(engine)
+    _register_nba_streams(engine)
+    return engine
+
+
+def test_first_nba_generation_records_withheld_l15_with_real_reader(tmp_path):
+    from app.services.matchup import MatchupService
+
+    engine = _fresh_generation_engine(tmp_path, "first-generation.sqlite3")
+    games = _canonical_league_games()[:-1]
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    # The real production reader with no preceding NBA publication generation.
+    reader = DatabaseFirstPublicationReader(engine)
+    service = LedgerMatchupMaterializationService(
+        ledger, repository, publication_reader=reader, clock=lambda: RETRIEVED_AT
+    )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+        l15_ready=False,
+        recomposition_reason="scheduled_reconciliation",
+    )
+
+    scope = TeamMatchupSnapshotScope("2025-26", AS_OF, 15)
+    stored = {
+        item.surface: (item.status, item.unavailable_reason)
+        for item in repository.get_snapshot(scope).observations
+    }
+    assert stored["shot_types"] == ("missing", "insufficient_governed_games")
+    assert stored["shot_zones"] == ("missing", "insufficient_governed_games")
+    assert stored["play_types"] == (
+        "unavailable", "provider_window_unsupported"
+    )
+
+    window = TeamMatchupQueryService(
+        repository, publication_reader=reader
+    ).get_window(scope)
+    reasons = {
+        item.surface: (item.status, item.unavailable_reason)
+        for item in window.observations
+    }
+    assert reasons["shot_types"] == ("missing", "insufficient_governed_games")
+    assert reasons["shot_zones"] == ("missing", "insufficient_governed_games")
+    assert reasons["play_types"] == (
+        "unavailable", "provider_window_unsupported"
+    )
+    assert MatchupService._availability(window, "shot_zones") == {
+        "status": "missing",
+        "unavailable_reason": "insufficient_governed_games",
+    }
+
+
+def test_first_nba_generation_records_withheld_l15_for_absent_team(tmp_path):
+    engine = _fresh_generation_engine(tmp_path, "first-generation-absent.sqlite3")
+    absent = CANONICAL_TEAM_IDS[-1]
+    games = tuple(
+        game
+        for game in _canonical_league_games()
+        if absent not in {game.home_team_id, game.away_team_id}
+    )
+    ledger = CanonicalGameLedgerRepository(engine)
+    ledger.replace_games_atomic(games)
+    repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    reader = DatabaseFirstPublicationReader(engine)
+    service = LedgerMatchupMaterializationService(
+        ledger, repository, publication_reader=reader, clock=lambda: RETRIEVED_AT
+    )
+    expected_game_ids, expected_l15_game_ids, team_ids = _governance(games)
+
+    service.materialize(
+        "2025-26",
+        as_of=AS_OF,
+        expected_game_ids=expected_game_ids,
+        expected_l15_game_ids=expected_l15_game_ids,
+        team_ids=team_ids,
+        l15_ready=False,
+        recomposition_reason="scheduled_reconciliation",
+    )
+
+    season = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF))
+    assert {
+        (item.status, item.unavailable_reason) for item in season.observations
+    } == {("missing", "governed_team_roster_incomplete")}
+    l15 = repository.get_snapshot(TeamMatchupSnapshotScope("2025-26", AS_OF, 15))
+    reasons = {
+        item.surface: (item.status, item.unavailable_reason)
+        for item in l15.observations
+    }
+    assert reasons["shot_types"] == ("missing", "insufficient_governed_games")
+    assert reasons["shot_zones"] == ("missing", "insufficient_governed_games")
+    assert reasons["play_types"] == (
+        "unavailable", "provider_window_unsupported"
+    )
+
+
 def test_synergy_last_15_is_explicitly_unsupported(tmp_path):
     engine = _engine(tmp_path)
     games = _canonical_league_games()

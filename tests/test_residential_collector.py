@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.collector.client import CollectorToken, HTTPResponse, RailwayClient
 from app.collector.cache import InstructionCache
 from app.collector.config import CollectorConfig, CollectorConfigurationError, load_collector_config
-from app.collector.contracts import ProviderContractError
+from app.collector.contracts import ProviderContractError, canonical_json
 from app.collector.normalizers import (
     SHOT_ZONES,
     normalize_grouped_shot_response,
@@ -66,6 +66,7 @@ from app.services.collection_control import (
     ObservationIngestionService,
     PublicationService,
     _collector_scope_descriptors,
+    _manifest_l15_date_from_by_team,
 )
 from app.services import collection_control as collection_control_module
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
@@ -81,7 +82,9 @@ from app.services.team_matchup_repository import (
     TeamMatchupObservation,
     TeamMatchupRepository,
     TeamMatchupSnapshotScope,
+    create_publication_write_capability,
 )
+from app.services.team_matchup_query import TeamMatchupQueryService
 
 UTC = timezone.utc
 NOW = datetime(2026, 8, 13, 8, 0, tzinfo=UTC)
@@ -3194,3 +3197,248 @@ def test_player_zone_normalizer_refuses_rounded_counts_labelled_totals():
     per_game = _flat_zone_records("per_game")
     per_game[0]["Mid-Range_FGA"] = float(per_game[0]["Mid-Range_FGA"]) + 0.5
     assert _normalized_zones(response=per_game).payload["profile"]["rows"]
+
+
+def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
+    tmp_path: Path,
+):
+    """The real next-cycle NBA release, from descriptors to active publications.
+
+    Cycle one has a canonical team short of 15, so the league-wide gate issues
+    no L15 descriptor and composes nothing.  Cycle two advances the catalog with
+    no other change; the descriptors appear, accepted provider observations
+    compose through the production worker, and the query serves the exact
+    governed window.  Two runtime mutations must fail this test: forcing the
+    runtime-local readiness permanently false, and unconditionally skipping
+    every NBA Last-15 composition.
+    """
+
+    from app.models.collection_control import (
+        CollectionObservation,
+    )
+    from app.services.matchup import MatchupService
+
+    season = "2025-26"
+    team_ids = sorted(int(team_id) for team_id in NBA_TEAM_IDS)
+    cutoff_one = NOW
+    cutoff_two = NOW + timedelta(days=1)
+    streams = {
+        "grouped_shot_types_opponent_l15",
+        "exact_shot_zones_opponent_l15",
+    }
+    scopes = {*streams, "canonical_game_ledger"}
+
+    def events_for(cutoff, rounds):
+        return [{
+            "nba_game_id": f"game-{round_index}-{pair_index}",
+            "home_team_id": team_ids[pair_index * 2],
+            "away_team_id": team_ids[pair_index * 2 + 1],
+            "phase": "Regular Season", "status": "Final",
+            "scheduled_at": (
+                cutoff - timedelta(days=15 - round_index, hours=1)
+            ).isoformat(),
+        } for round_index in range(rounds) for pair_index in range(15)]
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'release.sqlite3'}")
+    run_migrations(engine)
+    control = CollectionControlService(engine, clock=lambda: NOW)
+    control.activate_season(season, actor="operator")
+
+    def publish_catalogs(events, cutoff, version):
+        request = control.create_bootstrap_request(season, "event", cutoff=cutoff)
+        control.publish_catalog(
+            request.request_id, {"complete_snapshot": True, "events": events},
+            version=version,
+        )
+        request = control.create_bootstrap_request(season, "athlete", cutoff=cutoff)
+        control.publish_catalog(request.request_id, {
+            "complete_snapshot": True,
+            "identities": [{
+                "player_id": "1", "team_id": team_ids[0], "status": "active",
+                "event_ids": [event["nba_game_id"] for event in events],
+            }],
+        }, version=f"{version}-athlete")
+
+    near_ready = events_for(cutoff_one, rounds=15)[:-1]
+    full = events_for(cutoff_two, rounds=15)
+    publish_catalogs(near_ready, cutoff_one, "event-1")
+    manifest_one = control.create_manifest(
+        season, cutoff=cutoff_one, scopes=scopes,
+        collect_before=NOW + timedelta(hours=1),
+    )
+    publish_catalogs(full, cutoff_two, "event-2")
+    manifest_two = control.create_manifest(
+        season, cutoff=cutoff_two, scopes=scopes,
+        collect_before=NOW + timedelta(days=1, hours=1),
+    )
+
+    governance = ActiveManifestLedgerGovernanceReader(engine)
+    publications = PublicationService(
+        engine, clock=lambda: NOW, l15_expectation_resolver=governance,
+    )
+    publications.register_stream(
+        "grouped_shot_types_opponent_l15", provider="nba",
+        owner="residential_collector", required_observations=["shot_types_opponent"],
+        publication_strategy="snapshot_replace", supported_windows=["l15"],
+        completeness_rule="base_complete", enabled=True,
+    )
+    publications.register_stream(
+        "exact_shot_zones_opponent_l15", provider="nba",
+        owner="residential_collector", required_observations=["shot_zones_opponent"],
+        publication_strategy="snapshot_replace", supported_windows=["l15"],
+        completeness_rule="base_complete", enabled=True,
+    )
+    tokens = CollectorTokenService(
+        engine, environment="testing", signing_secret="test", clock=lambda: NOW,
+    )
+    identity = tokens.create_identity(
+        "collector", scopes=["ingest"], owner="residential_collector",
+        providers=["nba"], surfaces=["shot_types_opponent", "shot_zones_opponent"],
+    )
+    claims = tokens.validate(tokens.issue_for_secret(
+        identity["identity_id"], identity["secret"], scopes=["ingest"]
+    ))
+    ingestion = ObservationIngestionService(
+        engine, publication_service=publications, clock=lambda: NOW,
+    )
+
+    matchup_repository = TeamMatchupRepository(
+        engine, publication_write_capability=create_publication_write_capability(engine)
+    )
+    matchup_materialization = LedgerMatchupMaterializationService(
+        CanonicalGameLedgerRepository(engine), matchup_repository,
+        publication_reader=DatabaseFirstPublicationReader(engine),
+        l15_expectation_resolver=governance, clock=lambda: NOW + timedelta(days=2),
+    )
+    runtime = LedgerRuntime(
+        backfill=None, repository=CanonicalGameLedgerRepository(engine),
+        materialization=None, governance=governance,
+        matchup_materialization=matchup_materialization,
+        publication_service=publications, clock=lambda: NOW + timedelta(days=2),
+    )
+
+    # Cycle one: a canonical team is short, so the window is closed league-wide.
+    assert _manifest_l15_date_from_by_team(engine, manifest_one) == {}
+    descriptors = _collector_scope_descriptors(
+        scopes, cutoff_one,
+        l15_date_from_by_team=_manifest_l15_date_from_by_team(engine, manifest_one),
+    )
+    assert not any(
+        descriptor["parameters"].get("window") == "l15"
+        for descriptor in descriptors
+    )
+    assert runtime.compose_queued(season) == 0
+    with Session(engine) as session:
+        assert session.scalars(select(PublicationPointer)).all() == []
+        assert session.scalars(select(CompositionJob)).all() == []
+
+    # Cycle two: every canonical team has 15 and the descriptors open.
+    boundaries = _manifest_l15_date_from_by_team(engine, manifest_two)
+    assert len(boundaries) == 30
+    descriptors = _collector_scope_descriptors(
+        scopes, cutoff_two, l15_date_from_by_team=boundaries,
+    )
+    l15_descriptors = [
+        descriptor for descriptor in descriptors
+        if descriptor["parameters"].get("window") == "l15"
+    ]
+    assert {
+        descriptor["parameters"]["team_id"] for descriptor in l15_descriptors
+    } == set(team_ids)
+    date_to = slate_date_for_instant(cutoff_two).strftime("%m/%d/%Y")
+
+    def ingest(observation, client_id):
+        raw = canonical_json(observation.payload)
+        ingestion.ingest(claims, {
+            "client_observation_id": client_id,
+            "observation_type": observation.observation_type,
+            "provider": "nba", "season": season,
+            "cutoff": cutoff_two.isoformat(), "schema_version": 2,
+            "retrieved_at": NOW.isoformat(),
+            "manifest_id": manifest_two.manifest_id,
+            "scope": observation.scope, "environment": "testing",
+            "checksum": hashlib.sha256(raw).hexdigest(),
+        }, raw)
+
+    for team_id in team_ids:
+        for category in ("Catch and Shoot", "Pullups", "Less Than 10 ft"):
+            ingest(normalize_opponent_grouped_shot_response(
+                [{
+                    "TEAM_ID": team_id, "GP": 15, "MIN": 725,
+                    "category": category, "FG2M": 40, "FG2A": 80,
+                    "FG3M": 20, "FG3A": 60,
+                }],
+                season=season, cutoff=cutoff_two, team_id=team_id, window="l15",
+                category=category, value_mode="totals_with_minutes",
+                endpoint_window={
+                    "last_n_games": 15,
+                    "date_from": boundaries[team_id], "date_to": date_to,
+                },
+            ), f"shot-types-{team_id}-{category}")
+        zone_row = {"TEAM_ID": team_id, "GP": 15, "MIN": 725}
+        for zone in (
+            "Restricted Area", "In The Paint (Non-RA)", "Mid-Range",
+            "Above the Break 3",
+        ):
+            zone_row[f"{zone}_OPP_FGM"] = 4
+            zone_row[f"{zone}_OPP_FGA"] = 8
+        zone_row.update({
+            "Left Corner 3_OPP_FGM": 2, "Left Corner 3_OPP_FGA": 4,
+            "Right Corner 3_OPP_FGM": 2, "Right Corner 3_OPP_FGA": 4,
+            "Backcourt_OPP_FGM": 1, "Backcourt_OPP_FGA": 3,
+            "OPP_TOTAL_FGM": 21, "OPP_TOTAL_FGA": 43,
+        })
+        ingest(normalize_opponent_zone_response(
+            [zone_row], season=season, cutoff=cutoff_two, team_id=team_id,
+            window="l15", value_mode="totals_with_minutes",
+            endpoint_window={
+                "last_n_games": 15,
+                "date_from": boundaries[team_id], "date_to": date_to,
+            },
+        ), f"shot-zones-{team_id}")
+
+    with Session(engine) as session:
+        queued = session.scalars(select(CompositionJob)).all()
+    assert {job.stream_key for job in queued} == streams
+    assert {job.status for job in queued} == {"queued"}
+
+    assert runtime.compose_queued(season) == 2
+
+    with Session(engine) as session:
+        assert {
+            job.status for job in session.scalars(select(CompositionJob)).all()
+        } == {"succeeded"}
+        for stream_key in streams:
+            pointer = session.get(PublicationPointer, stream_key)
+            version = session.get(
+                PublicationVersion, pointer.active_publication_id
+            )
+            assert version.status == "active"
+            assert version.cutoff.replace(tzinfo=timezone.utc) == cutoff_two
+            rows = json.loads(version.payload)["rows"]
+            assert len(rows) == 30
+            assert {len(row["game_ids"]) for row in rows} == {15}
+            assert len(session.scalars(select(CollectionObservation).where(
+                CollectionObservation.manifest_id == manifest_two.manifest_id
+            )).all()) == 120
+
+    scope = TeamMatchupSnapshotScope(season, cutoff_two.date(), 15)
+    query = TeamMatchupQueryService(
+        matchup_repository,
+        publication_reader=DatabaseFirstPublicationReader(engine),
+        l15_expectation_resolver=governance,
+    )
+    window = query.get_window(scope)
+    availability = {
+        base: MatchupService._availability(window, base)
+        for base in ("shot_types", "shot_zones")
+    }
+    assert availability["shot_types"]["status"] == "available"
+    assert availability["shot_zones"]["status"] == "available"
+
+    # Season is never labelled with the Last-15 waiting reason.
+    season_window = query.get_window(TeamMatchupSnapshotScope(season, cutoff_two.date()))
+    assert all(
+        observation.unavailable_reason != "insufficient_governed_games"
+        for observation in season_window.observations
+    )
