@@ -6,6 +6,7 @@ import logging
 
 import pytest
 from flask import Flask
+from werkzeug.datastructures import MultiDict
 
 from app.errors import (
     AppError,
@@ -347,6 +348,134 @@ def test_game_logs_playstyle_failures_use_the_separate_query_names(
     assert rejected == {"playstyle_RTG_max": ["inf"]}
 
 
+def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
+    client,
+) -> None:
+    # Only the minimum was submitted; the untouched 200 default must never
+    # be blamed, and the submitted minimum must not disappear.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_min=201"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_min": ["201"]}
+
+    # With both bounds submitted, each names itself with its own value.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_min=150&playstyle_RTG_max=50"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_min": ["150"], "playstyle_RTG_max": ["50"]}
+
+    # A submitted maximum below the minimum default blames only itself.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_max=-5"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_max": ["-5"]}
+
+
+def test_game_logs_rejected_self_filter_numeric_values_name_the_stat(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BBOGUS%5D=a,b"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # An unsupported stat never blinds the range facts: the numeric
+    # failures still attribute to the stat the caller submitted.
+    assert rejected == {"self_filters[BOGUS]": ["a", "b"]}
+
+
+def test_game_logs_rejected_self_filter_zero_bound_survives(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&self_filters%5BPTS%5D=2,0"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Zero is a submitted value, not one to drop by truthiness.
+    assert rejected == {"self_filters[PTS]": ["2", "0"]}
+
+
+def test_game_logs_parameter_names_are_redacted_and_bounded_too(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5Btoken%3Dsynthetic-secret%5D=bad-value"
+    )
+
+    assert response.status_code == 400
+    entry = response.get_json()["error"]["details"]["filters"][0]
+    assert entry["parameter"] == "self_filters[token=[REDACTED]]"
+    assert "synthetic-secret" not in response.get_data(as_text=True)
+    # The ordinary rejected value stays verbatim.
+    assert entry["values"] == ["bad-value"]
+
+
+def test_game_logs_published_values_are_bounded(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=" + "A" * 300 +
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"teams_against": ["A" * 200]}
+
+
+def test_game_logs_details_carry_only_the_documented_facts(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&date_filter=not-a-date"
+        "&teams_against%5B%5D=NotAFilter"
+        "&teams_against%5B%5D=token%3Dsecret-token"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert error["code"] == "invalid_input"
+    # Structure, not just substrings: every entry carries only the keys
+    # the documented contract allows, and values are scalars.
+    documented = {
+        "supported_values",
+        "supported_aliases",
+        "values",
+        "parameter",
+    }
+    for entry in error["details"]["filters"]:
+        assert set(entry) <= documented
+        for key in ("ctx", "input", "url", "loc", "type", "msg"):
+            assert key not in entry
+    body = response.get_data(as_text=True)
+    assert "secret-token" not in body
+    assert "ValueError" not in body
+    assert "pydantic" not in body
+    assert "errors.pydantic.dev" not in body
+    assert "input_value" not in body
+
+
 def test_game_logs_scalar_parse_failures_name_parameter_and_value(
     client,
 ) -> None:
@@ -400,7 +529,7 @@ def test_game_log_validation_details_keep_known_and_skip_unknown() -> None:
             self_filters="oops",
         )
     except ValidationError as error:
-        details = _game_log_validation_details(error, filters={})
+        details = _game_log_validation_details(error, filters={}, args=MultiDict())
         assert _rejected_filters(details) == {"teams_against": ["NotAFilter"]}
     else:
         pytest.fail("the malformed request must be rejected")
@@ -529,7 +658,7 @@ def test_game_log_validation_details_skip_unknown_internal_failures() -> None:
     try:
         GameLogQuery(season_filter="2024-25", self_filters="oops")
     except ValidationError as error:
-        assert _game_log_validation_details(error, filters={}) is None
+        assert _game_log_validation_details(error, filters={}, args=MultiDict()) is None
     else:
         pytest.fail("the malformed self_filters payload must be rejected")
 

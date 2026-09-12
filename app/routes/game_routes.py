@@ -131,7 +131,7 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         raise InvalidInputError(
             "One or more game log filters are invalid.",
             detail=error,
-            public_details=_game_log_validation_details(error, filters),
+            public_details=_game_log_validation_details(error, filters, request.args),
         ) from error
 
 
@@ -143,16 +143,51 @@ _UNTYPED_PARAMETER_NAMES = frozenset(
 )
 
 
+def _playstyle_range_failures(
+    filters: dict[str, Any],
+    args: Any,
+) -> list[dict[str, str]]:
+    """Facts for an inverted playstyle range, per submitted bound.
+
+    The range spans two query parameters. Only the ones the caller actually
+    submitted are named with the bound as it arrived, so a default the
+    caller never sent is never blamed for a rejection.
+    """
+
+    low, high = filters["playstyle_range"]
+    bounds = (
+        ("playstyle_RTG_min", low),
+        ("playstyle_RTG_max", high),
+    )
+    return [
+        {
+            "parameter": parameter,
+            # The filters hold exactly the queried bound (the omitted one
+            # replaced by its documented default), as submitted strings.
+            "values": [sanitize_public_value(str(bound))],
+        }
+        for parameter, bound in bounds
+        if args.getlist(parameter)
+    ]
+
+
 def _game_log_rejected_filter(
     cause: GameLogFilterError | None,
     validation_error: dict[str, Any],
     filters: dict[str, Any],
-) -> dict[str, Any] | None:
+    args: Any,
+) -> dict[str, Any] | list[dict[str, Any]] | None:
     """One rejected filter as published facts, or none if not safely known."""
 
     if isinstance(cause, GameLogFilterError):
+        if cause.parameter == "playstyle_RTG_range":
+            # Internal two-parameter marker, never published as a name:
+            # report the bounds the caller actually submitted.
+            return _playstyle_range_failures(filters, args)
         facts = {
-            "parameter": cause.parameter,
+            # Caller-supplied content can appear inside a parameter name
+            # (a self_filter's stat), so it is redacted like the values.
+            "parameter": sanitize_public_value(cause.parameter),
             "values": [sanitize_public_value(value) for value in cause.values],
         }
         if cause.supported_values is not None:
@@ -179,6 +214,7 @@ def _game_log_rejected_filter(
 def _game_log_validation_details(
     error: ValidationError,
     filters: dict[str, Any],
+    args: Any,
 ) -> dict[str, Any] | None:
     """The failed game-log parameters a caller can act on, or none.
 
@@ -194,8 +230,10 @@ def _game_log_validation_details(
     failed_filters = []
     for validation_error in error.errors():
         cause = (validation_error.get("ctx") or {}).get("error")
-        facts = _game_log_rejected_filter(cause, validation_error, filters)
-        if facts is not None:
+        facts = _game_log_rejected_filter(cause, validation_error, filters, args)
+        if isinstance(facts, list):
+            failed_filters.extend(facts)
+        elif facts is not None:
             failed_filters.append(facts)
     if not failed_filters:
         return None

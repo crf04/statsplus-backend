@@ -1274,7 +1274,8 @@ joins the malformed values of the #9 note and returns a `400` `invalid_input`.
   Each entry's `parameter` is the canonical filter name: `teams_against`,
   `rank_filter`, `opponent_tricode`, `minutes_filter`, `game_filter`,
   `season_filter`, `date_filter`, `location_filter`,
-  `playstyle_RTG_min`/`playstyle_RTG_max` (the bound that failed), or
+  `playstyle_RTG_min`/`playstyle_RTG_max` (the reversed range names only
+  the bounds the caller actually submitted, each as its own entry), or
   `self_filters[STAT]` with the actual stat. `values` lists the unusable
   submitted values, redacted and length-bounded like the diagnostics: only
   the unusable entries appear, so a `teams_against` request mixing
@@ -1289,10 +1290,12 @@ joins the malformed values of the #9 note and returns a `400` `invalid_input`.
   failure with no safely actionable detail (unknown internal shapes) is
   skipped rather than blanking the known ones, and if nothing is
   actionable the generic message stands alone with no `details` object.
-  No validation-library context, raw input dump, or provider material is
-  ever included, and anything credential-shaped is redacted the same way
-  the diagnostics are. The presence of `details` never changes the
-  message.
+  Parameter names are redacted and length-bounded the same way values are,
+  because caller-controlled text can appear inside one (a self_filter's
+  stat). No validation-library context, raw input dump, or provider
+  material is ever included, and anything credential-shaped is redacted
+  the same way the diagnostics are. The presence of `details` never
+  changes the message.
 - `game_logs`, `averages`, and `season_averages` are ordinary JSON arrays.
   Earlier versions nested pandas JSON strings in these fields; callers that
   parsed those strings must instead read the arrays directly. `next_game`

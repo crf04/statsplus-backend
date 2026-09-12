@@ -33,6 +33,7 @@ from typing import Any, Callable, Literal
 from pydantic import (
     BaseModel,
     Field,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -217,7 +218,11 @@ class SelfFilter(BaseModel):
     def normalize_numeric_value(cls, value: Any, info: ValidationInfo) -> float | None:
         if value is None:
             return None
-        parameter = f"self_filters[{info.data.get('stat')}]"
+        # When the stat itself was already rejected it is not in the
+        # validated data; the parent self_filters validator then re-labels
+        # these facts under the actual submitted stat.
+        stat = info.data.get("stat")
+        parameter = f"self_filters[{stat}]" if stat else "self_filters"
         try:
             number = float(value)
         except (TypeError, ValueError) as error:
@@ -239,9 +244,16 @@ class SelfFilter(BaseModel):
         try:
             self.operator.validate_values(self.value, self.value2)
         except ValueError as error:
+            # A rejected bound is a submitted value even when it is zero,
+            # so report every submitted operand, not only the truthy ones.
+            submitted = (self.value, self.value2)
             raise GameLogFilterError(
                 self._describe(),
-                (self.value, *(filter(None, (self.value2,)))),
+                tuple(
+                    _format_rating(operand)
+                    for operand in submitted
+                    if operand is not None
+                ),
                 str(error),
             ) from error
         return self
@@ -296,6 +308,39 @@ def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
             f"self_filter for {stat!r} must contain min,max values",
         )
     return SelfFilter(stat=stat, operator="between", value=parts[0], value2=parts[1])
+
+
+def _relabel_self_filter_failure(
+    stat: Any,
+    raw: Any,
+    error: ValidationError,
+) -> GameLogFilterError | ValidationError:
+    """Re-label one nested self-filter rejection under the actual stat.
+
+    When the stat itself is rejected, pydantic can no longer attribute the
+    stat's range failures to it -- the validated fields no longer carry the
+    rejected stat name. Re-labeling here keeps every fact under the
+    parameter the caller actually submitted, ``self_filters[STAT]``,
+    without leaking the nested rejection wholesale.
+    """
+
+    rejected_values = []
+    for nested in error.errors():
+        cause = (nested.get("ctx") or {}).get("error")
+        if (
+            isinstance(cause, GameLogFilterError)
+            and nested.get("loc")
+            and nested["loc"][-1] != "stat"
+        ):
+            rejected_values.extend(cause.values)
+    if not rejected_values:
+        return error
+    label = f"self_filters[{stat}]" if stat else "self_filters"
+    return GameLogFilterError(
+        label,
+        tuple(rejected_values),
+        f"self_filter {raw!r} was rejected: {error}",
+    )
 
 
 class GameLogQuery(BaseModel):
@@ -498,12 +543,18 @@ class GameLogQuery(BaseModel):
                 for entry in value
             )
         else:
+            # Only internally reached (the route always sends ordered
+            # pairs); it stays an unknown-shape rejection, so the generic
+            # message with no details remains the contract here.
             raise ValueError(
                 "self_filters must be a stat range mapping or a list of typed filters"
             )
         normalized: list[SelfFilter] = []
         for stat, raw in entries:
-            entry = _normalize_self_filter_entry(stat, raw)
+            try:
+                entry = _normalize_self_filter_entry(stat, raw)
+            except ValidationError as error:
+                raise _relabel_self_filter_failure(stat, raw, error) from error
             normalized.append(entry)
         return normalized
 
@@ -547,8 +598,8 @@ class GameLogQuery(BaseModel):
             )
         if self.playstyle_range[0] > self.playstyle_range[1]:
             raise GameLogFilterError(
-                "playstyle_RTG_max",
-                (_format_rating(self.playstyle_range[1]),),
+                "playstyle_RTG_range",
+                (_format_rating(self.playstyle_range[0]), _format_rating(self.playstyle_range[1])),
                 "playstyle_RTG_min must not exceed playstyle_RTG_max",
             )
         return self

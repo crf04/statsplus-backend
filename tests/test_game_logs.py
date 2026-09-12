@@ -892,67 +892,67 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "query_string,expected_details",
+    "query_string,expected_filters",
     [
         (
             "player_name=LeBron%20James&minutes_filter=not-a-range",
-            {"minutes_filter": ["not-a-range"]},
+            [{"parameter": "minutes_filter", "values": ["not-a-range"]}],
         ),
         (
             "player_name=LeBron%20James&location_filter=home",
-            {"location_filter": ["home"]},
+            [{"parameter": "location_filter", "values": ["home"]}],
         ),
         (
             "player_name=LeBron%20James&teams_against[]=OPP_PTS",
-            {"rank_filter": []},
+            [{"parameter": "rank_filter", "values": []}],
         ),
         (
             "player_name=LeBron%20James&opponent_tricode=XXX",
-            {"opponent_tricode": ["XXX"]},
+            [{"parameter": "opponent_tricode", "values": ["XXX"]}],
         ),
         (
             "player_name=LeBron%20James&opponent_tricode=",
-            {"opponent_tricode": [""]},
+            [{"parameter": "opponent_tricode", "values": [""]}],
         ),
         (
             "player_name=LeBron%20James&date_filter=not-a-date",
-            {"date_filter": ["not-a-date"]},
+            [{"parameter": "date_filter", "values": ["not-a-date"]}],
         ),
         (
             "player_name=LeBron%20James&game_filter=0",
-            {"game_filter": ["0"]},
+            [{"parameter": "game_filter", "values": ["0"]}],
         ),
     ],
 )
-def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_string, expected_details):
+def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_string, expected_filters):
     _stub_route_settings(monkeypatch)
 
     response = client.get(f"/api/games/game_logs?{query_string}")
 
     assert response.status_code == 400
-    payload = response.get_json()
-    assert payload["error"]["message"] == "One or more game log filters are invalid."
-    # #145: the known caller-actionable rejections name their parameter and
-    # the submitted values, in the documented details shape.
-    assert {
-        entry["parameter"]: entry["values"]
-        for entry in payload["error"]["details"]["filters"]
-    } == expected_details
+    # #145: the whole envelope stays generic-plus-details — the code is
+    # still invalid_input and each known rejection names its parameter and
+    # submitted values in the documented shape only.
+    assert response.get_json()["error"] == {
+        "code": "invalid_input",
+        "message": "One or more game log filters are invalid.",
+        "details": {"filters": expected_filters},
+    }
 
 
 @pytest.mark.parametrize(
-    "query_string,expected_details",
+    "query_string,expected_filters",
     [
-        ("season_filter=", {"season_filter": [""]}),
-        ("season_filter=potato", {"season_filter": ["potato"]}),
-        ("season_filter=2024-27", {"season_filter": ["2024-27"]}),
-        ("playstyle_RTG_min=nan", {"playstyle_RTG_min": ["nan"]}),
-        ("playstyle_RTG_max=inf", {"playstyle_RTG_max": ["inf"]}),
-        ("playstyle_RTG_min=-inf", {"playstyle_RTG_min": ["-inf"]}),
+        ("season_filter=", [{"parameter": "season_filter", "values": [""]}]),
+        ("season_filter=potato", [{"parameter": "season_filter", "values": ["potato"]}]),
+        ("season_filter=2024-27", [{"parameter": "season_filter", "values": ["2024-27"]}]),
+        ("playstyle_RTG_min=nan", [{"parameter": "playstyle_RTG_min", "values": ["nan"]}]),
+        ("playstyle_RTG_max=inf", [{"parameter": "playstyle_RTG_max", "values": ["inf"]}]),
+        ("playstyle_RTG_min=-inf", [{"parameter": "playstyle_RTG_min", "values": ["-inf"]}]),
     ],
 )
 def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
-    client, monkeypatch, query_string, expected_details
+    client, monkeypatch, query_string, expected_filters
 ):
     from app.routes import game_routes
 
@@ -973,17 +973,13 @@ def test_route_rejects_invalid_season_and_nonfinite_playstyle_before_service(
     )
 
     assert response.status_code == 400
-    payload = response.get_json()
-    # The generic message stays; #145 adds details naming the failed
-    # parameter and its submitted value when they are actionable (#145).
-    assert payload["error"]["message"] == "One or more game log filters are invalid."
-    if expected_details is None:
-        assert "details" not in payload["error"]
-    else:
-        assert {
-            entry["parameter"]: entry["values"]
-            for entry in payload["error"]["details"]["filters"]
-        } == expected_details
+    # The generic message and invalid_input code stay; #145 adds details
+    # naming the failed parameter and its submitted value.
+    assert response.get_json()["error"] == {
+        "code": "invalid_input",
+        "message": "One or more game log filters are invalid.",
+        "details": {"filters": expected_filters},
+    }
     assert calls == []
 
 
