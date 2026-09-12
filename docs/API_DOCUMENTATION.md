@@ -75,7 +75,6 @@ Unexpected failures return `internal_error` with status `500`. Internal
 exception details are logged for operators and are never included in the
 response. Game-log records and averages are ordinary JSON arrays, not nested
 pandas JSON strings.
-
 For local, credential-free development only, set
 `FIREBASE_ADMIN_DISABLED=true`. This explicitly enables a synthetic `dev-user`
 for local requests. The bypass is rejected when `FLASK_ENV=production`; never
@@ -1255,6 +1254,52 @@ joins the malformed values of the #9 note and returns a `400` `invalid_input`.
   `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
   per one) return a `400` error with code `invalid_input` and message:
   `One or more game log filters are invalid.`
+- Rejected filter details (#145): a rejected game-log filter names the
+  parameter that failed and the offending submitted values in a bounded
+  `details` object:
+
+  ```json
+  {
+    "code": "invalid_input",
+    "message": "One or more game log filters are invalid.",
+    "details": {
+      "filters": [
+        {
+          "parameter": "teams_against",
+          "values": ["NotAFilter"],
+          "supported_values": ["OPP_PTS", "..."],
+          "supported_aliases": ["<10 Ft"]
+        }
+      ]
+    }
+  }
+  ```
+
+  Each entry's `parameter` is the canonical filter name: `teams_against`,
+  `rank_filter`, `opponent_tricode`, `minutes_filter`, `game_filter`,
+  `season_filter`, `date_filter`, `location_filter`,
+  `playstyle_RTG_min`/`playstyle_RTG_max` (the reversed range names only
+  the bounds the caller actually submitted, each as its own entry), or
+  `self_filters[STAT]` with the actual stat. `values` lists the unusable
+  submitted values, redacted and length-bounded like the diagnostics: only
+  the unusable entries appear, so a `teams_against` request mixing
+  supported and unsupported names reports only the unsupported ones, and a
+  reversed `minutes_filter` range reports the submitted `min,max` pair.
+  Failures that identify no single value (for example `rank_filter[]` not
+  matching `teams_against[]`) report the submitted ranks. For
+  `teams_against`, `supported_values` carries the authoritative canonical
+  vocabulary from the backend's own constant and `supported_aliases` the
+  accepted legacy spellings, so a caller never needs a copy of either;
+  other entries omit them. Each rejection is translated separately, so one
+  failure with no safely actionable detail (unknown internal shapes) is
+  skipped rather than blanking the known ones, and if nothing is
+  actionable the generic message stands alone with no `details` object.
+  Parameter names are redacted and length-bounded the same way values are,
+  because caller-controlled text can appear inside one (a self_filter's
+  stat). No validation-library context, raw input dump, or provider
+  material is ever included, and anything credential-shaped is redacted
+  the same way the diagnostics are. The presence of `details` never
+  changes the message.
 - `game_logs`, `averages`, and `season_averages` are ordinary JSON arrays.
   Earlier versions nested pandas JSON strings in these fields; callers that
   parsed those strings must instead read the arrays directly. `next_game`
@@ -1272,7 +1317,7 @@ Query parameters:
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
 | `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
-| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings |
+| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145) |
 | `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |

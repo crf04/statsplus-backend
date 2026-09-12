@@ -108,6 +108,35 @@ def _sanitize_diagnostic_detail(detail: Any) -> str | None:
     )
 
 
+#: Bounds on one published detail value, so unusable caller input cannot
+#: blow up the error payload. Values are redacted like the diagnostics but
+#: truncated after matching, keeping ordinary rejected values identifiable.
+_PUBLIC_VALUE_MAX_LENGTH = 200
+
+
+def redact_public_value(value: Any) -> str:
+    """Credential redaction only, without the published length bound.
+
+    The split-value facts compare redacted and raw text to detect a
+    credential that splitting destroyed; distinguishing redaction from
+    mere length truncation requires the unbounded form.
+    """
+
+    sanitized = _sanitize_diagnostic_detail(value)
+    return sanitized or ""
+
+
+def sanitize_public_value(value: Any) -> str:
+    """One value a caller may see: the diagnostics redaction, bounded.
+
+    The ``details`` facts on invalid-input responses echo submitted text
+    back to the submitter, but they are published on a route other callers
+    of the same API can reach, so anything the sanitiser strips from logs
+    is stripped here too, and the value is length-bounded.
+    """
+
+    return redact_public_value(value)[:_PUBLIC_VALUE_MAX_LENGTH]
+
 def _log_application_error(
     error: AppError,
     *,
@@ -178,6 +207,20 @@ class InvalidInputError(AppError):
     status_code = 400
     code = "invalid_input"
     default_message = "The request contains invalid input."
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        public_details: dict[str, Any] | None = None,
+    ) -> None:
+        self._public_details = public_details
+        super().__init__(message, detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any] | None:
+        return self._public_details
 
 
 class ResourceNotFoundError(AppError):
