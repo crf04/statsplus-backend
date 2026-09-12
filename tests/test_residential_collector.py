@@ -3327,10 +3327,51 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
         descriptor["parameters"].get("window") == "l15"
         for descriptor in descriptors
     )
-    assert runtime.compose_queued(season) == 0
+    # A stale queued Last-15 job must settle as a waiting success: the runtime
+    # never invokes the observation composer, never publishes, and records the
+    # durable waiting observations instead.
+    composed = []
+    real_compose_from_observations = publications.compose_from_observations
+
+    def record_composition(*args, **kwargs):
+        composed.append(args[0] if args else kwargs.get("stream_key"))
+        return real_compose_from_observations(*args, **kwargs)
+
+    publications.compose_from_observations = record_composition
+    with Session(engine) as session, session.begin():
+        session.add(CompositionJob(
+            job_id="withheld-l15",
+            stream_key="grouped_shot_types_opponent_l15",
+            manifest_id=manifest_one.manifest_id,
+            season=season,
+            cutoff=cutoff_one,
+            status="queued",
+            attempts=0,
+            created_at=cutoff_one,
+            updated_at=cutoff_one,
+        ))
+
+    assert runtime.compose_queued(season) == 1
+    assert composed == []
     with Session(engine) as session:
-        assert session.scalars(select(PublicationPointer)).all() == []
-        assert session.scalars(select(CompositionJob)).all() == []
+        job = session.get(CompositionJob, "withheld-l15")
+        assert job.status == "succeeded"
+        assert job.last_error is None
+        assert session.get(
+            PublicationPointer, "grouped_shot_types_opponent_l15"
+        ) is None
+    waiting = matchup_repository.get_snapshot(
+        TeamMatchupSnapshotScope(season, cutoff_one.date(), 15)
+    )
+    assert waiting.facts == ()
+    assert {
+        (item.surface, item.status, item.unavailable_reason)
+        for item in waiting.observations
+    } == {
+        ("play_types", "unavailable", "provider_window_unsupported"),
+        ("shot_types", "missing", "insufficient_governed_games"),
+        ("shot_zones", "missing", "insufficient_governed_games"),
+    }
 
     # Cycle two: every canonical team has 15 and the descriptors open.
     boundaries = _manifest_l15_date_from_by_team(engine, manifest_two)
@@ -3398,7 +3439,9 @@ def test_l15_nba_release_transition_publishes_after_the_last_team_reaches_15(
         ), f"shot-zones-{team_id}")
 
     with Session(engine) as session:
-        queued = session.scalars(select(CompositionJob)).all()
+        queued = session.scalars(select(CompositionJob).where(
+            CompositionJob.manifest_id == manifest_two.manifest_id
+        )).all()
     assert {job.stream_key for job in queued} == streams
     assert {job.status for job in queued} == {"queued"}
 
