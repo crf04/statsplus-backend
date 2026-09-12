@@ -30,7 +30,13 @@ from operator import eq, ge, gt, le, lt
 import re
 from typing import Any, Callable, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.nba_teams import NBA_TEAM_TRICODES
 from app.models.catalogs import (
@@ -48,14 +54,26 @@ class GameLogFilterError(ValueError):
     Raised by :class:`GameLogQuery` validators instead of a bare
     :class:`ValueError` when the facts a caller needs -- the parameter that
     failed and the submitted values that were unusable -- are safe to publish.
-    The route layer reads them into the error payload's ``details``; the
-    message stays the generic one.
+    The message still stays the generic one; only these facts and, where the
+    service owns the accepted vocabulary, the canonical supported values are
+    read into the error payload's ``details``. The route layer builds them
+    with the same redaction the diagnostics get.
     """
 
-    def __init__(self, parameter: str, values: tuple[Any, ...] | None, message: str) -> None:
+    def __init__(
+        self,
+        parameter: str,
+        values: tuple[Any, ...],
+        message: str,
+        *,
+        supported_values: tuple[str, ...] | None = None,
+        supported_aliases: tuple[str, ...] | None = None,
+    ) -> None:
         super().__init__(message)
         self.parameter = parameter
-        self.values = values
+        self.values = tuple(str(value) for value in values)
+        self.supported_values = supported_values
+        self.supported_aliases = supported_aliases
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,35 +188,62 @@ class SelfFilter(BaseModel):
 
         return self.stat
 
+    def _describe(self) -> str:
+        """The HTTP parameter name ``self_filters[STAT]`` for this filter."""
+
+        return f"self_filters[{self.stat}]"
+
     @field_validator("stat", mode="before")
     @classmethod
     def normalize_stat(cls, value: Any) -> str:
         stat = str(value).strip().upper()
         if not stat:
-            raise ValueError("self_filter stat must not be empty")
+            raise GameLogFilterError(
+                "self_filters[]",
+                (value,),
+                "self_filter stat must not be empty",
+            )
         if stat not in SUPPORTED_SELF_FILTER_STATS:
-            raise ValueError(
+            raise GameLogFilterError(
+                f"self_filters[{stat}]",
+                (value,),
                 f"self_filter contains unsupported stat {stat!r}. Supported stats are: "
-                + ", ".join(SUPPORTED_SELF_FILTER_STATS)
+                + ", ".join(SUPPORTED_SELF_FILTER_STATS),
             )
         return stat
 
     @field_validator("value", "value2", mode="before")
     @classmethod
-    def normalize_numeric_value(cls, value: Any) -> float | None:
+    def normalize_numeric_value(cls, value: Any, info: ValidationInfo) -> float | None:
         if value is None:
             return None
+        parameter = f"self_filters[{info.data.get('stat')}]"
         try:
             number = float(value)
         except (TypeError, ValueError) as error:
-            raise ValueError("self_filter values must be numbers") from error
+            raise GameLogFilterError(
+                parameter,
+                (value,),
+                "self_filter values must be numbers",
+            ) from error
         if not isfinite(number):
-            raise ValueError("self_filter values must be finite numbers")
+            raise GameLogFilterError(
+                parameter,
+                (value,),
+                "self_filter values must be finite numbers",
+            )
         return number
 
     @model_validator(mode="after")
     def validate_operator_values(self) -> "SelfFilter":
-        self.operator.validate_values(self.value, self.value2)
+        try:
+            self.operator.validate_values(self.value, self.value2)
+        except ValueError as error:
+            raise GameLogFilterError(
+                self._describe(),
+                (self.value, *(filter(None, (self.value2,)))),
+                str(error),
+            ) from error
         return self
 
     def apply(self, values: Any) -> Any:
@@ -239,11 +284,17 @@ def _normalize_self_filter_entry(stat: Any, raw: Any) -> SelfFilter:
     elif isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
         parts = list(raw)
     else:
-        raise ValueError(
-            f"self_filter for {stat!r} must be a range or typed comparison"
+        raise GameLogFilterError(
+            f"self_filters[{stat}]" if stat else "self_filters",
+            (str(raw),),
+            f"self_filter for {stat!r} must be a range or typed comparison",
         )
     if len(parts) != 2:
-        raise ValueError(f"self_filter for {stat!r} must contain min,max values")
+        raise GameLogFilterError(
+            f"self_filters[{stat}]" if stat else "self_filters",
+            (str(raw),),
+            f"self_filter for {stat!r} must contain min,max values",
+        )
     return SelfFilter(stat=stat, operator="between", value=parts[0], value2=parts[1])
 
 
@@ -271,46 +322,33 @@ class GameLogQuery(BaseModel):
     # can contain more than one constraint for the same stat.
     self_filters: list[SelfFilter] = Field(default_factory=list)
 
-    @field_validator("game_filter", mode="before")
-    @classmethod
-    def normalize_game_filter(cls, value: Any) -> Any:
-        """Name the submitted value when ``game_filter`` is not a usable count."""
-
-        if value is None:
-            return None
-        try:
-            count = int(value)
-        except (TypeError, ValueError) as error:
-            raise GameLogFilterError(
-                "game_filter",
-                (value,),
-                "game_filter must be a whole number of games",
-            ) from error
-        if count < 1:
-            raise GameLogFilterError(
-                "game_filter",
-                (value,),
-                "game_filter must be at least 1",
-            )
-        return value
-
     @field_validator("season_filter", mode="before")
     @classmethod
     def normalize_season_filter(cls, value: Any) -> str:
         """Require one canonical NBA season label (for example, ``2024-25``)."""
 
         if not isinstance(value, str):
-            raise ValueError("season_filter must be a string in YYYY-YY format")
+            raise GameLogFilterError(
+                "season_filter",
+                (value,),
+                "season_filter must be a string in YYYY-YY format",
+            )
         season = value.strip()
         match = re.fullmatch(r"([0-9]{4})-([0-9]{2})", season)
         if match is None:
-            raise ValueError("season_filter must use YYYY-YY format")
+            raise GameLogFilterError(
+                "season_filter",
+                (value,),
+                "season_filter must use YYYY-YY format",
+            )
         start_year = int(match.group(1))
         expected_suffix = f"{(start_year + 1) % 100:02d}"
         if match.group(2) != expected_suffix:
-            raise ValueError(
+            raise GameLogFilterError(
+                "season_filter",
+                (value,),
                 "season_filter must end with the following calendar year's "
-                "final two digits"
+                "final two digits",
             )
         return season
 
@@ -324,14 +362,37 @@ class GameLogQuery(BaseModel):
         if isinstance(value, str):
             parts = value.split(",")
             if len(parts) != 2:
-                raise ValueError("minutes_filter must contain two integer values")
+                raise GameLogFilterError(
+                    "minutes_filter",
+                    (value,),
+                    "minutes_filter must contain two integer values",
+                )
             value = tuple(parts)
         if not isinstance(value, (list, tuple)) or len(value) != 2:
-            raise ValueError("minutes_filter must contain min,max minutes")
+            raise GameLogFilterError(
+                "minutes_filter",
+                (str(value),),
+                "minutes_filter must contain min,max minutes",
+            )
+        # Name the offending part, not the whole pair: the working bound
+        # stays untouched while the unusable one identifies itself.
         try:
-            return (int(value[0]), int(value[1]))
+            low = int(value[0])
         except (TypeError, ValueError) as error:
-            raise ValueError("minutes_filter values must be integers") from error
+            raise GameLogFilterError(
+                "minutes_filter",
+                (value[0],),
+                "minutes_filter values must be integers",
+            ) from error
+        try:
+            high = int(value[1])
+        except (TypeError, ValueError) as error:
+            raise GameLogFilterError(
+                "minutes_filter",
+                (value[1],),
+                "minutes_filter values must be integers",
+            ) from error
+        return (low, high)
 
     @field_validator("rank_filter", mode="before")
     @classmethod
@@ -340,14 +401,21 @@ class GameLogQuery(BaseModel):
             return []
         if isinstance(value, (int, str)):
             value = [value]
+        # Like teams_against, report every unusable entry and leave the
+        # parseable ranks out of the details.
         ranks: list[int] = []
+        invalid: list[Any] = []
         for entry in value:
             try:
                 ranks.append(int(entry))
-            except (TypeError, ValueError) as error:
-                raise GameLogFilterError(
-                    "rank_filter", (entry,), f"rank_filter entry {entry!r} is not a valid integer"
-                ) from error
+            except (TypeError, ValueError):
+                invalid.append(entry)
+        if invalid:
+            raise GameLogFilterError(
+                "rank_filter",
+                tuple(invalid),
+                f"rank_filter contains invalid entries: {invalid!r}",
+            )
         return ranks
 
     @field_validator("opponent_tricode", mode="before")
@@ -380,13 +448,37 @@ class GameLogQuery(BaseModel):
             return (0.0, 200.0)
         if not isinstance(value, (list, tuple)) or len(value) != 2:
             raise ValueError("playstyle_range must contain min,max ratings")
+        # The two bounds are separate query parameters, so each failure
+        # carries the parameter it was submitted as.
         try:
-            normalized = (float(value[0]), float(value[1]))
+            low = float(value[0])
         except (TypeError, ValueError) as error:
-            raise ValueError("playstyle_range values must be numbers") from error
-        if not all(isfinite(number) for number in normalized):
-            raise ValueError("playstyle_range values must be finite numbers")
-        return normalized
+            raise GameLogFilterError(
+                "playstyle_RTG_min",
+                (value[0],),
+                "playstyle_RTG_min must be a finite number",
+            ) from error
+        try:
+            high = float(value[1])
+        except (TypeError, ValueError) as error:
+            raise GameLogFilterError(
+                "playstyle_RTG_max",
+                (value[1],),
+                "playstyle_RTG_max must be a finite number",
+            ) from error
+        if not isfinite(low):
+            raise GameLogFilterError(
+                "playstyle_RTG_min",
+                (value[0],),
+                "playstyle_RTG_min must be a finite number",
+            )
+        if not isfinite(high):
+            raise GameLogFilterError(
+                "playstyle_RTG_max",
+                (value[1],),
+                "playstyle_RTG_max must be a finite number",
+            )
+        return (low, high)
 
     @field_validator("self_filters", mode="before")
     @classmethod
@@ -431,7 +523,11 @@ class GameLogQuery(BaseModel):
                 tuple(unsupported),
                 f"teams_against contains unsupported filters: {unsupported}. "
                 "Supported filters are: "
-                + ", ".join(SUPPORTED_TEAM_FILTERS)
+                + ", ".join(SUPPORTED_TEAM_FILTERS),
+                # The canonical vocabulary travels with the refusal, so a
+                # caller never needs a copy of these constants to recover.
+                supported_values=tuple(SUPPORTED_TEAM_FILTERS),
+                supported_aliases=tuple(TEAM_FILTER_ALIASES),
             )
         return value
 
@@ -440,22 +536,30 @@ class GameLogQuery(BaseModel):
         if self.teams_against and len(self.teams_against) != len(self.rank_filter):
             raise GameLogFilterError(
                 "rank_filter",
-                None,
+                tuple(self.rank_filter),
                 "rank_filter must contain one rank per teams_against filter",
             )
         if self.minutes_filter[0] > self.minutes_filter[1]:
             raise GameLogFilterError(
                 "minutes_filter",
-                None,
+                (f"{self.minutes_filter[0]},{self.minutes_filter[1]}",),
                 "minutes_filter min must not exceed minutes_filter max",
             )
         if self.playstyle_range[0] > self.playstyle_range[1]:
             raise GameLogFilterError(
-                "playstyle_RTG_min",
-                None,
+                "playstyle_RTG_max",
+                (_format_rating(self.playstyle_range[1]),),
                 "playstyle_RTG_min must not exceed playstyle_RTG_max",
             )
         return self
+
+
+def _format_rating(raw: float) -> str:
+    """One submitted rating bound, spelled the way decimals read."""
+
+    if raw.is_integer():
+        return str(int(raw))
+    return str(raw)
 
 
 class GameLogResponse(BaseModel):

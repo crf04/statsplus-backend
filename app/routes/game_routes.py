@@ -19,6 +19,7 @@ from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
+    sanitize_public_value,
 )
 from ..models.game_logs import GameLogFilterError, GameLogQuery
 from ..utils.auth import require_auth
@@ -130,32 +131,74 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         raise InvalidInputError(
             "One or more game log filters are invalid.",
             detail=error,
-            public_details=_game_log_validation_details(error),
+            public_details=_game_log_validation_details(error, filters),
         ) from error
 
 
-def _game_log_validation_details(error: ValidationError) -> dict[str, Any] | None:
+#: Parsers the typed models do not own, translated from one pydantic-native
+#: rejection at the HTTP seam, the original submitted value in hand. Their
+#: accepted grammar is pydantic's, so acceptance is untouched.
+_UNTYPED_PARAMETER_NAMES = frozenset(
+    {"date_filter", "location_filter", "game_filter"}
+)
+
+
+def _game_log_rejected_filter(
+    cause: GameLogFilterError | None,
+    validation_error: dict[str, Any],
+    filters: dict[str, Any],
+) -> dict[str, Any] | None:
+    """One rejected filter as published facts, or none if not safely known."""
+
+    if isinstance(cause, GameLogFilterError):
+        facts = {
+            "parameter": cause.parameter,
+            "values": [sanitize_public_value(value) for value in cause.values],
+        }
+        if cause.supported_values is not None:
+            facts["supported_values"] = list(cause.supported_values)
+        if cause.supported_aliases is not None:
+            facts["supported_aliases"] = list(cause.supported_aliases)
+        return facts
+
+    # A parser pydantic owns (``date_filter``, ``location_filter``) has no
+    # typed cause, but the route holds exactly the value the caller
+    # submitted and it is a scalar string, so publish that. Anything still
+    # unknown is skipped, keeping the other rejected filters' facts.
+    field = validation_error.get("loc", ())
+    field = field[0] if field and isinstance(field[0], str) else None
+    submitted = filters.get(field) if field in _UNTYPED_PARAMETER_NAMES else None
+    if isinstance(submitted, str):
+        return {
+            "parameter": field,
+            "values": [sanitize_public_value(submitted)],
+        }
+    return None
+
+
+def _game_log_validation_details(
+    error: ValidationError,
+    filters: dict[str, Any],
+) -> dict[str, Any] | None:
     """The failed game-log parameters a caller can act on, or none.
 
-    Pydantic reports each rejection with the filter it came from; only
-    :class:`GameLogFilterError` rejections carry the bounded facts -- the
-    parameter name and the unusable submitted values -- this contract
-    publishes. Everything else keeps the generic message with no details,
-    and no Pydantic context, input, or provider material ever reaches a
-    caller.
+    Each rejection is translated separately: typed
+    :class:`GameLogFilterError` causes name the parameter, the unusable
+    submitted values, and where the service owns the vocabulary, the
+    canonical accepted values. A failure with no safely actionable detail
+    -- an unknown internal one -- is skipped rather than blanking the
+    whole payload, and none of them publishes Pydantic context or input:
+    only redacted, bounded scalars reach ``details``.
     """
 
     failed_filters = []
     for validation_error in error.errors():
         cause = (validation_error.get("ctx") or {}).get("error")
-        if not isinstance(cause, GameLogFilterError):
-            return None
-        failed_filters.append(
-            {
-                "parameter": cause.parameter,
-                "values": list(cause.values) if cause.values is not None else None,
-            }
-        )
+        facts = _game_log_rejected_filter(cause, validation_error, filters)
+        if facts is not None:
+            failed_filters.append(facts)
+    if not failed_filters:
+        return None
     return {"filters": failed_filters}
 
 

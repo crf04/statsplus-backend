@@ -211,11 +211,21 @@ def test_game_logs_invalid_input_uses_central_handler(client) -> None:
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": {
-            "code": "invalid_input",
-            "message": "One or more game log filters are invalid.",
-        }
+    error = response.get_json()["error"]
+    assert error["code"] == "invalid_input"
+    assert error["message"] == "One or more game log filters are invalid."
+
+
+# Synthetic marker for the redaction test: never a real credential.
+REDACTED_TEAM_VALUE = "token=[REDACTED]"
+
+
+def _rejected_filters(details):
+    """Map one details payload to parameter -> values for assertions."""
+
+    return {
+        entry["parameter"]: entry["values"]
+        for entry in details["filters"]
     }
 
 
@@ -232,36 +242,32 @@ def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> 
     assert response.status_code == 400
     payload = response.get_json()
     assert payload["error"]["message"] == "One or more game log filters are invalid."
-    assert payload["error"]["details"] == {
-        "filters": [
-            {
-                "parameter": "teams_against",
-                "values": ["NotAFilter"],
-            }
-        ]
-    }
+    # Only the unsupported entry names itself; the honoured Arc3Assists does
+    # not appear as unusable.
+    rejected = _rejected_filters(payload["error"]["details"])
+    assert rejected == {"teams_against": ["NotAFilter"]}
 
 
-def test_game_logs_details_omit_supported_vocabulary(client) -> None:
+def test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary(
+    client,
+) -> None:
+    from app.models.catalogs import TEAM_FILTER_ALIASES, SUPPORTED_TEAM_FILTERS
+
     response = client.get(
         "/api/games/game_logs"
         "?player_name=LeBron%20James"
         "&teams_against%5B%5D=NotAFilter"
-        "&teams_against%5B%5D=AlsoNotAFilter"
         "&rank_filter%5B%5D=5"
-        "&rank_filter%5B%5D=6"
     )
 
     assert response.status_code == 400
-    body = response.get_data(as_text=True)
-    # The supported vocabulary stays discoverable from the backend and is
-    # never duplicated into the error payload.
-    assert "OPP_PTS" not in body
-    assert response.get_json()["error"]["details"] == {
-        "filters": [
-            {"parameter": "teams_against", "values": ["NotAFilter", "AlsoNotAFilter"]}
-        ]
-    }
+    details = response.get_json()["error"]["details"]["filters"][0]
+    # The full authoritative vocabulary travels with the rejection, sourced
+    # from the backend constant, so a caller never holds a drifting copy.
+    assert details["supported_values"] == list(SUPPORTED_TEAM_FILTERS)
+    assert "Arc3Assists" in details["supported_values"]
+    assert details["supported_aliases"] == list(TEAM_FILTER_ALIASES)
+    assert "<10 Ft" in details["supported_aliases"]
 
 
 def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -> None:
@@ -271,12 +277,30 @@ def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["details"] == {
-        "filters": [{"parameter": "opponent_tricode", "values": ["XXX"]}]
-    }
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"opponent_tricode": ["XXX"]}
 
 
-def test_game_logs_model_level_alignment_failure_names_parameter(client) -> None:
+def test_game_logs_rank_filter_rejection_reports_every_unusable_entry(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&rank_filter%5B%5D=abc"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=xyz"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # All unusable entries, with the parseable 5 left out.
+    assert rejected == {"rank_filter": ["abc", "xyz"]}
+
+
+def test_game_logs_model_level_alignment_failure_names_submitted_values(
+    client,
+) -> None:
     response = client.get(
         "/api/games/game_logs"
         "?player_name=LeBron%20James"
@@ -286,22 +310,137 @@ def test_game_logs_model_level_alignment_failure_names_parameter(client) -> None
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["details"] == {
-        "filters": [{"parameter": "rank_filter", "values": None}]
-    }
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"rank_filter": ["5", "9"]}
 
 
-def test_game_logs_range_failures_name_their_parameters(client) -> None:
+def test_game_logs_range_failures_name_their_submitted_values(client) -> None:
     response = client.get(
         "/api/games/game_logs"
         "?player_name=LeBron%20James&minutes_filter=40,20"
     )
 
     assert response.status_code == 400
-    details = response.get_json()["error"]["details"]
-    assert details == {
-        "filters": [{"parameter": "minutes_filter", "values": None}]
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"minutes_filter": ["40,20"]}
+
+
+def test_game_logs_playstyle_failures_use_the_separate_query_names(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_min=abc"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_min": ["abc"]}
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_max=inf"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_max": ["inf"]}
+
+
+def test_game_logs_scalar_parse_failures_name_parameter_and_value(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&date_filter=not-a-date"
+        "&location_filter=home"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {
+        "date_filter": ["not-a-date"],
+        "location_filter": ["home"],
     }
+
+
+def test_game_logs_known_failures_survive_other_unknown_failures(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&date_filter=not-a-date"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=5"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Each rejection translates separately: a date parse failure never
+    # blanks the teams_against refusal.
+    assert rejected == {
+        "date_filter": ["not-a-date"],
+        "teams_against": ["NotAFilter"],
+    }
+
+
+def test_game_log_validation_details_keep_known_and_skip_unknown() -> None:
+    from pydantic import ValidationError
+
+    from app.models.game_logs import GameLogQuery
+    from app.routes.game_routes import _game_log_validation_details
+
+    # One typed refusal plus one internal unknown shape: the known detail
+    # survives, the unknown one is skipped rather than blanking the payload.
+    try:
+        GameLogQuery(
+            season_filter="2024-25",
+            teams_against=["NotAFilter"],
+            self_filters="oops",
+        )
+    except ValidationError as error:
+        details = _game_log_validation_details(error, filters={})
+        assert _rejected_filters(details) == {"teams_against": ["NotAFilter"]}
+    else:
+        pytest.fail("the malformed request must be rejected")
+
+
+def test_game_logs_season_failure_names_parameter_and_value(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&season_filter=potato"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"season_filter": ["potato"]}
+
+
+def test_game_logs_minutes_part_failures_name_the_offending_part(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&minutes_filter=a,20"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"minutes_filter": ["a"]}
+
+
+def test_game_logs_self_filter_failures_name_parameter_and_value(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BBOGUS%5D=1,2"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[BOGUS]": ["BOGUS"]}
 
 
 def test_game_logs_game_filter_failure_names_parameter_and_value(client) -> None:
@@ -310,47 +449,90 @@ def test_game_logs_game_filter_failure_names_parameter_and_value(client) -> None
     )
 
     assert response.status_code == 400
-    assert response.get_json()["error"]["details"] == {
-        "filters": [{"parameter": "game_filter", "values": ["0"]}]
-    }
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"game_filter": ["0"]}
 
 
-def test_game_logs_untyped_rejections_keep_generic_message_without_details(
+def test_game_logs_credential_looking_values_are_redacted_not_echoed(
     client,
 ) -> None:
-    # A malformed season has no typed, caller-actionable detail yet, so the
-    # response stays exactly the pre-#145 generic shape.
-    response = client.get(
-        "/api/games/game_logs?player_name=LeBron%20James&season_filter=potato"
-    )
-
-    assert response.status_code == 400
-    assert response.get_json() == {
-        "error": {
-            "code": "invalid_input",
-            "message": "One or more game log filters are invalid.",
-        }
-    }
-
-
-def test_game_logs_details_never_leak_pydantic_context_or_inputs(client) -> None:
     response = client.get(
         "/api/games/game_logs"
         "?player_name=LeBron%20James"
-        "&teams_against%5B%5D=NotAFilter"
+        "&teams_against%5B%5D=token%3Dsecret-token"
+        "&rank_filter%5B%5D=1"
     )
 
     assert response.status_code == 400
     body = response.get_data(as_text=True)
-    # Only the bounded facts appear: no Pydantic error text, no full-input
-    # dump, no supported-vocabulary echo, no internal type names or URLs.
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {
+        "teams_against": [
+            REDACTED_TEAM_VALUE,
+        ]
+    }
+    assert REDACTED_TEAM_VALUE in body
+    assert "secret-token" not in body
+    assert "token=secret-token" not in body
+    # The vocabulary in the same payload is untouched by the redaction.
+    details = response.get_json()["error"]["details"]["filters"][0]
+    assert "OPP_PTS" in details["supported_values"]
+
+
+def test_game_logs_rejected_values_stay_identifiable(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Ordinary rejected input is echoed verbatim; redaction only strips
+    # credential-shaped text.
+    assert rejected == {"teams_against": ["NotAFilter"]}
+
+
+def test_game_logs_details_never_leak_pydantic_context_or_inputs(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&date_filter=not-a-date"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    body = response.get_data(as_text=True)
+    # Only bounded facts appear: no Pydantic error text, no full-input dump,
+    # no internal type names or error URLs in the published payload.
     assert "ValueError" not in body
     assert "GameLogFilterError" not in body
     assert "pydantic" not in body
     assert "errors.pydantic.dev" not in body
-    assert "season_filter" not in body
     assert "input_value" not in body
-    assert "Supported filters are" not in body
+    assert "input_type" not in body
+
+
+def test_game_log_validation_details_skip_unknown_internal_failures() -> None:
+    from pydantic import ValidationError
+
+    from app.models.game_logs import GameLogQuery
+    from app.routes.game_routes import _game_log_validation_details
+
+    # An internal error shape with no identifying facts (here, a self
+    # Filters payload no route would send) yields no details at all, so the
+    # generic message stays the full answer.
+    try:
+        GameLogQuery(season_filter="2024-25", self_filters="oops")
+    except ValidationError as error:
+        assert _game_log_validation_details(error, filters={}) is None
+    else:
+        pytest.fail("the malformed self_filters payload must be rejected")
+
 
 
 def test_player_profile_missing_resource_uses_central_handler(client, monkeypatch) -> None:

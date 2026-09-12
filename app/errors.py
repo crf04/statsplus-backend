@@ -108,6 +108,27 @@ def _sanitize_diagnostic_detail(detail: Any) -> str | None:
     )
 
 
+#: Bounds on one published detail value, so unusable caller input cannot
+#: blow up the error payload. Values are redacted like the diagnostics but
+#: truncated after matching, keeping ordinary rejected values identifiable.
+_PUBLIC_VALUE_MAX_LENGTH = 200
+
+
+def sanitize_public_value(value: Any) -> str:
+    """One value a caller may see: the diagnostics redaction, bounded.
+
+    The ``details`` facts on invalid-input responses echo submitted text
+    back to the submitter, but they are published on a route other callers
+    of the same API can reach, so anything the sanitiser strips from logs
+    is stripped here too, and the value is length-bounded.
+    """
+
+    sanitized = _sanitize_diagnostic_detail(value)
+    if sanitized is None:
+        return ""
+    return sanitized[:_PUBLIC_VALUE_MAX_LENGTH]
+
+
 def _log_application_error(
     error: AppError,
     *,
