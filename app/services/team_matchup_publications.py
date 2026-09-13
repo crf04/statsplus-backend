@@ -313,6 +313,11 @@ def publication_cutoff_reason(read, cutoff: date) -> str | None:
 
 SEASON_COMPLETE_SNAPSHOT_REASON = "season_complete_snapshot"
 
+#: The durable reason for a Last-15 window that has not opened league-wide.
+#: Shared by the governed writer, the ledger materializer, and the read seam
+#: that must not reinterpret it as a transient publication gap.
+INSUFFICIENT_GOVERNED_GAMES_REASON = "insufficient_governed_games"
+
 
 def season_complete_snapshot_accepted(
     read,
@@ -392,6 +397,7 @@ __all__ = [
     "PublicationLineage",
     "PublicationGovernanceUnavailable",
     "PublicationValidationError",
+    "INSUFFICIENT_GOVERNED_GAMES_REASON",
     "SEASON_COMPLETE_SNAPSHOT_REASON",
     "SHOT_TYPE_SLICES",
     "SHOT_TYPE_STATS",

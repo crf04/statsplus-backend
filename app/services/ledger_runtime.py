@@ -53,6 +53,10 @@ _OBSERVATION_COMPOSED_STREAM_KEYS = (
     NBA_PUBLICATION_STREAM_KEYS | PLAYER_DIET_OBSERVATION_STREAM_KEYS
 )
 
+#: The canonical NBA identity set.  Last 15 is league-wide, so readiness is set
+#: equality against this roster rather than a per-team count.
+_CANONICAL_TEAM_IDS = frozenset(NBA_TEAM_ID_TO_TRICODE)
+
 
 @dataclass(frozen=True, slots=True)
 class LedgerGovernance:
@@ -102,6 +106,27 @@ class LedgerGovernance:
             if len(dates) == 15:
                 boundaries[team_id] = min(dates).strftime("%m/%d/%Y")
         return boundaries
+
+    @property
+    def l15_ready(self) -> bool:
+        """Whether every canonical team has a provable exact governed Last 15.
+
+        Mirrors the legacy refresh guard but against the canonical roster: a
+        team short of 15 completed games and a team absent from the governed
+        event set are both absent from ``expected_l15_game_ids``, which only
+        ever holds a team that appeared in the events.  Set equality against
+        the 30 canonical identities -- never a bare per-team count -- is what
+        keeps an empty or partial dict from passing vacuously.  This is a
+        production readiness rule: it names the real NBA universe and fails
+        closed on anything less, so no noncanonical fixture universe may be
+        reported ready.
+        """
+
+        game_ids_by_team = self.expected_l15_game_ids
+        return (
+            set(game_ids_by_team) == set(_CANONICAL_TEAM_IDS)
+            and all(len(game_ids) == 15 for game_ids in game_ids_by_team.values())
+        )
 
 
 class LedgerGovernanceReader(Protocol):
@@ -564,6 +589,8 @@ def _composition_failure_reason(
 
 def _succeeded_ledger_streams(
     materialization: LedgerMaterialization,
+    *,
+    l15_ready: bool = True,
 ) -> set[str]:
     succeeded = set()
     if materialization.season_window.complete:
@@ -572,7 +599,15 @@ def _succeeded_ledger_streams(
             "traditional_opponent_season",
             "player_per36",
         }
-    if materialization.l15_window.complete:
+    # A withheld Last-15 window is a designed waiting state, not a failure:
+    # its ledger-owned streams settle successfully so the cycle neither fails
+    # nor alerts while the window is closed.  The waiting success only applies
+    # when the window itself is incomplete; a complete window keeps its own
+    # per-surface outcome, so a genuinely missing assist surface still fails.
+    l15_complete = materialization.l15_window.complete
+    if l15_complete:
+        succeeded.add("traditional_opponent_l15")
+    elif not l15_ready:
         succeeded.add("traditional_opponent_l15")
     # Each assist window succeeds on its own materialization.
     if (
@@ -580,10 +615,9 @@ def _succeeded_ledger_streams(
         and materialization.season_window.complete
     ):
         succeeded.add("assist_locations_season")
-    if (
-        materialization.assist_location_l15 is not None
-        and materialization.l15_window.complete
-    ):
+    if materialization.assist_location_l15 is not None and l15_complete:
+        succeeded.add("assist_locations_l15")
+    elif not l15_ready and not l15_complete:
         succeeded.add("assist_locations_l15")
     if (
         materialization.player_assist_diet is not None
@@ -785,6 +819,7 @@ class LedgerRuntime:
                         cutoff,
                         manifest_id,
                     )
+                    l15_ready = governance.l15_ready
                     composition_as_of = slate_date_for_instant(cutoff)
                     read_connection = session.connection()
                     try:
@@ -870,6 +905,13 @@ class LedgerRuntime:
                             l15_expectation_resolver=self.governance,
                         )
                     for job in nba_jobs:
+                        if not l15_ready and job["stream_key"].endswith("_l15"):
+                            # Last 15 is withheld league-wide: the window has
+                            # not opened.  Settle the job as a waiting success
+                            # and let the materialization below persist the
+                            # withheld surface observations.
+                            nba_succeeded_streams.add(job["stream_key"])
+                            continue
                         try:
                             if not manifest_id:
                                 raise ControlPlaneError(
@@ -903,6 +945,7 @@ class LedgerRuntime:
                                 ),
                                 team_ids=governance.team_ids,
                                 session=session,
+                                l15_ready=l15_ready,
                             )
                         cas_failed = False
                         for job in nba_jobs:
@@ -972,6 +1015,7 @@ class LedgerRuntime:
                                 write_authority=write_authority,
                                 claimed_streams=frozenset(claimed_streams),
                                 session=session,
+                                l15_ready=l15_ready,
                             )
                     materialized = self.materialization.compose(
                         games,
@@ -988,7 +1032,9 @@ class LedgerRuntime:
                         ),
                         session=session,
                     )
-                    succeeded = _succeeded_ledger_streams(materialized)
+                    succeeded = _succeeded_ledger_streams(
+                        materialized, l15_ready=l15_ready
+                    )
                     cas_failed = False
                     for job in slice_jobs:
                         if job["stream_key"] in _OBSERVATION_COMPOSED_STREAM_KEYS:
