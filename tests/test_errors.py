@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 
 import pytest
 from flask import Flask
+from werkzeug.datastructures import MultiDict
 
 from app.errors import (
     AppError,
@@ -211,12 +213,621 @@ def test_game_logs_invalid_input_uses_central_handler(client) -> None:
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": {
-            "code": "invalid_input",
-            "message": "One or more game log filters are invalid.",
-        }
+    error = response.get_json()["error"]
+    assert error["code"] == "invalid_input"
+    assert error["message"] == "One or more game log filters are invalid."
+
+
+# Synthetic marker for the redaction test: never a real credential.
+REDACTED_TEAM_VALUE = "token=[REDACTED]"
+
+
+def _rejected_filters(details):
+    """Map one details payload to parameter -> values for assertions."""
+
+    return {
+        entry["parameter"]: entry["values"]
+        for entry in details["filters"]
     }
+
+
+def test_game_logs_rejected_teams_against_names_parameter_and_values(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=Arc3Assists"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=6"
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"]["message"] == "One or more game log filters are invalid."
+    # Only the unsupported entry names itself; the honoured Arc3Assists does
+    # not appear as unusable.
+    rejected = _rejected_filters(payload["error"]["details"])
+    assert rejected == {"teams_against": ["NotAFilter"]}
+
+
+def test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary(
+    client,
+) -> None:
+    from app.models.catalogs import TEAM_FILTER_ALIASES, SUPPORTED_TEAM_FILTERS
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=5"
+    )
+
+    assert response.status_code == 400
+    details = response.get_json()["error"]["details"]["filters"][0]
+    # The full authoritative vocabulary travels with the rejection, sourced
+    # from the backend constant, so a caller never holds a drifting copy.
+    assert details["supported_values"] == list(SUPPORTED_TEAM_FILTERS)
+    assert "Arc3Assists" in details["supported_values"]
+    assert details["supported_aliases"] == list(TEAM_FILTER_ALIASES)
+    assert "<10 Ft" in details["supported_aliases"]
+
+
+def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&opponent_tricode=XXX"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"opponent_tricode": ["XXX"]}
+
+
+def test_game_logs_rank_filter_rejection_reports_every_unusable_entry(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&rank_filter%5B%5D=abc"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=xyz"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # All unusable entries, with the parseable 5 left out.
+    assert rejected == {"rank_filter": ["abc", "xyz"]}
+
+
+def test_game_logs_model_level_alignment_failure_names_submitted_values(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=OPP_PTS"
+        "&rank_filter%5B%5D=5"
+        "&rank_filter%5B%5D=9"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"rank_filter": ["5", "9"]}
+
+
+def test_game_logs_range_failures_name_their_submitted_values(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&minutes_filter=40,20"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"minutes_filter": ["40,20"]}
+
+
+def test_game_logs_playstyle_failures_use_the_separate_query_names(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_min=abc"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_min": ["abc"]}
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_max=inf"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_max": ["inf"]}
+
+
+def test_game_logs_reversed_playstyle_range_names_submitted_bounds(
+    client,
+) -> None:
+    # Only the minimum was submitted; the untouched 200 default must never
+    # be blamed, and the submitted minimum must not disappear.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_min=201"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_min": ["201"]}
+
+    # With both bounds submitted, each names itself with its own value.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_min=150&playstyle_RTG_max=50"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_min": ["150"], "playstyle_RTG_max": ["50"]}
+
+    # A submitted maximum below the minimum default blames only itself.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&playstyle_RTG_max=-5"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"playstyle_RTG_max": ["-5"]}
+
+
+def test_game_logs_rejected_self_filter_numeric_values_name_the_stat(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BBOGUS%5D=a,b"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # An unsupported stat never blinds the range facts: the numeric
+    # failures still attribute to the stat the caller submitted.
+    assert rejected == {"self_filters[BOGUS]": ["a", "b"]}
+
+
+def test_game_logs_rejected_self_filter_zero_bound_survives(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&self_filters%5BPTS%5D=2,0"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Zero is a submitted value, not one to drop by truthiness.
+    assert rejected == {"self_filters[PTS]": ["2", "0"]}
+
+
+def test_game_logs_parameter_names_are_redacted_and_bounded_too(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5Btoken%3Dsynthetic-secret%5D=bad-value"
+    )
+
+    assert response.status_code == 400
+    entry = response.get_json()["error"]["details"]["filters"][0]
+    assert entry["parameter"] == "self_filters[token=[REDACTED]]"
+    assert "synthetic-secret" not in response.get_data(as_text=True)
+    # The ordinary rejected value stays verbatim.
+    assert entry["values"] == ["bad-value"]
+
+
+def test_game_logs_published_parameter_names_are_bounded(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5B" + "A" * 300 + "%5D=1,2"
+    )
+
+    assert response.status_code == 400
+    entry = response.get_json()["error"]["details"]["filters"][0]
+    # The caller-controlled stat inside a parameter name is truncated to
+    # the same bound as values; removing only truncation must fail here.
+    assert len(entry["parameter"]) == 200
+    assert entry["parameter"].startswith("self_filters[")
+
+
+SPLIT_TOKEN_VALUE = "token='synthetic-left,synthetic-right'"
+SPLIT_PASSWORD_VALUE = 'password="synthetic-left,synthetic-right"'
+
+
+def test_game_logs_split_credential_values_redact_the_complete_value(
+    client,
+) -> None:
+    # Splitting a submitted value on ',' can destroy the context its
+    # sanitization needs (a quoted value spanning the split), so the
+    # complete submitted value is sanitized and published instead.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D=" + urllib.parse.quote(SPLIT_TOKEN_VALUE, safe="")
+    )
+
+    assert response.status_code == 400
+    entry = response.get_json()["error"]["details"]["filters"][0]
+    assert entry["values"] == ["token=[REDACTED]"]
+    body = response.get_data(as_text=True)
+    assert "synthetic-left" not in body
+    assert "synthetic-right" not in body
+
+
+def test_game_logs_quoted_password_across_split_is_redacted(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D="
+        + urllib.parse.quote(SPLIT_PASSWORD_VALUE, safe="")
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
+        "password=[REDACTED]"
+    ]
+    assert "synthetic-left" not in response.get_data(as_text=True)
+    assert "synthetic-right" not in response.get_data(as_text=True)
+
+
+def test_game_logs_split_credential_in_minutes_is_redacted(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&minutes_filter=" + urllib.parse.quote(SPLIT_TOKEN_VALUE, safe="")
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["details"]["filters"][0]["values"] == [
+        "token=[REDACTED]"
+    ]
+    assert "synthetic-left" not in response.get_data(as_text=True)
+    assert "synthetic-right" not in response.get_data(as_text=True)
+
+
+def test_game_logs_ordinary_split_values_stay_identifiable(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&self_filters%5BPTS%5D=high,low"
+        "&minutes_filter=a,20"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Values without credentials are published per part, untouched.
+    assert rejected == {
+        "self_filters[PTS]": ["high", "low"],
+        "minutes_filter": ["a"],
+    }
+
+
+def test_game_logs_empty_stat_key_names_the_submitted_parameter(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5B%5D=a,b"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # The submitted key self_filters[] names itself; only the typed,
+    # non-HTTP calls without a stat use the unnamed form.
+    assert rejected == {"self_filters[]": ["a", "b"]}
+
+
+def test_game_logs_empty_stat_key_names_the_submitted_parameter_for_ranges(
+    client,
+) -> None:
+    # A malformed one-part range under the empty key must still name the
+    # actual submitted key, not fall back to the unnamed form.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5B%5D=a"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[]": ["a"]}
+
+
+def test_game_logs_long_ordinary_ranges_keep_the_invalid_operand(
+    client,
+) -> None:
+    # A complete value long enough to hit the published bound is not a
+    # credential: redaction and length bounding are distinguished, so the
+    # actionable invalid operand is named instead of buried in zeroes.
+    long_zeroes = "0" * 250
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&minutes_filter=" + long_zeroes + ",bad"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"minutes_filter": ["bad"]}
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D=" + long_zeroes + ",bad"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[PTS]": ["bad"]}
+
+
+def test_game_logs_repeated_same_stat_keeps_ordinary_fragments(client) -> None:
+    # One value contains the ordinary fragment inside a sensitive whole one.
+    # Each pair carries its own complete value, so the ordinary rejection is
+    # not rewritten by another same-stat input's redaction.
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BPTS%5D=bad"
+        "&self_filters%5BPTS%5D="
+        + urllib.parse.quote("token='bad,synthetic-right'", safe="")
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[PTS]": ["bad"]}
+    assert "synthetic-right" not in response.get_data(as_text=True)
+
+
+def test_game_logs_published_values_are_bounded(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=" + "A" * 300 +
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"teams_against": ["A" * 200]}
+
+
+def test_game_logs_details_carry_only_the_documented_facts(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&date_filter=not-a-date"
+        "&teams_against%5B%5D=NotAFilter"
+        "&teams_against%5B%5D=token%3Dsecret-token"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert error["code"] == "invalid_input"
+    # Structure, not just substrings: every entry carries only the keys
+    # the documented contract allows, and values are scalars.
+    documented = {
+        "supported_values",
+        "supported_aliases",
+        "values",
+        "parameter",
+    }
+    for entry in error["details"]["filters"]:
+        assert set(entry) <= documented
+        for key in ("ctx", "input", "url", "loc", "type", "msg"):
+            assert key not in entry
+    body = response.get_data(as_text=True)
+    assert "secret-token" not in body
+    assert "ValueError" not in body
+    assert "pydantic" not in body
+    assert "errors.pydantic.dev" not in body
+    assert "input_value" not in body
+
+
+def test_game_logs_scalar_parse_failures_name_parameter_and_value(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&date_filter=not-a-date"
+        "&location_filter=home"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {
+        "date_filter": ["not-a-date"],
+        "location_filter": ["home"],
+    }
+
+
+def test_game_logs_known_failures_survive_other_unknown_failures(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&date_filter=not-a-date"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=5"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Each rejection translates separately: a date parse failure never
+    # blanks the teams_against refusal.
+    assert rejected == {
+        "date_filter": ["not-a-date"],
+        "teams_against": ["NotAFilter"],
+    }
+
+
+def test_game_log_validation_details_keep_known_and_skip_unknown() -> None:
+    from pydantic import ValidationError
+
+    from app.models.game_logs import GameLogQuery
+    from app.routes.game_routes import _game_log_validation_details
+
+    # One typed refusal plus one internal unknown shape: the known detail
+    # survives, the unknown one is skipped rather than blanking the payload.
+    try:
+        GameLogQuery(
+            season_filter="2024-25",
+            teams_against=["NotAFilter"],
+            self_filters="oops",
+        )
+    except ValidationError as error:
+        details = _game_log_validation_details(error, filters={}, args=MultiDict())
+        assert _rejected_filters(details) == {"teams_against": ["NotAFilter"]}
+    else:
+        pytest.fail("the malformed request must be rejected")
+
+
+def test_game_logs_season_failure_names_parameter_and_value(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James&season_filter=potato"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"season_filter": ["potato"]}
+
+
+def test_game_logs_minutes_part_failures_name_the_offending_part(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&minutes_filter=a,20"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"minutes_filter": ["a"]}
+
+
+def test_game_logs_self_filter_failures_name_parameter_and_value(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&self_filters%5BBOGUS%5D=1,2"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"self_filters[BOGUS]": ["BOGUS"]}
+
+
+def test_game_logs_game_filter_failure_names_parameter_and_value(client) -> None:
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&game_filter=0"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {"game_filter": ["0"]}
+
+
+def test_game_logs_credential_looking_values_are_redacted_not_echoed(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=token%3Dsecret-token"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    body = response.get_data(as_text=True)
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    assert rejected == {
+        "teams_against": [
+            REDACTED_TEAM_VALUE,
+        ]
+    }
+    assert REDACTED_TEAM_VALUE in body
+    assert "secret-token" not in body
+    assert "token=secret-token" not in body
+    # The vocabulary in the same payload is untouched by the redaction.
+    details = response.get_json()["error"]["details"]["filters"][0]
+    assert "OPP_PTS" in details["supported_values"]
+
+
+def test_game_logs_rejected_values_stay_identifiable(client) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    rejected = _rejected_filters(response.get_json()["error"]["details"])
+    # Ordinary rejected input is echoed verbatim; redaction only strips
+    # credential-shaped text.
+    assert rejected == {"teams_against": ["NotAFilter"]}
+
+
+def test_game_logs_details_never_leak_pydantic_context_or_inputs(
+    client,
+) -> None:
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&date_filter=not-a-date"
+        "&teams_against%5B%5D=NotAFilter"
+        "&rank_filter%5B%5D=1"
+    )
+
+    assert response.status_code == 400
+    body = response.get_data(as_text=True)
+    # Only bounded facts appear: no Pydantic error text, no full-input dump,
+    # no internal type names or error URLs in the published payload.
+    assert "ValueError" not in body
+    assert "GameLogFilterError" not in body
+    assert "pydantic" not in body
+    assert "errors.pydantic.dev" not in body
+    assert "input_value" not in body
+    assert "input_type" not in body
+
+
+def test_game_log_validation_details_skip_unknown_internal_failures() -> None:
+    from pydantic import ValidationError
+
+    from app.models.game_logs import GameLogQuery
+    from app.routes.game_routes import _game_log_validation_details
+
+    # An internal error shape with no identifying facts (here, a self
+    # Filters payload no route would send) yields no details at all, so the
+    # generic message stays the full answer.
+    try:
+        GameLogQuery(season_filter="2024-25", self_filters="oops")
+    except ValidationError as error:
+        assert _game_log_validation_details(error, filters={}, args=MultiDict()) is None
+    else:
+        pytest.fail("the malformed self_filters payload must be rejected")
+
 
 
 def test_player_profile_missing_resource_uses_central_handler(client, monkeypatch) -> None:

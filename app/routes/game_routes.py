@@ -9,6 +9,7 @@ timeouts keep the documented 503 ``provider_unavailable`` contract.
 """
 
 import re
+from typing import Any
 
 import requests
 from flask import Blueprint, jsonify, request
@@ -18,8 +19,10 @@ from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
+    redact_public_value,
+    sanitize_public_value,
 )
-from ..models.game_logs import GameLogQuery
+from ..models.game_logs import GameLogFilterError, GameLogQuery
 from ..utils.auth import require_auth
 from ._service_proxy import CurrentAppService
 
@@ -127,8 +130,152 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         return player_name, GameLogQuery(**filters)
     except ValidationError as error:
         raise InvalidInputError(
-            "One or more game log filters are invalid.", detail=error
+            "One or more game log filters are invalid.",
+            detail=error,
+            public_details=_game_log_validation_details(error, filters, request.args),
         ) from error
+
+
+#: Parsers the typed models do not own, translated from one pydantic-native
+#: rejection at the HTTP seam, the original submitted value in hand. Their
+#: accepted grammar is pydantic's, so acceptance is untouched.
+_UNTYPED_PARAMETER_NAMES = frozenset(
+    {"date_filter", "location_filter", "game_filter"}
+)
+
+
+def _playstyle_range_failures(
+    filters: dict[str, Any],
+    args: Any,
+) -> list[dict[str, str]]:
+    """Facts for an inverted playstyle range, per submitted bound.
+
+    The range spans two query parameters. Only the ones the caller actually
+    submitted are named with the bound as it arrived, so a default the
+    caller never sent is never blamed for a rejection.
+    """
+
+    low, high = filters["playstyle_range"]
+    bounds = (
+        ("playstyle_RTG_min", low),
+        ("playstyle_RTG_max", high),
+    )
+    return [
+        {
+            "parameter": parameter,
+            # The filters hold exactly the queried bound (the omitted one
+            # replaced by its documented default), as submitted strings.
+            "values": [sanitize_public_value(str(bound))],
+        }
+        for parameter, bound in bounds
+        if args.getlist(parameter)
+    ]
+
+
+def _redacted_split_values(
+    fragments: list[str],
+    complete_values: list[str],
+) -> list[str]:
+    """Publish fragments that keep the sanitization context of the whole value.
+
+    Validators report the bounds or parts of one submitted value
+    individually, and splitting on ``,`` can break the context a credential
+    pattern needs to match (a quoted value spanning the split). When a
+    fragment came from a complete value the sanitizer redacts, the
+    sanitized complete value is published instead; ordinary invalid
+    fragments -- including long ones the sanitizer only truncates -- are
+    untouched, because redaction and length bounding are compared apart.
+    """
+
+    published = []
+    for fragment in fragments:
+        complete = next(
+            (
+                candidate
+                for candidate in complete_values
+                if fragment in candidate
+                and redact_public_value(candidate) != candidate
+            ),
+            None,
+        )
+        published.append(
+            sanitize_public_value(complete)
+            if complete is not None
+            else sanitize_public_value(fragment)
+        )
+    return list(dict.fromkeys(published))
+
+
+def _game_log_rejected_filter(
+    cause: GameLogFilterError | None,
+    validation_error: dict[str, Any],
+    filters: dict[str, Any],
+    args: Any,
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """One rejected filter as published facts, or none if not safely known."""
+
+    if isinstance(cause, GameLogFilterError):
+        if cause.parameter == "playstyle_RTG_range":
+            # Internal two-parameter marker, never published as a name:
+            # report the bounds the caller actually submitted.
+            return _playstyle_range_failures(filters, args)
+        facts = {
+            # Caller-supplied content can appear inside a parameter name
+            # (a self_filter's stat), so it is redacted like the values.
+            "parameter": sanitize_public_value(cause.parameter),
+            "values": _redacted_split_values(
+                list(cause.values),
+                [cause.context] if isinstance(cause.context, str) else [],
+            ),
+        }
+        if cause.supported_values is not None:
+            facts["supported_values"] = list(cause.supported_values)
+        if cause.supported_aliases is not None:
+            facts["supported_aliases"] = list(cause.supported_aliases)
+        return facts
+
+    # A parser pydantic owns (``date_filter``, ``location_filter``) has no
+    # typed cause, but the route holds exactly the value the caller
+    # submitted and it is a scalar string, so publish that. Anything still
+    # unknown is skipped, keeping the other rejected filters' facts.
+    field = validation_error.get("loc", ())
+    field = field[0] if field and isinstance(field[0], str) else None
+    submitted = filters.get(field) if field in _UNTYPED_PARAMETER_NAMES else None
+    if isinstance(submitted, str):
+        return {
+            "parameter": field,
+            "values": [sanitize_public_value(submitted)],
+        }
+    return None
+
+
+def _game_log_validation_details(
+    error: ValidationError,
+    filters: dict[str, Any],
+    args: Any,
+) -> dict[str, Any] | None:
+    """The failed game-log parameters a caller can act on, or none.
+
+    Each rejection is translated separately: typed
+    :class:`GameLogFilterError` causes name the parameter, the unusable
+    submitted values, and where the service owns the vocabulary, the
+    canonical accepted values. A failure with no safely actionable detail
+    -- an unknown internal one -- is skipped rather than blanking the
+    whole payload, and none of them publishes Pydantic context or input:
+    only redacted, bounded scalars reach ``details``.
+    """
+
+    failed_filters = []
+    for validation_error in error.errors():
+        cause = (validation_error.get("ctx") or {}).get("error")
+        facts = _game_log_rejected_filter(cause, validation_error, filters, args)
+        if isinstance(facts, list):
+            failed_filters.extend(facts)
+        elif facts is not None:
+            failed_filters.append(facts)
+    if not failed_filters:
+        return None
+    return {"filters": failed_filters}
 
 
 @game_bp.route('/game_logs', methods=['GET'])
