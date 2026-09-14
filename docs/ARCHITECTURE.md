@@ -1207,13 +1207,29 @@ returns the frozen stored fact
 `StatsFreshness(last_successful_completion=...)`; a null completion explicitly
 distinguishes the before-first-run state. A later presentation seam owns its
 translation into API `retrieved_at` and freshness status. Railway runs
-`scripts/nightly_refresh.py --hosted-only`. This mode constructs only the
-PBP-backed player-game-log ingestion path, reads the governed Event and Athlete
-Catalogs from Postgres, and never constructs or calls the NBA Stats adapter.
-A failure is retried once and preserves the prior complete game-log
-publication. NBA-owned catalogs and statistical surfaces remain residential
-collector inputs; their governed team-window publications are later consumed
-by the database-first ledger materialization seam described below.
+`scripts/nightly_refresh.py --hosted-only`. This mode runs two independent,
+bounded steps and never constructs or calls the NBA Stats adapter.
+The first is the activation-gated legacy metadata refresh. It assembles the
+same `DataService.update_all_data` publication path used by the operator mode,
+but with inert NBA Stats and PBP Stats providers, and preflights the four
+replacement streams its non-surviving collector frames require:
+`player_per36`, `exact_shot_zones_opponent_season`, `exact_shot_zones`, and
+`assist_locations_season`. A disabled or missing stream, or an unreadable
+activation registry, fails this step closed before any provider is collected,
+so hosted metadata publishes only the offline `player_information` list from
+the bundled player data. Its publication and `stats_tables` completion are one
+transaction, so `stats_tables` names only the remaining legacy refresh and is
+never evidence that residential player or team statistics were refreshed.
+The second step is the PBP-backed player-game-log ingestion path, which reads
+the governed Event and Athlete Catalogs from Postgres and is unchanged. Each
+step is attempted even if the other fails, a failed step is retried exactly
+once without rerunning a successful one, and the command exits nonzero naming
+any step that exhausts its retry. A failed publication preserves that surface's
+previous complete data and completion record; each surface's completion
+advances only with its own successful publication. NBA-owned catalogs and
+statistical surfaces remain residential collector inputs; their governed
+team-window publications are later consumed by the database-first ledger
+materialization seam described below.
 
 The legacy operator mode without `--hosted-only` runs that same stats service, the
 current-season Event Catalog refresh, the current-season Athlete Catalog

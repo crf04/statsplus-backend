@@ -62,10 +62,61 @@ def run_nightly_refresh(
     )
 
 
-def run_hosted_refresh(*, refresh_player_game_logs: Callable[[], Any]) -> int:
-    """Run only the PBP-backed refresh that is safe from hosted egress."""
+def run_hosted_refresh(
+    *,
+    refresh_metadata: Callable[[], Any],
+    refresh_player_game_logs: Callable[[], Any],
+) -> int:
+    """Run the two hosted-owned steps independently, retrying each once."""
 
-    return _run_refresh_steps((("player game logs", refresh_player_game_logs),))
+    return _run_independent_refresh_steps(
+        (
+            ("metadata", refresh_metadata),
+            ("player game logs", refresh_player_game_logs),
+        )
+    )
+
+
+def _run_independent_refresh_steps(
+    steps: tuple[tuple[str, Callable[[], Any]], ...],
+) -> int:
+    """Attempt every step, then retry only the failed steps exactly once.
+
+    One step's failure must never prevent another step from being attempted,
+    and a step that already succeeded is never rerun.  The aggregate exit is
+    nonzero when any step fails both its attempt and its single retry.
+    """
+
+    succeeded = {step: _refresh_succeeded(refresh) for step, refresh in steps}
+    failed = tuple(
+        (step, refresh) for step, refresh in steps if not succeeded[step]
+    )
+    if not failed:
+        return 0
+    for step, _ in failed:
+        print(
+            f"Nightly Refresh attempt 1 failed during {step} refresh; retrying.",
+            file=sys.stderr,
+        )
+    for step, refresh in failed:
+        succeeded[step] = _refresh_succeeded(refresh)
+    exhausted = [step for step, _ in failed if not succeeded[step]]
+    for step in exhausted:
+        print(
+            f"Nightly Refresh attempt 2 failed during {step} refresh; "
+            "no retries remain.",
+            file=sys.stderr,
+        )
+    return 1 if exhausted else 0
+
+
+def _refresh_succeeded(refresh: Callable[[], Any]) -> bool:
+    """Run one refresh, reporting success without leaking its failure text."""
+
+    try:
+        return refresh() is not False
+    except Exception:
+        return False
 
 
 def _run_refresh_steps(
@@ -104,8 +155,9 @@ def _parser() -> argparse.ArgumentParser:
         "--hosted-only",
         action="store_true",
         help=(
-            "refresh only PBP-backed player game logs; never contact NBA Stats "
-            "from hosted infrastructure"
+            "refresh PBP-backed player game logs and the activation-gated "
+            "legacy player metadata; never contact NBA Stats from hosted "
+            "infrastructure"
         ),
     )
     return parser
@@ -116,6 +168,46 @@ def _bootstrap_legacy_write_fence(engine):
 
     PublicationService(engine).register_default_streams()
     return LegacyWriteFence(engine)
+
+
+class _InertHostedProvider:
+    """A provider stand-in that fails on any attribute access.
+
+    Hosted metadata may only publish the offline ``player_information`` frame;
+    every provider-backed frame is refused by an activated stream before
+    collection.  If a collector is ever reached, this guard fails the step
+    locally instead of letting a hosted process try to contact NBA Stats or
+    PBP Stats.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __getattr__(self, operation: str) -> Any:
+        raise RuntimeError(f"hosted metadata attempted {self._name}.{operation}")
+
+
+def _run_hosted_metadata(engine, settings) -> Any:
+    """Assemble and publish the activation-gated legacy metadata refresh.
+
+    Assembly and the activation preflight live inside this function so a setup
+    or preflight failure stays inside the metadata step's failure boundary: it
+    must never stop PBP game-log ingestion from being attempted.  Both
+    injected providers are inert, so a frame that was not refused by
+    activation fails locally rather than on the network.
+    """
+
+    write_fence = LegacyWriteFence(engine)
+    data_service = DataService(
+        engine,
+        settings=settings,
+        pbp_provider=_InertHostedProvider("pbp_stats"),
+        nba_stats_provider=_InertHostedProvider("nba_stats"),
+        stats_freshness=StatsFreshnessRepository(engine),
+        write_fence=write_fence,
+    )
+    data_service.require_hosted_metadata()
+    return data_service.update_all_data()
 
 
 def _run(database_url: str, *, hosted_only: bool = False) -> int:
@@ -164,9 +256,10 @@ def _run(database_url: str, *, hosted_only: bool = False) -> int:
         )
         if hosted_only:
             return run_hosted_refresh(
+                refresh_metadata=lambda: _run_hosted_metadata(engine, settings),
                 refresh_player_game_logs=lambda: player_game_log_ingest_service.refresh(
                     settings.nba.current_season
-                )
+                ),
             )
 
         pbp_provider = PBPStatsAdapter(settings=settings)

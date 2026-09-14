@@ -63,6 +63,23 @@ _ACTIVATION_FENCED_TABLE_STREAMS: dict[str, str] = {
     "pbp_player_stats": "player_assist_locations",
 }
 
+#: The one frame a hosted metadata refresh may still collect and publish.  It
+#: is built from the bundled offline player list and contacts no provider.
+HOSTED_METADATA_SURVIVING_TABLE = "player_information"
+
+#: The replacement streams a hosted metadata refresh requires before it may
+#: run.  Each refuses one legacy collector frame, so the offline
+#: ``player_information`` list is the only frame a hosted refresh publishes.
+#: A disabled or missing stream is not permission to refresh its frame from a
+#: provider, so the hosted command preflights this map and fails the metadata
+#: step closed rather than contacting NBA Stats.
+HOSTED_METADATA_REQUIRED_TABLE_STREAMS: dict[str, str] = {
+    "player_per36_stats": "player_per36",
+    "opp_shooting_zone": publication_stream("shot_zones", "season"),
+    "player_shooting_zones": "exact_shot_zones",
+    "pbp_opponent_stats": "assist_locations_season",
+}
+
 
 class DataService:
     def __init__(
@@ -150,6 +167,35 @@ class DataService:
         except Exception as error:
             logger.error("Error updating database: %s", error)
             return False
+
+    def require_hosted_metadata(self) -> None:
+        """Fail closed unless collection can only publish the offline frame.
+
+        Hosted egress cannot reach NBA Stats, and a hosted run must never
+        write a legacy table whose database-first replacement is not
+        activated.  Every required stream is checked with the same
+        ``LegacyWriteFence`` the collection and publication passes use, so a
+        disabled stream, a missing registry row, or an unreadable control
+        plane stops the metadata step before any provider is called.  This
+        deliberately activates nothing and only reports the gap.
+        """
+
+        checker = getattr(self.write_fence, "is_activated", None)
+        if not callable(checker):
+            # No readable fence means an unprovable activation state, which is
+            # the same refusal a missing registry row receives.
+            raise ControlPlaneError("legacy_write_fence_unavailable")
+        missing = sorted(
+            stream_key
+            for stream_key in HOSTED_METADATA_REQUIRED_TABLE_STREAMS.values()
+            if not checker(stream_key)
+        )
+        if missing:
+            raise ControlPlaneError(
+                "hosted_metadata_activation_required",
+                "hosted metadata requires activated replacement streams: "
+                + ", ".join(missing),
+            )
 
     def _refuses_table(self, table_name) -> bool:
         """Report whether this refresh must skip one table entirely.
