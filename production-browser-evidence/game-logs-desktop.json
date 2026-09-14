@@ -1,0 +1,53 @@
+{
+  "url": "http://127.0.0.1:5188/?player_name=LeBron+James&game_filter=5",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "screenshot": "/tmp/statsplus-46-spec-loop/production-browser-evidence/game-logs-desktop.png",
+  "aria": "/tmp/statsplus-46-spec-loop/production-browser-evidence/game-logs-desktop.aria.txt",
+  "responses": [
+    {
+      "at": "2026-09-14T01:07:35.687Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-09-14T01:07:35.789Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/players/profile",
+      "status": 200
+    },
+    {
+      "at": "2026-09-14T01:07:35.936Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/players",
+      "status": 200
+    },
+    {
+      "at": "2026-09-14T01:07:36.146Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-09-14T01:07:36.259Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    },
+    {
+      "at": "2026-09-14T01:07:36.289Z",
+      "actionStep": 1,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    }
+  ]
+}

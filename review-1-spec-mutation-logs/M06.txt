@@ -1,0 +1,23 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-46-spec-loop/review-1-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_nightly_refresh_command.py F                                  [100%]
+
+=================================== FAILURES ===================================
+________ test_hosted_refresh_returns_failure_after_independent_retries _________
+tests/test_nightly_refresh_command.py:837: in test_hosted_refresh_returns_failure_after_independent_retries
+    assert (
+E   assert 0 == 1
+E    +  where 0 = run_hosted_refresh(refresh_metadata=<function test_hosted_refresh_returns_failure_after_independent_retries.<locals>.<lambda> at 0x11ade67a0>, refresh_player_game_logs=<function test_hosted_refresh_returns_failure_after_independent_retries.<locals>.<lambda> at 0x11ade6980>)
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 1 failed during player game logs refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+Nightly Refresh attempt 2 failed during player game logs refresh; no retries remain.
+=========================== short test summary info ============================
+FAILED tests/test_nightly_refresh_command.py::test_hosted_refresh_returns_failure_after_independent_retries
+============================== 1 failed in 0.36s ===============================

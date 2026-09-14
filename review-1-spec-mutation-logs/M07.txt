@@ -1,0 +1,22 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-46-spec-loop/review-1-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_nightly_refresh_command.py F                                  [100%]
+
+=================================== FAILURES ===================================
+____ test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs _____
+tests/test_nightly_refresh_command.py:162: in test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs
+    assert nightly_refresh._run(database_url, hosted_only=True) == 0
+E   AssertionError: assert 1 == 0
+E    +  where 1 = <function _run at 0x11f4dfd80>('sqlite:////private/var/folders/vl/c4y_fblx7bg4lgkdxnmsbj_h0000gn/T/pytest-of-chrisfu/pytest-16/test_hosted_refresh_publishes_0/nightly.sqlite3', hosted_only=True)
+E    +    where <function _run at 0x11f4dfd80> = nightly_refresh._run
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+=========================== short test summary info ============================
+FAILED tests/test_nightly_refresh_command.py::test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs
+============================== 1 failed in 0.47s ===============================

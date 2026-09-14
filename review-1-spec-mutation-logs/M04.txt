@@ -1,0 +1,53 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-46-spec-loop/review-1-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 3 items
+
+tests/test_nightly_refresh_command.py FFF                                [100%]
+
+=================================== FAILURES ===================================
+____________ test_hosted_metadata_succeeds_even_when_game_logs_fail ____________
+tests/test_nightly_refresh_command.py:321: in test_hosted_metadata_succeeds_even_when_game_logs_fail
+    assert collection == ["player_information"]
+E   AssertionError: assert ['player_info..._information'] == ['player_information']
+E     
+E     Left contains one more item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during player game logs refresh; retrying.
+Nightly Refresh attempt 2 failed during player game logs refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh pbp_opponent_stats; stream assist_locations_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh pbp_opponent_stats; stream assist_locations_season is activated
+__________ test_hosted_refresh_retries_only_the_failed_metadata_step ___________
+tests/test_nightly_refresh_command.py:800: in test_hosted_refresh_retries_only_the_failed_metadata_step
+    assert calls == ["metadata", "player_game_logs", "metadata"]
+E   AssertionError: assert ['metadata', ...er_game_logs'] == ['metadata', ...', 'metadata']
+E     
+E     Left contains one more item: 'player_game_logs'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+__________ test_hosted_refresh_retries_only_the_failed_game_log_step ___________
+tests/test_nightly_refresh_command.py:824: in test_hosted_refresh_retries_only_the_failed_game_log_step
+    assert calls == ["metadata", "player_game_logs", "player_game_logs"]
+E   AssertionError: assert ['metadata', ...er_game_logs'] == ['metadata', ...er_game_logs']
+E     
+E     At index 2 diff: 'metadata' != 'player_game_logs'
+E     Left contains one more item: 'player_game_logs'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during player game logs refresh; retrying.
+=========================== short test summary info ============================
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_succeeds_even_when_game_logs_fail
+FAILED tests/test_nightly_refresh_command.py::test_hosted_refresh_retries_only_the_failed_metadata_step
+FAILED tests/test_nightly_refresh_command.py::test_hosted_refresh_retries_only_the_failed_game_log_step
+============================== 3 failed in 0.47s ===============================

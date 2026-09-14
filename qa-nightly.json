@@ -1,0 +1,225 @@
+{
+  "backendHead": "ce9c7e33eab4de80ec1f5cddfd5145456a9e1851",
+  "snapshotSha256": "3fe69266e135d9ed9e6f671d01e7034c7d529a6ee3a9fa6395851b003ee222f5",
+  "scenarios": [
+    {
+      "scenario": "no-new-game hosted success",
+      "passed": true,
+      "exitStatus": 0,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "player_game_logs": "2026-09-11 10:00:57.172687+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:31.034611+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": ""
+    },
+    {
+      "scenario": "disabled player_per36",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:31.034611+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:37.279499+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during metadata refresh; retrying.\nNightly Refresh attempt 2 failed during metadata refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "disabled exact_shot_zones_opponent_season",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:37.279499+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:43.982656+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during metadata refresh; retrying.\nNightly Refresh attempt 2 failed during metadata refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "disabled exact_shot_zones",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:43.982656+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:49.764860+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during metadata refresh; retrying.\nNightly Refresh attempt 2 failed during metadata refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "disabled assist_locations_season",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:49.764860+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:55.525622+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during metadata refresh; retrying.\nNightly Refresh attempt 2 failed during metadata refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "unreadable activation",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:09:55.525622+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:10:01.402715+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during metadata refresh; retrying.\nNightly Refresh attempt 2 failed during metadata refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "metadata transaction rollback after swap",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [
+        {
+          "gamesProcessed": 0,
+          "rowCount": 0
+        }
+      ],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:10:01.402715+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:10:06.821989+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during metadata refresh; retrying.\nNightly Refresh attempt 2 failed during metadata refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "PBP provider failure preserves last good",
+      "passed": true,
+      "exitStatus": 1,
+      "pbpGamesRequested": [],
+      "ingestions": [],
+      "completionBefore": {
+        "stats_tables": "2026-09-14 01:09:31.033215+00:00",
+        "player_game_logs": "2026-09-14 01:10:06.821989+00:00"
+      },
+      "completionAfter": {
+        "player_game_logs": "2026-09-14 01:10:06.821989+00:00",
+        "stats_tables": "2026-09-14 01:10:12.494506+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": "Nightly Refresh attempt 1 failed during player game logs refresh; retrying.\nNightly Refresh attempt 2 failed during player game logs refresh; no retries remain.\n"
+    },
+    {
+      "scenario": "real PBP game recovery",
+      "passed": true,
+      "exitStatus": 0,
+      "pbpGamesRequested": [
+        "0022501174"
+      ],
+      "ingestions": [
+        {
+          "gamesProcessed": 1,
+          "rowCount": 21
+        }
+      ],
+      "completionBefore": {
+        "player_game_logs": "2026-09-14 01:10:06.821989+00:00",
+        "stats_tables": "2026-09-14 01:10:12.494506+00:00"
+      },
+      "completionAfter": {
+        "stats_tables": "2026-09-14 01:10:18.384384+00:00",
+        "player_game_logs": "2026-09-14 01:10:18.386185+00:00"
+      },
+      "residentialUnchanged": true,
+      "metadataRowsAfter": 530,
+      "diagnostics": ""
+    }
+  ],
+  "environment": "isolated disposable PostgreSQL",
+  "qaAdjustments": [
+    "Frozen catalog freshness windows extended to 365 days in this process only.",
+    "One game removed from local copy to trigger real PBP ingestion; production untouched."
+  ],
+  "cleanedUp": true,
+  "database": "courtai_qa_58ab31fb1cd24dec",
+  "activation": {
+    "assist_locations_season": true,
+    "player_per36": true,
+    "exact_shot_zones_opponent_season": true,
+    "exact_shot_zones": true
+  },
+  "zeroNBAAdapterConstruction": true,
+  "implementationDiffSha256": "3d51954d27b2f579bab3e73837afec278839158e7f090237e22def6b81ee7552",
+  "verificationScriptSha256": "b433a3e2d1a4fc5a894e0488b19056c343d180ab0564d4e9f0d0fa67e8911f6d"
+}

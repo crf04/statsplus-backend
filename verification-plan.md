@@ -1,0 +1,11 @@
+# Issue 46 / backend 273 verification plan
+
+Pinned baseline backend ce9c7e33eab4de80ec1f5cddfd5145456a9e1851; frontend 2f92cba52430458822c7ac664a9598409b51cc80; coordination 54a4cb6fcb78b29d8ccc65c9859d54f50ee30ca5. Final implementation revision recorded per run.
+
+- Hosted metadata could construct/request NBA Stats, overwrite replacement tables, or stamp unrelated surfaces: run actual hosted assembly in disposable PostgreSQL with all four prerequisites enabled, guard NBA construction/request boundary, compare metadata/completion/residential pointers before and after.
+- Metadata preflight or publication could abort game logs: disable each required stream, remove a stream, inject unreadable activation / publication failure in isolated QA; expect nonzero status, two metadata attempts and successful independent game-log path, metadata/completion preserved.
+- Game-log failure could suppress metadata or rerun successful metadata: inject PBP request failure for a completed game; expect metadata success once, game-log failure twice, existing game data/completion preserved.
+- No-new-game run could invent freshness semantics: use the existing ingestion service and seeded current-season catalog; record normal completion contract separately from actual live PBP provider success. Exercise a real PBP request in the disposable database where available.
+- Owning gate ./scripts/check.sh and coordination check with explicit checkout roots must pass. Fresh-context Astra high Standards and Spec reviews receive exact specs and full diff; reviewers must break each new test by reintroducing its defect in isolated review checkouts and restore clean trees.
+- Browser transport compatibility: verify a historical game-log shared URL, visible rows, API response, reload, and phone layout with verify-statsplus in QA and separate read-only production mode. This covers existing consumers, not the CLI job itself.
+- Production baseline: record deployed nightly revision, start command, schedule, four activation states, stats/game-log completion and separate residential publication pointers using read-only queries. No deployment or schedule mutation. Scheduled acceptance of the new revision remains pending until the user merges/deploys and a scheduled run occurs; parent stays open.

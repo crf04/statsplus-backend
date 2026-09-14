@@ -1,0 +1,9 @@
+{"scenario": "no-new-game hosted success", "passed": true, "status": 0, "pbpCalls": []}
+{"scenario": "disabled player_per36", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "disabled exact_shot_zones_opponent_season", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "disabled exact_shot_zones", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "disabled assist_locations_season", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "unreadable activation", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "metadata transaction rollback after swap", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "PBP provider failure preserves last good", "passed": true, "status": 1, "pbpCalls": []}
+{"scenario": "real PBP game recovery", "passed": true, "status": 0, "pbpCalls": ["0022501174"]}

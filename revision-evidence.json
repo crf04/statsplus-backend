@@ -1,0 +1,12 @@
+{
+  "implementationHead": "15a9e7139c3dc7677ce0b3698231c266cdbfd4e4",
+  "baseHead": "ce9c7e33eab4de80ec1f5cddfd5145456a9e1851",
+  "implementationDiffSha256": "51472a8e335625889488bdb88617ff42e6183769401d16a6ab4fe073417afd52",
+  "reviewedDiffSha256": "1271d67731ef6222393522e755998507e8117d0505c7361dfff0f588fc629ceb",
+  "reviewSnapshotHead": "9ccde7d9c0aac695a735b6dc13ddb86b91722b8f",
+  "reviewDifference": "One blank line removed between tests; git diff --ignore-blank-lines is empty.",
+  "liveQaRuntimeCommit": "03b49ca223ac81900ce5d405769e84a7d143e5b5",
+  "onlyChangeSinceLiveQa": "tests/test_nightly_refresh_command.py",
+  "runtimeUnchangedSinceLiveQa": true,
+  "backendClean": true
+}

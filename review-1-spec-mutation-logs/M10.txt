@@ -1,0 +1,35 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-46-spec-loop/review-1-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 1 item
+
+tests/test_nightly_refresh_command.py F                                  [100%]
+
+=================================== FAILURES ===================================
+_________ test_failed_hosted_metadata_publication_preserves_last_good __________
+tests/test_nightly_refresh_command.py:299: in test_failed_hosted_metadata_publication_preserves_last_good
+    assert (
+E   assert datetime.datetime(2026, 9, 14, 1, 12, 53, 945507, tzinfo=datetime.timezone.utc) == datetime.datetime(2026, 1, 1, 10, 0, tzinfo=datetime.timezone.utc)
+E    +  where datetime.datetime(2026, 9, 14, 1, 12, 53, 945507, tzinfo=datetime.timezone.utc) = StatsFreshness(last_successful_completion=datetime.datetime(2026, 9, 14, 1, 12, 53, 945507, tzinfo=datetime.timezone.utc)).last_successful_completion
+E    +    where StatsFreshness(last_successful_completion=datetime.datetime(2026, 9, 14, 1, 12, 53, 945507, tzinfo=datetime.timezone.utc)) = get()
+E    +      where get = <app.services.stats_freshness_repository.StatsFreshnessRepository object at 0x15e349f90>.get
+E    +        where <app.services.stats_freshness_repository.StatsFreshnessRepository object at 0x15e349f90> = StatsFreshnessRepository(Engine(sqlite:////private/var/folders/vl/c4y_fblx7bg4lgkdxnmsbj_h0000gn/T/pytest-of-chrisfu/pytest-19/test_failed_hosted_metadata_pu0/nightly.sqlite3))
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh pbp_opponent_stats; stream assist_locations_season is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: write failed
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh pbp_opponent_stats; stream assist_locations_season is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: write failed
+=========================== short test summary info ============================
+FAILED tests/test_nightly_refresh_command.py::test_failed_hosted_metadata_publication_preserves_last_good
+============================== 1 failed in 0.52s ===============================

@@ -1,0 +1,441 @@
+{
+  "observedAt": "2026-09-14T01:04:42.543575+00:00",
+  "publication_streams": [
+    {
+      "stream_key": "event_catalog",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"event_catalog\"]",
+      "publication_strategy": "keyed_reconcile",
+      "supported_windows": "[\"regular_season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "catalog_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.286877+00:00"
+    },
+    {
+      "stream_key": "athlete_catalog",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"athlete_catalog\"]",
+      "publication_strategy": "keyed_reconcile",
+      "supported_windows": "[\"regular_season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "identity_complete",
+      "freshness_rule": "seven_day",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.315402+00:00"
+    },
+    {
+      "stream_key": "canonical_game_ledger",
+      "provider": "pbp",
+      "owner": "railway",
+      "required_observations": "[\"game_stats\"]",
+      "publication_strategy": "atomic_replace",
+      "supported_windows": "[\"regular_season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "game_complete",
+      "freshness_rule": "daily_recheck",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.325303+00:00"
+    },
+    {
+      "stream_key": "traditional_opponent",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"l15\",\"season\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.336835+00:00"
+    },
+    {
+      "stream_key": "assist_locations",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"l15\",\"season\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.342016+00:00"
+    },
+    {
+      "stream_key": "synergy_play_types_opponent_l15",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"synergy_opponent\"]",
+      "publication_strategy": "never_schedule",
+      "supported_windows": "[\"l15\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "unsupported",
+      "freshness_rule": "unavailable",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.412546+00:00"
+    },
+    {
+      "stream_key": "dfs_boards",
+      "provider": "railway",
+      "owner": "request_time",
+      "required_observations": "[]",
+      "publication_strategy": "request_time",
+      "supported_windows": "[\"pregame\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "provider_readable",
+      "freshness_rule": "request_time",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.439436+00:00"
+    },
+    {
+      "stream_key": "injury_reports",
+      "provider": "rotowire",
+      "owner": "request_time",
+      "required_observations": "[]",
+      "publication_strategy": "request_time",
+      "supported_windows": "[\"pregame\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "provider_readable",
+      "freshness_rule": "request_time",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.444275+00:00"
+    },
+    {
+      "stream_key": "synergy:l15",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"synergy\"]",
+      "publication_strategy": "never_schedule",
+      "supported_windows": "[\"l15\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "unsupported",
+      "freshness_rule": "unavailable",
+      "enabled": false,
+      "created_at": "2026-08-14 04:36:56.448721+00:00"
+    },
+    {
+      "stream_key": "player_game_logs",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"season\",\"since_date\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.331363+00:00"
+    },
+    {
+      "stream_key": "traditional_opponent_season",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.356783+00:00"
+    },
+    {
+      "stream_key": "traditional_opponent_l15",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"l15\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.362771+00:00"
+    },
+    {
+      "stream_key": "assist_locations_season",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.368223+00:00"
+    },
+    {
+      "stream_key": "assist_locations_l15",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"l15\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.374016+00:00"
+    },
+    {
+      "stream_key": "player_per36",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"regular_season\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.350349+00:00"
+    },
+    {
+      "stream_key": "synergy_play_types_opponent_season",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"synergy_opponent\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.406977+00:00"
+    },
+    {
+      "stream_key": "grouped_shot_types_opponent_season",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"shot_types_opponent\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.418287+00:00"
+    },
+    {
+      "stream_key": "grouped_shot_types_opponent_l15",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"shot_types_opponent\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"l15\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.424169+00:00"
+    },
+    {
+      "stream_key": "exact_shot_zones_opponent_season",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"shot_zones_opponent\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.428828+00:00"
+    },
+    {
+      "stream_key": "exact_shot_zones_opponent_l15",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"shot_zones_opponent\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"l15\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.434888+00:00"
+    },
+    {
+      "stream_key": "grouped_shot_types",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"grouped_shot_types\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"l15\",\"season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.386096+00:00"
+    },
+    {
+      "stream_key": "synergy_play_types",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"synergy_play_types\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.379303+00:00"
+    },
+    {
+      "stream_key": "player_assist_locations",
+      "provider": "ledger",
+      "owner": "railway",
+      "required_observations": "[\"canonical_game_ledger\"]",
+      "publication_strategy": "ledger_compose",
+      "supported_windows": "[\"season\"]",
+      "schema_versions": "[1]",
+      "completeness_rule": "league_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.400781+00:00"
+    },
+    {
+      "stream_key": "exact_shot_zones",
+      "provider": "nba",
+      "owner": "residential_collector",
+      "required_observations": "[\"exact_shot_zones\"]",
+      "publication_strategy": "snapshot_replace",
+      "supported_windows": "[\"l15\",\"season\"]",
+      "schema_versions": "[1,2]",
+      "completeness_rule": "base_complete",
+      "freshness_rule": "cutoff_current",
+      "enabled": true,
+      "created_at": "2026-08-14 04:36:56.396097+00:00"
+    }
+  ],
+  "publication_pointers": [
+    {
+      "stream_key": "assist_locations_season",
+      "active_publication_id": "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+      "previous_publication_id": null,
+      "fence": 1,
+      "updated_at": "2026-08-23 16:33:47.687111+00:00"
+    },
+    {
+      "stream_key": "assist_locations_l15",
+      "active_publication_id": "bcbaacc2-5172-43f6-83ed-dbfd40ca6340",
+      "previous_publication_id": null,
+      "fence": 1,
+      "updated_at": "2026-08-23 16:33:51.555527+00:00"
+    },
+    {
+      "stream_key": "player_per36",
+      "active_publication_id": "09a07a9e-b08c-4016-962b-a079f9ee248b",
+      "previous_publication_id": null,
+      "fence": 1,
+      "updated_at": "2026-08-23 16:33:56.599155+00:00"
+    },
+    {
+      "stream_key": "player_game_logs",
+      "active_publication_id": "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+      "previous_publication_id": "1424e0d0-f998-4ebe-a21e-3698cc10ae41",
+      "fence": 3,
+      "updated_at": "2026-08-23 19:12:19.727615+00:00"
+    },
+    {
+      "stream_key": "synergy_play_types",
+      "active_publication_id": "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+      "previous_publication_id": "1bece40b-2479-46f2-98b7-9b29db6b1d99",
+      "fence": 5,
+      "updated_at": "2026-09-09 10:00:33.679229+00:00"
+    },
+    {
+      "stream_key": "grouped_shot_types",
+      "active_publication_id": "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+      "previous_publication_id": "ae46f713-dc10-4549-8aea-13948604c545",
+      "fence": 6,
+      "updated_at": "2026-09-09 10:00:33.801679+00:00"
+    },
+    {
+      "stream_key": "exact_shot_zones",
+      "active_publication_id": "b38d49db-8685-426c-966f-a8c737722cbb",
+      "previous_publication_id": "05543444-0db4-4bfb-b3e4-d10f01aca21e",
+      "fence": 4,
+      "updated_at": "2026-09-09 10:05:49.503289+00:00"
+    },
+    {
+      "stream_key": "synergy_play_types_opponent_season",
+      "active_publication_id": "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+      "previous_publication_id": "6c139152-e344-4886-994a-9c00291e0d74",
+      "fence": 3,
+      "updated_at": "2026-08-24 19:05:33.172525+00:00"
+    },
+    {
+      "stream_key": "player_assist_locations",
+      "active_publication_id": "dc534717-30b9-4426-bc4d-8f66b4064625",
+      "previous_publication_id": null,
+      "fence": 1,
+      "updated_at": "2026-09-11 23:06:40.597427+00:00"
+    },
+    {
+      "stream_key": "grouped_shot_types_opponent_season",
+      "active_publication_id": "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+      "previous_publication_id": "3e3dca63-de48-4dd8-a060-183799bebd90",
+      "fence": 3,
+      "updated_at": "2026-08-25 01:10:08.980399+00:00"
+    },
+    {
+      "stream_key": "grouped_shot_types_opponent_l15",
+      "active_publication_id": "bd7d6f40-07bd-40ad-951f-c124f19e3e17",
+      "previous_publication_id": null,
+      "fence": 1,
+      "updated_at": "2026-08-25 02:05:10.903799+00:00"
+    },
+    {
+      "stream_key": "traditional_opponent_l15",
+      "active_publication_id": "37f3a1bc-e8d9-4ff7-a59e-ae842415aa1d",
+      "previous_publication_id": "6567f791-e1f8-4d84-99af-df5f5856535b",
+      "fence": 2,
+      "updated_at": "2026-09-04 21:33:24.088797+00:00"
+    },
+    {
+      "stream_key": "traditional_opponent_season",
+      "active_publication_id": "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+      "previous_publication_id": "ebcc431f-2676-40f7-85c7-22c31ef97ab1",
+      "fence": 2,
+      "updated_at": "2026-09-04 21:33:24.088797+00:00"
+    },
+    {
+      "stream_key": "exact_shot_zones_opponent_l15",
+      "active_publication_id": "312b0e45-0aee-47c8-a35b-047a532c8930",
+      "previous_publication_id": null,
+      "fence": 3,
+      "updated_at": "2026-09-06 22:46:47.468226+00:00"
+    },
+    {
+      "stream_key": "exact_shot_zones_opponent_season",
+      "active_publication_id": "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+      "previous_publication_id": null,
+      "fence": 2,
+      "updated_at": "2026-09-06 22:46:47.468226+00:00"
+    }
+  ],
+  "stats_refreshes": [
+    {
+      "surface": "player_game_logs",
+      "last_success_at": "2026-09-11 10:00:57.172687+00:00"
+    }
+  ],
+  "player_game_log_refreshes": [
+    {
+      "season": "2025-26",
+      "source_provider": "pbp_stats",
+      "retrieved_at": "2026-09-11 10:00:57.172687+00:00",
+      "row_count": 26649,
+      "source_row_count": 26649,
+      "identity_source_row_count": 26649,
+      "publication_status": "complete"
+    }
+  ]
+}

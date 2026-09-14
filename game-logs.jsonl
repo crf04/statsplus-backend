@@ -1,0 +1,12 @@
+{"action":"open","path":"/?player_name=LeBron+James&game_filter=5"}
+{"action":"assert","target":{"role":"heading","name":"Game Logs"}}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","game_filter":"5"},"status":200}
+{"action":"assert","target":{"role":"cell","name":"UTA","index":0}}
+{"action":"proof","name":"game-logs-desktop"}
+{"action":"viewport","name":"phone"}
+{"action":"reload"}
+{"action":"assert","target":{"role":"heading","name":"Game Logs"}}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","game_filter":"5"},"status":200}
+{"action":"assert","target":{"role":"cell","name":"UTA","index":0}}
+{"action":"proof","name":"game-logs-phone"}
+{"action":"cleanup"}

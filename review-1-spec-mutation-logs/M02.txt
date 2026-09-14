@@ -1,0 +1,162 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-9.1.1, pluggy-1.6.0
+rootdir: /private/tmp/statsplus-46-spec-loop/review-1-spec
+configfile: pytest.ini
+plugins: mock-3.15.1, cov-7.1.0, xdist-3.8.0, anyio-4.14.2
+collected 9 items
+
+tests/test_nightly_refresh_command.py FFFFFFFFF                          [100%]
+
+=================================== FAILURES ===================================
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[player_per36] _
+tests/test_nightly_refresh_command.py:206: in test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted nba_stats.fetch_player_per36_stats
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted nba_stats.fetch_player_per36_stats
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[exact_shot_zones_opponent_season] _
+tests/test_nightly_refresh_command.py:206: in test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted nba_stats.fetch_opponent_shooting_zone
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted nba_stats.fetch_opponent_shooting_zone
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[exact_shot_zones] _
+tests/test_nightly_refresh_command.py:206: in test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted nba_stats.fetch_player_shooting_zone
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted nba_stats.fetch_player_shooting_zone
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[assist_locations_season] _
+tests/test_nightly_refresh_command.py:206: in test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted pbp_stats.get_totals
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: hosted metadata attempted pbp_stats.get_totals
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[player_per36] _
+tests/test_nightly_refresh_command.py:232: in test_hosted_metadata_fails_closed_when_a_required_stream_is_missing
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[exact_shot_zones_opponent_season] _
+tests/test_nightly_refresh_command.py:232: in test_hosted_metadata_fails_closed_when_a_required_stream_is_missing
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[exact_shot_zones] _
+tests/test_nightly_refresh_command.py:232: in test_hosted_metadata_fails_closed_when_a_required_stream_is_missing
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+_ test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[assist_locations_season] _
+tests/test_nightly_refresh_command.py:232: in test_hosted_metadata_fails_closed_when_a_required_stream_is_missing
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_per36_stats; stream player_per36 is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh opp_shooting_zone; stream exact_shot_zones_opponent_season is activated
+WARNING  app.services.data_service:data_service.py:239 legacy_write_fenced: refusing to refresh player_shooting_zones; stream exact_shot_zones is activated
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+____ test_hosted_metadata_fails_closed_when_activation_state_is_unreadable _____
+tests/test_nightly_refresh_command.py:257: in test_hosted_metadata_fails_closed_when_activation_state_is_unreadable
+    assert collection == []
+E   AssertionError: assert ['player_info..._information'] == []
+E     
+E     Left contains 2 more items, first extra item: 'player_information'
+E     Use -v to get more diff
+----------------------------- Captured stderr call -----------------------------
+Nightly Refresh attempt 1 failed during metadata refresh; retrying.
+Nightly Refresh attempt 2 failed during metadata refresh; no retries remain.
+------------------------------ Captured log call -------------------------------
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+ERROR    app.services.data_service:data_service.py:168 Error updating database: legacy_write_fence_unavailable
+=========================== short test summary info ============================
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[player_per36]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[exact_shot_zones_opponent_season]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[exact_shot_zones]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled[assist_locations_season]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[player_per36]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[exact_shot_zones_opponent_season]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[exact_shot_zones]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_a_required_stream_is_missing[assist_locations_season]
+FAILED tests/test_nightly_refresh_command.py::test_hosted_metadata_fails_closed_when_activation_state_is_unreadable
+============================== 9 failed in 0.79s ===============================
