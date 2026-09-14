@@ -1543,10 +1543,16 @@ provider calls already in flight when a lease expires are not cancellable by
 this mechanism.
 
 The deployment-owned `scripts/nightly_refresh.py --hosted-only` command is not
-an HTTP endpoint. It refreshes only durable current-season player game logs,
-retrying that PBP-backed unit once. It reads the existing governed catalogs
-from Postgres and makes zero NBA Stats calls; NBA-owned surfaces remain the
-residential collector's responsibility. The player-log step uses the PBP-based
+an HTTP endpoint. It runs two independent steps, retrying each failed step once,
+and makes zero NBA Stats calls. The metadata step refreshes the remaining legacy
+player metadata through the activation-aware `update_all_data` path after
+preflighting the four replacement streams (`player_per36`,
+`exact_shot_zones_opponent_season`, `exact_shot_zones`, and
+`assist_locations_season`). A disabled, missing, or unreadable stream fails that
+step closed before any provider is collected, so only the offline
+`player_information` list is published and `stats_tables` records only that
+publication. NBA-owned surfaces remain the residential collector's
+responsibility. The player-log step uses the PBP-based
 incremental ingestion: it discovers governed completed `Regular Season` and
 `Playoffs` games and requests one PBP per-game player observation per missing
 game, plus a bounded recent-game reconciliation window

@@ -498,6 +498,30 @@ def test_an_activated_zone_stream_costs_the_nightly_no_nba_request(
     assert "player_information" in collected
 
 
+def test_hosted_metadata_requires_every_non_offline_replacement_stream(service):
+    """The hosted preflight must cover every frame the refresh still collects.
+
+    If a collector frame is ever added without naming its replacement stream,
+    hosted metadata would collect it from an inert provider and fail at the
+    wrong seam.  Pinning the constant to the collector set keeps the preflight
+    aligned with the actual work.
+    """
+
+    from app.services.data_service import (
+        HOSTED_METADATA_REQUIRED_TABLE_STREAMS,
+        HOSTED_METADATA_SURVIVING_TABLE,
+        _ACTIVATION_FENCED_TABLE_STREAMS,
+    )
+
+    frames = set(service._frame_collectors())
+    frames.discard(HOSTED_METADATA_SURVIVING_TABLE)
+
+    assert set(HOSTED_METADATA_REQUIRED_TABLE_STREAMS) == frames
+    assert HOSTED_METADATA_REQUIRED_TABLE_STREAMS == {
+        table: _ACTIVATION_FENCED_TABLE_STREAMS[table] for table in frames
+    }
+
+
 def test_a_zone_response_missing_a_pinned_source_column_is_refused(
     service, monkeypatch
 ):

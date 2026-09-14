@@ -1,16 +1,30 @@
 """Offline behavior of the Railway Nightly Refresh process command."""
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
-from sqlalchemy import create_engine, update
+from sqlalchemy import create_engine, delete, inspect, text, update
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationStream
-from app.services.collection_control import ControlPlaneError
+from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.stats_freshness_repository import (
+    PLAYER_GAME_LOG_SURFACE,
+    StatsFreshnessRepository,
+)
 from scripts import nightly_refresh
-from scripts.nightly_refresh import run_nightly_refresh
+from scripts.nightly_refresh import run_hosted_refresh, run_nightly_refresh
+
+#: The four replacement streams hosted metadata requires before it may run.
+HOSTED_METADATA_STREAMS = (
+    "player_per36",
+    "exact_shot_zones_opponent_season",
+    "exact_shot_zones",
+    "assist_locations_season",
+)
 
 
 def test_fresh_database_bootstrap_allows_inactive_and_fences_enabled_stream(tmp_path):
@@ -28,9 +42,8 @@ def test_fresh_database_bootstrap_allows_inactive_and_fences_enabled_stream(tmp_
         fence.assert_writable("player_per36")
 
 
-def test_hosted_refresh_never_constructs_or_calls_nba_stats(monkeypatch):
-    calls = []
-    settings = SimpleNamespace(
+def _hosted_settings():
+    return SimpleNamespace(
         nba=SimpleNamespace(current_season="2025-26"),
         catalog=SimpleNamespace(
             player_game_log_max_age_hours=30,
@@ -39,46 +52,69 @@ def test_hosted_refresh_never_constructs_or_calls_nba_stats(monkeypatch):
         ),
     )
 
-    class FakeEngine:
-        def dispose(self):
-            calls.append("dispose")
 
-    engine = FakeEngine()
-    player_log_repository = object()
-    event_service = object()
-    athlete_service = object()
+def _hosted_database(
+    tmp_path,
+    *,
+    activated=HOSTED_METADATA_STREAMS,
+    absent=(),
+    unreadable=False,
+):
+    """Build a real migrated database with the requested activation state."""
+
+    database_url = f"sqlite:///{tmp_path / 'nightly.sqlite3'}"
+    engine = create_engine(database_url)
+    run_migrations(engine)
+    PublicationService(engine).register_default_streams()
+    with engine.begin() as connection:
+        connection.execute(
+            update(PublicationStream)
+            .where(PublicationStream.stream_key.in_(activated))
+            .values(enabled=True)
+        )
+        if absent:
+            connection.execute(
+                delete(PublicationStream).where(
+                    PublicationStream.stream_key.in_(absent)
+                )
+            )
+        if unreadable:
+            connection.execute(
+                text(
+                    "ALTER TABLE publication_streams "
+                    "RENAME TO publication_streams_unreadable"
+                )
+            )
+    engine.dispose()
+    return database_url
+
+
+def _install_hosted_boundaries(monkeypatch, calls, *, game_log_result="ok"):
+    """Inject the provider boundaries the hosted command must not call."""
+
+    settings = _hosted_settings()
     pbp_log_provider = object()
+    player_log_repository = object()
+
+    def refuse_adapter(**kwargs):
+        raise AssertionError("hosted refresh constructed an upstream adapter")
 
     monkeypatch.setattr(nightly_refresh, "load_settings", lambda **kwargs: settings)
-    monkeypatch.setattr(nightly_refresh, "create_engine", lambda url: engine)
-    monkeypatch.setattr(nightly_refresh, "_normalize_database_url", lambda url: url)
-    monkeypatch.setattr(
-        nightly_refresh,
-        "run_migrations",
-        lambda actual_engine: calls.append("migrations"),
-    )
-    monkeypatch.setattr(
-        nightly_refresh,
-        "NBAStatsAdapter",
-        lambda **kwargs: pytest.fail("hosted refresh constructed NBA Stats"),
-    )
+    monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", refuse_adapter)
+    monkeypatch.setattr(nightly_refresh, "PBPStatsAdapter", refuse_adapter)
     monkeypatch.setattr(
         nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: pbp_log_provider
     )
     monkeypatch.setattr(
-        nightly_refresh,
-        "EventCatalogService",
-        lambda actual_engine, **kwargs: event_service,
+        nightly_refresh, "EventCatalogService", lambda *args, **kwargs: object()
     )
     monkeypatch.setattr(
-        nightly_refresh,
-        "AthleteCatalogService",
-        lambda actual_engine, **kwargs: athlete_service,
+        nightly_refresh, "AthleteCatalogService", lambda *args, **kwargs: object()
     )
     monkeypatch.setattr(
         nightly_refresh,
         "PlayerGameLogRepository",
-        lambda actual_engine, **kwargs: player_log_repository,
+        lambda *args, **kwargs: player_log_repository,
     )
     monkeypatch.setattr(
         nightly_refresh,
@@ -87,29 +123,211 @@ def test_hosted_refresh_never_constructs_or_calls_nba_stats(monkeypatch):
     )
 
     def build_ingest_service(**kwargs):
-        assert kwargs == {
-            "pbp_provider": pbp_log_provider,
-            "repository": player_log_repository,
-            "athlete_catalog": athlete_service,
-            "event_catalog": event_service,
-            "minimum_active_players_per_team_game": 5,
-            "reconciliation_days": 3,
-        }
-        return SimpleNamespace(
-            refresh=lambda season: calls.append(("player_game_logs", season))
-            or object()
-        )
+        def refresh(season):
+            calls.append(("player_game_logs", season))
+            if isinstance(game_log_result, Exception):
+                raise game_log_result
+            return game_log_result
+
+        return SimpleNamespace(refresh=refresh)
 
     monkeypatch.setattr(
         nightly_refresh, "PlayerGameLogIngestService", build_ingest_service
     )
 
-    assert nightly_refresh._run("sqlite:///nightly.sqlite3", hosted_only=True) == 0
+
+def _record_active_players(monkeypatch, collection):
+    """Observe the offline player-list collection the metadata step performs."""
+
+    from app.services import data_service as data_service_module
+
+    def get_active_players():
+        collection.append("player_information")
+        return [{"id": 2544, "full_name": "LeBron James"}]
+
+    monkeypatch.setattr(
+        data_service_module.players, "get_active_players", get_active_players
+    )
+
+
+def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(
+    tmp_path, monkeypatch
+):
+    database_url = _hosted_database(tmp_path)
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 0
+
+    # The game-log step still ran, and the metadata step collected only the
+    # offline player list: every other frame was refused by activation.
+    assert calls == [("player_game_logs", "2025-26")]
+    assert collection == ["player_information"]
+
+    engine = create_engine(database_url)
+    try:
+        assert pd.read_sql(
+            "SELECT full_name FROM player_information", engine
+        )["full_name"].tolist() == ["LeBron James"]
+        assert (
+            StatsFreshnessRepository(engine).get().last_successful_completion
+            is not None
+        )
+        # Game-log completion is separate evidence and untouched here.
+        assert (
+            StatsFreshnessRepository(
+                engine, surface=PLAYER_GAME_LOG_SURFACE
+            ).get().last_successful_completion
+            is None
+        )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("disabled_stream", HOSTED_METADATA_STREAMS)
+def test_hosted_metadata_fails_closed_when_a_required_stream_is_disabled(
+    tmp_path, monkeypatch, capsys, disabled_stream
+):
+    activated = tuple(
+        stream for stream in HOSTED_METADATA_STREAMS if stream != disabled_stream
+    )
+    database_url = _hosted_database(tmp_path, activated=activated)
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 1
+
+    # The failed metadata step never collected a frame, and it did not stop
+    # PBP game-log ingestion from being attempted.
+    assert collection == []
+    assert calls == [("player_game_logs", "2025-26")]
+    engine = create_engine(database_url)
+    try:
+        assert not inspect(engine).has_table("player_information")
+        assert (
+            StatsFreshnessRepository(engine).get().last_successful_completion
+            is None
+        )
+    finally:
+        engine.dispose()
+    assert "metadata refresh" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing_stream", HOSTED_METADATA_STREAMS)
+def test_hosted_metadata_fails_closed_when_a_required_stream_is_missing(
+    tmp_path, monkeypatch, capsys, missing_stream
+):
+    database_url = _hosted_database(tmp_path, absent=(missing_stream,))
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 1
+
+    assert collection == []
+    assert calls == [("player_game_logs", "2025-26")]
+    engine = create_engine(database_url)
+    try:
+        assert not inspect(engine).has_table("player_information")
+        assert (
+            StatsFreshnessRepository(engine).get().last_successful_completion
+            is None
+        )
+    finally:
+        engine.dispose()
+    assert "metadata refresh" in capsys.readouterr().err
+
+
+def test_hosted_metadata_fails_closed_when_activation_state_is_unreadable(
+    tmp_path, monkeypatch, capsys
+):
+    database_url = _hosted_database(tmp_path, unreadable=True)
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 1
+
+    assert collection == []
+    assert calls == [("player_game_logs", "2025-26")]
+    assert "metadata refresh" in capsys.readouterr().err
+
+
+def test_failed_hosted_metadata_publication_preserves_last_good(
+    tmp_path, monkeypatch
+):
+    database_url = _hosted_database(tmp_path)
+    first = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE player_information (value TEXT)"))
+        connection.execute(text("INSERT INTO player_information VALUES ('old')"))
+    StatsFreshnessRepository(engine).record_success(first)
+    engine.dispose()
+
+    class FailingFreshness:
+        def record_success(self, *_args, **_kwargs):
+            raise RuntimeError("write failed")
+
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls)
+    monkeypatch.setattr(
+        nightly_refresh,
+        "StatsFreshnessRepository",
+        lambda actual_engine: FailingFreshness(),
+    )
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 1
+
+    # The metadata step collected but its publication rolled back, so the
+    # previous table and completion record survive; game logs still ran.
+    assert collection == ["player_information", "player_information"]
+    assert calls == [("player_game_logs", "2025-26")]
+    engine = create_engine(database_url)
+    try:
+        assert pd.read_sql(
+            "SELECT value FROM player_information", engine
+        )["value"].tolist() == ["old"]
+        assert (
+            StatsFreshnessRepository(engine).get().last_successful_completion
+            == first
+        )
+    finally:
+        engine.dispose()
+
+
+def test_hosted_metadata_succeeds_even_when_game_logs_fail(tmp_path, monkeypatch):
+    database_url = _hosted_database(tmp_path)
+    calls = []
+    _install_hosted_boundaries(monkeypatch, calls, game_log_result=False)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 1
+
+    # Only the failed game-log step was retried; metadata ran once.
     assert calls == [
-        "migrations",
         ("player_game_logs", "2025-26"),
-        "dispose",
+        ("player_game_logs", "2025-26"),
     ]
+    assert collection == ["player_information"]
+    engine = create_engine(database_url)
+    try:
+        assert inspect(engine).has_table("player_information")
+        assert (
+            StatsFreshnessRepository(engine).get().last_successful_completion
+            is not None
+        )
+    finally:
+        engine.dispose()
 
 
 def test_run_wires_owner_services_into_the_six_step_refresh(monkeypatch):
@@ -549,6 +767,93 @@ def test_nightly_refresh_retries_whole_unit_when_player_diets_fail(capsys):
         "team_matchups",
     ]
     assert "failed during player diets refresh; retrying" in capsys.readouterr().err
+
+
+def test_hosted_refresh_runs_both_steps_once_on_success():
+    calls = []
+
+    assert (
+        run_hosted_refresh(
+            refresh_metadata=lambda: calls.append("metadata") or True,
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
+        )
+        == 0
+    )
+    assert calls == ["metadata", "player_game_logs"]
+
+
+def test_hosted_refresh_retries_only_the_failed_metadata_step(capsys):
+    calls = []
+    metadata_results = iter([False, True])
+
+    assert (
+        run_hosted_refresh(
+            refresh_metadata=lambda: calls.append("metadata")
+            or next(metadata_results),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or object(),
+        )
+        == 0
+    )
+    # The successful game-log step is not rerun with the failed metadata step.
+    assert calls == ["metadata", "player_game_logs", "metadata"]
+    assert (
+        "attempt 1 failed during metadata refresh; retrying"
+        in capsys.readouterr().err
+    )
+
+
+def test_hosted_refresh_retries_only_the_failed_game_log_step(capsys):
+    calls = []
+    log_attempts = iter([RuntimeError("offline failure"), None])
+
+    def refresh_logs():
+        calls.append("player_game_logs")
+        error = next(log_attempts)
+        if error is not None:
+            raise error
+
+    assert (
+        run_hosted_refresh(
+            refresh_metadata=lambda: calls.append("metadata") or True,
+            refresh_player_game_logs=refresh_logs,
+        )
+        == 0
+    )
+    assert calls == ["metadata", "player_game_logs", "player_game_logs"]
+    diagnostics = capsys.readouterr().err
+    assert (
+        "attempt 1 failed during player game logs refresh; retrying" in diagnostics
+    )
+    assert "offline failure" not in diagnostics
+
+
+def test_hosted_refresh_returns_failure_after_independent_retries(capsys):
+    calls = []
+    metadata_results = iter([False, False])
+    log_results = iter([False, False])
+
+    assert (
+        run_hosted_refresh(
+            refresh_metadata=lambda: calls.append("metadata")
+            or next(metadata_results),
+            refresh_player_game_logs=lambda: calls.append("player_game_logs")
+            or next(log_results),
+        )
+        == 1
+    )
+    assert calls == [
+        "metadata",
+        "player_game_logs",
+        "metadata",
+        "player_game_logs",
+    ]
+    diagnostics = capsys.readouterr().err
+    assert "attempt 1 failed during metadata refresh; retrying" in diagnostics
+    assert "attempt 1 failed during player game logs refresh; retrying" in diagnostics
+    assert "attempt 2 failed during metadata refresh" in diagnostics
+    assert "attempt 2 failed during player game logs refresh" in diagnostics
 
 
 def test_main_reports_success_without_live_calls(tmp_path, monkeypatch, capsys):

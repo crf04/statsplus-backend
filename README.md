@@ -177,11 +177,18 @@ during daylight time. Railway schedules are not timezone-aware; use `0 9 * * *`
 instead if the deployment prefers 5:00 AM during daylight time (4:00 AM during
 standard time), or change the UTC hour seasonally for an exact 5:00 AM ET run.
 
-The Railway command runs only the PBP-backed durable player-game-log refresh.
-It reads the already governed Event and Athlete Catalogs from Postgres and
-never constructs or calls the NBA Stats adapter, because hosted Railway egress
-cannot reliably reach `stats.nba.com`. NBA-owned catalogs and statistical
-surfaces are collected by the residential collector.
+The Railway command runs two independent, retried steps. The metadata step
+refreshes the remaining legacy player metadata through the activation-aware
+`update_all_data` path after preflighting the four replacement streams
+(`player_per36`, `exact_shot_zones_opponent_season`, `exact_shot_zones`, and
+`assist_locations_season`); a disabled, missing, or unreadable stream fails the
+step closed before any provider is called, so it publishes only the offline
+`player_information` list and never constructs or calls the NBA Stats adapter.
+The player-log step runs the PBP-backed durable player-game-log refresh. It
+reads the already governed Event and Athlete Catalogs from Postgres and never
+constructs or calls the NBA Stats adapter, because hosted Railway egress cannot
+reliably reach `stats.nba.com`. NBA-owned catalogs and statistical surfaces are
+collected by the residential collector.
 
 Running the command without `--hosted-only` retains the legacy operator mode.
 That mode runs six named current-season steps in this exact order: stats
