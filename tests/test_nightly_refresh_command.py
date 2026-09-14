@@ -1,7 +1,8 @@
 """Offline behavior of the Railway Nightly Refresh process command."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from functools import partial
 from types import SimpleNamespace
 
 import pandas as pd
@@ -11,12 +12,24 @@ from sqlalchemy import create_engine, delete, inspect, text, update
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationStream
 from app.services.collection_control import ControlPlaneError, PublicationService
+from app.services.player_game_log_ingest import PlayerGameLogIngestService
+from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import (
     PLAYER_GAME_LOG_SURFACE,
     StatsFreshnessRepository,
 )
 from scripts import nightly_refresh
 from scripts.nightly_refresh import run_hosted_refresh, run_nightly_refresh
+from tests.services.test_player_game_log_ingest import (
+    FakeGameLogProvider,
+    _complete_game_logs,
+)
+from tests.services.test_player_game_logs import (
+    RETRIEVED_AT,
+    SEASON,
+    _seed_identities,
+)
 
 #: The four replacement streams hosted metadata requires before it may run.
 HOSTED_METADATA_STREAMS = (
@@ -49,6 +62,8 @@ def _hosted_settings():
             player_game_log_max_age_hours=30,
             player_game_log_min_active_players_per_team_game=5,
             player_game_log_reconciliation_days=3,
+            athlete_freshness_days=7,
+            event_max_age_hours=72,
         ),
     )
 
@@ -148,6 +163,106 @@ def _record_active_players(monkeypatch, collection):
     monkeypatch.setattr(
         data_service_module.players, "get_active_players", get_active_players
     )
+
+
+def _install_real_hosted_boundaries(monkeypatch, game_log_provider):
+    """Inject only the external providers and a deterministic ingest clock.
+
+    The catalog readers, statistic catalog, game-log repository, and
+    ``PlayerGameLogIngestService`` stay real, so the real hosted wiring from
+    ``_run`` through provider collection, normalization, and publication is
+    exercised.
+    """
+
+    monkeypatch.setattr(
+        nightly_refresh, "load_settings", lambda **kwargs: _hosted_settings()
+    )
+
+    def refuse_adapter(**kwargs):
+        raise AssertionError("hosted refresh constructed an upstream adapter")
+
+    monkeypatch.setattr(nightly_refresh, "NBAStatsAdapter", refuse_adapter)
+    monkeypatch.setattr(nightly_refresh, "PBPStatsAdapter", refuse_adapter)
+    monkeypatch.setattr(
+        nightly_refresh, "PBPGameLogAdapter", lambda **kwargs: game_log_provider
+    )
+    # The real ingestion service, with only its clock pinned so the seeded
+    # catalogs are inside their freshness windows.  It still receives and uses
+    # the PBP provider ``_run`` passes it.
+    monkeypatch.setattr(
+        nightly_refresh,
+        "PlayerGameLogIngestService",
+        partial(PlayerGameLogIngestService, clock=lambda: RETRIEVED_AT),
+    )
+
+
+def test_hosted_refresh_runs_real_ingestion_against_injected_pbp_provider(
+    tmp_path, monkeypatch
+):
+    """The hosted game-log step must carry its injected PBP provider through.
+
+    Every collaborator except the external providers stays real: the seeded
+    Event and Athlete Catalogs are read from the temporary database, the real
+    incremental ingestion fetches one missing completed game per provider
+    call, and the real repository publishes the facts and the separate
+    ``player_game_logs`` completion.  A hosted ``pbp_provider=None`` therefore
+    fails this test instead of passing through a fake ingestion service.
+    """
+
+    database_url = _hosted_database(tmp_path)
+    engine = create_engine(database_url)
+    _seed_identities(
+        PlayerGameLogRepository(
+            engine,
+            statistic_catalog=StatisticCatalog.load_default(),
+            stats_surface_season=SEASON,
+            stats_surface_max_age=timedelta(hours=30),
+        )
+    )
+    engine.dispose()
+
+    pbp_game_logs = FakeGameLogProvider(_complete_game_logs())
+    _install_real_hosted_boundaries(monkeypatch, pbp_game_logs)
+    collection = []
+    _record_active_players(monkeypatch, collection)
+
+    assert nightly_refresh._run(database_url, hosted_only=True) == 0
+
+    assert sorted(call[0] for call in pbp_game_logs.calls) == [
+        "0022500001",
+        "0022500004",
+    ]
+    assert collection == ["player_information"]
+
+    engine = create_engine(database_url)
+    try:
+        reader = PlayerGameLogRepository(
+            engine,
+            statistic_catalog=StatisticCatalog.load_default(),
+            stats_surface_season=SEASON,
+            stats_surface_max_age=timedelta(hours=30),
+            clock=lambda: RETRIEVED_AT,
+        )
+        rows = reader.list_player_rows(SEASON, 101)
+        assert sorted(row.game_id for row in rows) == [
+            "0022500001",
+            "0022500004",
+        ]
+        assert pd.read_sql(
+            "SELECT full_name FROM player_information", engine
+        )["full_name"].tolist() == ["LeBron James"]
+        assert (
+            StatsFreshnessRepository(engine).get().last_successful_completion
+            is not None
+        )
+        assert (
+            StatsFreshnessRepository(engine, surface=PLAYER_GAME_LOG_SURFACE)
+            .get()
+            .last_successful_completion
+            is not None
+        )
+    finally:
+        engine.dispose()
 
 
 def test_hosted_refresh_publishes_activation_gated_metadata_and_game_logs(
