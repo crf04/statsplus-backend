@@ -635,7 +635,13 @@ class PlayerService:
                 ]
             )
         try:
-            facts = decode_player_per36(read.payload, season=season)
+            # The reader already decoded this immutable version to authorize
+            # the read; decoding the payload again would repeat that work.
+            facts = (
+                read.decoded
+                if read.decoded is not None
+                else decode_player_per36(read.payload, season=season)
+            )
         except PublicationPayloadError:
             return pd.DataFrame()
         return pd.DataFrame(

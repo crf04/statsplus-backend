@@ -866,3 +866,43 @@ def test_profile_reader_forwards_the_callers_publication_snapshot():
     PlayerProfileReader.unavailable().get_for_players(
         "2025-26", (1,), publication_snapshot=snapshot
     )
+
+
+def test_per36_frame_uses_the_readers_decoded_facts_without_decoding_again():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    fact = SimpleNamespace(
+        player_id=7,
+        field_goals_made_per36=9.0,
+        field_goals_attempted_per36=18.0,
+        three_pointers_made_per36=3.0,
+        three_pointers_attempted_per36=8.0,
+        free_throws_made_per36=5.0,
+        free_throws_attempted_per36=6.0,
+        points_per36=26.0,
+        turnovers_per36=2.5,
+    )
+    read = SimpleNamespace(
+        legacy_fallback_allowed=False,
+        available=True,
+        decoded=(fact,),
+        # Decoding this again would fail, so the frame must come from
+        # the reader's own decode.
+        payload="not a per-36 payload",
+    )
+    service = PlayerService(
+        object(),
+        settings=_settings(),
+        profile_reader=PlayerProfileReader.unavailable(),
+        publication_reader=Mock(read=Mock(return_value=read)),
+    )
+
+    frame = service._per36_frame()
+
+    assert frame.to_dict("records") == [
+        {
+            "PLAYER_ID": 7, "FGM": 9.0, "FGA": 18.0, "FG3M": 3.0, "FG3A": 8.0,
+            "FTM": 5.0, "FTA": 6.0, "PTS": 26.0, "TOV": 2.5,
+        }
+    ]
