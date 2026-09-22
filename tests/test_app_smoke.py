@@ -28,6 +28,22 @@ def test_database_healthcheck(client):
     assert response.get_json()["status"] == "ok"
 
 
+def test_json_responses_are_compact_and_key_sorted_even_in_debug(app):
+    """``FLASK_DEBUG=1`` (as ``.env.example`` sets) must not indent bodies,
+    which roughly doubles large responses; the frontend renders some columns
+    in key order, so keys stay sorted."""
+
+    app.debug = True
+    response = app.test_client().get("/api/health/db")
+
+    import json
+
+    assert response.status_code == 200
+    assert response.get_data(as_text=True).strip() == json.dumps(
+        response.get_json(), separators=(",", ":"), sort_keys=True
+    )
+
+
 def test_nba_api_health_classifies_non_2xx_as_provider_http_error(
     client, dependencies, monkeypatch
 ):

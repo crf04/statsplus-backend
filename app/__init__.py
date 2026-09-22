@@ -30,8 +30,14 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     logging.basicConfig(level=settings.log_level)
 
     app = Flask(__name__)
+    # Flask 3 ignores the JSON_SORT_KEYS config key; the provider decides.
+    # Keys stay sorted because the frontend renders some columns in key
+    # order.  Compact output is explicit because debug mode (FLASK_DEBUG=1,
+    # as .env.example sets) would otherwise indent, roughly doubling large
+    # bodies such as the Matchup document.
+    app.json.sort_keys = True
+    app.json.compact = True
     app.config.update(
-        JSON_SORT_KEYS=False,
         TESTING=settings.environment == "testing",
         FLASK_ENV=settings.environment,
         LOG_LEVEL=settings.log_level,
