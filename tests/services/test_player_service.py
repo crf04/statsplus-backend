@@ -810,3 +810,59 @@ def test_accent_and_ascii_names_resolve_to_the_same_durable_profile(
     assert service.get_player_profile(ascii_name, "assists")[0][
         "AtRimAssists+"
     ] == pytest.approx(2.0)
+
+
+def test_player_list_and_profiles_read_diets_through_one_decoded_only_snapshot():
+    """A snapshot keys the baseline cache by generation; without one the
+    league-wide baselines are recomputed on every player list and profile."""
+
+    from unittest.mock import Mock
+
+    from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+
+    durable = _durable_profile_reader()
+    received = []
+
+    class SnapshotRecordingReader(_DurableProfileReader):
+        def get_for_players(self, season, player_ids, *, publication_snapshot=None):
+            received.append(publication_snapshot)
+            return super().get_for_players(season, player_ids)
+
+    reader = SnapshotRecordingReader(durable.catalog, durable.result)
+    snapshot = object()
+    publication_reader = Mock(snapshot=Mock(return_value=snapshot))
+    service = PlayerService(
+        object(),
+        settings=_settings(),
+        profile_reader=reader,
+        publication_reader=publication_reader,
+    )
+
+    assert service.get_all_players() == ["Jayson Tatum"]
+    assert service.get_player_profile("Jayson Tatum", "Playtypes")["Transition%"] == 20.0
+
+    assert received == [snapshot, snapshot]
+    for call in publication_reader.snapshot.call_args_list:
+        assert set(call.args[0]) == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+        assert call.kwargs["season"] == "2025-26"
+        assert call.kwargs["decoded_only_keys"] == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+
+
+def test_profile_reader_forwards_the_callers_publication_snapshot():
+    from unittest.mock import Mock
+
+    diets = Mock()
+    snapshot = object()
+    reader = PlayerProfileReader(Mock(), diets)
+
+    reader.get_for_players("2025-26", (1,), publication_snapshot=snapshot)
+    reader.get_for_players("2025-26", (1,))
+
+    assert diets.get_for_players.call_args_list[0].kwargs == {
+        "publication_snapshot": snapshot
+    }
+    assert diets.get_for_players.call_args_list[1].kwargs == {}
+    # The demo fixture's empty reader accepts the same call.
+    PlayerProfileReader.unavailable().get_for_players(
+        "2025-26", (1,), publication_snapshot=snapshot
+    )

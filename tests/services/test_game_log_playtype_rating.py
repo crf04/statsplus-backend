@@ -83,7 +83,14 @@ class _RequiredSnapshotReader:
         self.generation = object()
         self.calls = 0
 
-    def snapshot(self, stream_keys, *, season, projection_only_keys=frozenset()):
+    def snapshot(
+        self,
+        stream_keys,
+        *,
+        season,
+        projection_only_keys=frozenset(),
+        decoded_only_keys=frozenset(),
+    ):
         assert set(stream_keys) == {
             "player_game_logs",
             *PLAYER_DIET_PUBLICATION_STREAM_KEYS,
@@ -92,6 +99,9 @@ class _RequiredSnapshotReader:
         }
         assert season == "2025-26"
         assert projection_only_keys == frozenset({"player_game_logs"})
+        # The diet shares are read from the decode cache, so their league-wide
+        # payloads are never re-selected and re-parsed per request.
+        assert decoded_only_keys == PLAYER_DIET_PUBLICATION_STREAM_KEYS
         self.calls += 1
         return self.generation
 
