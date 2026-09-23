@@ -2554,6 +2554,7 @@ PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 GET    /api/user/targets/<id>/backtest
+GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
 ```
 
@@ -3084,6 +3085,96 @@ rather than a suppressed one; no Diet evidence exists to be withheld.
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another
 account -- foreign ids are never reported as `403`.
+
+#### Backtest every Target
+
+```http
+GET /api/user/targets/backtests
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns, in one request, every one of the caller's
+[Backtests](#backtest-one-target-over-the-season-to-date) already held in the
+per-Target result cache for the current Publication generation. It never
+computes a Backtest: a Target that is not cached comes back `uncached`, and the
+client reads it through `GET /api/user/targets/<id>/backtest` as before. It
+takes no parameters and covers all of the caller's Targets. The path never
+reaches `/api/user/targets/<id>`, whose id only matches integers.
+
+```json
+{
+  "success": true,
+  "season": "2025-26",
+  "backtests": [
+    {
+      "target_id": 9,
+      "status": "error",
+      "error": {
+        "code": "operation_failed",
+        "message": "Failed to backtest the target."
+      }
+    },
+    {"target_id": 8, "status": "uncached"},
+    {
+      "target_id": 7,
+      "status": "ok",
+      "backtest": {
+        "target": {"id": 7, "opponent": "OKC", "title": "OKC vs Corner 3 ≥ 40%", "...": "..."},
+        "season": "2025-26",
+        "proxy": "Outcomes are box-score proxies for the Qualifier slices, ...",
+        "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
+        "summary": {"players": 1, "games": 2, "columns": {"...": "..."}},
+        "players": [{"canonical_id": 2544, "name": "LeBron James", "...": "..."}],
+        "games_considered": {"played": 2, "kept": 2}
+      }
+    }
+  ]
+}
+```
+
+- `season` is the configured current season, the same one each Backtest
+  echoes.
+- `backtests` has one item per Target, in the order
+  [`GET /api/user/targets`](#targets) lists them (newest first), each naming
+  its `target_id`.
+- `status: "ok"` carries `backtest`: exactly the body
+  `GET /api/user/targets/<id>/backtest` returns for that Target, minus
+  `success` -- the same keys in the same order, including `games_considered`.
+- `status: "uncached"` means the result cache holds no entry for that Target in
+  the current generation, or the cache is unavailable (disabled, no Redis, a
+  failed generation read, or a Redis read error). Read that Target through the single route, which computes
+  and caches it; the next batch then returns it `ok`.
+- `status: "error"` isolates a failure to that Target in the standard
+  `{code, message}` shape, so one failing Target never blanks the others.
+  Today the only such failure is a stored entry that cannot compose a body,
+  reported as `operation_failed`, `"Failed to backtest the target."`.
+- The generation pointer is read once and every Target is looked up under it,
+  so the `ok` items never mix generations.
+
+**Why cache-only.** A version that computed misses inside the batch did so one
+after another, and on a cold cache measured about 3.5 to 3.8 times slower than
+the page's four concurrent single reads. Serving only hits keeps the batch a
+strict improvement: a warm list costs one request, and a cold list costs one
+cheap request plus exactly the previous per-Target reads.
+
+**Cache.** Each lookup uses the single route's key and invalidation, so an
+entry the single route files is a hit here. The request log's `targets_cache`
+is `hit` when every item is `ok`, `miss` when any is `uncached`, and `-` when
+there are no Targets or the cache is disabled or its generation read failed.
+
+**Empty state.** A caller with no Targets gets `200` with `"backtests": []`.
+
+**Errors.** `401 authentication_required` for an unauthenticated caller. Only a
+failure to read the caller's Target list fails the whole request, with the
+standard error shape: `500 operation_failed`, `"Failed to backtest the
+targets."`. A failed generation read is treated like a disabled cache: every
+item is `uncached` and `targets_cache` is `-`, so the page degrades to the
+per-Target reads instead of failing.
+
+**Compatibility.** The single-Target route is unchanged and remains the Target
+detail page's read and the read for every `uncached` item. A client deployed
+ahead of this route gets `404` for the path and can fall back to the per-Target
+route for every Target.
 
 #### Preview a Draft Target
 
