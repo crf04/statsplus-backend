@@ -453,10 +453,7 @@ def _compose_candidate_set(
     ))
     if locked_game_ids != game_ids:
         raise InvalidEvidenceError("ledger_game_set_incomplete")
-    games = tuple(
-        repository.get_game(game_id, connection=session.connection())
-        for game_id in game_ids
-    )
+    games = repository.get_games(game_ids, connection=session.connection())
     if any(game is None for game in games):
         raise InvalidEvidenceError("ledger_game_set_incomplete")
     source_observation_ids = tuple(sorted({
@@ -628,9 +625,8 @@ def _compare_candidate_per36(
         for game_id in game_ids_for_team
     )
     repository = repository or CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        repository.get_game(game_id, connection=session.connection())
-        for game_id in sorted(game_ids)
+    games = repository.get_games(
+        sorted(game_ids), connection=session.connection()
     )
     if any(game is None for game in games) or len(games) != len(game_ids):
         raise InvalidEvidenceError("ledger_game_set_incomplete")
@@ -800,9 +796,8 @@ def _validate_matchup_candidate_composition(
 
     game_ids = frozenset(str(game_id) for game_id in governance.expected_game_ids)
     repository = CanonicalGameLedgerRepository(engine)
-    games = tuple(
-        repository.get_game(game_id, connection=session.connection())
-        for game_id in sorted(game_ids)
+    games = repository.get_games(
+        sorted(game_ids), connection=session.connection()
     )
     if any(game is None for game in games) or len(games) != len(game_ids):
         raise InvalidEvidenceError("ledger_game_set_incomplete")

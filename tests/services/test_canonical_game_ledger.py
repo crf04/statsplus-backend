@@ -2487,3 +2487,90 @@ def test_accepted_game_requires_raw_evidence(tmp_path):
         raise AssertionError("empty raw evidence unexpectedly published")
     with engine.connect() as connection:
         assert connection.execute(select(CanonicalGameLedgerGame)).all() == []
+
+
+def _game_with_id(game_id: str):
+    base = replace(_game(), game_id=game_id, source_observation_id=f"obs-{game_id}")
+    return replace(base, raw_rows=raw_rows_from_facts(base)).with_checksum()
+
+
+def _count_statements(engine):
+    from sqlalchemy import event
+
+    statements: list[str] = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    return statements, lambda: event.remove(
+        engine, "before_cursor_execute", before_cursor_execute
+    )
+
+
+def test_get_games_equals_one_get_game_per_id_in_request_order(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    stored_ids = ("0022400003", "0022400001", "0022400002")
+    repository.replace_games_atomic([_game_with_id(game_id) for game_id in stored_ids])
+    requested = ("0022400002", "missing-game", "0022400001", "0022400003", "0022400002")
+
+    batched = repository.get_games(requested)
+
+    assert batched == tuple(repository.get_game(game_id) for game_id in requested)
+    assert [game.game_id if game else None for game in batched] == [
+        "0022400002", None, "0022400001", "0022400003", "0022400002",
+    ]
+    assert all(game.raw_rows and game.player_facts for game in batched if game)
+    assert repository.get_games(()) == ()
+    with engine.connect() as connection:
+        assert repository.get_games(requested, connection=connection) == batched
+
+
+def test_get_games_reads_a_bounded_statement_count_across_chunks(tmp_path, monkeypatch):
+    import app.services.canonical_game_ledger as ledger_module
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    game_ids = tuple(f"00224{index:05d}" for index in range(1, 8))
+    repository.replace_games_atomic([_game_with_id(game_id) for game_id in game_ids])
+    expected = tuple(repository.get_game(game_id) for game_id in game_ids)
+    monkeypatch.setattr(ledger_module, "_GAME_READ_CHUNK_SIZE", 3)
+
+    statements, stop = _count_statements(engine)
+    try:
+        batched = repository.get_games(game_ids)
+    finally:
+        stop()
+
+    assert batched == expected
+    # Four reads (game, team, player, raw) per chunk of three IDs, never
+    # four per game.
+    assert len([s for s in statements if s.lstrip().upper().startswith("SELECT")]) == 3 * 4
+
+
+def test_list_games_counts_every_game_with_a_constant_statement_count(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'ledger.sqlite3'}")
+    run_migrations(engine)
+    repository = CanonicalGameLedgerRepository(engine)
+    games = [_game_with_id(f"00224{index:05d}") for index in range(1, 6)]
+    later = replace(games[-1], game_date=date(2024, 11, 20))
+    games[-1] = replace(later, raw_rows=raw_rows_from_facts(later)).with_checksum()
+    repository.replace_games_atomic(games)
+
+    statements, stop = _count_statements(engine)
+    try:
+        summaries = repository.list_games("2024-25", through=date(2024, 11, 16))
+    finally:
+        stop()
+
+    assert [summary.game_id for summary in summaries] == [
+        "0022400004", "0022400003", "0022400002", "0022400001",
+    ]
+    assert {(summary.player_count, summary.team_count) for summary in summaries} == {(4, 2)}
+    assert [summary.checksum for summary in summaries] == [
+        game.checksum for game in reversed(games[:4])
+    ]
+    assert len(statements) <= 3

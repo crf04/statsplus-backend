@@ -2017,7 +2017,8 @@ def test_a_held_group_does_not_stop_unrelated_work_in_the_same_slice(tmp_path):
 
     runtime = LedgerRuntime(
         backfill=None,
-        repository=SimpleNamespace(engine=engine, list_games=lambda *a, **k: []),
+        repository=SimpleNamespace(engine=engine, list_games=lambda *a, **k: [],
+                                   get_games=lambda ids, **k: ()),
         materialization=SimpleNamespace(publication_service=None),
         governance=Governance(),
         clock=lambda: now,

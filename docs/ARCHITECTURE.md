@@ -1473,7 +1473,13 @@ counters); plus/minus and permanent period rows are not part of the ledger.
 invariants before deleting anything. A repeated checksum is idempotent; a
 new observation with the same game identity replaces the game, team facts,
 and player facts in one transaction. A failed or incomplete candidate leaves
-the prior correction and its checksum untouched. Provider participant evidence
+the prior correction and its checksum untouched. Readers that need a game set
+use `CanonicalGameLedgerRepository.get_games(game_ids, connection=...)`, which
+returns exactly what one `get_game` call per ID would (aligned to the request,
+`None` for an absent game) from chunked `IN` reads on one connection, so a
+season-sized read stays inside the caller's transaction at a fixed statement
+count per chunk; `list_games` likewise counts team and player facts with two
+grouped reads rather than two per game. Provider participant evidence
 must exactly equal the retained player set (including zero-minute participants).
 Migration `024_canonical_game_ledger` remains the schema owner for the typed
 ledger tables, migration `032_ledger_raw_row_evidence` owns the raw archive,

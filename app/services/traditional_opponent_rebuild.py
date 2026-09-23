@@ -1138,13 +1138,10 @@ class LedgerFactReader:
         )
 
         repository = CanonicalGameLedgerRepository(self.engine)
-        games = []
-        for game_id in sources.governed_game_ids:
-            game = repository.get_game(game_id)
-            if game is None:
-                raise ControlPlaneError("stale_publication_family")
-            games.append(game)
-        return tuple(games)
+        games = repository.get_games(sources.governed_game_ids)
+        if any(game is None for game in games):
+            raise ControlPlaneError("stale_publication_family")
+        return games
 
 
 def compose_from_ledger(

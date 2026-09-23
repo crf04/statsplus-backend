@@ -837,11 +837,11 @@ class LedgerRuntime:
                         )
                     games = tuple(
                         game
-                        for summary in summaries
-                        if (game := self.repository.get_game(
-                            summary.game_id,
+                        for game in self.repository.get_games(
+                            tuple(summary.game_id for summary in summaries),
                             connection=read_connection,
-                        )) is not None
+                        )
+                        if game is not None
                     )
                     games_by_id = {game.game_id: game for game in games}
                     for row in ledger_jobs:

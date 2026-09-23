@@ -1920,7 +1920,7 @@ def test_runner_ingestion_and_composition_publish_all_supported_opponent_windows
     runtime_repository = SimpleNamespace(
         engine=control_db,
         list_games=lambda *args, **kwargs: (),
-        get_game=lambda *args, **kwargs: None,
+        get_games=lambda game_ids, **kwargs: tuple(None for _ in game_ids),
     )
     runtime = LedgerRuntime(
         backfill=None,

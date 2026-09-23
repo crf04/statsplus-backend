@@ -22,7 +22,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from sqlalchemy import case, delete, exists, insert, inspect, literal, or_, select, update
+from sqlalchemy import case, delete, exists, func, insert, inspect, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.nba_events import REGULAR_SEASON_TYPE, is_final_event
@@ -759,6 +759,9 @@ def _verify_observation_binding(
 #: reload.  Home rows always precede Away rows regardless of lexicographic
 #: ordering; within each side rows keep their provider array index order.
 _RAW_ROW_SIDE_ORDER = {"Home": 0, "Away": 1}
+# Game IDs per IN-list in batched ledger reads: well under the SQLite (999 on
+# old builds) and PostgreSQL (65535) bind-parameter limits.
+_GAME_READ_CHUNK_SIZE = 500
 
 
 def _raw_row_order(row: LedgerGameRow) -> tuple[int, int]:
@@ -2391,19 +2394,71 @@ class CanonicalGameLedgerRepository:
         *,
         connection: Connection | None = None,
     ) -> CanonicalGame | None:
+        return self.get_games((game_id,), connection=connection)[0]
+
+    def get_games(
+        self,
+        game_ids: Iterable[str],
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[CanonicalGame | None, ...]:
+        """Read many complete games in one scope, aligned to ``game_ids``.
+
+        Each position holds exactly what ``get_game`` returns for that ID
+        (``None`` when the game is absent), so callers that loop over a game
+        set read it with a fixed number of statements per chunk instead of
+        four per game.  All chunks share one connection, so the whole set is
+        read inside the caller's transaction (or one fresh one).
+        """
+
+        requested = tuple(game_ids)
+        unique_ids = tuple(dict.fromkeys(requested))
+        if not unique_ids:
+            return ()
         tables = self._tables()
+        game_rows: dict[Any, Mapping[str, Any]] = {}
+        team_rows: dict[Any, list[Mapping[str, Any]]] = {}
+        player_rows: dict[Any, list[Mapping[str, Any]]] = {}
+        raw_rows: dict[Any, list[Mapping[str, Any]]] = {}
         scope = self.engine.connect() if connection is None else nullcontext(connection)
         with scope as connection:
-            game_row = connection.execute(select(tables["game"]).where(tables["game"].c.game_id == game_id)).mappings().one_or_none()
-            if game_row is None:
-                return None
-            team_rows = connection.execute(select(tables["team"]).where(tables["team"].c.game_id == game_id).order_by(tables["team"].c.team_id)).mappings().all()
-            player_rows = connection.execute(select(tables["player"]).where(tables["player"].c.game_id == game_id).order_by(tables["player"].c.team_id, tables["player"].c.player_id)).mappings().all()
-            raw_rows = connection.execute(select(tables["raw"]).where(tables["raw"].c.game_id == game_id).order_by(
-                _side_order_expression(tables["raw"].c.side),
-                tables["raw"].c.row_index,
-            )).mappings().all()
-        return _game_from_rows(game_row, team_rows, player_rows, raw_rows)
+            for start in range(0, len(unique_ids), _GAME_READ_CHUNK_SIZE):
+                chunk = unique_ids[start:start + _GAME_READ_CHUNK_SIZE]
+                found = {
+                    row["game_id"]: row
+                    for row in connection.execute(
+                        select(tables["game"]).where(tables["game"].c.game_id.in_(chunk))
+                    ).mappings().all()
+                }
+                if not found:
+                    continue
+                game_rows.update(found)
+                present = tuple(found)
+                for table_key, grouped, order in (
+                    ("team", team_rows, (tables["team"].c.team_id,)),
+                    ("player", player_rows, (tables["player"].c.team_id, tables["player"].c.player_id)),
+                    ("raw", raw_rows, (
+                        _side_order_expression(tables["raw"].c.side),
+                        tables["raw"].c.row_index,
+                    )),
+                ):
+                    table = tables[table_key]
+                    for row in connection.execute(
+                        select(table)
+                        .where(table.c.game_id.in_(present))
+                        .order_by(table.c.game_id, *order)
+                    ).mappings().all():
+                        grouped.setdefault(row["game_id"], []).append(row)
+        games = {
+            game_id: _game_from_rows(
+                game_row,
+                team_rows.get(game_id, ()),
+                player_rows.get(game_id, ()),
+                raw_rows.get(game_id, ()),
+            )
+            for game_id, game_row in game_rows.items()
+        }
+        return tuple(games.get(game_id) for game_id in requested)
 
     def list_games(
         self,
@@ -2417,17 +2472,34 @@ class CanonicalGameLedgerRepository:
         statement = select(table).where(table.c.season == canonical_season).order_by(table.c.game_date.desc(), table.c.game_id.desc())
         if through is not None:
             statement = statement.where(table.c.game_date <= _canonical_date(through))
+        listed_ids = statement.with_only_columns(table.c.game_id).order_by(None).scalar_subquery()
+
+        def fact_counts(fact_table: Any) -> dict[Any, int]:
+            return dict(connection.execute(
+                select(fact_table.c.game_id, func.count())
+                .where(fact_table.c.game_id.in_(listed_ids))
+                .group_by(fact_table.c.game_id)
+            ).all())
+
         scope = self.engine.connect() if connection is None else nullcontext(connection)
         with scope as connection:
             rows = connection.execute(statement).mappings().all()
-            summaries = []
-            player_table = CanonicalGameLedgerPlayerFact.__table__
-            team_table = CanonicalGameLedgerTeamFact.__table__
-            for row in rows:
-                player_count = len(connection.execute(select(player_table.c.player_id).where(player_table.c.game_id == row["game_id"])).all())
-                team_count = len(connection.execute(select(team_table.c.team_id).where(team_table.c.game_id == row["game_id"])).all())
-                summaries.append(LedgerGameSummary(row["game_id"], row["season"], row["game_date"], row["checksum"], assume_utc(row["retrieved_at"]), player_count, team_count))
-        return tuple(summaries)
+            if not rows:
+                return ()
+            player_counts = fact_counts(CanonicalGameLedgerPlayerFact.__table__)
+            team_counts = fact_counts(CanonicalGameLedgerTeamFact.__table__)
+        return tuple(
+            LedgerGameSummary(
+                row["game_id"],
+                row["season"],
+                row["game_date"],
+                row["checksum"],
+                assume_utc(row["retrieved_at"]),
+                player_counts.get(row["game_id"], 0),
+                team_counts.get(row["game_id"], 0),
+            )
+            for row in rows
+        )
 
     def game_checksums(
         self,
