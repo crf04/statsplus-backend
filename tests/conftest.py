@@ -1,11 +1,34 @@
 """
 Pytest configuration and fixtures for NBA backend tests
+
+Migrated SQLite databases come from a per-process template
+(``tests/support/migration_template.py``): ``run_migrations`` on an empty
+SQLite database restores a copy of one database migrated by the real function
+instead of migrating again.  It falls back to the real function automatically
+for non-SQLite engines, non-empty targets, a patched ``app.migrations`` module,
+and engines with statement listeners.  A test that must exercise the real
+migration code on an empty database opts out explicitly with
+``@pytest.mark.real_migrations`` (``pytestmark = pytest.mark.real_migrations``
+for a whole module); ``tests/test_migration_template.py`` guards equivalence.
 """
 import pytest
 from unittest.mock import Mock
 from types import SimpleNamespace
 
 from app.config.settings import AuthenticationSettings, CacheSettings, RuntimeSettings
+from tests.support import migration_template
+
+migration_template.install()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Run ``real_migrations`` tests, fixtures included, against real migrations."""
+    if item.get_closest_marker(migration_template.MARKER) is None:
+        return (yield)
+    with migration_template.disabled():
+        return (yield)
+
 
 @pytest.fixture
 def mock_redis_client():

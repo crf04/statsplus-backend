@@ -39,6 +39,10 @@ from app.services.statistic_catalog import StatisticCatalog
 from scripts import migrate
 from scripts.validate_demo_db import validate_demo_database
 
+# These tests exercise the migration code itself, so they never use the
+# migrated-template shortcut from tests/conftest.py.
+pytestmark = pytest.mark.real_migrations
+
 
 def _sqlite_schema_snapshot(database_path: str | Path) -> tuple[bytes, tuple[tuple[str, str | None], ...]]:
     path = Path(database_path)

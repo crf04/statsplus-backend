@@ -552,11 +552,17 @@ scripts/
 
 ## Deployment notes
 
-The included `Procfile` starts Gunicorn:
+The included `Procfile` starts Gunicorn with the committed configuration:
 
 ```bash
-gunicorn --workers 4 --threads 2 --timeout 180 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --bind 0.0.0.0:${PORT} wsgi:app
+gunicorn --config gunicorn.conf.py wsgi:app
 ```
+
+`gunicorn.conf.py` runs 4 workers × 2 threads (timeout 180 s, keep-alive 5 s,
+recycling after 1000 ± 100 requests, bind `0.0.0.0:$PORT`) and preloads the app
+in the master so workers share it copy-on-write. Because the app is built in
+the master, an import or startup failure stops the whole server; see
+"Pre-forking process model" in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 For production:
 

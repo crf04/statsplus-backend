@@ -6,6 +6,42 @@ This document records the interfaces and seams that are expensive to rediscover 
 
 `app.create_app()` constructs the Flask application, initializes optional dependencies, registers JSON error handlers, and attaches blueprints. `run.py` is the local entry point; Gunicorn imports `wsgi:app` in production.
 
+### Pre-forking process model
+
+The Procfile runs `gunicorn --config gunicorn.conf.py wsgi:app`. The committed
+config keeps the worker settings (4 gthread workers × 2 threads, 180-second
+timeout, 5-second keep-alive, recycling after 1000 ± 100 requests, bind
+`0.0.0.0:$PORT`) and sets `preload_app`: the master imports `wsgi:app` once,
+building the whole dependency graph, including the natural-language parser
+and its spaCy model, and every worker is forked from it. Workers share those
+pages copy-on-write, and a worker recycled by `max_requests` is forked in
+well under a second instead of rebuilding the app. Before the first fork,
+`when_ready` closes the master's pooled database connections and calls
+`gc.freeze()`, moving the boot-time objects into the collector's permanent
+generation so worker collections never write to (and copy) shared pages.
+Gunicorn's control socket is disabled so the master stays single-threaded
+whenever it forks.
+
+State that must not cross `fork` is owned per worker:
+
+| Resource | Handling |
+| --- | --- |
+| Durable refresh dispatcher | The config sets `STATSPLUS_DEFER_DATA_REFRESH_DISPATCHER=1` before the app loads, so the master constructs `DataRefreshJobService` with `defer_start=True` (no recovery dispatch, no poller thread, no claimed lease). `post_fork` calls `start_dispatcher()` in each worker, which generates that process' lease owner (`uuid:pid:thread`) and then dispatches and starts the poller as construction does elsewhere. A service whose dispatcher started before a fork refuses to start in the child. |
+| SQLAlchemy engine pool | `post_fork` calls `engine.dispose(close=False)`, so a worker never reuses a DBAPI connection opened in the master. |
+| Redis client | No action: redis-py's connection pool records its pid and resets itself on first use in a new process. |
+| Firebase Admin | No action: `initialize_app` parses credentials without I/O or threads; the auth client and its HTTP session are built lazily in the worker that verifies a token. |
+| `ThreadPoolExecutor`s (refresh jobs, DFS snapshot cache, per-call provider pools) | No action: executors start threads only on `submit`, which the master never reaches. |
+
+`run.py`, the test app factory, scripts, and the `projection-collector`
+process never set the deferral variable and keep starting the dispatcher when
+the service is constructed; `post_fork` removes it from each worker's
+environment so processes a worker starts do the same.
+
+Trade-off: an import-time or app-factory failure now stops the master, and so
+the deploy, rather than failing one worker at a time; and code or settings
+changes still need a full restart, because recycled workers inherit the
+master's app instead of re-importing it.
+
 Blueprints are intentionally thin HTTP adapters:
 
 | Seam | Modules | Responsibility |
@@ -2352,7 +2388,8 @@ lease on completion/failure. The app factory creates one coordinator per app
 with the closed registry for `update_database`, both PBP refreshes,
 `fetch_players_with_teams`, and `fetch_players`; operation names, not callbacks,
 are persisted. A bounded dispatcher wakes immediately after enqueue and polls
-every 15 seconds (`poll_interval`) per process for restart and expired-lease
+every 15 seconds (`poll_interval`) per process (per Gunicorn worker; the
+pre-forking master defers it, see "Pre-forking process model") for restart and expired-lease
 recovery; the 60-second lease is renewed by a separate 5-second heartbeat
 while a handler runs, so the poll cadence bounds only recovery latency, not
 lease health. The service takes an injectable executor and clock;
@@ -4480,7 +4517,8 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   `connect_timeout_seconds`) only to Postgres engines, so the worst-case
   Postgres connection count is `processes × (pool_size + max_overflow)` — with
   the Procfile's 4 gunicorn workers and the documented defaults, `4 × (3 + 4)
-  = 28`. Scripts that call `create_engine` directly
+  = 28`; the pre-forking master closes the connections it opened while
+  building the app before it forks the first worker. Scripts that call `create_engine` directly
   (`scripts/migrate.py`, `scripts/nightly_refresh.py`, and similar
   one-shot/operator scripts) are not governed by these settings.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
