@@ -2229,8 +2229,12 @@ Target hits captures no snapshot. The first miss captures the one
 `_publication_snapshot` every miss is computed from and filed under; if that
 capture has moved past the pre-checked generation, the hits already read are
 discarded and re-read under the captured one, so no response mixes
-generations. Each Target's failure -- in its cache read or its computation --
-is isolated into that item as `isolated_error_body` (`app/errors.py`) renders
+generations. Each Target's computation runs inside its own SAVEPOINT on the
+request connection (`_target_savepoint`), released on success and rolled back
+to on failure, so a database error in one Target -- which on PostgreSQL aborts
+the whole transaction -- never refuses the reads of the Targets after it; the
+cache reads touch only Redis and need none. Each Target's failure -- in its
+cache read or its computation -- is isolated into that item as `isolated_error_body` (`app/errors.py`) renders
 it: the same translation, logging, and failure count `route_error_boundary`
 and the central handler give the single route, with the unexpected case's
 traceback logged against the Target id. The list or the capture failing is

@@ -3136,3 +3136,125 @@ def test_every_backtest_lists_and_composes_on_one_request_scope_connection(
     assert len(checkouts) == 1
     assert [item["target_id"] for item in payload["backtests"]] == listed
     assert [item["status"] for item in payload["backtests"]] == ["ok"] * 3
+
+
+# --- one Target's database error never aborts the others' transaction --------
+
+
+def _abort_transactions_like_postgres(engine):
+    """Make SQLite refuse statements after an error until a rollback.
+
+    PostgreSQL marks a transaction aborted on any statement error and
+    refuses every later statement but a ``ROLLBACK`` (to a savepoint or of
+    the whole transaction).  SQLite has no such state, so this reproduces it
+    with connection events: the per-Target savepoint is then the only thing
+    that lets the next Target's reads run on the shared connection.
+    """
+
+    from sqlalchemy import event
+
+    aborted = "emulated_postgres_aborted"
+
+    @event.listens_for(engine, "handle_error")
+    def _mark(context):
+        connection = context.connection
+        if connection is not None:
+            connection.info[aborted] = True
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _refuse(connection, _cursor, statement, *_args):
+        if connection.info.get(aborted) and not statement.lstrip().upper().startswith(
+            "ROLLBACK"
+        ):
+            raise RuntimeError(
+                "current transaction is aborted, commands ignored until end "
+                "of transaction block"
+            )
+
+    @event.listens_for(engine, "rollback_savepoint")
+    def _clear_savepoint(connection, *_args):
+        connection.info.pop(aborted, None)
+
+    @event.listens_for(engine, "rollback")
+    def _clear(connection):
+        connection.info.pop(aborted, None)
+
+
+class StatementLogs(FakeLogs):
+    """Game logs that run a statement on the request connection per read,
+    failing one opponent's with invalid SQL, as a broken query would."""
+
+    def __init__(self, failing_opponent, **kwargs):
+        super().__init__(**kwargs)
+        self.failing_opponent = failing_opponent
+
+    def list_opponent_rows(
+        self, season, opponent_team_id, *, publication_snapshot=None, connection=None
+    ):
+        from sqlalchemy import text
+
+        assert connection is not None
+        if opponent_team_id == self.failing_opponent:
+            connection.execute(text("SELECT * FROM no_such_backtest_table"))
+        connection.execute(text("SELECT 1")).scalar_one()
+        return super().list_opponent_rows(
+            season, opponent_team_id, publication_snapshot=publication_snapshot
+        )
+
+
+def test_the_emulated_abort_refuses_statements_until_a_savepoint_rolls_back(
+    backtest_engine,
+):
+    """The harness's control: without a savepoint the error blanks every
+    later statement; rolling back to one restores the connection."""
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+
+    _abort_transactions_like_postgres(backtest_engine)
+    with backtest_engine.connect() as connection:
+        with pytest.raises(OperationalError):
+            connection.execute(text("SELECT * FROM no_such_backtest_table"))
+        with pytest.raises(RuntimeError, match="transaction is aborted"):
+            connection.execute(text("SELECT 1"))
+        connection.rollback()
+
+        with pytest.raises(OperationalError):
+            with connection.begin_nested():
+                connection.execute(text("SELECT * FROM no_such_backtest_table"))
+        assert connection.execute(text("SELECT 1")).scalar_one() == 1
+
+
+def test_one_targets_database_error_leaves_every_later_target_ok(
+    backtest_engine, backtest_settings, targets
+):
+    bos, lal, okc = _three_targets(targets)
+    _abort_transactions_like_postgres(backtest_engine)
+    seams = _two_games()
+    service = TargetBacktestService(
+        targets=targets,
+        player_logs=StatementLogs(BOS, rows=seams["logs"].rows),
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        engine=backtest_engine,
+    )
+
+    payload, _ = service.backtest_all(OWNER)
+
+    # BOS is listed first, so without its savepoint the aborted transaction
+    # would refuse every read LAL and OKC make after it.
+    assert [item["target_id"] for item in payload["backtests"]] == [bos, lal, okc]
+    assert payload["backtests"][0] == {
+        "target_id": bos,
+        "status": "error",
+        "error": {
+            "code": "operation_failed",
+            "message": "Failed to backtest the target.",
+        },
+    }
+    assert [item["status"] for item in payload["backtests"][1:]] == ["ok", "ok"]
+    for item in payload["backtests"][1:]:
+        assert [player["canonical_id"] for player in item["backtest"]["players"]] == [
+            LEBRON
+        ]

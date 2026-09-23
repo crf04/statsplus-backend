@@ -39,8 +39,8 @@ NBA, PBP, or DFS provider is reached.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
-from contextlib import ExitStack
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from logging import getLogger
 from math import isfinite
 from typing import Any, Callable, Protocol
@@ -194,6 +194,23 @@ def _normalized_generation(
     if generation is None:
         return None
     return tuple(tuple(entry) for entry in generation)
+
+
+@contextmanager
+def _target_savepoint(connection: Connection | None) -> Iterator[None]:
+    """Run one Target's reads inside a SAVEPOINT on the request connection.
+
+    Released on success, rolled back to on any failure so the request's
+    transaction stays usable for the next Target; the failure still
+    propagates to the caller's per-Target isolation.  Without a connection
+    (no engine) every read opens its own, so there is nothing to protect.
+    """
+
+    if connection is None:
+        yield
+        return
+    with connection.begin_nested():
+        yield
 
 
 def aggregate_cache_state(states: Iterable[str]) -> str:
@@ -444,16 +461,22 @@ class TargetBacktestService:
                     if results[index] is not None:
                         continue
                     try:
-                        results[index] = self._compute(
-                            target,
-                            publication_snapshot=snapshot,
-                            connection=connection,
-                            session=session,
-                            cacheable=(
-                                generation is not None
-                                and target.get("id") is not None
-                            ),
-                        )
+                        # A database error inside one Target's reads would
+                        # otherwise abort the shared transaction (PostgreSQL
+                        # refuses every later statement until a rollback),
+                        # blanking every Target after it.  Its savepoint
+                        # rolls back only this Target's work.
+                        with _target_savepoint(connection):
+                            results[index] = self._compute(
+                                target,
+                                publication_snapshot=snapshot,
+                                connection=connection,
+                                session=session,
+                                cacheable=(
+                                    generation is not None
+                                    and target.get("id") is not None
+                                ),
+                            )
                     except Exception as error:  # isolated per Target
                         results[index] = error
 
