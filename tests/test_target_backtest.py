@@ -2735,3 +2735,429 @@ def test_the_request_log_sees_hit_miss_and_bypass(
         "hit",
         "bypass",
     ]
+
+
+
+# --- every Target's cached Backtest in one request ----------------------------
+
+
+def _three_targets(targets, *, uid=OWNER):
+    for opponent, qualifiers in (
+        ("OKC", (CORNER_THREE,)),
+        ("LAL", (CORNER_THREE, LOW_RIM)),
+        ("BOS", (TRANSITION,)),
+    ):
+        _create(targets, uid=uid, opponent=opponent, qualifiers=qualifiers)
+    return [target["id"] for target in targets.list_targets(uid)]
+
+
+def _reads_so_far(service, reader):
+    """Everything a computation would touch: game logs, Diets, snapshots."""
+
+    return (
+        len(service.player_logs.opponent_calls),
+        len(service.player_logs.summary_calls),
+        len(service.player_diets.snapshots),
+        len(reader.snapshot_calls),
+    )
+
+
+def test_every_cached_backtest_is_ok_and_equals_the_single_read_in_list_order(
+    targets, build_backtest
+):
+    listed = _three_targets(targets)
+    _create(targets, uid=STRANGER)
+    service, reader, client = _cached_service(build_backtest)
+    for target_id in listed:
+        assert service.backtest(OWNER, target_id)[1] == "miss"
+    before = _reads_so_far(service, reader)
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert state == "hit"
+    assert payload["season"] == SEASON
+    assert [item["target_id"] for item in payload["backtests"]] == listed
+    # Served from the entries alone: nothing computed, no snapshot captured,
+    # and one pointer-only generation read for the whole request.
+    assert _reads_so_far(service, reader) == before
+    assert len(reader.generation_calls) == len(listed) + 1
+    for item in payload["backtests"]:
+        assert set(item) == {"target_id", "status", "backtest"}
+        assert item["status"] == "ok"
+        single, single_state = service.backtest(OWNER, item["target_id"])
+        assert single_state == "hit"
+        assert item["backtest"] == single
+        assert list(item["backtest"]) == list(single)
+
+
+def test_a_target_with_no_entry_is_uncached_and_never_computed(
+    targets, build_backtest
+):
+    bos, lal, okc = _three_targets(targets)
+    service, reader, client = _cached_service(build_backtest)
+    service.backtest(OWNER, lal)
+    before = _reads_so_far(service, reader)
+    sets_before = len(client.sets)
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert state == "miss"
+    assert payload["backtests"][0] == {"target_id": bos, "status": "uncached"}
+    assert payload["backtests"][1]["status"] == "ok"
+    assert payload["backtests"][2] == {"target_id": okc, "status": "uncached"}
+    # No game-log, Diet, or snapshot read, and nothing filed.
+    assert _reads_so_far(service, reader) == before
+    assert len(client.sets) == sets_before
+
+
+def test_a_single_read_after_an_uncached_item_makes_the_next_batch_ok(
+    targets, build_backtest
+):
+    created = _create(targets)
+    service, _, _ = _cached_service(build_backtest)
+    first, first_state = service.backtest_all(OWNER)
+    assert first["backtests"] == [{"target_id": created["id"], "status": "uncached"}]
+    assert first_state == "miss"
+
+    single, _ = service.backtest(OWNER, created["id"])
+    again, again_state = service.backtest_all(OWNER)
+
+    assert again_state == "hit"
+    assert again["backtests"] == [
+        {"target_id": created["id"], "status": "ok", "backtest": single}
+    ]
+
+
+@pytest.mark.parametrize("wiring", ["flag_off", "no_redis", "no_generation_reader"])
+def test_a_disabled_cache_makes_every_item_uncached(
+    targets, build_backtest, wiring
+):
+    listed = _three_targets(targets)
+    client = FakeRedis()
+    reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
+    seams = {
+        "flag_off": dict(
+            settings=RuntimeSettings(
+                environment="testing",
+                nba=NBASeasonSettings(current_season=SEASON),
+                matchup_scores=MatchupScoreSettings(),
+                cache=CacheSettings(target_backtest_enabled=False),
+            ),
+            redis_client=client,
+            publication_reader=reader,
+        ),
+        "no_redis": dict(publication_reader=reader),
+        "no_generation_reader": dict(
+            redis_client=client, publication_reader=FakePublicationReader()
+        ),
+    }[wiring]
+    service = build_backtest(**_two_games(), **seams)
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert state == "-"
+    assert payload["backtests"] == [
+        {"target_id": target_id, "status": "uncached"} for target_id in listed
+    ]
+    assert client.gets == []
+    assert reader.snapshot_calls == []
+    assert service.player_logs.opponent_calls == []
+
+
+@pytest.mark.parametrize("redis_client", [DeadRedis, RefusingRedis])
+def test_a_redis_read_error_is_uncached_not_a_failed_request(
+    targets, build_backtest, redis_client
+):
+    listed = _three_targets(targets)
+    service, reader, _ = _cached_service(
+        build_backtest, redis_client=redis_client()
+    )
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert state == "miss"
+    assert payload["backtests"] == [
+        {"target_id": target_id, "status": "uncached"} for target_id in listed
+    ]
+    assert reader.snapshot_calls == []
+    assert service.player_logs.opponent_calls == []
+
+
+def test_an_unusable_entry_is_isolated_to_its_own_target(
+    targets, build_backtest
+):
+    bos, lal, okc = _three_targets(targets)
+    service, _, client = _cached_service(build_backtest)
+    for target_id in (bos, lal, okc):
+        service.backtest(OWNER, target_id)
+    # One entry decodes as JSON but is missing the evidence a body needs.
+    lal_target = next(t for t in targets.list_targets(OWNER) if t["id"] == lal)
+    client.store[
+        backtest_cache_key(
+            lal_target,
+            _frozen_generation(),
+            season=SEASON,
+            settings=service.settings,
+        )
+    ] = zlib.compress(json.dumps({"season": SEASON}).encode("utf-8"))
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert [item["status"] for item in payload["backtests"]] == [
+        "ok",
+        "error",
+        "ok",
+    ]
+    assert payload["backtests"][1] == {
+        "target_id": lal,
+        "status": "error",
+        "error": {
+            "code": "operation_failed",
+            "message": "Failed to backtest the target.",
+        },
+    }
+    assert state == "-"
+
+
+def test_a_generation_read_failure_degrades_every_item_to_uncached(
+    targets, build_backtest, caplog
+):
+    import logging
+
+    listed = _three_targets(targets)
+
+    class FailingGeneration(GenerationSnapshotReader):
+        def generation(self, *args, **kwargs):
+            raise RuntimeError("publication pointers are unreachable")
+
+    client = FakeRedis()
+    reader = FailingGeneration(_available_reads(), _frozen_generation())
+    service = build_backtest(
+        **_two_games(), publication_reader=reader, redis_client=client
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.services.target_backtest"):
+        payload, state = service.backtest_all(OWNER)
+
+    # Degraded like a disabled cache, not failed: the page falls back to
+    # per-Target reads.  No entry is looked up without a generation.
+    assert state == "-"
+    assert payload["backtests"] == [
+        {"target_id": target_id, "status": "uncached"} for target_id in listed
+    ]
+    assert client.gets == []
+    assert reader.snapshot_calls == []
+    assert service.player_logs.opponent_calls == []
+    [warning] = [
+        record
+        for record in caplog.records
+        if "generation read failed" in record.getMessage()
+    ]
+    assert warning.levelno == logging.WARNING
+    assert warning.exc_info[0] is RuntimeError
+
+
+def test_a_target_list_failure_fails_the_whole_request(targets, build_backtest):
+    service, reader, client = _cached_service(build_backtest)
+    service.targets = SimpleNamespace(
+        list_targets=Mock(side_effect=RuntimeError("targets table unreachable"))
+    )
+
+    with pytest.raises(RuntimeError):
+        service.backtest_all(OWNER)
+    assert client.gets == []
+
+
+def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):
+    _create(targets, uid=STRANGER)
+    service, reader, client = _cached_service(build_backtest)
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert payload == {"season": SEASON, "backtests": []}
+    assert state == "-"
+    assert client.gets == []
+    assert reader.snapshot_calls == []
+
+
+def test_every_cached_backtest_lists_on_one_request_scope_connection(
+    backtest_engine, backtest_settings, targets
+):
+    listed = _three_targets(targets)
+    seams = _two_games()
+    service = TargetBacktestService(
+        targets=targets,
+        player_logs=seams["logs"],
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        engine=backtest_engine,
+    )
+
+    checkouts: list[int] = []
+    real_connect = backtest_engine.connect
+
+    from unittest.mock import patch as mock_patch
+
+    with mock_patch.object(
+        backtest_engine,
+        "connect",
+        side_effect=lambda *a, **kw: checkouts.append(1) or real_connect(),
+    ), mock_patch.object(
+        type(targets), "list_targets", autospec=True, side_effect=AssertionError(
+            "the list opened its own session"
+        )
+    ):
+        payload, _ = service.backtest_all(OWNER)
+
+    assert len(checkouts) == 1
+    assert [item["target_id"] for item in payload["backtests"]] == listed
+
+
+@pytest.mark.parametrize(
+    ("statuses", "cache_enabled", "expected"),
+    [
+        ([], True, "-"),
+        (["ok", "ok"], True, "hit"),
+        (["ok", "uncached"], True, "miss"),
+        (["uncached", "error"], True, "miss"),
+        (["ok", "error"], True, "-"),
+        (["uncached", "uncached"], False, "-"),
+    ],
+)
+def test_the_request_cache_outcome_aggregates_every_item(
+    statuses, cache_enabled, expected
+):
+    from app.services.target_backtest import aggregate_cache_state
+
+    assert aggregate_cache_state(statuses, cache_enabled=cache_enabled) == expected
+
+
+BATCH = {
+    "season": SEASON,
+    "backtests": [
+        {"target_id": 7, "status": "ok", "backtest": BACKTESTED},
+        {"target_id": 8, "status": "uncached"},
+        {
+            "target_id": 9,
+            "status": "error",
+            "error": {
+                "code": "operation_failed",
+                "message": "Failed to backtest the target.",
+            },
+        },
+    ],
+}
+
+
+def test_the_batch_route_returns_every_item_and_stamps_the_cache(
+    client, authenticate, backtest_service, caplog
+):
+    import logging
+
+    headers = authenticate()
+    backtest_service.backtest_all.return_value = (BATCH, "miss")
+
+    with caplog.at_level(logging.INFO, logger="app"):
+        response = client.get("/api/user/targets/backtests", headers=headers)
+
+    assert response.status_code == 200
+    assert response.get_json() == {"success": True, **BATCH}
+    backtest_service.backtest_all.assert_called_once_with("test-uid")
+    backtest_service.backtest.assert_not_called()
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("request method=")
+    ]
+    assert [line.split("targets_cache=")[1] for line in lines] == ["miss"]
+
+
+def test_the_batch_route_returns_an_empty_list_for_no_targets(
+    client, authenticate, backtest_service
+):
+    headers = authenticate()
+    backtest_service.backtest_all.return_value = (
+        {"season": SEASON, "backtests": []},
+        "-",
+    )
+
+    response = client.get("/api/user/targets/backtests", headers=headers)
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "success": True,
+        "season": SEASON,
+        "backtests": [],
+    }
+
+
+def test_the_batch_route_refuses_an_unauthenticated_caller(
+    client, authenticate, backtest_service
+):
+    authenticate()
+
+    response = client.get("/api/user/targets/backtests")
+
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "authentication_required"
+    backtest_service.backtest_all.assert_not_called()
+
+
+def test_the_batch_route_reports_a_failure_before_any_target_safely(
+    client, authenticate, backtest_service
+):
+    headers = authenticate()
+    backtest_service.backtest_all.side_effect = RuntimeError("list failed")
+
+    response = client.get("/api/user/targets/backtests", headers=headers)
+
+    assert response.status_code == 500
+    assert response.get_json()["error"] == {
+        "code": "operation_failed",
+        "message": "Failed to backtest the targets.",
+    }
+
+
+def test_the_batch_items_equal_the_single_routes_bodies_over_http(
+    client, authenticate, dependencies, backtest_engine, targets, build_backtest
+):
+    with backtest_engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": "test-uid",
+                "email": "test@example.com",
+                "display_name": "test",
+                "photo_url": None,
+                "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "last_login": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "is_active": True,
+            },
+        )
+    listed = _three_targets(targets, uid="test-uid")
+    service, _, _ = _cached_service(build_backtest)
+    dependencies.target_backtest_service = service
+    headers = authenticate()
+
+    cold = client.get("/api/user/targets/backtests", headers=headers).get_json()
+    assert [item["status"] for item in cold["backtests"]] == ["uncached"] * 3
+
+    singles = {}
+    for target_id in listed:
+        single = client.get(
+            f"/api/user/targets/{target_id}/backtest", headers=headers
+        )
+        assert single.status_code == 200
+        singles[target_id] = single.get_json()
+        del singles[target_id]["success"]
+
+    response = client.get("/api/user/targets/backtests", headers=headers)
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["success"] is True
+    assert [item["target_id"] for item in body["backtests"]] == listed
+    for item in body["backtests"]:
+        assert item["status"] == "ok"
+        assert item["backtest"] == singles[item["target_id"]]
