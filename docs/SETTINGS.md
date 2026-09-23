@@ -16,7 +16,7 @@ The model is intentionally grouped by responsibility:
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
 | `ProviderSettings` | NBA Stats/PBP settings, internal DFS provider settings, projection archive evidence bounds, and RotoWire permission/transport settings | `NBA_STATS_TIMEOUT_SECONDS`, `NBA_STATS_MAX_CONCURRENCY`, `NBA_API_TIMEOUT_CONNECT`, `NBA_API_TIMEOUT_READ`, `NBA_API_MAX_RETRIES`, `NBA_API_POOL_CONNECTIONS`, `NBA_API_POOL_MAXSIZE`, `DFS_ENABLED_PROVIDERS`, `DFS_BOARD_DEADLINE_SECONDS`, `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS`, `DFS_PROVIDER_READ_TIMEOUT_SECONDS`, `DFS_DABBLE_DETAIL_CONCURRENCY`, `DFS_CACHE_FRESH_SECONDS`, `DFS_CACHE_STALE_IF_ERROR_SECONDS`, `DFS_COMPARISON_MAX_MARKETS`, `PROJECTION_ARCHIVE_MAX_MARKETS`, provider-specific `DFS_<PROVIDER>_CACHE_*` overrides, `ROTOWIRE_PERMISSION_GRANTED` (default `false`), `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` (`3`), and `ROTOWIRE_READ_TIMEOUT_SECONDS` (`8`) |
 | `ProjectionCollectionSettings` | Board-wide scheduler cadence, governed pregame horizon, lease duration, and bounded provider backoff | `PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES` (`30`), `PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES` (`5`), `PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS` (`24`), `PROJECTION_COLLECTION_FAST_WINDOW_HOURS` (`2`), `PROJECTION_COLLECTION_LEASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS` (`1800`) |
-| `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD` |
+| `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD`, `LLM_SHADOW_SAMPLE_RATE` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
 | `NBASeasonSettings` | `current_season` | Derived by `current_nba_season()` |
 | `CatalogSettings` | Catalog/read thresholds: athlete freshness, player-log coverage and age, event matching/schedule age, and matchup-selection H2H/archetype thin sample minimums | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` (default `5`), `PLAYER_GAME_LOG_RECONCILIATION_DAYS` (default `3`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`), `SLATE_SCHEDULE_MAX_AGE_HOURS` (default `30`), `PLAYER_GAME_LOG_MAX_AGE_HOURS` (default `30`), `MATCHUP_SELECTION_H2H_MIN_GAMES` (default `1`), `MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES` (default `5`) |
@@ -258,6 +258,9 @@ Local and test startup is credential-free by default:
   otherwise. Without a key, deterministic NLP remains available.
 - `LLM_CONFIDENCE_THRESHOLD` (default `0.9`) is the parser confidence below
   which a query is routed to the LLM fallback.
+- `LLM_SHADOW_SAMPLE_RATE` (default `0`, off) is the fraction of confident
+  NLP parses also sent to the LLM in the background to measure disagreement;
+  see `docs/NLP_SYSTEM.md`. It has no effect while the fallback is disabled.
 - Firebase is optional until a protected request is made. The explicit
   `FIREBASE_ADMIN_DISABLED=true` bypass is accepted only in development,
   testing, or local environments.
