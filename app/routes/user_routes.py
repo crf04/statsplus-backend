@@ -405,14 +405,16 @@ def preview_target():
 @route_error_boundary("Failed to backtest the targets.")
 def backtest_targets():
     """
-    Report every one of the caller's Targets' seasons to date at once.
+    Report every one of the caller's Targets' cached seasons to date at once.
 
     One item per Target, in the order the Target list shows them: ``ok``
-    with the body the single Target's backtest returns, minus ``success``,
-    or ``error`` with the standard error object that route would have
-    returned, so one failing Target never blanks the others.  Every ``ok``
-    item comes from one Publication generation.  ``<int:target_id>`` only
-    matches integers, so this path never reaches the per-Target routes.
+    with the body the single Target's backtest returns, minus ``success``;
+    ``uncached`` when the result cache holds no entry for it, which the
+    client then reads through the single route; or ``error`` with the
+    standard error object, so one failing Target never blanks the others.
+    Nothing is computed here, and every ``ok`` item comes from one
+    Publication generation.  ``<int:target_id>`` only matches integers, so
+    this path never reaches the per-Target routes.
 
     Returns:
         JSON response with the season and one Backtest item per Target
@@ -420,7 +422,7 @@ def backtest_targets():
     backtested, cache_state = target_backtest_service.backtest_all(
         _authenticated_uid()
     )
-    # Every item's result-cache outcome, reduced by the service to one value.
+    # hit when every item is ok, miss when any is uncached, else '-'.
     g.targets_cache = cache_state
     return jsonify({'success': True, **backtested})
 

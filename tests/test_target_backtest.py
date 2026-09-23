@@ -2737,38 +2737,8 @@ def test_the_request_log_sees_hit_miss_and_bypass(
     ]
 
 
-# --- every Target's Backtest in one request ----------------------------------
 
-
-class RaisingLogs(FakeLogs):
-    """Game logs that fail for chosen opponents, as one Target's read may."""
-
-    def __init__(self, failures, **kwargs):
-        super().__init__(**kwargs)
-        self.failures = failures
-
-    def list_opponent_rows(self, season, opponent_team_id, *, publication_snapshot=None):
-        failure = self.failures.get(opponent_team_id)
-        if failure is not None:
-            raise failure
-        return super().list_opponent_rows(
-            season, opponent_team_id, publication_snapshot=publication_snapshot
-        )
-
-
-class AdvancingGenerationReader(GenerationSnapshotReader):
-    """A pointer pre-check answering one generation while the capture that
-    follows has already moved on to the next."""
-
-    def __init__(self, reads, generation, captured_generation):
-        super().__init__(reads, generation)
-        self.captured_generation = captured_generation
-
-    def snapshot(self, stream_keys, *, season, **_keywords):
-        self.snapshot_calls.append((tuple(stream_keys), season))
-        return SimpleNamespace(
-            reads=self.reads, generation=self.captured_generation
-        )
+# --- every Target's cached Backtest in one request ----------------------------
 
 
 def _three_targets(targets, *, uid=OWNER):
@@ -2781,84 +2751,164 @@ def _three_targets(targets, *, uid=OWNER):
     return [target["id"] for target in targets.list_targets(uid)]
 
 
-def test_every_backtest_matches_the_single_read_in_list_order(
+def _reads_so_far(service, reader):
+    """Everything a computation would touch: game logs, Diets, snapshots."""
+
+    return (
+        len(service.player_logs.opponent_calls),
+        len(service.player_logs.summary_calls),
+        len(service.player_diets.snapshots),
+        len(reader.snapshot_calls),
+    )
+
+
+def test_every_cached_backtest_is_ok_and_equals_the_single_read_in_list_order(
     targets, build_backtest
 ):
     listed = _three_targets(targets)
     _create(targets, uid=STRANGER)
-    service = build_backtest(**_two_games())
+    service, reader, client = _cached_service(build_backtest)
+    for target_id in listed:
+        assert service.backtest(OWNER, target_id)[1] == "miss"
+    before = _reads_so_far(service, reader)
 
     payload, state = service.backtest_all(OWNER)
 
-    assert state == "-"
+    assert state == "hit"
     assert payload["season"] == SEASON
     assert [item["target_id"] for item in payload["backtests"]] == listed
+    # Served from the entries alone: nothing computed, no snapshot captured,
+    # and one pointer-only generation read for the whole request.
+    assert _reads_so_far(service, reader) == before
+    assert len(reader.generation_calls) == len(listed) + 1
     for item in payload["backtests"]:
         assert set(item) == {"target_id", "status", "backtest"}
         assert item["status"] == "ok"
-        single, _ = service.backtest(OWNER, item["target_id"])
+        single, single_state = service.backtest(OWNER, item["target_id"])
+        assert single_state == "hit"
         assert item["backtest"] == single
         assert list(item["backtest"]) == list(single)
 
 
-def test_every_backtest_in_one_request_reads_one_captured_snapshot(
+def test_a_target_with_no_entry_is_uncached_and_never_computed(
     targets, build_backtest
 ):
-    _three_targets(targets)
-    seams = _two_games()
-    reader = FakePublicationReader()
+    bos, lal, okc = _three_targets(targets)
+    service, reader, client = _cached_service(build_backtest)
+    service.backtest(OWNER, lal)
+    before = _reads_so_far(service, reader)
+    sets_before = len(client.sets)
 
-    payload, _ = build_backtest(**seams, publication_reader=reader).backtest_all(
-        OWNER
-    )
+    payload, state = service.backtest_all(OWNER)
 
-    assert [item["status"] for item in payload["backtests"]] == ["ok"] * 3
-    # One capture for the response, not one per Target, so no two Backtests
-    # in it can come from two Publication generations.
-    assert len(reader.calls) == 1
-    assert seams["logs"].snapshots == ["snapshot-1"] * 6
-    assert seams["diets"].snapshots == ["snapshot-1"] * 3
+    assert state == "miss"
+    assert payload["backtests"][0] == {"target_id": bos, "status": "uncached"}
+    assert payload["backtests"][1]["status"] == "ok"
+    assert payload["backtests"][2] == {"target_id": okc, "status": "uncached"}
+    # No game-log, Diet, or snapshot read, and nothing filed.
+    assert _reads_so_far(service, reader) == before
+    assert len(client.sets) == sets_before
 
 
-def test_a_caller_with_no_targets_gets_an_empty_list_and_no_capture(
+def test_a_single_read_after_an_uncached_item_makes_the_next_batch_ok(
     targets, build_backtest
 ):
-    _create(targets, uid=STRANGER)
-    reader = FakePublicationReader()
+    created = _create(targets)
+    service, _, _ = _cached_service(build_backtest)
+    first, first_state = service.backtest_all(OWNER)
+    assert first["backtests"] == [{"target_id": created["id"], "status": "uncached"}]
+    assert first_state == "miss"
 
-    payload, state = build_backtest(publication_reader=reader).backtest_all(OWNER)
+    single, _ = service.backtest(OWNER, created["id"])
+    again, again_state = service.backtest_all(OWNER)
 
-    assert payload == {"season": SEASON, "backtests": []}
-    assert state == "-"
-    assert reader.calls == []
+    assert again_state == "hit"
+    assert again["backtests"] == [
+        {"target_id": created["id"], "status": "ok", "backtest": single}
+    ]
 
 
-def test_one_failing_target_is_isolated_while_the_others_succeed(
-    targets, build_backtest
+@pytest.mark.parametrize("wiring", ["flag_off", "no_redis", "no_generation_reader"])
+def test_a_disabled_cache_makes_every_item_uncached(
+    targets, build_backtest, wiring
 ):
-    from app.errors import ProviderUnavailableError
-
     listed = _three_targets(targets)
-    seams = _two_games()
-    logs = RaisingLogs(
-        {
-            LAL: RuntimeError("stored rows are wrong"),
-            BOS: ProviderUnavailableError("The game logs are unavailable."),
-        },
-        rows=seams["logs"].rows,
+    client = FakeRedis()
+    reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
+    seams = {
+        "flag_off": dict(
+            settings=RuntimeSettings(
+                environment="testing",
+                nba=NBASeasonSettings(current_season=SEASON),
+                matchup_scores=MatchupScoreSettings(),
+                cache=CacheSettings(target_backtest_enabled=False),
+            ),
+            redis_client=client,
+            publication_reader=reader,
+        ),
+        "no_redis": dict(publication_reader=reader),
+        "no_generation_reader": dict(
+            redis_client=client, publication_reader=FakePublicationReader()
+        ),
+    }[wiring]
+    service = build_backtest(**_two_games(), **seams)
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert state == "-"
+    assert payload["backtests"] == [
+        {"target_id": target_id, "status": "uncached"} for target_id in listed
+    ]
+    assert client.gets == []
+    assert reader.snapshot_calls == []
+    assert service.player_logs.opponent_calls == []
+
+
+@pytest.mark.parametrize("redis_client", [DeadRedis, RefusingRedis])
+def test_a_redis_read_error_is_uncached_not_a_failed_request(
+    targets, build_backtest, redis_client
+):
+    listed = _three_targets(targets)
+    service, reader, _ = _cached_service(
+        build_backtest, redis_client=redis_client()
     )
-    service = build_backtest(logs=logs, diets=seams["diets"])
 
-    payload, _ = service.backtest_all(OWNER)
+    payload, state = service.backtest_all(OWNER)
 
-    by_id = {item["target_id"]: item for item in payload["backtests"]}
-    assert [item["target_id"] for item in payload["backtests"]] == listed
-    bos, lal, okc = listed
-    assert by_id[okc]["status"] == "ok"
-    assert by_id[okc]["backtest"] == service.backtest(OWNER, okc)[0]
-    # An unexpected failure is what the single route's boundary returns for
-    # it: the safe operation_failed message, never the exception text.
-    assert by_id[lal] == {
+    assert state == "miss"
+    assert payload["backtests"] == [
+        {"target_id": target_id, "status": "uncached"} for target_id in listed
+    ]
+    assert reader.snapshot_calls == []
+    assert service.player_logs.opponent_calls == []
+
+
+def test_an_unusable_entry_is_isolated_to_its_own_target(
+    targets, build_backtest
+):
+    bos, lal, okc = _three_targets(targets)
+    service, _, client = _cached_service(build_backtest)
+    for target_id in (bos, lal, okc):
+        service.backtest(OWNER, target_id)
+    # One entry decodes as JSON but is missing the evidence a body needs.
+    lal_target = next(t for t in targets.list_targets(OWNER) if t["id"] == lal)
+    client.store[
+        backtest_cache_key(
+            lal_target,
+            _frozen_generation(),
+            season=SEASON,
+            settings=service.settings,
+        )
+    ] = zlib.compress(json.dumps({"season": SEASON}).encode("utf-8"))
+
+    payload, state = service.backtest_all(OWNER)
+
+    assert [item["status"] for item in payload["backtests"]] == [
+        "ok",
+        "error",
+        "ok",
+    ]
+    assert payload["backtests"][1] == {
         "target_id": lal,
         "status": "error",
         "error": {
@@ -2866,124 +2916,100 @@ def test_one_failing_target_is_isolated_while_the_others_succeed(
             "message": "Failed to backtest the target.",
         },
     }
-    # An application error keeps its own code and public message.
-    assert by_id[bos] == {
-        "target_id": bos,
-        "status": "error",
-        "error": {
-            "code": "provider_unavailable",
-            "message": "The game logs are unavailable.",
-        },
-    }
+    assert state == "-"
 
 
-def test_a_failure_before_any_target_is_read_fails_the_whole_request(
+def test_a_generation_read_failure_fails_the_whole_request(
     targets, build_backtest
 ):
     _three_targets(targets)
 
-    class FailingCapture(FakePublicationReader):
-        def snapshot(self, *args, **kwargs):
-            raise RuntimeError("publication tables are unreachable")
+    class FailingGeneration(GenerationSnapshotReader):
+        def generation(self, *args, **kwargs):
+            raise RuntimeError("publication pointers are unreachable")
+
+    service = build_backtest(
+        **_two_games(),
+        publication_reader=FailingGeneration(
+            _available_reads(), _frozen_generation()
+        ),
+        redis_client=FakeRedis(),
+    )
 
     with pytest.raises(RuntimeError):
-        build_backtest(
-            **_two_games(), publication_reader=FailingCapture()
-        ).backtest_all(OWNER)
+        service.backtest_all(OWNER)
 
 
-def test_every_backtest_shares_the_single_reads_cache_entries(
-    targets, build_backtest
-):
-    okc, lal = (
-        _create(targets, opponent="OKC")["id"],
-        _create(targets, opponent="LAL", qualifiers=(CORNER_THREE, LOW_RIM))["id"],
-    )
+def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):
+    _create(targets, uid=STRANGER)
     service, reader, client = _cached_service(build_backtest)
 
-    # The single route files OKC; the batch hits that same entry and files
-    # LAL, capturing one snapshot for its one miss.
-    single_okc, single_state = service.backtest(OWNER, okc)
-    assert single_state == "miss"
-    captures = len(reader.snapshot_calls)
     payload, state = service.backtest_all(OWNER)
 
-    assert state == "miss"
-    assert len(reader.snapshot_calls) == captures + 1
-    by_id = {item["target_id"]: item for item in payload["backtests"]}
-    assert by_id[okc]["backtest"] == single_okc
-    assert len(client.sets) == 2
-
-    # The single route now hits the entry the batch filed.
-    single_lal, lal_state = service.backtest(OWNER, lal)
-    assert lal_state == "hit"
-    assert single_lal == by_id[lal]["backtest"]
-
-    # Every item hitting is a hit, and a request that hits throughout
-    # captures no snapshot at all, exactly as a single hit captures none.
-    reads = len(service.player_logs.opponent_calls)
-    again, again_state = service.backtest_all(OWNER)
-    assert again_state == "hit"
-    assert again == payload
-    assert len(reader.snapshot_calls) == captures + 1
-    assert len(service.player_logs.opponent_calls) == reads
+    assert payload == {"season": SEASON, "backtests": []}
+    assert state == "-"
+    assert client.gets == []
+    assert reader.snapshot_calls == []
 
 
-def test_a_generation_advancing_before_the_capture_never_mixes_generations(
-    targets, build_backtest
+def test_every_cached_backtest_lists_on_one_request_scope_connection(
+    backtest_engine, backtest_settings, targets
 ):
-    okc = _create(targets, opponent="OKC")["id"]
-    _create(targets, opponent="LAL", qualifiers=(CORNER_THREE, LOW_RIM))
-    first = _frozen_generation()
-    service, _, client = _cached_service(build_backtest, generation=first)
-    service.backtest(OWNER, okc)
-    advanced = tuple(
-        (key, f"pub-2-{key}", 2, 2) for key in BACKTEST_PUBLICATION_STREAM_KEYS
-    )
-    service.publication_reader = AdvancingGenerationReader(
-        _available_reads(), first, advanced
+    listed = _three_targets(targets)
+    seams = _two_games()
+    service = TargetBacktestService(
+        targets=targets,
+        player_logs=seams["logs"],
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=backtest_settings,
+        engine=backtest_engine,
     )
 
-    payload, state = service.backtest_all(OWNER)
+    checkouts: list[int] = []
+    real_connect = backtest_engine.connect
 
-    # OKC hit the pre-check generation, but LAL's miss captured the next one;
-    # OKC is re-read under the captured generation rather than served from
-    # the older one, so both items are filed under the one generation.
-    assert state == "miss"
-    assert [item["status"] for item in payload["backtests"]] == ["ok", "ok"]
-    captured_keys = {
-        backtest_cache_key(
-            item["backtest"]["target"],
-            advanced,
-            season=SEASON,
-            settings=service.settings,
+    from unittest.mock import patch as mock_patch
+
+    with mock_patch.object(
+        backtest_engine,
+        "connect",
+        side_effect=lambda *a, **kw: checkouts.append(1) or real_connect(),
+    ), mock_patch.object(
+        type(targets), "list_targets", autospec=True, side_effect=AssertionError(
+            "the list opened its own session"
         )
-        for item in payload["backtests"]
-    }
-    assert captured_keys <= {key for key, _ in client.sets}
+    ):
+        payload, _ = service.backtest_all(OWNER)
+
+    assert len(checkouts) == 1
+    assert [item["target_id"] for item in payload["backtests"]] == listed
 
 
 @pytest.mark.parametrize(
-    ("states", "expected"),
+    ("statuses", "cache_enabled", "expected"),
     [
-        ([], "-"),
-        (["hit", "hit"], "hit"),
-        (["hit", "miss"], "miss"),
-        (["bypass", "miss"], "miss"),
-        (["hit", "bypass"], "bypass"),
-        (["-", "-"], "-"),
+        ([], True, "-"),
+        (["ok", "ok"], True, "hit"),
+        (["ok", "uncached"], True, "miss"),
+        (["uncached", "error"], True, "miss"),
+        (["ok", "error"], True, "-"),
+        (["uncached", "uncached"], False, "-"),
     ],
 )
-def test_the_request_cache_outcome_aggregates_every_item(states, expected):
+def test_the_request_cache_outcome_aggregates_every_item(
+    statuses, cache_enabled, expected
+):
     from app.services.target_backtest import aggregate_cache_state
 
-    assert aggregate_cache_state(states) == expected
+    assert aggregate_cache_state(statuses, cache_enabled=cache_enabled) == expected
 
 
 BATCH = {
     "season": SEASON,
     "backtests": [
         {"target_id": 7, "status": "ok", "backtest": BACKTESTED},
+        {"target_id": 8, "status": "uncached"},
         {
             "target_id": 9,
             "status": "error",
@@ -2996,13 +3022,13 @@ BATCH = {
 }
 
 
-def test_the_batch_route_returns_every_backtest_and_stamps_the_cache(
+def test_the_batch_route_returns_every_item_and_stamps_the_cache(
     client, authenticate, backtest_service, caplog
 ):
     import logging
 
     headers = authenticate()
-    backtest_service.backtest_all.return_value = (BATCH, "hit")
+    backtest_service.backtest_all.return_value = (BATCH, "miss")
 
     with caplog.at_level(logging.INFO, logger="app"):
         response = client.get("/api/user/targets/backtests", headers=headers)
@@ -3016,7 +3042,7 @@ def test_the_batch_route_returns_every_backtest_and_stamps_the_cache(
         for record in caplog.records
         if record.getMessage().startswith("request method=")
     ]
-    assert [line.split("targets_cache=")[1] for line in lines] == ["hit"]
+    assert [line.split("targets_cache=")[1] for line in lines] == ["miss"]
 
 
 def test_the_batch_route_returns_an_empty_list_for_no_targets(
@@ -3082,8 +3108,21 @@ def test_the_batch_items_equal_the_single_routes_bodies_over_http(
             },
         )
     listed = _three_targets(targets, uid="test-uid")
-    dependencies.target_backtest_service = build_backtest(**_two_games())
+    service, _, _ = _cached_service(build_backtest)
+    dependencies.target_backtest_service = service
     headers = authenticate()
+
+    cold = client.get("/api/user/targets/backtests", headers=headers).get_json()
+    assert [item["status"] for item in cold["backtests"]] == ["uncached"] * 3
+
+    singles = {}
+    for target_id in listed:
+        single = client.get(
+            f"/api/user/targets/{target_id}/backtest", headers=headers
+        )
+        assert single.status_code == 200
+        singles[target_id] = single.get_json()
+        del singles[target_id]["success"]
 
     response = client.get("/api/user/targets/backtests", headers=headers)
 
@@ -3092,169 +3131,5 @@ def test_the_batch_items_equal_the_single_routes_bodies_over_http(
     assert body["success"] is True
     assert [item["target_id"] for item in body["backtests"]] == listed
     for item in body["backtests"]:
-        single = client.get(
-            f"/api/user/targets/{item['target_id']}/backtest", headers=headers
-        )
-        assert single.status_code == 200
-        expected = single.get_json()
-        del expected["success"]
         assert item["status"] == "ok"
-        assert item["backtest"] == expected
-
-
-def test_every_backtest_lists_and_composes_on_one_request_scope_connection(
-    backtest_engine, backtest_settings, targets
-):
-    listed = _three_targets(targets)
-    _create(targets, uid=STRANGER)
-    seams = _two_games()
-    service = TargetBacktestService(
-        targets=targets,
-        player_logs=seams["logs"],
-        player_diets=seams["diets"],
-        statistic_catalog=StatisticCatalog.load_default(),
-        settings=backtest_settings,
-        engine=backtest_engine,
-    )
-
-    checkouts: list[int] = []
-    real_connect = backtest_engine.connect
-
-    from unittest.mock import patch as mock_patch
-
-    with mock_patch.object(
-        backtest_engine,
-        "connect",
-        side_effect=lambda *a, **kw: checkouts.append(1) or real_connect(),
-    ), mock_patch.object(
-        type(targets), "list_targets", autospec=True, side_effect=AssertionError(
-            "the list opened its own session"
-        )
-    ):
-        payload, _ = service.backtest_all(OWNER)
-
-    assert len(checkouts) == 1
-    assert [item["target_id"] for item in payload["backtests"]] == listed
-    assert [item["status"] for item in payload["backtests"]] == ["ok"] * 3
-
-
-# --- one Target's database error never aborts the others' transaction --------
-
-
-def _abort_transactions_like_postgres(engine):
-    """Make SQLite refuse statements after an error until a rollback.
-
-    PostgreSQL marks a transaction aborted on any statement error and
-    refuses every later statement but a ``ROLLBACK`` (to a savepoint or of
-    the whole transaction).  SQLite has no such state, so this reproduces it
-    with connection events: the per-Target savepoint is then the only thing
-    that lets the next Target's reads run on the shared connection.
-    """
-
-    from sqlalchemy import event
-
-    aborted = "emulated_postgres_aborted"
-
-    @event.listens_for(engine, "handle_error")
-    def _mark(context):
-        connection = context.connection
-        if connection is not None:
-            connection.info[aborted] = True
-
-    @event.listens_for(engine, "before_cursor_execute")
-    def _refuse(connection, _cursor, statement, *_args):
-        if connection.info.get(aborted) and not statement.lstrip().upper().startswith(
-            "ROLLBACK"
-        ):
-            raise RuntimeError(
-                "current transaction is aborted, commands ignored until end "
-                "of transaction block"
-            )
-
-    @event.listens_for(engine, "rollback_savepoint")
-    def _clear_savepoint(connection, *_args):
-        connection.info.pop(aborted, None)
-
-    @event.listens_for(engine, "rollback")
-    def _clear(connection):
-        connection.info.pop(aborted, None)
-
-
-class StatementLogs(FakeLogs):
-    """Game logs that run a statement on the request connection per read,
-    failing one opponent's with invalid SQL, as a broken query would."""
-
-    def __init__(self, failing_opponent, **kwargs):
-        super().__init__(**kwargs)
-        self.failing_opponent = failing_opponent
-
-    def list_opponent_rows(
-        self, season, opponent_team_id, *, publication_snapshot=None, connection=None
-    ):
-        from sqlalchemy import text
-
-        assert connection is not None
-        if opponent_team_id == self.failing_opponent:
-            connection.execute(text("SELECT * FROM no_such_backtest_table"))
-        connection.execute(text("SELECT 1")).scalar_one()
-        return super().list_opponent_rows(
-            season, opponent_team_id, publication_snapshot=publication_snapshot
-        )
-
-
-def test_the_emulated_abort_refuses_statements_until_a_savepoint_rolls_back(
-    backtest_engine,
-):
-    """The harness's control: without a savepoint the error blanks every
-    later statement; rolling back to one restores the connection."""
-
-    from sqlalchemy import text
-    from sqlalchemy.exc import OperationalError
-
-    _abort_transactions_like_postgres(backtest_engine)
-    with backtest_engine.connect() as connection:
-        with pytest.raises(OperationalError):
-            connection.execute(text("SELECT * FROM no_such_backtest_table"))
-        with pytest.raises(RuntimeError, match="transaction is aborted"):
-            connection.execute(text("SELECT 1"))
-        connection.rollback()
-
-        with pytest.raises(OperationalError):
-            with connection.begin_nested():
-                connection.execute(text("SELECT * FROM no_such_backtest_table"))
-        assert connection.execute(text("SELECT 1")).scalar_one() == 1
-
-
-def test_one_targets_database_error_leaves_every_later_target_ok(
-    backtest_engine, backtest_settings, targets
-):
-    bos, lal, okc = _three_targets(targets)
-    _abort_transactions_like_postgres(backtest_engine)
-    seams = _two_games()
-    service = TargetBacktestService(
-        targets=targets,
-        player_logs=StatementLogs(BOS, rows=seams["logs"].rows),
-        player_diets=seams["diets"],
-        statistic_catalog=StatisticCatalog.load_default(),
-        settings=backtest_settings,
-        engine=backtest_engine,
-    )
-
-    payload, _ = service.backtest_all(OWNER)
-
-    # BOS is listed first, so without its savepoint the aborted transaction
-    # would refuse every read LAL and OKC make after it.
-    assert [item["target_id"] for item in payload["backtests"]] == [bos, lal, okc]
-    assert payload["backtests"][0] == {
-        "target_id": bos,
-        "status": "error",
-        "error": {
-            "code": "operation_failed",
-            "message": "Failed to backtest the target.",
-        },
-    }
-    assert [item["status"] for item in payload["backtests"][1:]] == ["ok", "ok"]
-    for item in payload["backtests"][1:]:
-        assert [player["canonical_id"] for player in item["backtest"]["players"]] == [
-            LEBRON
-        ]
+        assert item["backtest"] == singles[item["target_id"]]

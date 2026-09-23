@@ -39,8 +39,8 @@ NBA, PBP, or DFS provider is reached.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from collections.abc import Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from logging import getLogger
 from math import isfinite
 from typing import Any, Callable, Protocol
@@ -186,49 +186,23 @@ _CACHE_KEY_PREFIX_TEMPLATE = "targets:backtest:v{schema}:"
 BACKTEST_FAILED_MESSAGE = "Failed to backtest the target."
 
 
-def _normalized_generation(
-    generation: Any,
-) -> tuple[tuple[str, str | None, int | None, int | None], ...] | None:
-    """One comparable form of a generation, whichever reader produced it."""
+def aggregate_cache_state(
+    statuses: Iterable[str], *, cache_enabled: bool = True
+) -> str:
+    """Reduce the every-Target read's item statuses to one request log value.
 
-    if generation is None:
-        return None
-    return tuple(tuple(entry) for entry in generation)
-
-
-@contextmanager
-def _target_savepoint(connection: Connection | None) -> Iterator[None]:
-    """Run one Target's reads inside a SAVEPOINT on the request connection.
-
-    Released on success, rolled back to on any failure so the request's
-    transaction stays usable for the next Target; the failure still
-    propagates to the caller's per-Target isolation.  Without a connection
-    (no engine) every read opens its own, so there is nothing to protect.
+    ``-`` when there are no Targets or the cache is disabled, ``miss`` when
+    any item is ``uncached``, ``hit`` when every item is ``ok``, and ``-``
+    otherwise (an ``error`` item with no ``uncached`` one).
     """
 
-    if connection is None:
-        yield
-        return
-    with connection.begin_nested():
-        yield
-
-
-def aggregate_cache_state(states: Iterable[str]) -> str:
-    """Reduce several Backtests' cache outcomes to one request log value.
-
-    ``hit`` when every item hit, ``miss`` when any item missed, otherwise the
-    single read's rule: ``bypass`` when any item bypassed, else the unbilled
-    ``-``.  Only items that produced a Backtest have an outcome; a request
-    with none is ``-``.
-    """
-
-    states = list(states)
-    if states and all(state == "hit" for state in states):
-        return "hit"
-    if "miss" in states:
+    statuses = list(statuses)
+    if not statuses or not cache_enabled:
+        return "-"
+    if "uncached" in statuses:
         return "miss"
-    if "bypass" in states:
-        return "bypass"
+    if all(status == "ok" for status in statuses):
+        return "hit"
     return "-"
 
 
@@ -404,137 +378,81 @@ class TargetBacktestService:
             )
 
     def backtest_all(self, firebase_uid: str) -> tuple[dict[str, Any], str]:
-        """Return every one of the caller's Targets with its season to date.
+        """Return every one of the caller's Targets' cached Backtests.
 
-        One item per Target in ``list_targets`` order: ``ok`` with the body
-        ``backtest`` returns for that Target, or ``error`` with the standard
-        error object the single read's route would have answered, so one
-        failing Target never blanks the rest.  A failure before any Target is
-        read -- the list itself, or the generation capture -- is raised.
+        Cache-only: this read never computes a Backtest and does no
+        per-Target database work.  It lists the Targets, reads the generation
+        pointer once, and looks each Target up under that one generation with
+        the single read's own cache key, so every ``ok`` item comes from one
+        generation and an entry either read files is a hit for the other.
+        Each item, in ``list_targets`` order, is ``ok`` with the body
+        ``backtest`` returns, ``uncached`` when no entry exists or the cache
+        is disabled or unreadable -- the client then reads that Target through
+        the single route, which computes and files it -- or ``error`` for a
+        failure confined to that Target.
 
-        Every ``ok`` item is composed from one Publication generation.  The
-        per-Target result cache is the single read's own: the same keys,
-        pre-checked against one pointer-only generation, so a request whose
-        every Target hits captures no snapshot at all.  The first miss
-        captures the one snapshot every miss is computed from; should that
-        capture have moved past the pre-checked generation, earlier hits are
-        discarded and re-read under the captured one, so hits and misses can
-        never mix generations.
+        Computing misses here was measured and rejected: done serially inside
+        one request, a cold list took about 3.5 to 3.8 times as long as the
+        page's four concurrent single reads.
 
-        The second element is the request's aggregate cache outcome (see
-        ``aggregate_cache_state``) for the caller to stamp on the log.
+        A failure before any Target is looked up -- the list, or the
+        generation read -- is raised.  The second element is the request's
+        ``targets_cache`` value (``aggregate_cache_state``).
         """
 
         season = self.settings.nba.current_season
-        with request_read_scope(self._engine) as (connection, session):
+        with request_read_scope(self._engine) as (_connection, session):
             if session is not None:
                 listed = self.targets.list_targets_in_session(
                     session, firebase_uid
                 )
             else:
                 listed = self.targets.list_targets(firebase_uid)
-            targets = [dict(target) for target in listed]
-            if not targets:
-                return {"season": season, "backtests": []}, "-"
-
-            results: list[tuple[dict[str, Any], str] | Exception | None] = [
-                None
-            ] * len(targets)
-            generation = self._cache_generation(season, session)
-            if generation is not None:
-                self._read_cached(targets, results, season, generation)
-
-            if any(result is None for result in results):
-                snapshot = self._publication_snapshot(season, session=session)
-                captured = _normalized_generation(
-                    getattr(snapshot, "generation", None)
-                )
-                if generation is not None and captured != generation:
-                    # The pointers advanced between the pre-check and the
-                    # capture: every hit read so far is the older generation.
-                    for index, result in enumerate(results):
-                        if isinstance(result, tuple):
-                            results[index] = None
-                    if captured is not None:
-                        self._read_cached(targets, results, season, captured)
-                for index, target in enumerate(targets):
-                    if results[index] is not None:
-                        continue
-                    try:
-                        # A database error inside one Target's reads would
-                        # otherwise abort the shared transaction (PostgreSQL
-                        # refuses every later statement until a rollback),
-                        # blanking every Target after it.  Its savepoint
-                        # rolls back only this Target's work.
-                        with _target_savepoint(connection):
-                            results[index] = self._compute(
-                                target,
-                                publication_snapshot=snapshot,
-                                connection=connection,
-                                session=session,
-                                cacheable=(
-                                    generation is not None
-                                    and target.get("id") is not None
-                                ),
-                            )
-                    except Exception as error:  # isolated per Target
-                        results[index] = error
+            generation = self._read_cache_generation(season, session)
 
         items = []
-        states = []
-        for target, result in zip(targets, results):
-            if isinstance(result, tuple):
-                body, state = result
-                states.append(state)
-                items.append(
-                    {"target_id": target.get("id"), "status": "ok", "backtest": body}
+        for target in listed:
+            target_id = target.get("id")
+            try:
+                evidence = (
+                    None
+                    if generation is None
+                    else self._cache_read(
+                        self._cache_key(target, season, generation)
+                    )
                 )
-            else:
-                # The error object below is logged and counted as the
-                # central handler would; this line names the Target, and an
-                # unexpected failure's traceback, which that one cannot.
+                if evidence is None:
+                    items.append({"target_id": target_id, "status": "uncached"})
+                    continue
+                items.append(
+                    {
+                        "target_id": target_id,
+                        "status": "ok",
+                        "backtest": self._cached_body(target, evidence),
+                    }
+                )
+            except Exception as error:  # isolated per Target
+                # The error object is logged and counted as the central
+                # handler would; this line adds the Target id and, for an
+                # unexpected failure, the traceback that one cannot.
                 logger.warning(
                     "Target backtest item failed target_id=%s",
-                    target.get("id"),
-                    exc_info=(
-                        None
-                        if isinstance(result, AppError)
-                        else (type(result), result, result.__traceback__)
-                    ),
+                    target_id,
+                    exc_info=None if isinstance(error, AppError) else error,
                 )
                 items.append(
                     {
-                        "target_id": target.get("id"),
+                        "target_id": target_id,
                         "status": "error",
                         "error": isolated_error_body(
-                            result, BACKTEST_FAILED_MESSAGE
+                            error, BACKTEST_FAILED_MESSAGE
                         ),
                     }
                 )
         return {"season": season, "backtests": items}, aggregate_cache_state(
-            states
+            (item["status"] for item in items),
+            cache_enabled=generation is not None,
         )
-
-    def _read_cached(
-        self,
-        targets: Sequence[Mapping[str, Any]],
-        results: list[Any],
-        season: str,
-        generation: Sequence[tuple[str, str | None, int | None, int | None]],
-    ) -> None:
-        """Fill every pending saved Target's slot that hits ``generation``."""
-
-        for index, target in enumerate(targets):
-            if results[index] is not None or target.get("id") is None:
-                continue
-            try:
-                evidence = self._cache_read(
-                    self._cache_key(target, season, generation)
-                )
-                if evidence is not None:
-                    results[index] = (self._cached_body(target, evidence), "hit")
-            except Exception as error:  # isolated per Target
-                results[index] = error
 
     def backtest_target(
         self,
@@ -579,7 +497,10 @@ class TargetBacktestService:
         route that wants the outcome on the request log.
         """
 
+        cache_state = "-"
         season = self.settings.nba.current_season
+        qualifiers = list(target["qualifiers"])
+        markets = self._stat_columns(qualifiers)
         # A saved Target is the only caller whose response may be served from
         # the shared Redis result cache (#279): ``backtest`` loads it through
         # the request scope, so a cache hit still echoes that fresh row,
@@ -600,50 +521,6 @@ class TargetBacktestService:
                 # advances no pointer, so it is not detected until the next
                 # generation.
                 return self._cached_body(target, evidence), "hit"
-        return self._compute(
-            target,
-            publication_snapshot=publication_snapshot,
-            connection=connection,
-            session=session,
-            cacheable=cache_key is not None,
-        )
-
-    @staticmethod
-    def _cached_body(
-        target: Mapping[str, Any], evidence: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        """Compose a hit's body in the construction order a miss returns."""
-
-        return {
-            "target": dict(target),
-            "season": evidence["season"],
-            "proxy": PROXY_NOTE,
-            "stat_columns": evidence["stat_columns"],
-            "summary": evidence["summary"],
-            "players": evidence["players"],
-            "games_considered": evidence["games_considered"],
-        }
-
-    def _compute(
-        self,
-        target: Mapping[str, Any],
-        *,
-        publication_snapshot: Any,
-        connection: Connection | None,
-        session: Session | None,
-        cacheable: bool,
-    ) -> tuple[dict[str, Any], str]:
-        """Compute one Backtest and, when ``cacheable``, file its evidence.
-
-        The evidence is filed under the generation of the snapshot it was
-        computed from, whoever captured that snapshot, so the single read and
-        the every-Target read file and find the same entries.
-        """
-
-        cache_state = "-"
-        season = self.settings.nba.current_season
-        qualifiers = list(target["qualifiers"])
-        markets = self._stat_columns(qualifiers)
         with ExitStack() as scope:
             # One connection for every read this request composes, exactly as
             # the Matchup and Selection reads share theirs; a caller already
@@ -706,7 +583,7 @@ class TargetBacktestService:
                     for stream in eligibility
                 )
             )
-            if cacheable:
+            if cache_key is not None:
                 if eligible:
                     # A pointer advance between the pre-check generation and
                     # this capture files the result under the captured
@@ -742,6 +619,22 @@ class TargetBacktestService:
             "players": players,
             "games_considered": games_considered,
         }, cache_state
+
+    @staticmethod
+    def _cached_body(
+        target: Mapping[str, Any], evidence: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Compose a hit's body in the construction order a miss returns."""
+
+        return {
+            "target": dict(target),
+            "season": evidence["season"],
+            "proxy": PROXY_NOTE,
+            "stat_columns": evidence["stat_columns"],
+            "summary": evidence["summary"],
+            "players": evidence["players"],
+            "games_considered": evidence["games_considered"],
+        }
 
     @classmethod
     def _summary(
@@ -805,18 +698,25 @@ class TargetBacktestService:
         contacted in that case and ``targets_cache`` stays ``-``.
         """
 
-        generation = self._cache_generation(season, session)
+        try:
+            generation = self._read_cache_generation(season, session)
+        except Exception:
+            # The pre-check must not turn a Redis-or-reader outage into a
+            # failed request: answer as the uncached read answers.
+            return None
         if generation is None:
             return None
         return self._cache_key(target, season, generation)
 
-    def _cache_generation(
+    def _read_cache_generation(
         self, season: str, session: Session | None
-    ) -> tuple[tuple[str, str | None, int | None, int | None], ...] | None:
+    ) -> Sequence[tuple[str, str | None, int | None, int | None]] | None:
         """Read the current generation pointer-only, or ``None`` when off.
 
-        ``None`` is the cache deciding it has nothing to say for this
-        request; see ``_saved_backtest_cache_key``.
+        ``None`` is the flag off, no Redis client, or no reader able to answer
+        a generation.  A reader failure is raised: the single read swallows
+        it as an uncached read, while the every-Target read reports it as the
+        request's failure.
         """
 
         if not self._cache_enabled:
@@ -825,19 +725,11 @@ class TargetBacktestService:
         generation_reader = getattr(reader, "generation", None)
         if not callable(generation_reader):
             return None
-        try:
-            generation = generation_reader(
-                _PUBLICATION_STREAM_KEYS,
-                season=season,
-                session=session,
-            )
-        except Exception:
-            # The pre-check must not turn a Redis-or-reader outage into a
-            # failed request: answer as the uncached read answers.
-            return None
-        if generation is None:
-            return None
-        return _normalized_generation(generation)
+        return generation_reader(
+            _PUBLICATION_STREAM_KEYS,
+            season=season,
+            session=session,
+        )
 
     def _cache_key(
         self,

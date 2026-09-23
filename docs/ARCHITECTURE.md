@@ -176,8 +176,9 @@ refused and the result is written nowhere, and stays `-` when the feature is
 off (no Redis client, or `TARGET_BACKTEST_CACHE_ENABLED=false`) — the Lab's
 Draft Target read never touches the cache, so it never stamps a decision.
 The every-Target read (`GET /api/user/targets/backtests`) stamps one value for
-all its items through `aggregate_cache_state`: `hit` when every item hit,
-`miss` when any missed, else `bypass` when any bypassed, else `-`.
+all its items through `aggregate_cache_state`: `hit` when every item is `ok`,
+`miss` when any is `uncached`, and `-` when there are no Targets or the cache
+is disabled.
 This line is
 the source for latency/regression triggers; the in-process telemetry deques
 are not. Unhandled catastrophic failures at shutdown skip after_request, so
@@ -2142,9 +2143,9 @@ share, binding the publication snapshot's session to it and passing it as
 that same checkout through `UserService.get_target_in_session` instead of the
 per-call `get_target`, so one saved backtest checks out exactly one pooled
 connection, and the per-call default remains for wirings without an engine.
-The Targets page backtests every saved Target -- one request per
-Target, or one every-Target request (see below) -- each against the same
-active publication but naming a different
+The Targets page backtests the saved Targets its every-Target read found
+uncached one at a
+time, each against the same active publication but naming a different
 opponent's player pool, so `PlayerGameLogRepository` additionally caches
 each player's decoded season rows under the publication that produced
 them: a Publication's projection is immutable once composed, so a later
@@ -2221,24 +2222,25 @@ game-log scan runs only when a reader expands one Target, so the Slate's own
 read stays the cost of one Slate plus the Matchups its Targets name.
 
 `backtest_all(uid)` serves the Targets page's every-Target read
-(`GET /api/user/targets/backtests`) on one `request_read_scope`: it lists the
-Targets on that checkout (`UserService.list_targets_in_session`), asks the
-pointer-only `generation()` once, and reads every Target's result-cache entry
-under that generation with the single route's own keys. A request whose every
-Target hits captures no snapshot. The first miss captures the one
-`_publication_snapshot` every miss is computed from and filed under; if that
-capture has moved past the pre-checked generation, the hits already read are
-discarded and re-read under the captured one, so no response mixes
-generations. Each Target's computation runs inside its own SAVEPOINT on the
-request connection (`_target_savepoint`), released on success and rolled back
-to on failure, so a database error in one Target -- which on PostgreSQL aborts
-the whole transaction -- never refuses the reads of the Targets after it; the
-cache reads touch only Redis and need none. Each Target's failure -- in its
-cache read or its computation -- is isolated into that item as `isolated_error_body` (`app/errors.py`) renders
-it: the same translation, logging, and failure count `route_error_boundary`
-and the central handler give the single route, with the unexpected case's
-traceback logged against the Target id. The list or the capture failing is
-still the whole request's standard error.
+(`GET /api/user/targets/backtests`) and never computes a Backtest. On one
+`request_read_scope` it lists the Targets (`UserService.list_targets_in_session`)
+and asks the pointer-only `generation()` once; after that it touches only
+Redis, looking every Target up under that one generation with the single
+route's own `backtest_cache_key`, so its `ok` items never mix generations and
+an entry either route files is a hit for the other. A Target with no entry --
+or any Target when the flag is off, there is no client, the reader answers no
+generation, or a Redis read fails -- is `uncached`, and the client reads it
+through the single route, which computes and files it. Computing misses inside
+the batch was built and measured first: done one after another in one request,
+twelve cold Targets took about 3.5 to 3.8 times as long as the page's four
+concurrent single reads, so serving hits only is what makes the batch never
+slower than the reads it replaces. A failure confined to one Target -- today
+only an entry that decodes but cannot compose a body -- is isolated into that
+item by `isolated_error_body` (`app/errors.py`), with the translation, logging,
+and failure count `route_error_boundary` and the central handler give the
+single route. The list or the generation read failing is the whole request's
+standard error; unlike the single route's pre-check, the batch does not treat a
+generation-read failure as uncached.
 
 ### Target preview (#253)
 

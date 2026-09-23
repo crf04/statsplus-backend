@@ -3093,11 +3093,13 @@ GET /api/user/targets/backtests
 Authorization: Bearer <firebase-id-token>
 ```
 
-Returns the [Backtest](#backtest-one-target-over-the-season-to-date) of every
-one of the caller's Targets in one request, so the Targets page no longer asks
-for them one at a time. It takes no parameters and covers all of the caller's
-Targets. The path never reaches `/api/user/targets/<id>`, whose id only matches
-integers.
+Returns, in one request, every one of the caller's
+[Backtests](#backtest-one-target-over-the-season-to-date) already held in the
+per-Target result cache for the current Publication generation. It never
+computes a Backtest: a Target that is not cached comes back `uncached`, and the
+client reads it through `GET /api/user/targets/<id>/backtest` as before. It
+takes no parameters and covers all of the caller's Targets. The path never
+reaches `/api/user/targets/<id>`, whose id only matches integers.
 
 ```json
 {
@@ -3112,6 +3114,7 @@ integers.
         "message": "Failed to backtest the target."
       }
     },
+    {"target_id": 8, "status": "uncached"},
     {
       "target_id": 7,
       "status": "ok",
@@ -3121,7 +3124,7 @@ integers.
         "proxy": "Outcomes are box-score proxies for the Qualifier slices, ...",
         "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
         "summary": {"players": 1, "games": 2, "columns": {"...": "..."}},
-        "players": ["..."],
+        "players": [{"canonical_id": 2544, "name": "LeBron James", "...": "..."}],
         "games_considered": {"played": 2, "kept": 2}
       }
     }
@@ -3137,32 +3140,39 @@ integers.
 - `status: "ok"` carries `backtest`: exactly the body
   `GET /api/user/targets/<id>/backtest` returns for that Target, minus
   `success` -- the same keys in the same order, including `games_considered`.
-- `status: "error"` isolates a failure to that Target, so one failing Target
-  never blanks the others. `error` is the standard `{code, message}` object
-  (plus `details` where that error defines them) the single route would have
-  answered for the same failure: an application error keeps its own code and
-  message, and anything unexpected is `operation_failed` with
-  `"Failed to backtest the target."`, its detail logged and never returned.
-- Every `ok` item is composed from one Publication generation, so the
-  Backtests in one response never mix generations.
+- `status: "uncached"` means the result cache holds no entry for that Target in
+  the current generation, or the cache is unavailable (disabled, no Redis, or a
+  Redis read error). Read that Target through the single route, which computes
+  and caches it; the next batch then returns it `ok`.
+- `status: "error"` isolates a failure to that Target in the standard
+  `{code, message}` shape, so one failing Target never blanks the others.
+  Today the only such failure is a stored entry that cannot compose a body,
+  reported as `operation_failed`, `"Failed to backtest the target."`.
+- The generation pointer is read once and every Target is looked up under it,
+  so the `ok` items never mix generations.
 
-**Cache.** Each Target is served through the same shared Redis result cache as
-the single route, under the same keys and invalidation, so an entry either
-route files is a hit for the other. A request whose every Target hits reads no
-publication payload at all. The request log's `targets_cache` is `hit` when
-every `ok` item hit, `miss` when any missed, else `bypass` when any bypassed,
-else `-`.
+**Why cache-only.** A version that computed misses inside the batch did so one
+after another, and on a cold cache measured about 3.5 to 3.8 times slower than
+the page's four concurrent single reads. Serving only hits keeps the batch a
+strict improvement: a warm list costs one request, and a cold list costs one
+cheap request plus exactly the previous per-Target reads.
+
+**Cache.** Each lookup uses the single route's key and invalidation, so an
+entry the single route files is a hit here. The request log's `targets_cache`
+is `hit` when every item is `ok`, `miss` when any is `uncached`, and `-` when
+there are no Targets or the cache is disabled.
 
 **Empty state.** A caller with no Targets gets `200` with `"backtests": []`.
 
 **Errors.** `401 authentication_required` for an unauthenticated caller. A
-failure before any Target is read -- the Target list or the generation capture
--- fails the whole request with the standard error shape, e.g. `500
-operation_failed` with `"Failed to backtest the targets."`.
+failure before any Target is looked up -- the Target list or the generation
+read -- fails the whole request with the standard error shape: `500
+operation_failed`, `"Failed to backtest the targets."`.
 
 **Compatibility.** The single-Target route is unchanged and remains the Target
-detail page's read. A client deployed ahead of this route gets `404` for the
-path and can fall back to the per-Target route.
+detail page's read and the read for every `uncached` item. A client deployed
+ahead of this route gets `404` for the path and can fall back to the per-Target
+route for every Target.
 
 #### Preview a Draft Target
 
