@@ -254,8 +254,10 @@ Local and test startup is credential-free by default:
 - `DATABASE_URL` defaults to `sqlite:///nba_play_types.db`.
 - Redis remains optional; a failed connection disables caching.
 - OpenAI fallback is enabled only when both `ENABLE_LLM_FALLBACK` is truthy
-  and `OPENAI_API_KEY` is present. Without a key, deterministic NLP remains
-  available.
+  and `OPENAI_API_KEY` is present; `NLService` builds no OpenAI client
+  otherwise. Without a key, deterministic NLP remains available.
+- `LLM_CONFIDENCE_THRESHOLD` (default `0.9`) is the parser confidence below
+  which a query is routed to the LLM fallback.
 - Firebase is optional until a protected request is made. The explicit
   `FIREBASE_ADMIN_DISABLED=true` bypass is accepted only in development,
   testing, or local environments.

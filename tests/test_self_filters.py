@@ -14,6 +14,7 @@ from app.models.game_logs import SelfFilter
 # Add the app directory to the path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+from app.config.settings import load_settings
 from app.services.nl_query.parser import BaseQueryParser
 
 
@@ -34,10 +35,15 @@ class TestSelfFilters(unittest.TestCase):
         }
         mock_player_df = pd.DataFrame(player_data)
         
+        # Pin the routing threshold to its default so a developer .env
+        # carrying another LLM_CONFIDENCE_THRESHOLD cannot move these cases.
+        with patch.dict(os.environ, {"LLM_CONFIDENCE_THRESHOLD": "0.9"}):
+            settings = load_settings()
+
         with patch('pandas.read_sql', return_value=mock_player_df):
             with patch('nba_api.stats.static.teams.get_teams', return_value=[]):
-                self.parser = BaseQueryParser(self.mock_engine)
-    
+                self.parser = BaseQueryParser(self.mock_engine, settings=settings)
+
     def test_basic_scoring_filters(self):
         """Test basic scoring pattern filters"""
         test_cases = [
