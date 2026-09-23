@@ -40,8 +40,8 @@ ENDPOINT_SCHEMAS = {
             },
             "rank_filter": {
                 "type": "list",
-                "description": "Ranking numbers corresponding to teams_against filters",
-                "example": ["10", "-5"]
+                "description": "One rank per teams_against filter: N (first N), -N (last N), or 'low,high' (inclusive ranks, 1 = highest value)",
+                "example": ["10", "-5", "11,20"]
             },
             "date_filter": {
                 "type": "str",

@@ -21,6 +21,10 @@ from app.startup_schema_guard import (
     verify_schema_is_current,
 )
 
+# These tests exercise the migration code itself, so they never use the
+# migrated-template shortcut from tests/conftest.py.
+pytestmark = pytest.mark.real_migrations
+
 
 def _production_settings(url: str) -> RuntimeSettings:
     return RuntimeSettings(

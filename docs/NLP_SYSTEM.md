@@ -8,15 +8,15 @@ The backend turns free-text NBA stat questions into structured API parameters. I
 2. `app/routes/nl_routes.py` requires Firebase auth when Firebase Admin is configured.
 3. `NLService.process_query()` validates the query and runs `BaseQueryParser`.
 4. The parser returns query components and confidence metadata.
-5. If the confidence breakdown recommends LLM fallback and `OPENAI_API_KEY` is configured, `LLMService` parses the query with the optimized prompt.
-6. `NLService` formats the response for the frontend. LLM responses may be merged with NLP player context and marked as `hybrid`.
+5. If the parser's confidence is below `LLM_CONFIDENCE_THRESHOLD` and the fallback is enabled (`ENABLE_LLM_FALLBACK` with `OPENAI_API_KEY`), `LLMService` parses the query into a strict structured-output schema, with the players the parser already resolved as context.
+6. `NLService` resolves every player name in the LLM result against the parser's roster, then formats the response for the frontend. LLM results are marked `hybrid`.
 
 ## Main modules
 
 - `app/services/nl_service.py`: Orchestrates NLP parsing, LLM fallback, and response formatting.
 - `app/services/nl_query/parser.py`: Extracts player/team names, date ranges, locations, opponent filters, stat thresholds, game counts, seasons, and intent.
-- `app/services/llm_service.py`: Wraps OpenAI calls, prompt loading, retries, and JSON response handling.
-- `prompts/system_prompt_optimized.txt`: LLM parsing instructions.
+- `app/services/llm_service.py`: Wraps OpenAI structured-output calls (`LLMParsedQuery`), prompt loading, and retries.
+- `prompts/system_prompt_optimized.txt`: LLM parsing instructions (field meanings, opponent filter vocabulary, rank sign). The output shape comes from the schema, not the prompt.
 
 ## Response shape
 
@@ -50,7 +50,8 @@ The backend turns free-text NBA stat questions into structured API parameters. I
 }
 ```
 
-`parsed_by` can be `nlp`, `llm`, or `hybrid`.
+`parsed_by` can be `nlp`, `llm`, or `hybrid`. The current service emits `nlp`
+for the deterministic path and `hybrid` for an LLM parse.
 
 ## spaCy and aliases
 
@@ -84,10 +85,24 @@ LLM_MAX_TOKENS=512
 LLM_TIMEOUT=8.0
 LLM_MAX_RETRIES=1
 ENABLE_LLM_FALLBACK=True
-LLM_CONFIDENCE_THRESHOLD=0.7
+LLM_CONFIDENCE_THRESHOLD=0.9
 ```
 
-If the OpenAI client cannot initialize or a call fails, the service logs the failure and returns the NLP result when available.
+`ENABLE_LLM_FALLBACK=false` disables the fallback even when a key is set.
+`LLM_CONFIDENCE_THRESHOLD` is the parser confidence below which a query is
+sent to the LLM; raising it sends more traffic to the LLM. A query whose
+opponent-filter keywords produced no opponent filter is always sent.
+
+The model must fill the `LLMParsedQuery` schema (strict JSON schema with
+opponent-filter and operator enums), so a reply either validates or fails.
+Player names are free text in the schema and are resolved through
+`BaseQueryParser.resolve_player_name`, the same alias, exact, last-name, and
+fuzzy matching the parser uses. An unresolved main player falls back to the
+NLP name; unresolved teammates are dropped, so the response never names a
+player the roster does not know.
+
+If the OpenAI client cannot initialize, a call fails, or the model refuses or
+returns no parse, the service logs the failure and returns the NLP result.
 The default fallback budget is one eight-second attempt. Natural-language
 parsing is optional enrichment, so retrying inside a public request must not
 hold the deterministic result for tens of seconds.

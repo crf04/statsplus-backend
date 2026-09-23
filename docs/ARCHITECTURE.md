@@ -6,6 +6,42 @@ This document records the interfaces and seams that are expensive to rediscover 
 
 `app.create_app()` constructs the Flask application, initializes optional dependencies, registers JSON error handlers, and attaches blueprints. `run.py` is the local entry point; Gunicorn imports `wsgi:app` in production.
 
+### Pre-forking process model
+
+The Procfile runs `gunicorn --config gunicorn.conf.py wsgi:app`. The committed
+config keeps the worker settings (4 gthread workers × 2 threads, 180-second
+timeout, 5-second keep-alive, recycling after 1000 ± 100 requests, bind
+`0.0.0.0:$PORT`) and sets `preload_app`: the master imports `wsgi:app` once,
+building the whole dependency graph, including the natural-language parser
+and its spaCy model, and every worker is forked from it. Workers share those
+pages copy-on-write, and a worker recycled by `max_requests` is forked in
+well under a second instead of rebuilding the app. Before the first fork,
+`when_ready` closes the master's pooled database connections and calls
+`gc.freeze()`, moving the boot-time objects into the collector's permanent
+generation so worker collections never write to (and copy) shared pages.
+Gunicorn's control socket is disabled so the master stays single-threaded
+whenever it forks.
+
+State that must not cross `fork` is owned per worker:
+
+| Resource | Handling |
+| --- | --- |
+| Durable refresh dispatcher | The config sets `STATSPLUS_DEFER_DATA_REFRESH_DISPATCHER=1` before the app loads, so the master constructs `DataRefreshJobService` with `defer_start=True` (no recovery dispatch, no poller thread, no claimed lease). `post_fork` calls `start_dispatcher()` in each worker, which generates that process' lease owner (`uuid:pid:thread`) and then dispatches and starts the poller as construction does elsewhere. A service whose dispatcher started before a fork refuses to start in the child. |
+| SQLAlchemy engine pool | `post_fork` calls `engine.dispose(close=False)`, so a worker never reuses a DBAPI connection opened in the master. |
+| Redis client | No action: redis-py's connection pool records its pid and resets itself on first use in a new process. |
+| Firebase Admin | No action: `initialize_app` parses credentials without I/O or threads; the auth client and its HTTP session are built lazily in the worker that verifies a token. |
+| `ThreadPoolExecutor`s (refresh jobs, DFS snapshot cache, per-call provider pools) | No action: executors start threads only on `submit`, which the master never reaches. |
+
+`run.py`, the test app factory, scripts, and the `projection-collector`
+process never set the deferral variable and keep starting the dispatcher when
+the service is constructed; `post_fork` removes it from each worker's
+environment so processes a worker starts do the same.
+
+Trade-off: an import-time or app-factory failure now stops the master, and so
+the deploy, rather than failing one worker at a time; and code or settings
+changes still need a full restart, because recycled workers inherit the
+master's app instead of re-importing it.
+
 Blueprints are intentionally thin HTTP adapters:
 
 | Seam | Modules | Responsibility |
@@ -44,7 +80,7 @@ The app reads from five distinct sources:
 | NBA LiveData | `app.providers.nba_live_data.NBALiveDataBoxscoreAdapter` → shared retrying session → NBA-hosted LiveData S3 | Fail-closed traditional box-score fallback for governed ledger games whose primary PBP evidence is malformed; accepted composite observations retain both source documents |
 | RotoWire injuries | gated `app.providers.rotowire.RotoWireInjuryProvider` → injected `requests.Session` | Disabled by default; one current JSON observation only after both the feature and permission gates are explicit |
 
-Redis is an optional cache. Connection failure disables caching without blocking startup. After startup, a Redis connection or timeout error opens a per-process breaker in `NBAGameCache` (`REDIS_FAILURE_COOLDOWN_SECONDS`, 30 s) during which `get`/`set`/`delete` bypass Redis instead of paying the socket timeout on every call; `get_cache_stats()` reports `circuit_open`. OpenAI is an optional fallback for low-confidence natural-language parsing. Firebase is optional for local development but should be configured in production.
+Redis is an optional cache. Connection failure disables caching without blocking startup. After startup, a Redis connection or timeout error opens a per-process breaker in `NBAGameCache` (`REDIS_FAILURE_COOLDOWN_SECONDS`, 30 s) during which `get`/`set`/`delete` bypass Redis instead of paying the socket timeout on every call; `get_cache_stats()` reports `circuit_open`. OpenAI is an optional structured-output fallback for natural-language parsing below `LLM_CONFIDENCE_THRESHOLD`. Firebase is optional for local development but should be configured in production.
 
 The default database URL is `sqlite:///nba_play_types.db`, relative to the current working directory. Run commands from the repository root or set an absolute `DATABASE_URL`.
 
@@ -2379,7 +2415,8 @@ lease on completion/failure. The app factory creates one coordinator per app
 with the closed registry for `update_database`, both PBP refreshes,
 `fetch_players_with_teams`, and `fetch_players`; operation names, not callbacks,
 are persisted. A bounded dispatcher wakes immediately after enqueue and polls
-every 15 seconds (`poll_interval`) per process for restart and expired-lease
+every 15 seconds (`poll_interval`) per process (per Gunicorn worker; the
+pre-forking master defers it, see "Pre-forking process model") for restart and expired-lease
 recovery; the 60-second lease is renewed by a separate 5-second heartbeat
 while a handler runs, so the poll cadence bounds only recovery latency, not
 lease health. The service takes an injectable executor and clock;
@@ -3341,7 +3378,18 @@ would append one observation per market, so an unchanged repeat kept growing
 the audit. Contradicted evidence therefore never enters a canonical comparison
 in any market order, and repeated markets, repeated board reads, and a repeat
 that lists the same markets in another order all append no further decision and
-leave the same durable row. Later evidence that disagrees with
+leave the same durable row. A repeat that would change nothing writes nothing
+either: the automatic mapping row is updated only when its state, activity,
+conflict columns, or any canonical or provider column it records would change —
+each column is compared, not the idempotency fingerprint — so re-reading an
+unchanged board issues only the identity lock, the governing re-reads, and the
+latest-decision lookup, plus the observation-clock update when the snapshot is
+newer. `last_seen_at` is an activity marker accurate to
+`MAPPING_LAST_SEEN_TOUCH_INTERVAL` (15 minutes, the interval a user's
+`last_login` uses), not a per-read log: it moves with any real change to the
+row, and an unchanged observation rewrites it only once the stored value is at
+least that old, measured by the repository's persistence clock. Event mappings
+follow the same rule with the same interval. Later evidence that disagrees with
 an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
 approve/override/reject/clear actions require an identity and reason; approve
@@ -3417,8 +3465,13 @@ established or queue a conflict between two canonical athletes that were never
 claimed at the same time. A read contemporaneous with the governing instant is
 not from before it, so replaying one stays idempotent, and a caller that
 reports no observation instant is never fenced.
-The per-identity lock row is inserted inside a savepoint that is always left
-before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
+The identity transaction first selects the per-identity lock row for update and
+inserts it only when it is missing, so a steady-state read never issues a
+failing insert. The lock row stays locked until the transaction ends, so the
+observation clock read with it is reused for the fence rather than read again.
+A missing row is inserted inside a savepoint that is always left
+before a duplicate `IntegrityError` is handled — a concurrent transaction may
+create the row between the select and the insert — so PostgreSQL rolls back the
 failed savepoint instead of leaving the surrounding transaction aborted;
 `tests/integration/test_postgres.py` covers that concurrency path against a
 real database when `TEST_DATABASE_URL` is set. The process-local identity lock
@@ -3480,8 +3533,10 @@ provider identity, an append-only `event_mapping_decisions` audit log, typed
 suppressions, and a per-identity lock row carrying that identity's observation
 clock. Governance is the one established for athletes and behaves identically:
 active-mapping precedence, append-only decisions suppressed only for a repeated
-*consecutive* observation, per-identity serialization with the lock row inserted
-inside a savepoint that is left before a duplicate `IntegrityError` is handled,
+*consecutive* observation, per-identity serialization that selects the lock row
+for update and inserts a missing one inside a savepoint that is left before a
+duplicate `IntegrityError` is handled, no mapping write for an unchanged repeat
+with a throttled `last_seen_at`,
 `observed_at` fencing of a read taken before the newest governing instant, and
 one documented failure type — `EventMappingPersistenceError`, defined in
 `app.services.event_mapping_errors` — for every repository read and operator
@@ -4489,7 +4544,8 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   `connect_timeout_seconds`) only to Postgres engines, so the worst-case
   Postgres connection count is `processes × (pool_size + max_overflow)` — with
   the Procfile's 4 gunicorn workers and the documented defaults, `4 × (3 + 4)
-  = 28`. Scripts that call `create_engine` directly
+  = 28`; the pre-forking master closes the connections it opened while
+  building the app before it forks the first worker. Scripts that call `create_engine` directly
   (`scripts/migrate.py`, `scripts/nightly_refresh.py`, and similar
   one-shot/operator scripts) are not governed by these settings.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.
