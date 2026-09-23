@@ -361,6 +361,9 @@ class LLMSettings(BaseModel):
     max_retries: int = Field(default=1, ge=1)
     enable_fallback: bool = False
     confidence_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
+    # Fraction of confident NLP parses also sent to the LLM in the background
+    # to measure disagreement; 0 disables shadow sampling.
+    shadow_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 def _normalize_cors_origin(value: Any) -> str:
@@ -855,6 +858,7 @@ def _build_settings(
         # even when an old .env file still says ENABLE_LLM_FALLBACK=true.
         enable_fallback=requested_llm_fallback and bool(api_key),
         confidence_threshold=reader.decimal("LLM_CONFIDENCE_THRESHOLD", 0.9),
+        shadow_sample_rate=reader.decimal("LLM_SHADOW_SAMPLE_RATE", 0.0),
     )
     cors_origins = reader.raw("CORS_ALLOWED_ORIGINS")
     cors = _validated_model(
