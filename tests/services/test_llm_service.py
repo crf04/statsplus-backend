@@ -1,44 +1,73 @@
-"""Deterministic tests for LLM service helpers."""
+"""Deterministic tests for the structured-output LLM service."""
 
 from types import SimpleNamespace
 
-from app.services.llm_service import LLMConfig, LLMService
+import pytest
+
+from app.services.llm_service import (
+    LLMConfig,
+    LLMError,
+    LLMParsedQuery,
+    LLMService,
+)
+
+
+def parsed_query(**overrides) -> LLMParsedQuery:
+    fields = {
+        "player_name": None,
+        "team_name": None,
+        "game_count": None,
+        "date_range": None,
+        "location": None,
+        "minutes_filter": None,
+        "self_filters": [],
+        "opponent_filters": [],
+        "players_on": [],
+        "players_off": [],
+        "season": None,
+        "intent": "game_logs",
+        "time_period": None,
+        "confidence": 0.9,
+    }
+    fields.update(overrides)
+    return LLMParsedQuery(**fields)
 
 
 class FakeCompletions:
-    """Minimal stand-in for OpenAI chat completions."""
+    """Stand-in for ``client.chat.completions`` with the structured parse API.
 
-    def __init__(self, content: str):
-        self.content = content
-        self.last_kwargs = None
+    Each queued outcome is a message (parsed/refusal) or an exception.
+    """
 
-    def create(self, **kwargs):
-        self.last_kwargs = kwargs
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content=self.content),
-                )
-            ],
-            usage=None,
-            model=kwargs["model"],
-        )
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return SimpleNamespace(choices=[SimpleNamespace(message=outcome)])
 
 
-def make_service(content: str) -> LLMService:
+def message(parsed=None, refusal=None):
+    return SimpleNamespace(parsed=parsed, refusal=refusal)
+
+
+def make_service(*outcomes, model="gpt-4o-mini", max_retries=1) -> LLMService:
     service = LLMService.__new__(LLMService)
     service.config = SimpleNamespace(
-        model="gpt-4o-mini",
+        model=model,
         temperature=0,
         max_tokens=512,
         timeout=10.0,
-        max_retries=1,
+        max_retries=max_retries,
     )
     service.client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions(content))
+        chat=SimpleNamespace(completions=FakeCompletions(*outcomes))
     )
-    service.player_aliases = {}
-    service.team_aliases = {}
+    service.system_prompt = "Parse NBA queries."
     return service
 
 
@@ -58,43 +87,103 @@ def test_load_system_prompt_falls_back_for_missing_file():
     assert "NBA statistics queries" in prompt
 
 
-def test_query_llm_parses_valid_json_response():
-    service = make_service('{"player_name": "LeBron James", "confidence": 0.9}')
+def test_the_service_loads_the_production_prompt(monkeypatch):
+    from app.config.settings import load_settings
 
-    result = service.query_llm("LeBron last 10 games", system_prompt="Return JSON")
-    request = service.client.chat.completions.last_kwargs
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    client = SimpleNamespace()
 
-    assert result["success"] is True
-    assert result["content"]["player_name"] == "LeBron James"
-    assert result["content"]["confidence"] == 0.9
-    assert result["attempt"] == 1
+    service = LLMService(settings=load_settings(), client=client)
+
+    assert service.client is client
+    assert "opponent_filters" in service.system_prompt
+
+
+def test_parse_query_requests_the_strict_schema_and_returns_the_parse():
+    expected = parsed_query(player_name="LeBron James", game_count=10)
+    service = make_service(message(parsed=expected))
+
+    result = service.parse_query("LeBron last 10 games")
+    request = service.client.chat.completions.calls[0]
+
+    assert result is expected
+    assert request["response_format"] is LLMParsedQuery
+    assert request["messages"][-1] == {
+        "role": "user", "content": "LeBron last 10 games"
+    }
     assert request["max_tokens"] == 512
     assert request["temperature"] == 0
     assert "max_completion_tokens" not in request
 
 
-def test_query_llm_marks_invalid_json_response():
-    service = make_service("not-json")
+def test_resolved_players_are_added_to_the_system_prompt():
+    service = make_service(message(parsed=parsed_query()))
 
-    result = service.query_llm("LeBron last 10 games", system_prompt="Return JSON")
-
-    assert result["success"] is True
-    assert result["content"]["parsing_error"] is True
-    assert result["content"]["raw_response"] == "not-json"
-
-
-def test_query_llm_uses_gpt5_completion_token_parameter():
-    service = make_service('{"player_name": "Giannis Antetokounmpo"}')
-    service.config.model = "gpt-5-nano"
-
-    result = service.query_llm(
-        "Giannis against stingy perimeter defenses",
-        system_prompt="Return JSON",
+    service.parse_query(
+        "steph without klay",
+        {"player_name": "Stephen Curry", "players_off": ["Klay Thompson"]},
     )
+    system = service.client.chat.completions.calls[0]["messages"][0]["content"]
 
-    request = service.client.chat.completions.last_kwargs
-    assert result["success"] is True
+    assert system.startswith("Parse NBA queries.")
+    assert "RESOLVED PLAYERS" in system
+    assert "Main player: Stephen Curry" in system
+    assert "Players off court: Klay Thompson" in system
+
+
+def test_no_player_context_leaves_the_prompt_unchanged():
+    service = make_service(message(parsed=parsed_query()))
+
+    service.parse_query("top 5 defenses", {})
+    system = service.client.chat.completions.calls[0]["messages"][0]["content"]
+
+    assert system == "Parse NBA queries."
+
+
+def test_gpt5_models_use_the_completion_token_parameter():
+    service = make_service(message(parsed=parsed_query()), model="gpt-5-nano")
+
+    service.parse_query("Giannis against stingy perimeter defenses")
+    request = service.client.chat.completions.calls[0]
+
     assert request["max_completion_tokens"] == 512
     assert request["reasoning_effort"] == "minimal"
     assert "max_tokens" not in request
     assert "temperature" not in request
+
+
+def test_a_refusal_is_an_error():
+    service = make_service(message(refusal="I can't help with that."))
+
+    with pytest.raises(LLMError, match="refused"):
+        service.parse_query("anything")
+
+
+def test_a_missing_parse_is_an_error():
+    service = make_service(message(parsed=None))
+
+    with pytest.raises(LLMError, match="no structured output"):
+        service.parse_query("anything")
+
+
+def test_a_transport_failure_is_retried_within_the_budget(monkeypatch):
+    monkeypatch.setattr("app.services.llm_service.time.sleep", lambda _: None)
+    expected = parsed_query(player_name="Stephen Curry")
+    service = make_service(
+        RuntimeError("timeout"), message(parsed=expected), max_retries=2
+    )
+
+    assert service.parse_query("curry") is expected
+    assert len(service.client.chat.completions.calls) == 2
+
+
+def test_exhausted_attempts_raise_with_the_last_error():
+    service = make_service(RuntimeError("openai unreachable"))
+
+    with pytest.raises(LLMError, match="openai unreachable"):
+        service.parse_query("curry")
+
+
+def test_the_schema_rejects_an_unknown_opponent_filter():
+    with pytest.raises(ValueError):
+        parsed_query(opponent_filters=[{"filter_type": "Vibes", "rank": 5}])

@@ -1318,7 +1318,7 @@ Query parameters:
 | `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145) |
-| `rank_filter[]` | No | Rank for each opponent filter; positive means top defenses, negative means weakest |
+| `rank_filter[]` | No | One rank per opponent filter: `N` keeps the N teams with the highest value of the filter's metric, `-N` the N with the lowest, and `low,high` the inclusive ranks low through high, rank 1 being the highest value (see Ranking convention). A range needs `1 <= low <= high`; anything else is rejected with `400` `invalid_input` |
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
@@ -3350,8 +3350,21 @@ Common opponent filters include:
 
 Ranking convention:
 
-- `rank_filter[]=5` means top 5 defenses for the selected filter.
-- `rank_filter[]=-8` means bottom 8 defenses for the selected filter.
+Each filter ranks all teams by one Season per-48 metric, highest value first
+(`TeamFilterRanking._rank`), and the rank slices that list from either end
+(`GameService._select_rank`):
+
+- `rank_filter[]=5` keeps the 5 teams with the **highest** value of the metric.
+- `rank_filter[]=-8` keeps the 8 teams with the **lowest** value of the metric.
+- `rank_filter[]=11,20` keeps ranks 11 through 20 inclusive, rank 1 being the
+  highest value. A range reaching past the last ranked team is clipped to it,
+  so `21,30` on a filter that ranks 28 teams keeps ranks 21 through 28.
+
+The sign says nothing about defensive quality on its own. For an allowed
+metric such as `OPP_PTS`, the highest values are the weakest defenses, so "top
+5 defenses by points allowed" is `-5`. Whether a high value is the tougher
+defense depends on each metric, which is why the frontend labels ranks
+"highest" and "lowest" rather than "best" and "worst".
 
 ### One Specific Opponent
 

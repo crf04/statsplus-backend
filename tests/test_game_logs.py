@@ -1000,3 +1000,90 @@ def test_route_returns_400_when_player_name_missing(client, monkeypatch):
             "message": "player_name is required.",
         }
     }
+
+
+# ---------------------------------------------------------------- rank ranges
+
+
+@pytest.mark.parametrize(
+    ("raw", "parsed"),
+    [
+        (["10"], [10]),
+        (["-8"], [-8]),
+        (["11,20"], [(11, 20)]),
+        ([" 3 , 3 "], [(3, 3)]),
+        (["1,30", "-5"], [(1, 30), -5]),
+        ([(21, 30)], [(21, 30)]),
+    ],
+)
+def test_rank_filter_accepts_signed_counts_and_inclusive_ranges(raw, parsed):
+    query = GameLogQuery(
+        season_filter="2024-25",
+        teams_against=["OPP_PTS"] * len(raw),
+        rank_filter=raw,
+    )
+
+    assert query.rank_filter == parsed
+
+
+@pytest.mark.parametrize("entry", ["0,5", "20,11", "a,b", "1,2,3", ",", "5,"])
+def test_rank_filter_rejects_unusable_ranges(entry):
+    with pytest.raises(ValueError, match="rank_filter contains invalid entries"):
+        GameLogQuery(
+            season_filter="2024-25", teams_against=["OPP_PTS"], rank_filter=[entry]
+        )
+
+
+@pytest.mark.parametrize(
+    ("rank", "expected"),
+    [
+        (3, ["T1", "T2", "T3"]),
+        (-2, ["T29", "T30"]),
+        ((11, 13), ["T11", "T12", "T13"]),
+        ((1, 1), ["T1"]),
+        ((29, 40), ["T29", "T30"]),
+        ((31, 35), []),
+    ],
+)
+def test_select_rank_slices_a_highest_first_ranking(rank, expected):
+    ranked = [f"T{position}" for position in range(1, 31)]
+
+    assert GameService._select_rank(ranked, rank) == expected
+
+
+def test_route_serves_a_rank_range(
+    client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
+):
+    """``rank_filter[]=low,high`` selects inclusive ranks from the HTTP seam."""
+
+    from app.routes import game_routes
+
+    # LAL is ranked second and PHX, which LeBron never played, third: a range
+    # keeps exactly the games against the teams its ranks cover.
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "PHX"]
+    )
+    dependencies.game_service = service
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            lambda player_name, query: GameService.get_filtered_logs(
+                service, player_name, query
+            ),
+        )
+
+    base = (
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&date_filter=2024-01-01&teams_against[]=OPP_PTS"
+    )
+    kept = client.get(base + "&rank_filter[]=2,2")
+    dropped = client.get(base + "&rank_filter[]=3,3")
+    rejected = client.get(base + "&rank_filter[]=3,2")
+
+    assert kept.status_code == 200
+    assert [row["MATCHUP"] for row in kept.get_json()["game_logs"]] == ["BOS vs. LAL"]
+    assert dropped.status_code == 200
+    assert dropped.get_json()["game_logs"] == []
+    assert rejected.status_code == 400

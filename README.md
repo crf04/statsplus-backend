@@ -540,8 +540,7 @@ docs/
   API_DOCUMENTATION.md     Endpoint reference
   NLP_SYSTEM.md            Natural-language query architecture
 prompts/
-  system_prompt_optimized.txt  Production prompt loaded by NLService
-  system_prompt.txt            Reference prompt used by the LLM smoke script
+  system_prompt_optimized.txt  Production prompt loaded by LLMService
 tests/
   pytest suite
 scripts/
