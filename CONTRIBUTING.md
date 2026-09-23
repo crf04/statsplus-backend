@@ -45,6 +45,17 @@ versions in `schema_migrations`; use a disposable SQLite database for
 migration tests. It rejects the tracked `nba_play_types.db` file as a
 read-only fixture, and masks database passwords in status output.
 
+In the test suite, `run_migrations` on an empty SQLite database restores a copy
+of a per-worker template that the real function migrated once, instead of
+running all migrations again (`tests/support/migration_template.py`). It falls
+back to the real function for non-SQLite engines, populated databases, a
+patched `app.migrations`, and engines with statement listeners, and
+`tests/test_migration_template.py` proves a restored database matches a freshly
+migrated one. A test that must exercise the migration code on an empty database
+opts out with `@pytest.mark.real_migrations` (or a module-level
+`pytestmark = pytest.mark.real_migrations`), as `tests/test_migrations.py` and
+`tests/test_startup_schema_guard.py` do.
+
 Run `python scripts/validate_demo_db.py` to validate that fixture. This command
 opens the file read-only and rejects missing schema elements or user records.
 
