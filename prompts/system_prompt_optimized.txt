@@ -16,7 +16,7 @@ FIELDS:
 - time_period: "recent" for "last N games", otherwise the named period.
 - confidence: your confidence in the whole parse, 0-1.
 
-OPPONENT FILTER TYPES (rank teams by what they allow):
+OPPONENT FILTER TYPES (each ranks all teams by one per-game value):
 - OPP_PTS: overall defense (points allowed)
 - OPP_REB: rebounds allowed; OPP_AST: assists allowed; OPP_FTA: fouls / free throws allowed
 - OPP_STOCKS: steals+blocks; OPP_TOV: turnovers forced; OPP_BLK: blocks; OPP_STL: steals
@@ -26,14 +26,18 @@ OPPONENT FILTER TYPES (rank teams by what they allow):
 - Less Than 10 ft: paint / rim protection
 - Play types: PRBallHandler, PRRollMan, Transition, Isolation, Spotup, Cut, Handoff, OffScreen, Postup, OffRebound, Misc
 
-RANKING: "top N" / "best N" defenses = +N. "worst N" / "bottom N" defenses = -N. Good matchups for the player are negative ranks.
+RANKING: rank +N selects the N teams with the HIGHEST value of the filter's metric; -N selects the N teams with the LOWEST value.
+For "allowed" metrics (points, rebounds, assists, free throws, threes, shot types, play types), a high value is a weak defense:
+"top/best N defenses" = -N, "worst/bottom N defenses" = +N.
+For metrics a defense generates (OPP_TOV, OPP_STL, OPP_BLK, OPP_STOCKS), a high value is a strong defense:
+"teams that force the most turnovers" = OPP_TOV +N.
 
 EXAMPLES:
 "LeBron last 10 games with 30+ points" →
 player_name "LeBron James", game_count 10, time_period "recent", self_filters [{stat_column "PTS", operator "gte", value 30, value2 null}]
 
 "Curry vs top 5 defenses at home" →
-player_name "Stephen Curry", location "home", opponent_filters [{filter_type "OPP_PTS", rank 5}]
+player_name "Stephen Curry", location "home", opponent_filters [{filter_type "OPP_PTS", rank -5}]
 
 "Dame against worst 8 three point defenses" →
-player_name "Damian Lillard", opponent_filters [{filter_type "OPP_FG3M", rank -8}]
+player_name "Damian Lillard", opponent_filters [{filter_type "OPP_FG3M", rank 8}]

@@ -41,7 +41,8 @@ OpponentFilterType = Literal[
 
 class LLMOpponentFilter(BaseModel):
     filter_type: OpponentFilterType
-    # Positive = top N defenses in the category, negative = bottom N.
+    # +N = the N teams with the highest value of the metric, -N = the lowest
+    # (GameService._select_rank over a most-allowed-first ranking).
     rank: int
 
 
