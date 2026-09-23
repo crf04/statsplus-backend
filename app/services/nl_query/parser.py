@@ -699,7 +699,8 @@ class CompletenessChecker:
 class MasterConfidenceCalculator:
     """Combines all confidence signals into final score"""
     
-    def __init__(self, db_engine, players: List[str], player_aliases: Dict[str, str]):
+    def __init__(self, db_engine, players: List[str], player_aliases: Dict[str, str],
+                 llm_threshold: float = 0.9):
         self.semantic_validator = SemanticValidator(db_engine)
         self.ambiguity_detector = AmbiguityDetector(players, player_aliases)
         self.complexity_analyzer = ComplexityAnalyzer()
@@ -714,8 +715,9 @@ class MasterConfidenceCalculator:
             'completeness': 0.20
         }
         
-        # Lowered threshold for better LLM fallback on self-filter patterns
-        self.llm_threshold = 0.9
+        # Queries scoring below this route to the LLM fallback
+        # (LLM_CONFIDENCE_THRESHOLD).
+        self.llm_threshold = llm_threshold
     
     def calculate_confidence(self, query: str, components: QueryComponents, 
                            coverage: QueryCoverage, parser=None) -> ConfidenceBreakdown:
@@ -808,7 +810,8 @@ class BaseQueryParser:
         
         # Initialize confidence calculator
         self.confidence_calculator = MasterConfidenceCalculator(
-            db_engine, self.players, self.player_aliases
+            db_engine, self.players, self.player_aliases,
+            llm_threshold=self.settings.llm.confidence_threshold,
         )
         
         # Initialize date parser
@@ -1182,6 +1185,14 @@ class BaseQueryParser:
             return matching_players[0]
         else:
             return None
+
+    def resolve_player_name(self, name: str) -> Optional[str]:
+        """Resolve a free-text player name (e.g. from the LLM) to the roster.
+
+        Uses the same alias, exact, last-name, and fuzzy matching as query
+        parsing, so a name only resolves if this parser would recognize it.
+        """
+        return self._extract_single_player_name(name)
 
     def _extract_single_player_name(self, text: str, context: str = "fragment") -> Optional[str]:
         """

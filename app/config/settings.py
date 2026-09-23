@@ -360,7 +360,7 @@ class LLMSettings(BaseModel):
     timeout_seconds: float = Field(default=8.0, gt=0)
     max_retries: int = Field(default=1, ge=1)
     enable_fallback: bool = False
-    confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    confidence_threshold: float = Field(default=0.9, ge=0.0, le=1.0)
 
 
 def _normalize_cors_origin(value: Any) -> str:
@@ -854,7 +854,7 @@ def _build_settings(
         # The optional fallback is safe by default: an absent key disables it
         # even when an old .env file still says ENABLE_LLM_FALLBACK=true.
         enable_fallback=requested_llm_fallback and bool(api_key),
-        confidence_threshold=reader.decimal("LLM_CONFIDENCE_THRESHOLD", 0.7),
+        confidence_threshold=reader.decimal("LLM_CONFIDENCE_THRESHOLD", 0.9),
     )
     cors_origins = reader.raw("CORS_ALLOWED_ORIGINS")
     cors = _validated_model(
