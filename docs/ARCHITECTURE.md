@@ -178,7 +178,7 @@ Draft Target read never touches the cache, so it never stamps a decision.
 The every-Target read (`GET /api/user/targets/backtests`) stamps one value for
 all its items through `aggregate_cache_state`: `hit` when every item is `ok`,
 `miss` when any is `uncached`, and `-` when there are no Targets or the cache
-is disabled.
+is disabled or its generation read failed.
 This line is
 the source for latency/regression triggers; the in-process telemetry deques
 are not. Unhandled catastrophic failures at shutdown skip after_request, so
@@ -2229,7 +2229,7 @@ Redis, looking every Target up under that one generation with the single
 route's own `backtest_cache_key`, so its `ok` items never mix generations and
 an entry either route files is a hit for the other. A Target with no entry --
 or any Target when the flag is off, there is no client, the reader answers no
-generation, or a Redis read fails -- is `uncached`, and the client reads it
+generation, the generation read fails, or a Redis read fails -- is `uncached`, and the client reads it
 through the single route, which computes and files it. Computing misses inside
 the batch was built and measured first: done one after another in one request,
 twelve cold Targets took about 3.5 to 3.8 times as long as the page's four
@@ -2238,9 +2238,10 @@ slower than the reads it replaces. A failure confined to one Target -- today
 only an entry that decodes but cannot compose a body -- is isolated into that
 item by `isolated_error_body` (`app/errors.py`), with the translation, logging,
 and failure count `route_error_boundary` and the central handler give the
-single route. The list or the generation read failing is the whole request's
-standard error; unlike the single route's pre-check, the batch does not treat a
-generation-read failure as uncached.
+single route. Only the Target list failing is the whole request's standard
+error. A generation read that fails degrades exactly as the single route's
+pre-check does -- every item `uncached`, `targets_cache` `-` -- and, since that
+pre-check records nothing, is only logged as a warning with its traceback.
 
 ### Target preview (#253)
 

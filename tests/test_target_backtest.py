@@ -2919,25 +2919,53 @@ def test_an_unusable_entry_is_isolated_to_its_own_target(
     assert state == "-"
 
 
-def test_a_generation_read_failure_fails_the_whole_request(
-    targets, build_backtest
+def test_a_generation_read_failure_degrades_every_item_to_uncached(
+    targets, build_backtest, caplog
 ):
-    _three_targets(targets)
+    import logging
+
+    listed = _three_targets(targets)
 
     class FailingGeneration(GenerationSnapshotReader):
         def generation(self, *args, **kwargs):
             raise RuntimeError("publication pointers are unreachable")
 
+    client = FakeRedis()
+    reader = FailingGeneration(_available_reads(), _frozen_generation())
     service = build_backtest(
-        **_two_games(),
-        publication_reader=FailingGeneration(
-            _available_reads(), _frozen_generation()
-        ),
-        redis_client=FakeRedis(),
+        **_two_games(), publication_reader=reader, redis_client=client
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.services.target_backtest"):
+        payload, state = service.backtest_all(OWNER)
+
+    # Degraded like a disabled cache, not failed: the page falls back to
+    # per-Target reads.  No entry is looked up without a generation.
+    assert state == "-"
+    assert payload["backtests"] == [
+        {"target_id": target_id, "status": "uncached"} for target_id in listed
+    ]
+    assert client.gets == []
+    assert reader.snapshot_calls == []
+    assert service.player_logs.opponent_calls == []
+    [warning] = [
+        record
+        for record in caplog.records
+        if "generation read failed" in record.getMessage()
+    ]
+    assert warning.levelno == logging.WARNING
+    assert warning.exc_info[0] is RuntimeError
+
+
+def test_a_target_list_failure_fails_the_whole_request(targets, build_backtest):
+    service, reader, client = _cached_service(build_backtest)
+    service.targets = SimpleNamespace(
+        list_targets=Mock(side_effect=RuntimeError("targets table unreachable"))
     )
 
     with pytest.raises(RuntimeError):
         service.backtest_all(OWNER)
+    assert client.gets == []
 
 
 def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):

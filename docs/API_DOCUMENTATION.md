@@ -3141,8 +3141,8 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
   `GET /api/user/targets/<id>/backtest` returns for that Target, minus
   `success` -- the same keys in the same order, including `games_considered`.
 - `status: "uncached"` means the result cache holds no entry for that Target in
-  the current generation, or the cache is unavailable (disabled, no Redis, or a
-  Redis read error). Read that Target through the single route, which computes
+  the current generation, or the cache is unavailable (disabled, no Redis, a
+  failed generation read, or a Redis read error). Read that Target through the single route, which computes
   and caches it; the next batch then returns it `ok`.
 - `status: "error"` isolates a failure to that Target in the standard
   `{code, message}` shape, so one failing Target never blanks the others.
@@ -3160,14 +3160,16 @@ cheap request plus exactly the previous per-Target reads.
 **Cache.** Each lookup uses the single route's key and invalidation, so an
 entry the single route files is a hit here. The request log's `targets_cache`
 is `hit` when every item is `ok`, `miss` when any is `uncached`, and `-` when
-there are no Targets or the cache is disabled.
+there are no Targets or the cache is disabled or its generation read failed.
 
 **Empty state.** A caller with no Targets gets `200` with `"backtests": []`.
 
-**Errors.** `401 authentication_required` for an unauthenticated caller. A
-failure before any Target is looked up -- the Target list or the generation
-read -- fails the whole request with the standard error shape: `500
-operation_failed`, `"Failed to backtest the targets."`.
+**Errors.** `401 authentication_required` for an unauthenticated caller. Only a
+failure to read the caller's Target list fails the whole request, with the
+standard error shape: `500 operation_failed`, `"Failed to backtest the
+targets."`. A failed generation read is treated like a disabled cache: every
+item is `uncached` and `targets_cache` is `-`, so the page degrades to the
+per-Target reads instead of failing.
 
 **Compatibility.** The single-Target route is unchanged and remains the Target
 detail page's read and the read for every `uncached` item. A client deployed

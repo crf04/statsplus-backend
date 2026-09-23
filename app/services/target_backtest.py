@@ -395,9 +395,10 @@ class TargetBacktestService:
         one request, a cold list took about 3.5 to 3.8 times as long as the
         page's four concurrent single reads.
 
-        A failure before any Target is looked up -- the list, or the
-        generation read -- is raised.  The second element is the request's
-        ``targets_cache`` value (``aggregate_cache_state``).
+        Only a failure to read the Target list is raised.  A generation read
+        that fails degrades like a disabled cache: logged, and every item
+        ``uncached``.  The second element is the request's ``targets_cache``
+        value (``aggregate_cache_state``).
         """
 
         season = self.settings.nba.current_season
@@ -408,7 +409,19 @@ class TargetBacktestService:
                 )
             else:
                 listed = self.targets.list_targets(firebase_uid)
-            generation = self._read_cache_generation(season, session)
+            try:
+                generation = self._read_cache_generation(season, session)
+            except Exception:
+                # Degrade like a disabled cache, as the single route's
+                # pre-check does: every item is uncached and the page falls
+                # back to per-Target reads.  That pre-check records nothing,
+                # so neither does this; the warning keeps the traceback.
+                logger.warning(
+                    "Target backtest generation read failed; serving every "
+                    "Target uncached",
+                    exc_info=True,
+                )
+                generation = None
 
         items = []
         for target in listed:
@@ -714,9 +727,9 @@ class TargetBacktestService:
         """Read the current generation pointer-only, or ``None`` when off.
 
         ``None`` is the flag off, no Redis client, or no reader able to answer
-        a generation.  A reader failure is raised: the single read swallows
-        it as an uncached read, while the every-Target read reports it as the
-        request's failure.
+        a generation.  A reader failure is raised for the caller to degrade:
+        the single read answers uncached silently, and the every-Target read
+        logs it and serves every Target ``uncached``.
         """
 
         if not self._cache_enabled:
