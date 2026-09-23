@@ -86,6 +86,7 @@ LLM_TIMEOUT=8.0
 LLM_MAX_RETRIES=1
 ENABLE_LLM_FALLBACK=True
 LLM_CONFIDENCE_THRESHOLD=0.9
+LLM_SHADOW_SAMPLE_RATE=0
 ```
 
 `ENABLE_LLM_FALLBACK=false` disables the fallback even when a key is set.
@@ -103,6 +104,38 @@ player the roster does not know.
 
 If the OpenAI client cannot initialize, a call fails, or the model refuses or
 returns no parse, the service logs the failure and returns the NLP result.
+
+## Measuring confident parses (shadow sampling)
+
+A query the parser is confident about never reaches the LLM, so its mistakes
+are invisible. `LLM_SHADOW_SAMPLE_RATE` (0 to 1, default `0`, which is off) sends
+that fraction of *confident* queries to the LLM as well, **in the background**:
+
+- The response is always the NLP result, and it never waits for the LLM.
+- Both results are normalized (tuples vs lists, casing, `both` vs no location)
+  and compared on the fields that choose games: player, team, game count,
+  location, teammates on/off, opponent filters with their ranks, minutes,
+  stat thresholds, date and season. Confidence, intent and time period are
+  not compared.
+- Each sample logs one `nl_shadow {json}` line with `outcome` (`agree`,
+  `disagree` or `error`), the query, the NLP confidence, the latency and, for
+  a disagreement, each differing field with both values.
+- At most four comparisons are in flight per process; a sample arriving while
+  four are outstanding is dropped (`nl_shadow dropped`), never queued.
+- Nothing is sampled when the fallback is off. Each sample costs one LLM call,
+  so the rate sets the spend: `0.1` costs one extra call per ten confident
+  queries.
+
+Summarize the results from the logs:
+
+```bash
+railway logs | python scripts/summarize_nl_shadow.py --examples 10
+```
+
+The output reports the agreement rate (errors excluded, since an LLM failure
+says nothing about NLP accuracy), disagreement counts by field, the median
+latency and example disagreements. A disagreement means the parsers differ,
+not which one is right; read the examples to decide.
 The default fallback budget is one eight-second attempt. Natural-language
 parsing is optional enrichment, so retrying inside a public request must not
 hold the deterministic result for tens of seconds.

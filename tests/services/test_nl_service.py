@@ -15,7 +15,7 @@ import pytest
 from app.services.nl_query.parser import QueryComponents, SelfFilter
 
 
-def make_service(llm_service=None, parser=None):
+def make_service(llm_service=None, parser=None, shadow_sampler=None):
     """Build an NLService with its collaborators stubbed."""
     from app.config.settings import load_settings
     from app.services.nl_service import NLService
@@ -25,6 +25,7 @@ def make_service(llm_service=None, parser=None):
     service.nl_parser = parser or SimpleNamespace()
     service.query_executor = SimpleNamespace()
     service.llm_service = llm_service
+    service.shadow_sampler = shadow_sampler
     return service
 
 
