@@ -539,7 +539,7 @@ class GameService:
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     def filter_teams(self, team_filter, rank_filter, season):
-        """Select the top-N or bottom-N opponents by Season Rankings.
+        """Select opponents by Season Rankings: the first N, last N, or a rank range.
 
         The rankings are whole-Regular-Season aggregates for the requested
         season, so ``date_filter`` deliberately takes no part here: a date
@@ -574,6 +574,14 @@ class GameService:
 
     @staticmethod
     def _select_rank(ranked, rank_filter):
+        """Slice a highest-value-first ranking by one rank_filter entry.
+
+        ``N`` keeps the first N teams, ``-N`` the last N, and ``(low, high)``
+        the inclusive 1-based ranks low..high (clipped to the ranked teams).
+        """
+        if isinstance(rank_filter, tuple):
+            low, high = rank_filter
+            return ranked[low - 1:high]
         if rank_filter >= 0:
             return ranked[:rank_filter]
         return ranked[rank_filter:]
