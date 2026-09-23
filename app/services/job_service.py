@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import threading
 import uuid
 from collections.abc import Callable, Mapping
@@ -69,6 +70,12 @@ DEFAULT_FAILURE_SUMMARY: Final[str] = (
     "The data refresh operation could not complete."
 )
 
+#: Set to ``"1"`` by a pre-forking server (``gunicorn.conf.py``) before it
+#: builds the app in its master process.  The app-scoped coordinator is then
+#: constructed without recovery dispatch or a poller thread, and the server
+#: calls :meth:`DataRefreshJobService.start_dispatcher` in each forked worker.
+DEFER_DISPATCHER_ENV: Final[str] = "STATSPLUS_DEFER_DATA_REFRESH_DISPATCHER"
+
 RefreshCallable = Callable[..., Any]
 ProgressCallback = Callable[[float, str | None], None]
 
@@ -99,6 +106,7 @@ __all__ = [
     "DataRefreshJobService",
     "SynchronousExecutor",
     "DEFAULT_FAILURE_SUMMARY",
+    "DEFER_DISPATCHER_ENV",
     "KNOWN_REFRESH_OPERATIONS",
     "ClaimedJob",
     "build_default_refresh_handlers",
@@ -221,7 +229,19 @@ def build_data_refresh_job_service(
         ),
         dispatch_on_startup=not testing,
         start_poller=not testing,
+        defer_start=os.environ.get(DEFER_DISPATCHER_ENV) == "1",
     )
+
+
+def _process_lease_owner() -> str:
+    """Return a lease owner naming exactly one process.
+
+    A forked child inherits its parent's memory, so an owner generated before
+    ``fork`` would be shared by every worker; the pid keeps them distinct and
+    diagnosable.
+    """
+
+    return f"{uuid.uuid4().hex}:{os.getpid()}:{threading.get_ident()}"
 
 
 class DataRefreshJobService:
@@ -239,6 +259,7 @@ class DataRefreshJobService:
         max_workers: int = 2,
         dispatch_on_startup: bool = True,
         start_poller: bool | None = None,
+        defer_start: bool = False,
     ) -> None:
         self._engine = engine
         self.settings = settings
@@ -247,13 +268,14 @@ class DataRefreshJobService:
         self._handlers = MappingProxyType(dict(handlers or {}))
         self._lease_seconds = max(float(lease_seconds), 0.1)
         self._poll_interval = max(float(poll_interval), 0.05)
-        self._owner = f"{uuid.uuid4().hex}:{threading.get_ident()}"
+        self._owner = _process_lease_owner()
         self._worker_limit = max(int(max_workers), 1)
         self._submitted = 0
         self._submitted_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._poller: threading.Thread | None = None
         self._shutdown = False
+        self._dispatcher_pid: int | None = None
 
         self._executor_owned = executor is None
         self._executor = executor or ThreadPoolExecutor(
@@ -261,7 +283,35 @@ class DataRefreshJobService:
             thread_name_prefix="data-refresh",
         )
 
-        if dispatch_on_startup:
+        if start_poller is None:
+            start_poller = not isinstance(self._executor, SynchronousExecutor)
+        self._dispatch_on_startup = dispatch_on_startup
+        self._start_poller = start_poller
+        if not defer_start:
+            self.start_dispatcher()
+
+    def start_dispatcher(self) -> None:
+        """Recover queued work and start the recovery poller in this process.
+
+        Construction calls this unless ``defer_start`` is set.  A pre-forking
+        server builds the app in its master with ``defer_start`` and calls this
+        from each worker after ``fork``: threads do not survive ``fork``, and a
+        master that claimed jobs would run them outside any worker.  Calling it
+        again in the same process is a no-op.
+        """
+
+        pid = os.getpid()
+        if self._dispatcher_pid == pid:
+            return
+        if self._dispatcher_pid is not None:
+            raise RuntimeError(
+                "The data refresh dispatcher was started before fork; construct "
+                "the service with defer_start=True in a pre-forking master."
+            )
+        self._dispatcher_pid = pid
+        self._owner = _process_lease_owner()
+
+        if self._dispatch_on_startup:
             # The app factory normally migrates before constructing this
             # service.  The defensive catch keeps read-only/demo app startup
             # usable when a test intentionally skips table creation.
@@ -270,9 +320,7 @@ class DataRefreshJobService:
             except SQLAlchemyError:
                 logger.debug("Data refresh queue is not available yet", exc_info=True)
 
-        if start_poller is None:
-            start_poller = not isinstance(self._executor, SynchronousExecutor)
-        if start_poller:
+        if self._start_poller:
             self._poller = threading.Thread(
                 target=self._poll_loop,
                 name="data-refresh-dispatcher",

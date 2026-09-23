@@ -6,6 +6,8 @@ bundled ``nba_play_types.db`` fixture and external providers are never touched.
 
 from __future__ import annotations
 
+import os
+import threading
 from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event, Thread
 
@@ -16,7 +18,12 @@ from sqlalchemy.orm import Session
 
 from app.errors import DuplicateOperationError, ProviderUnavailableError
 from app.migrations import run_migrations
-from app.models.job import JOB_STATUS_FAILED, JOB_STATUS_QUEUED, JOB_STATUS_SUCCEEDED
+from app.models.job import (
+    JOB_STATUS_FAILED,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_SUCCEEDED,
+    DataRefreshJob,
+)
 from app.services.job_service import (
     DEFAULT_FAILURE_SUMMARY,
     DataRefreshJobService,
@@ -815,3 +822,163 @@ def test_get_unknown_job_returns_404(job_app, monkeypatch):
 
     assert response.status_code == 404
     assert response.get_json()["error"]["code"] == "resource_not_found"
+
+
+# --- Pre-forking servers -----------------------------------------------------
+
+
+def _queued_job(job_engine) -> str:
+    """Persist one queued row as a previous process would have left it."""
+
+    with Session(job_engine) as session:
+        session.add(
+            DataRefreshJob(
+                job_id="queued-before-boot",
+                operation="update_database",
+                status=JOB_STATUS_QUEUED,
+                created_at=_fixed_clock(),
+                progress=0.0,
+                attempt_count=0,
+            )
+        )
+        session.commit()
+    return "queued-before-boot"
+
+
+def test_deferred_service_starts_no_thread_and_dispatches_nothing(job_engine):
+    job_id = _queued_job(job_engine)
+    executor = _ManualExecutor()
+    threads_before = {thread.ident for thread in threading.enumerate()}
+
+    service = DataRefreshJobService(
+        job_engine,
+        executor=executor,
+        handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
+        clock=_fixed_clock,
+        dispatch_on_startup=True,
+        start_poller=True,
+        defer_start=True,
+    )
+    try:
+        # A pre-fork master builds the graph but must not claim work or own
+        # a thread: neither survives fork into the process serving requests.
+        assert executor.calls == []
+        assert service.get(job_id)["status"] == JOB_STATUS_QUEUED
+        assert {thread.ident for thread in threading.enumerate()} == threads_before
+
+        service.start_dispatcher()
+
+        assert len(executor.calls) == 1
+        assert service.get(job_id)["status"] == "running"
+        pollers = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == "data-refresh-dispatcher"
+            and thread.ident not in threads_before
+        ]
+        assert len(pollers) == 1 and pollers[0].is_alive()
+
+        # Idempotent within one process.
+        service.start_dispatcher()
+        assert len(executor.calls) == 1
+    finally:
+        service.shutdown()
+
+
+def _owner_in_child(service: DataRefreshJobService) -> tuple[int, str]:
+    read_end, write_end = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the forked child
+        status = 0
+        try:
+            service.start_dispatcher()
+            os.write(write_end, service._owner.encode())
+        except BaseException:
+            status = 1
+        finally:
+            os._exit(status)
+    os.close(write_end)
+    with os.fdopen(read_end, "rb") as reader:
+        owner = reader.read().decode()
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    return pid, owner
+
+
+def test_start_dispatcher_gives_each_forked_process_its_own_lease_owner(
+    job_engine,
+):
+    service = DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
+        dispatch_on_startup=False,
+        start_poller=False,
+        defer_start=True,
+    )
+    master_owner = service._owner
+
+    first_pid, first_owner = _owner_in_child(service)
+    second_pid, second_owner = _owner_in_child(service)
+
+    assert len({master_owner, first_owner, second_owner}) == 3
+    assert f":{first_pid}:" in first_owner
+    assert f":{second_pid}:" in second_owner
+    service.shutdown()
+
+
+def test_dispatcher_started_before_fork_refuses_to_run_in_the_child(job_engine):
+    service = DataRefreshJobService(
+        job_engine,
+        executor=SynchronousExecutor(),
+        handlers={"update_database": adapt_zero_arg_handler(lambda: True)},
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+    read_end, write_end = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - runs in the forked child
+        message = b""
+        try:
+            service.start_dispatcher()
+        except RuntimeError as error:
+            message = str(error).encode()
+        finally:
+            os.write(write_end, message)
+            os._exit(0)
+    os.close(write_end)
+    with os.fdopen(read_end, "rb") as reader:
+        message = reader.read().decode()
+    os.waitpid(pid, 0)
+    assert "defer_start" in message
+    service.shutdown()
+
+
+def test_builder_defers_dispatch_when_the_server_requests_it(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.services.job_service as job_service_module
+
+    captured = {}
+
+    def fake_service(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(job_service_module, "DataRefreshJobService", fake_service)
+    monkeypatch.setattr(
+        job_service_module, "build_default_refresh_handlers", lambda *a, **k: {}
+    )
+    settings = SimpleNamespace(environment="production")
+
+    monkeypatch.delenv(job_service_module.DEFER_DISPATCHER_ENV, raising=False)
+    job_service_module.build_data_refresh_job_service(
+        None, settings, player_service=None
+    )
+    assert captured["defer_start"] is False
+
+    monkeypatch.setenv(job_service_module.DEFER_DISPATCHER_ENV, "1")
+    job_service_module.build_data_refresh_job_service(
+        None, settings, player_service=None
+    )
+    assert captured["defer_start"] is True
