@@ -1,7 +1,9 @@
 from app.services.nl_query.parser import BaseQueryParser
 from app.services.llm_service import LLMParsedQuery, LLMService
+from app.services import nl_shadow
 from app.config.settings import RuntimeSettings, get_runtime_settings
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +13,7 @@ class NLService:
         self.settings = settings or get_runtime_settings()
         self.nl_parser = None
         self.llm_service = None
+        self.shadow_sampler = None
         self.initialize_nl_system()
 
     def initialize_nl_system(self):
@@ -33,6 +36,11 @@ class NLService:
                 self.llm_service = None
         else:
             logger.info("LLM fallback disabled; using NLP-only mode")
+
+        rate = self.settings.llm.shadow_sample_rate
+        if self.llm_service and rate > 0:
+            self.shadow_sampler = nl_shadow.ShadowSampler(rate)
+            logger.info("Shadow-sampling %.1f%% of confident NLP parses", rate * 100)
 
         logger.info("Natural language query system initialized")
 
@@ -63,11 +71,32 @@ class NLService:
             except Exception as e:
                 logger.error("LLM processing error: %s", e)
                 logger.info("Falling back to NLP result")
-        else:
-            logger.info("Using NLP (confidence %.3f): %s", parsed_components.confidence, query_text[:50])
+            return self._format_nlp_result(parsed_components, query_text)
 
-        # Step 3: Use NLP result (fast path or fallback)
-        return self._format_nlp_result(parsed_components, query_text)
+        logger.info("Using NLP (confidence %.3f): %s", parsed_components.confidence, query_text[:50])
+        result = self._format_nlp_result(parsed_components, query_text)
+        if self.shadow_sampler and not should_use_llm:
+            # Snapshot on the request thread; the comparison never touches
+            # the response the route is about to serialize.
+            nlp_view = nl_shadow.comparable_view(result)
+            self.shadow_sampler.maybe_submit(
+                lambda: self._shadow_compare(query_text, parsed_components, nlp_view)
+            )
+        return result
+
+    def _shadow_compare(self, query_text: str, parsed_components, nlp_view: dict):
+        """Parse a confident query with the LLM too and log whether they agree."""
+        started = time.monotonic()
+        try:
+            llm_result = self._process_with_llm(query_text, parsed_components)
+        except Exception as error:
+            return nl_shadow.log_comparison(
+                query_text, parsed_components.confidence, started, error=error
+            )
+        diff = nl_shadow.differences(nlp_view, nl_shadow.comparable_view(llm_result))
+        return nl_shadow.log_comparison(
+            query_text, parsed_components.confidence, started, diff=diff
+        )
 
     def _process_with_llm(self, query_text: str, parsed_components):
         """Parse with the LLM, seeded with the players the NLP pass resolved."""

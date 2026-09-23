@@ -329,6 +329,14 @@ class DataRefreshJobService:
             self._poller.start()
             if self._executor_owned:
                 atexit.register(self.shutdown)
+        # One line per process lets operators confirm from deploy logs that
+        # every pre-forked worker owns its own dispatcher.
+        logger.info(
+            "Data refresh dispatcher started pid=%s owner=%s poller=%s",
+            pid,
+            self._owner,
+            "on" if self._poller is not None else "off",
+        )
 
     def start(
         self,
