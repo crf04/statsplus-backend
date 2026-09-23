@@ -1363,6 +1363,28 @@ def _published_matchup_service(tmp_path, rows):
     return engine, service, publication
 
 
+def test_a_matchup_reads_diet_streams_decoded_only_and_serves_the_same_document(
+    tmp_path,
+):
+    """Diet payloads are league-wide; a repeat Matchup reuses their decode."""
+
+    from unittest.mock import Mock
+
+    from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+
+    _engine, service, _publication = _published_matchup_service(
+        tmp_path, [_log_row(game_id=GAME_ID, game_date="2026-01-14", points=31, minutes=34.0)]
+    )
+    service.publication_reader = Mock(wraps=service.publication_reader)
+
+    first = service.get_matchup(game_id=GAME_ID)
+    repeat = service.get_matchup(game_id=GAME_ID)
+
+    for call in service.publication_reader.snapshot.call_args_list:
+        assert call.kwargs["decoded_only_keys"] == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+    assert repeat == first
+
+
 def test_a_matchup_composed_over_a_given_snapshot_is_the_matchup_get_matchup_serves(
     tmp_path,
 ):

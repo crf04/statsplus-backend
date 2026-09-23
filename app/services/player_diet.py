@@ -724,6 +724,9 @@ class PlayerDietRepository:
         if self._publication_reader is None:
             return None
         stream_by_base = PLAYER_DIET_PUBLICATION_STREAMS
+        # Every league fact is tested for membership; a tuple of the whole
+        # catalog (the player list) would make each test linear.
+        requested_ids = frozenset(requested)
         facts_by_player: dict[int, list[StoredPlayerDietFact]] = defaultdict(list)
         # The baseline population is the whole stored season fact set for
         # the Base, so every decoded/legacy fact is kept here regardless of
@@ -816,7 +819,7 @@ class PlayerDietRepository:
             if cached_baselines is None:
                 baseline_facts_by_base[base].extend(facts)
             for fact in facts:
-                if fact.player_id in requested:
+                if fact.player_id in requested_ids:
                     facts_by_player[fact.player_id].append(
                         StoredPlayerDietFact(
                             player_id=fact.player_id,

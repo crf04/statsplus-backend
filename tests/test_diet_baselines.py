@@ -65,7 +65,10 @@ def test_baselines_match_the_matchup_diet_read_for_every_slice(tmp_path):
 def test_baselines_capture_one_snapshot_and_preserve_missing_shares():
     from types import SimpleNamespace
     from app.services.diet_baselines import DietBaselinesService
-    from app.services.player_diet import PlayerDietResult
+    from app.services.player_diet import (
+        PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+        PlayerDietResult,
+    )
     from app.config.settings import RuntimeSettings, NBASeasonSettings
 
     snapshot = object()
@@ -82,5 +85,10 @@ def test_baselines_capture_one_snapshot_and_preserve_missing_shares():
     ).get()
     assert calls == [snapshot]
     reader.snapshot.assert_called_once()
+    # Baselines need only the decoded facts, so a decode-cache hit never
+    # selects or parses the league-wide diet payloads.
+    assert reader.snapshot.call_args.kwargs["decoded_only_keys"] == (
+        PLAYER_DIET_PUBLICATION_STREAM_KEYS
+    )
     assert result['captured_at'] is None
     assert result['shares']['shot_zones']['Corner 3'] is None

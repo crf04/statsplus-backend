@@ -20,6 +20,13 @@ from ...config.settings import RuntimeSettings, get_runtime_settings
 
 logger = logging.getLogger(__name__)
 
+# Statistical pipes of en_core_web_sm the parser never reads.  Its patterns
+# match on LOWER, ORTH and the entity ruler's own ENT_TYPE, all of which the
+# tokenizer and entity ruler alone produce.
+_UNUSED_SPACY_PIPES = (
+    "tok2vec", "tagger", "parser", "senter", "attribute_ruler", "lemmatizer", "ner",
+)
+
 @dataclass
 class SelfFilter:
     """Represents a single self-filter condition for player stats"""
@@ -839,7 +846,9 @@ class BaseQueryParser:
             nlp (spacy.Language): The loaded spaCy language model.
         """
         try:
-            nlp = spacy.load("en_core_web_sm")
+            # Only the tokenizer and the entity ruler added below are read;
+            # the statistical pipes would run on every query for nothing.
+            nlp = spacy.load("en_core_web_sm", exclude=_UNUSED_SPACY_PIPES)
         except OSError:
             # Fallback to basic English model if custom model not available
             nlp = spacy.blank("en")
@@ -850,8 +859,9 @@ class BaseQueryParser:
         Set up custom spaCy components for the parser.
         Adds an entity ruler for player/alias recognition and initializes relationship patterns for the matcher.
         """
-        # Disable the built-in NER to prevent conflicts with our entity ruler
-        self.nlp.disable_pipes("ner")
+        # Disable any built-in NER to prevent conflicts with our entity ruler
+        if "ner" in self.nlp.pipe_names:
+            self.nlp.disable_pipes("ner")
         ruler = self.nlp.add_pipe("entity_ruler", config={"overwrite_ents": True})
         self._add_player_entity_patterns(ruler)
         self._setup_relationship_patterns()

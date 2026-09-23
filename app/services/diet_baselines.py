@@ -14,7 +14,11 @@ class DietBaselinesService:
         season = self.settings.nba.current_season
         snapshot = (
             self.publication_reader.snapshot(
-                tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)), season=season
+                tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)),
+                season=season,
+                # Baselines need only decoded facts; a decode-cache hit never
+                # selects or parses the league-wide diet payloads.
+                decoded_only_keys=PLAYER_DIET_PUBLICATION_STREAM_KEYS,
             ) if self.publication_reader is not None else None
         )
         result = (
