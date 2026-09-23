@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from itertools import permutations
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import and_, create_engine, event, func, inspect, insert, select
@@ -1368,13 +1368,35 @@ def test_repository_write_failures_are_translated_at_the_boundary():
         )
 
 
-def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable(
-    mapping_db,
-):
-    """The duplicate insert must be caught after ``begin_nested`` exits.
+def _record_savepoints(engine) -> list[str]:
+    savepoints: list[str] = []
+    event.listen(engine, "savepoint", lambda *args: savepoints.append("begin"))
+    event.listen(engine, "release_savepoint", lambda *args: savepoints.append("release"))
+    event.listen(
+        engine, "rollback_savepoint", lambda *args: savepoints.append("rollback")
+    )
+    return savepoints
 
-    PostgreSQL aborts the surrounding transaction if the failed savepoint is
-    still open, so every later statement in the same transaction would fail.
+
+def _assert_transaction_usable(connection, now) -> None:
+    assert connection.in_nested_transaction() is False
+    assert connection.in_transaction() is True
+    connection.execute(
+        insert(AthleteMappingDecision.__table__).values(
+            provider="prizepicks",
+            provider_athlete_id="pp-15",
+            decision_state="unmatched",
+            created_at=now,
+        )
+    )
+
+
+def test_an_existing_lock_row_is_locked_without_a_failing_insert(mapping_db):
+    """A steady-state identity takes its lock by selecting the row it has.
+
+    Inserting a lock row every identity already has would fail on every board
+    read, and PostgreSQL would record each failed insert and rolled-back
+    savepoint.
     """
 
     engine, now = mapping_db
@@ -1382,30 +1404,205 @@ def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable
     with repository._transaction("prizepicks", "pp-15"):
         pass
 
-    savepoints: list[str] = []
-    event.listen(engine, "savepoint", lambda *args: savepoints.append("begin"))
-    event.listen(engine, "release_savepoint", lambda *args: savepoints.append("release"))
-    event.listen(
-        engine, "rollback_savepoint", lambda *args: savepoints.append("rollback")
-    )
+    savepoints = _record_savepoints(engine)
+    with _recorded_statements(engine) as statements:
+        with repository._transaction("prizepicks", "pp-15") as connection:
+            assert savepoints == []
+            locking = list(statements)
+            _assert_transaction_usable(connection, now)
 
-    # The lock row now exists, so this transaction takes the duplicate path.
+    assert [verb for verb, _ in locking] == ["SELECT"]
+    assert "FOR UPDATE" in locking[0][1] or engine.dialect.name == "sqlite"
+    assert len(repository.history(provider="prizepicks")) == 1
+
+
+def test_duplicate_lock_row_leaves_no_savepoint_and_keeps_the_transaction_usable(
+    mapping_db, monkeypatch
+):
+    """The duplicate insert must be caught after ``begin_nested`` exits.
+
+    A concurrent transaction can create the lock row between this
+    transaction's lock select and its insert.  PostgreSQL aborts the
+    surrounding transaction if the failed savepoint is still open, so every
+    later statement in the same transaction would fail.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    with repository._transaction("prizepicks", "pp-15"):
+        pass
+
+    # The first lock select misses as if a racing transaction had not yet
+    # committed the row, so this transaction takes the duplicate-insert path.
+    select_lock = AthleteMappingRepository._select_lock_row
+    misses = iter([True])
+
+    def _racing_select(connection, provider, provider_id):
+        if next(misses, False):
+            return None
+        return select_lock(connection, provider, provider_id)
+
+    monkeypatch.setattr(
+        AthleteMappingRepository, "_select_lock_row", staticmethod(_racing_select)
+    )
+    savepoints = _record_savepoints(engine)
+
     with repository._transaction("prizepicks", "pp-15") as connection:
         # A released savepoint would leave PostgreSQL's transaction aborted, so
         # the failed insert must be rolled back to the savepoint instead.
         assert savepoints == ["begin", "rollback"]
-        assert connection.in_nested_transaction() is False
-        assert connection.in_transaction() is True
-        connection.execute(
-            insert(AthleteMappingDecision.__table__).values(
-                provider="prizepicks",
-                provider_athlete_id="pp-15",
-                decision_state="unmatched",
-                created_at=now,
-            )
-        )
+        _assert_transaction_usable(connection, now)
 
     assert len(repository.history(provider="prizepicks")) == 1
+
+
+@contextmanager
+def _recorded_statements(engine):
+    """Record every statement's leading SQL verb and text while active."""
+
+    statements: list[tuple[str, str]] = []
+
+    def _record(connection, cursor, statement, parameters, context, executemany):
+        statements.append((statement.strip().split()[0].upper(), statement))
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+
+def _writes(statements) -> list[str]:
+    return [
+        statement
+        for verb, statement in statements
+        if verb in {"INSERT", "UPDATE", "DELETE", "SAVEPOINT"}
+    ]
+
+
+def _stored_last_seen(engine, provider_id: str = "pp-15") -> datetime:
+    with engine.connect() as connection:
+        stored = connection.execute(
+            select(ProviderAthleteMapping.last_seen_at).where(
+                ProviderAthleteMapping.provider_athlete_id == provider_id
+            )
+        ).scalar_one()
+    return stored if stored.tzinfo else stored.replace(tzinfo=timezone.utc)
+
+
+def test_a_same_snapshot_repeat_writes_nothing(mapping_db):
+    """Re-reading an unchanged board is a read, not a mapping write."""
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    observed = _auto_resolution(observed_at=_OBSERVED_AFTER)
+    assert repository.record_resolution(observed).persisted is True
+    before = repository.get_mapping("prizepicks", "pp-15")
+
+    with _recorded_statements(engine) as statements:
+        repeated = repository.record_resolution(observed)
+
+    assert _writes(statements) == []
+    assert repeated.state == "auto"
+    assert repeated.persisted is False
+    assert repeated.mapping == before
+    assert repository.get_mapping("prizepicks", "pp-15") == before
+    assert len(repository.history()) == 1
+    assert _observation_clock(engine, "pp-15") == _OBSERVED_AFTER
+
+
+def test_a_repeat_through_the_board_writes_nothing(mapping_db):
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    service = _board_service(
+        _snapshot(_market()),
+        resolver=_resolver(repository=repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season="2024-25")
+    service.get_board(query)
+
+    with _recorded_statements(engine) as statements:
+        board = service.get_board(query)
+
+    assert _writes(statements) == []
+    assert [outcome.state.value for outcome in board.mapping_outcomes] == ["auto"]
+    assert len(repository.history()) == 1
+
+
+def test_last_seen_at_is_touched_again_once_the_interval_passes(mapping_db):
+    """``last_seen_at`` is throttled like a user's last login, not per read."""
+
+    engine, now = mapping_db
+    clock = {"now": now}
+    repository = AthleteMappingRepository(engine, clock=lambda: clock["now"])
+    resolution = _auto_resolution()
+    repository.record_resolution(resolution)
+    assert _stored_last_seen(engine) == now
+
+    clock["now"] = now + timedelta(minutes=14, seconds=59)
+    with _recorded_statements(engine) as statements:
+        repository.record_resolution(resolution)
+    assert _writes(statements) == []
+    assert _stored_last_seen(engine) == now
+
+    clock["now"] = now + timedelta(minutes=15)
+    repository.record_resolution(resolution)
+    mapping = repository.get_mapping("prizepicks", "pp-15")
+    assert _stored_last_seen(engine) == now + timedelta(minutes=15)
+    assert mapping.first_seen_at == now.isoformat()
+    assert mapping.mapping_state == "auto"
+    assert len(repository.history()) == 1
+
+
+@pytest.mark.parametrize(
+    ("catalog_row", "field", "expected"),
+    [
+        (_catalog_row(15, "Nikola Jokić Sr."), "canonical_name", "Nikola Jokić Sr."),
+        (
+            _catalog_row(15, "Nikola Jokić", team_name="LA Lakers"),
+            "canonical_team_name",
+            "LA Lakers",
+        ),
+        (
+            _catalog_row(15, "Nikola Jokić", team_abbreviation="LAK"),
+            "canonical_team_abbreviation",
+            "LAK",
+        ),
+    ],
+)
+def test_a_changed_canonical_fact_outside_the_fingerprint_still_updates(
+    mapping_db, catalog_row, field, expected
+):
+    """Every current column is compared before an unchanged row is skipped.
+
+    Only the provider evidence and the candidate set are fingerprinted, so a
+    skipped write judged by the fingerprint alone could leave the canonical
+    labels an operator reads out of date.
+    """
+
+    engine, now = mapping_db
+    repository = AthleteMappingRepository(engine, clock=lambda: now)
+    evidence = AthleteEvidence(
+        provider_id="pp-15",
+        name="Nikola Jokic",
+        team=TeamEvidence(provider_id="pp-lal", canonical_id=1610612747),
+    )
+    first = _resolver(repository=repository).resolve("prizepicks", evidence, "2024-25")
+    repository.record_resolution(first)
+
+    changed = _resolver(
+        rows=[catalog_row, _catalog_row(23, "LeBron James")], repository=repository
+    ).resolve("prizepicks", evidence, "2024-25")
+    assert changed.state is MappingResolutionState.AUTO
+
+    with _recorded_statements(engine) as statements:
+        repository.record_resolution(changed)
+
+    assert any(verb == "UPDATE" for verb, _ in statements)
+    mapping = repository.get_active_mapping("prizepicks", "pp-15")
+    assert getattr(mapping, field) == expected
+    assert _stored_last_seen(engine) == now
 
 
 def test_later_resolution_removes_an_identity_from_unresolved(mapping_db):

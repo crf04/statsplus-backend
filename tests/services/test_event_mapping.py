@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, insert, inspect, select, update
+from sqlalchemy import create_engine, event, insert, inspect, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
@@ -1193,6 +1194,219 @@ def test_an_observation_clock_makes_a_repeated_read_idempotent(event_db):
         assert connection.execute(
             select(EventMappingDecision.id)
         ).scalars().all() == [1]
+
+
+@contextmanager
+def _recorded_statements(engine):
+    """Record every statement's leading SQL verb and text while active."""
+
+    statements: list[tuple[str, str]] = []
+
+    def _record(connection, cursor, statement, parameters, context, executemany):
+        statements.append((statement.strip().split()[0].upper(), statement))
+
+    event.listen(engine, "before_cursor_execute", _record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+
+
+def _writes(statements) -> list[str]:
+    return [
+        statement
+        for verb, statement in statements
+        if verb in {"INSERT", "UPDATE", "DELETE", "SAVEPOINT"}
+    ]
+
+
+def _stored_last_seen(engine, provider_id: str = "ud-1") -> datetime:
+    with engine.connect() as connection:
+        stored = connection.execute(
+            select(ProviderEventMapping.last_seen_at).where(
+                ProviderEventMapping.provider_event_id == provider_id
+            )
+        ).scalar_one()
+    return stored if stored.tzinfo else stored.replace(tzinfo=timezone.utc)
+
+
+def _record_savepoints(engine) -> list[str]:
+    savepoints: list[str] = []
+    event.listen(engine, "savepoint", lambda *args: savepoints.append("begin"))
+    event.listen(engine, "release_savepoint", lambda *args: savepoints.append("release"))
+    event.listen(
+        engine, "rollback_savepoint", lambda *args: savepoints.append("rollback")
+    )
+    return savepoints
+
+
+def _assert_transaction_usable(connection, now) -> None:
+    assert connection.in_nested_transaction() is False
+    assert connection.in_transaction() is True
+    connection.execute(
+        insert(EventMappingDecision.__table__).values(
+            provider="underdog",
+            provider_event_id="ud-1",
+            decision_state="unmatched",
+            created_at=now,
+        )
+    )
+
+
+def test_an_existing_event_lock_row_is_locked_without_a_failing_insert(event_db):
+    engine, now = event_db
+    repository = _repository(engine, now)
+    with repository._transaction("underdog", "ud-1"):
+        pass
+
+    savepoints = _record_savepoints(engine)
+    with _recorded_statements(engine) as statements:
+        with repository._transaction("underdog", "ud-1") as connection:
+            assert savepoints == []
+            locking = list(statements)
+            _assert_transaction_usable(connection, now)
+
+    assert [verb for verb, _ in locking] == ["SELECT"]
+    assert len(repository.history(provider="underdog")) == 1
+
+
+def test_a_duplicate_event_lock_row_keeps_the_transaction_usable(
+    event_db, monkeypatch
+):
+    """A lock row created between the select and the insert is not fatal.
+
+    The duplicate insert must be caught after ``begin_nested`` exits, because
+    PostgreSQL aborts the surrounding transaction while a failed savepoint is
+    still open.
+    """
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    with repository._transaction("underdog", "ud-1"):
+        pass
+
+    select_lock = EventMappingRepository._select_lock_row
+    misses = iter([True])
+
+    def _racing_select(connection, provider, provider_id):
+        if next(misses, False):
+            return None
+        return select_lock(connection, provider, provider_id)
+
+    monkeypatch.setattr(
+        EventMappingRepository, "_select_lock_row", staticmethod(_racing_select)
+    )
+    savepoints = _record_savepoints(engine)
+
+    with repository._transaction("underdog", "ud-1") as connection:
+        assert savepoints == ["begin", "rollback"]
+        _assert_transaction_usable(connection, now)
+
+    assert len(repository.history(provider="underdog")) == 1
+
+
+def test_a_same_snapshot_event_repeat_writes_nothing(event_db):
+    """Re-reading an unchanged board is a read, not a mapping write."""
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    resolver = _catalog_resolver(engine, repository)
+    observed = replace(
+        resolver.resolve("underdog", _evidence(), SEASON), observed_at=_OBSERVED_AFTER
+    )
+    assert repository.record_resolution(observed).persisted is True
+    before = repository.get_mapping("underdog", "ud-1")
+
+    with _recorded_statements(engine) as statements:
+        repeated = repository.record_resolution(observed)
+
+    assert _writes(statements) == []
+    assert repeated.state == "auto"
+    assert repeated.persisted is False
+    assert repeated.mapping == before
+    assert repository.get_mapping("underdog", "ud-1") == before
+    assert len(repository.history()) == 1
+
+
+def test_an_event_repeat_through_the_board_writes_nothing(event_db):
+    engine, now = event_db
+    repository = _repository(engine, now)
+    service = _board_service(
+        _snapshot(_market("m-1"), _market("m-2")),
+        resolver=_catalog_resolver(engine, repository),
+        repository=repository,
+    )
+    query = NBAMarketQuery(season=SEASON)
+    service.get_board(query)
+
+    with _recorded_statements(engine) as statements:
+        board = service.get_board(query)
+
+    assert _writes(statements) == []
+    assert [outcome.state.value for outcome in board.event_mapping_outcomes] == ["auto"]
+    assert len(repository.history()) == 1
+
+
+def test_event_last_seen_at_is_touched_again_once_the_interval_passes(event_db):
+    engine, now = event_db
+    clock = {"now": now}
+    repository = EventMappingRepository(engine, clock=lambda: clock["now"])
+    resolution = _resolver(repository=repository).resolve("underdog", _evidence(), SEASON)
+    repository.record_resolution(resolution)
+    assert _stored_last_seen(engine) == now
+
+    clock["now"] = now + timedelta(minutes=14, seconds=59)
+    with _recorded_statements(engine) as statements:
+        repository.record_resolution(resolution)
+    assert _writes(statements) == []
+    assert _stored_last_seen(engine) == now
+
+    clock["now"] = now + timedelta(minutes=15)
+    repository.record_resolution(resolution)
+    mapping = repository.get_mapping("underdog", "ud-1")
+    assert _stored_last_seen(engine) == now + timedelta(minutes=15)
+    assert mapping.first_seen_at == now.isoformat()
+    assert mapping.mapping_state == "auto"
+    assert len(repository.history()) == 1
+
+
+@pytest.mark.parametrize(
+    ("catalog_row", "field", "expected"),
+    [
+        (
+            _event_row(home_team_name="LA Lakers"),
+            "canonical_home_team_name",
+            "LA Lakers",
+        ),
+        (
+            _event_row(offset_hours=1),
+            "canonical_scheduled_at",
+            (TIP_OFF + timedelta(hours=1)).isoformat(),
+        ),
+    ],
+)
+def test_a_changed_canonical_event_fact_still_updates(
+    event_db, catalog_row, field, expected
+):
+    """Every current column is compared before an unchanged row is skipped."""
+
+    engine, now = event_db
+    repository = _repository(engine, now)
+    first = _resolver(repository=repository).resolve("underdog", _evidence(), SEASON)
+    repository.record_resolution(first)
+
+    changed = _resolver([catalog_row], repository=repository).resolve(
+        "underdog", _evidence(), SEASON
+    )
+    assert changed.state is EventResolutionState.AUTO
+
+    with _recorded_statements(engine) as statements:
+        repository.record_resolution(changed)
+
+    assert any(verb == "UPDATE" for verb, _ in statements)
+    mapping = repository.get_active_mapping("underdog", "ud-1")
+    assert getattr(mapping, field) == expected
+    assert _stored_last_seen(engine) == now
 
 
 def test_the_demo_database_can_never_store_event_mappings():
