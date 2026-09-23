@@ -2,7 +2,9 @@ import numpy as np
 import pandas as pd
 import logging
 import requests
+from collections import OrderedDict
 from collections.abc import Callable
+from threading import Lock
 from nba_api.stats.static import players
 from rapidfuzz import process, fuzz
 from typing import Optional
@@ -134,6 +136,13 @@ def _made_rate(makes: float, attempts: float) -> float:
 
 
 class PlayerService:
+    #: The league Zone Shooting profile is a pure function of one immutable
+    #: ``exact_shot_zones`` publication row, so only the number of rows kept
+    #: live is bounded; an older one is worthless once the pointer advances.
+    #: Two mirrors the reader's Diet decode cache: the active row plus the one
+    #: a request racing the advance may still be reading.
+    _ZONE_PROFILE_CACHE_VERSIONS = 2
+
     def __init__(
         self,
         db_engine,
@@ -151,6 +160,12 @@ class PlayerService:
         # The stored game-log repository, which owns no provider client.  The
         # profile read path therefore cannot reach NBA Stats at all.
         self.game_logs = game_logs
+        # (publication_id, fence, version) -> transformed league profile.
+        # Entries are shared across requests and must be treated read-only.
+        self._zone_profile_cache: "OrderedDict[tuple[str, int, int], pd.DataFrame]" = (
+            OrderedDict()
+        )
+        self._zone_profile_cache_lock = Lock()
 
     def get_all_players(self):
         """Fetch list of all players from database"""
@@ -419,32 +434,86 @@ class PlayerService:
         :func:`app.services.player_zone_profile.transform_player_zone_profile`,
         and the row is still located by the fuzzy-matched player name the
         caller resolved.
+
+        The publication frame may be the memoized league profile shared by
+        every request for that generation, so it is only read here: boolean
+        indexing returns a copy, and ``to_dict`` builds fresh row dicts.
         """
 
         df = self._zone_shooting_frame()
         return df[df['PLAYER_NAME'] == player_name].to_dict(orient='records')[0]
 
     def _zone_shooting_frame(self):
-        """Read the Zone Shooting profile from the publication, else legacy."""
+        """Read the Zone Shooting profile from the publication, else legacy.
+
+        The publication is read decoded-only, so a hit on the reader's Diet
+        decode cache selects no payload, and the transformed league frame is
+        memoized under the ``(publication_id, fence, version)`` that read
+        itself names.  The read's availability, authority, season, and
+        legacy-fallback decisions run first on every request; only an
+        available publication row ever reaches the memo.  The returned frame
+        may be that shared memo entry and must not be mutated.
+        """
 
         if self.publication_reader is None:
             return self._fetch_data_from_table('player_shooting_zones')
+
+        stream_key = "exact_shot_zones"
+        season = self.settings.nba.current_season
+        read = self._zone_shooting_read(stream_key, season)
+        if read.legacy_fallback_allowed:
+            return self._fetch_data_from_table('player_shooting_zones')
+        if not read.available:
+            return pd.DataFrame(columns=['PLAYER_NAME'])
+        cached = self._zone_profile_cached(read)
+        if cached is not None:
+            return cached
+        if read.payload is None:
+            # A decoded-only hit on the Diet decode cache serves the five Diet
+            # facts alone, while the profile renders the payload's auxiliary
+            # section.  One full read supplies it, and every check above runs
+            # again on that read, which is keyed by its own labels in case the
+            # pointer advanced in between.
+            read = self.publication_reader.read(stream_key, season=season)
+            if read.legacy_fallback_allowed:
+                return self._fetch_data_from_table('player_shooting_zones')
+            if not read.available or read.payload is None:
+                return pd.DataFrame(columns=['PLAYER_NAME'])
+            cached = self._zone_profile_cached(read)
+            if cached is not None:
+                return cached
+        profile = self._transform_zone_shooting_payload(read.payload)
+        if profile is None:
+            return pd.DataFrame(columns=['PLAYER_NAME'])
+        self._store_zone_profile(read, profile)
+        return profile
+
+    def _zone_shooting_read(self, stream_key, season):
+        """One decoded-only snapshot read, when the reader supports it."""
+
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if callable(snapshot) and accepts_keyword(snapshot, "decoded_only_keys"):
+            return snapshot(
+                (stream_key,),
+                season=season,
+                decoded_only_keys=frozenset({stream_key}),
+            ).read(stream_key)
+        return self.publication_reader.read(stream_key, season=season)
+
+    @staticmethod
+    def _transform_zone_shooting_payload(payload):
+        """Render the league profile from one publication payload, or None."""
+
         from app.services.database_first_activation import (
             PublicationPayloadError,
             decode_player_shot_zones,
         )
         from app.services.player_zone_profile import transform_player_zone_profile
 
-        season = self.settings.nba.current_season
-        read = self.publication_reader.read("exact_shot_zones", season=season)
-        if read.legacy_fallback_allowed:
-            return self._fetch_data_from_table('player_shooting_zones')
-        if not read.available:
-            return pd.DataFrame(columns=['PLAYER_NAME'])
         try:
-            rows = decode_player_shot_zones(read.payload)
+            rows = decode_player_shot_zones(payload)
         except PublicationPayloadError:
-            return pd.DataFrame(columns=['PLAYER_NAME'])
+            return None
         frame = pd.DataFrame([
             {
                 'PLAYER_ID': row.player_id,
@@ -471,6 +540,36 @@ class PlayerService:
         # player: the profile's ``PTS%+`` columns are ratios against a league
         # mean taken over every source row.
         return transform_player_zone_profile(frame)
+
+    @staticmethod
+    def _zone_profile_key(read):
+        """The immutable publication row a read names, or None if unlabelled."""
+
+        if read.publication_id is None or read.fence is None or read.version is None:
+            return None
+        return (str(read.publication_id), int(read.fence), int(read.version))
+
+    def _zone_profile_cached(self, read):
+        key = self._zone_profile_key(read)
+        if key is None:
+            return None
+        with self._zone_profile_cache_lock:
+            frame = self._zone_profile_cache.get(key)
+            if frame is not None:
+                self._zone_profile_cache.move_to_end(key)
+            return frame
+
+    def _store_zone_profile(self, read, frame):
+        """Memoize one row's league profile and bound the rows, oldest first."""
+
+        key = self._zone_profile_key(read)
+        if key is None:
+            return
+        with self._zone_profile_cache_lock:
+            self._zone_profile_cache[key] = frame
+            self._zone_profile_cache.move_to_end(key)
+            while len(self._zone_profile_cache) > self._ZONE_PROFILE_CACHE_VERSIONS:
+                self._zone_profile_cache.popitem(last=False)
 
     def _get_shooting_type(self, player_id: int):
         """Render the Shooting Type tab from stored player Diet facts.

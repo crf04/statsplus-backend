@@ -617,6 +617,182 @@ def test_a_malformed_active_zone_publication_is_a_404_not_a_legacy_read(publishe
         service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
 
 
+# --------------------------------------------------------------------------
+# The generation-keyed Zone Shooting profile memo
+# --------------------------------------------------------------------------
+
+
+def _legacy_row(name=SAMPLE_PLAYER_NAME):
+    legacy = _legacy_zone_frame()
+    return legacy[legacy["PLAYER_NAME"] == name].to_dict(orient="records")[0]
+
+
+@pytest.fixture
+def counted_profile_decodes(monkeypatch):
+    """Count every decode of the rendered Zone Shooting profile."""
+
+    import app.services.database_first_activation as activation
+
+    calls = []
+    original = activation.decode_player_shot_zones
+
+    def counting(payload):
+        calls.append(payload)
+        return original(payload)
+
+    monkeypatch.setattr(activation, "decode_player_shot_zones", counting)
+    return calls
+
+
+def _statements_during(engine, action):
+    from sqlalchemy import event
+
+    statements = []
+
+    def record(_connection, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        result = action()
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    return result, statements
+
+
+def _advance_zone_publication(plane, *, restricted_area_fgm, suffix):
+    """Publish a new ``exact_shot_zones`` version with one profile value moved."""
+
+    engine, manifest, publications, deliver = plane
+    observation = _zone_observation()
+    row = next(
+        row for row in observation.payload["profile"]["rows"]
+        if row["player_id"] == SAMPLE_PLAYER_ID
+    )
+    row["Restricted Area_FGM"] = restricted_area_fgm
+    deliver(observation, suffix=suffix)
+    return publications.compose_from_observations(
+        "exact_shot_zones", season=SEASON, cutoff=NOW,
+        manifest_id=manifest.manifest_id,
+    )
+
+
+def test_repeated_zone_profile_reads_decode_the_publication_once(
+    published, counted_profile_decodes,
+):
+    """The league profile is a pure function of one immutable publication row.
+
+    The second request for the same generation is served from the memo: the
+    profile is not decoded again, and its decoded-only snapshot is a Diet
+    decode-cache hit, so no statement selects the ~760 KB payload.
+    """
+
+    engine = published
+    service = _player_service(
+        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+    )
+
+    first = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    second, statements = _statements_during(
+        engine,
+        lambda: service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting"),
+    )
+
+    assert first == second == _legacy_row()
+    assert len(counted_profile_decodes) == 1
+    assert statements
+    assert not [
+        statement for statement in statements
+        if "publication_versions.payload" in statement
+    ]
+
+
+def test_an_advanced_zone_publication_is_served_and_the_memo_stays_bounded(
+    plane, published, counted_profile_decodes,
+):
+    engine = published
+    service = _player_service(
+        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+    )
+    original = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    assert original["Restricted Area_FGM"] == 4.3
+
+    seen = []
+    for index, fgm in enumerate((4.2, 4.1)):
+        # Composition validates the candidate with the same decoder, so only
+        # the decodes the profile read itself performs are counted.
+        advanced = _advance_zone_publication(
+            plane, restricted_area_fgm=fgm, suffix=f"-v{index + 2}",
+        )
+        before = len(counted_profile_decodes)
+        row = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+        assert len(counted_profile_decodes) == before + 1
+        seen.append(row["Restricted Area_FGM"])
+        assert advanced.publication_id in {
+            key[0] for key in service._zone_profile_cache
+        }
+        assert len(service._zone_profile_cache) <= 2
+
+    assert seen == [4.2, 4.1]
+    # A repeat of the newest generation is a memo hit, and the oldest row was
+    # evicted once a third generation was memoized.
+    before = len(counted_profile_decodes)
+    service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    assert len(counted_profile_decodes) == before
+    assert len(service._zone_profile_cache) == 2
+
+
+def test_a_deactivated_stream_serves_legacy_rows_even_with_a_warm_memo(published):
+    engine = published
+    service = _player_service(
+        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+    )
+    assert service.get_player_profile(
+        SAMPLE_PLAYER_NAME, "Zone Shooting"
+    ) == _legacy_row()
+    assert len(service._zone_profile_cache) == 1
+
+    _deactivate(engine)
+    marked = _legacy_zone_frame()
+    marked.loc[
+        marked["PLAYER_NAME"] == SAMPLE_PLAYER_NAME, "Restricted Area_FGM"
+    ] = 99.0
+    marked.to_sql("player_shooting_zones", engine, if_exists="replace", index=False)
+
+    # The legacy-fallback decision is the read's, and it runs before the memo
+    # is consulted, so the warm entry for the still-existing row is not served.
+    row = service.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    assert row["Restricted Area_FGM"] == 99.0
+
+
+def test_the_memoized_row_is_identical_to_the_uncached_path(
+    published, counted_profile_decodes,
+):
+    engine = published
+    names = [row[1] for row in FIXTURE["per_game"]["rowSet"]]
+    cached = _player_service(
+        engine, publication_reader=DatabaseFirstPublicationReader(engine),
+    )
+    cached.get_player_profile(SAMPLE_PLAYER_NAME, "Zone Shooting")
+    decodes_after_warm = len(counted_profile_decodes)
+
+    for name in names:
+        memo_row = cached._get_player_zone_shooting(name)
+        # A fresh service and reader: nothing is memoized or decode-cached.
+        uncached_row = _player_service(
+            engine, publication_reader=DatabaseFirstPublicationReader(engine),
+        )._get_player_zone_shooting(name)
+        assert list(memo_row) == list(uncached_row)
+        assert json.dumps(memo_row) == json.dumps(uncached_row)
+        # A caller mutating its row cannot reach the shared frame.
+        memo_row["Restricted Area_FGM"] = -1.0
+
+    assert cached._get_player_zone_shooting(SAMPLE_PLAYER_NAME) == _legacy_row()
+    # The memo rows all came from the one warm decode; only the uncached
+    # services decoded again.
+    assert len(counted_profile_decodes) == decodes_after_warm + len(names)
+
+
 def test_the_registry_reconciles_an_already_registered_stream_without_migration(tmp_path):
     """The stream row exists in production with the wrong required name."""
 
