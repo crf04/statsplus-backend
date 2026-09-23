@@ -810,3 +810,99 @@ def test_accent_and_ascii_names_resolve_to_the_same_durable_profile(
     assert service.get_player_profile(ascii_name, "assists")[0][
         "AtRimAssists+"
     ] == pytest.approx(2.0)
+
+
+def test_player_list_and_profiles_read_diets_through_one_decoded_only_snapshot():
+    """A snapshot keys the baseline cache by generation; without one the
+    league-wide baselines are recomputed on every player list and profile."""
+
+    from unittest.mock import Mock
+
+    from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
+
+    durable = _durable_profile_reader()
+    received = []
+
+    class SnapshotRecordingReader(_DurableProfileReader):
+        def get_for_players(self, season, player_ids, *, publication_snapshot=None):
+            received.append(publication_snapshot)
+            return super().get_for_players(season, player_ids)
+
+    reader = SnapshotRecordingReader(durable.catalog, durable.result)
+    snapshot = object()
+    publication_reader = Mock(snapshot=Mock(return_value=snapshot))
+    service = PlayerService(
+        object(),
+        settings=_settings(),
+        profile_reader=reader,
+        publication_reader=publication_reader,
+    )
+
+    assert service.get_all_players() == ["Jayson Tatum"]
+    assert service.get_player_profile("Jayson Tatum", "Playtypes")["Transition%"] == 20.0
+
+    assert received == [snapshot, snapshot]
+    for call in publication_reader.snapshot.call_args_list:
+        assert set(call.args[0]) == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+        assert call.kwargs["season"] == "2025-26"
+        assert call.kwargs["decoded_only_keys"] == PLAYER_DIET_PUBLICATION_STREAM_KEYS
+
+
+def test_profile_reader_forwards_the_callers_publication_snapshot():
+    from unittest.mock import Mock
+
+    diets = Mock()
+    snapshot = object()
+    reader = PlayerProfileReader(Mock(), diets)
+
+    reader.get_for_players("2025-26", (1,), publication_snapshot=snapshot)
+    reader.get_for_players("2025-26", (1,))
+
+    assert diets.get_for_players.call_args_list[0].kwargs == {
+        "publication_snapshot": snapshot
+    }
+    assert diets.get_for_players.call_args_list[1].kwargs == {}
+    # The demo fixture's empty reader accepts the same call.
+    PlayerProfileReader.unavailable().get_for_players(
+        "2025-26", (1,), publication_snapshot=snapshot
+    )
+
+
+def test_per36_frame_uses_the_readers_decoded_facts_without_decoding_again():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    fact = SimpleNamespace(
+        player_id=7,
+        field_goals_made_per36=9.0,
+        field_goals_attempted_per36=18.0,
+        three_pointers_made_per36=3.0,
+        three_pointers_attempted_per36=8.0,
+        free_throws_made_per36=5.0,
+        free_throws_attempted_per36=6.0,
+        points_per36=26.0,
+        turnovers_per36=2.5,
+    )
+    read = SimpleNamespace(
+        legacy_fallback_allowed=False,
+        available=True,
+        decoded=(fact,),
+        # Decoding this again would fail, so the frame must come from
+        # the reader's own decode.
+        payload="not a per-36 payload",
+    )
+    service = PlayerService(
+        object(),
+        settings=_settings(),
+        profile_reader=PlayerProfileReader.unavailable(),
+        publication_reader=Mock(read=Mock(return_value=read)),
+    )
+
+    frame = service._per36_frame()
+
+    assert frame.to_dict("records") == [
+        {
+            "PLAYER_ID": 7, "FGM": 9.0, "FGA": 18.0, "FG3M": 3.0, "FG3A": 8.0,
+            "FTM": 5.0, "FTA": 6.0, "PTS": 26.0, "TOV": 2.5,
+        }
+    ]

@@ -39,6 +39,10 @@ class TestBaseQueryParser(unittest.TestCase):
             ]):
                 self.parser = BaseQueryParser(self.mock_engine)
     
+    def test_parser_runs_only_the_entity_ruler(self):
+        """Every query runs the pipeline; the statistical pipes are never read."""
+        self.assertEqual(self.parser.nlp.pipe_names, ["entity_ruler"])
+
     def test_player_extraction_exact_match(self):
         """Test extraction of exact player names"""
         test_cases = [

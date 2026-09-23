@@ -18,8 +18,15 @@ from app.domain.play_type_matchup import complete_play_type_shares
 from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
 from app.services.athlete_resolver import CanonicalAthlete, normalize_athlete_name
-from app.services.player_diet import PlayerDietResult
+from app.services.player_diet import (
+    PLAYER_DIET_PUBLICATION_STREAM_KEYS,
+    PlayerDietResult,
+)
 from app.services.progress import RefreshProgress
+from app.services.publication_snapshot_calls import (
+    accepts_keyword,
+    call_with_read_scope,
+)
 from app.services.table_publisher import PublicationFence
 
 logger = logging.getLogger(__name__)
@@ -56,8 +63,8 @@ class PlayerProfileReader:
 
         class UnavailableDietReader:
             @staticmethod
-            def get_for_players(season: str, player_ids):
-                del player_ids
+            def get_for_players(season: str, player_ids, **read_scope):
+                del player_ids, read_scope
                 return PlayerDietResult(
                     season=season,
                     players={},
@@ -69,8 +76,13 @@ class PlayerProfileReader:
     def get_catalog(self, season: str, *, active_only: bool = False):
         return self._catalog.get_catalog(season, active_only=active_only)
 
-    def get_for_players(self, season: str, player_ids):
-        return self._diets.get_for_players(season, player_ids)
+    def get_for_players(self, season: str, player_ids, *, publication_snapshot=None):
+        return call_with_read_scope(
+            self._diets.get_for_players,
+            season,
+            player_ids,
+            publication_snapshot=publication_snapshot,
+        )
 
 
 _ASSIST_LOCATION_SLICES = (
@@ -147,9 +159,7 @@ class PlayerService:
         catalog_by_id = {int(row["player_id"]): row for row in catalog}
         if not catalog_by_id:
             return []
-        result = self.profile_reader.get_for_players(
-            season, tuple(sorted(catalog_by_id))
-        )
+        result = self._read_diets(season, tuple(sorted(catalog_by_id)))
         return [
             catalog_by_id[player_id]["display_name"]
             for player_id in sorted(catalog_by_id)
@@ -233,10 +243,34 @@ class PlayerService:
             ),
         )
 
-    def _durable_profile_result(self, player_id):
-        result = self.profile_reader.get_for_players(
-            self.settings.nba.current_season, [player_id]
+    def _read_diets(self, season, player_ids):
+        """Read Player Diet facts through one decoded-only snapshot.
+
+        The snapshot's generation keys the diet reader's baseline cache, so the
+        league-wide baselines are computed once per generation instead of on
+        every request, and a decode-cache hit skips the diet payloads.
+        """
+
+        return call_with_read_scope(
+            self.profile_reader.get_for_players,
+            season,
+            player_ids,
+            publication_snapshot=self._diet_snapshot(season),
         )
+
+    def _diet_snapshot(self, season):
+        snapshot = getattr(self.publication_reader, "snapshot", None)
+        if not callable(snapshot):
+            return None
+        keyword = {}
+        if accepts_keyword(snapshot, "decoded_only_keys"):
+            keyword["decoded_only_keys"] = PLAYER_DIET_PUBLICATION_STREAM_KEYS
+        return snapshot(
+            tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)), season=season, **keyword
+        )
+
+    def _durable_profile_result(self, player_id):
+        result = self._read_diets(self.settings.nba.current_season, [player_id])
         return result, tuple(result.players.get(player_id, ()))
 
     def _get_durable_player_playtypes(
@@ -601,7 +635,13 @@ class PlayerService:
                 ]
             )
         try:
-            facts = decode_player_per36(read.payload, season=season)
+            # The reader already decoded this immutable version to authorize
+            # the read; decoding the payload again would repeat that work.
+            facts = (
+                read.decoded
+                if read.decoded is not None
+                else decode_player_per36(read.payload, season=season)
+            )
         except PublicationPayloadError:
             return pd.DataFrame()
         return pd.DataFrame(

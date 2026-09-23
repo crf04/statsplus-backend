@@ -215,6 +215,9 @@ _PUBLICATION_STREAM_KEYS = (
     *sorted(frozenset().union(*TEAM_MATCHUP_PUBLICATION_STREAM_KEYS.values())),
 )
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+# Diet facts come from the reader's decode cache, so a cache hit never selects
+# or parses the league-wide diet payloads.
+_DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS
 #: The streams one Matchup composes, and the narrowing it applies, for a
 #: caller that captures one generation to share with another read (#253).
 MATCHUP_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
@@ -1011,6 +1014,8 @@ class MatchupService:
             # The season-wide game-log payload is never needed here: the
             # summaries read resolves this game's players from the projection.
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if accepts_keyword(snapshot, "decoded_only_keys"):
+            keyword["decoded_only_keys"] = _DECODED_ONLY_STREAM_KEYS
         if session is not None and accepts_keyword(snapshot, "session"):
             keyword["session"] = session
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)

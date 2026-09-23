@@ -52,6 +52,9 @@ _PUBLICATION_STREAM_KEYS = tuple(sorted({
     *TEAM_MATCHUP_PUBLICATION_STREAM_KEYS["season"],
 }))
 _PROJECTION_ONLY_STREAM_KEYS = frozenset({"player_game_logs"})
+# Diet facts come from the reader's decode cache, so a cache hit never selects
+# or parses the league-wide diet payloads.
+_DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS
 
 
 def _records(frame: pd.DataFrame):
@@ -531,6 +534,8 @@ class GameService:
         keyword = {}
         if accepts_keyword(snapshot, "projection_only_keys"):
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
+        if accepts_keyword(snapshot, "decoded_only_keys"):
+            keyword["decoded_only_keys"] = _DECODED_ONLY_STREAM_KEYS
         return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     def filter_teams(self, team_filter, rank_filter, season):
