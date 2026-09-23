@@ -2554,6 +2554,7 @@ PATCH  /api/user/targets/<id>
 DELETE /api/user/targets/<id>
 GET    /api/user/targets/resolve?date=<YYYY-MM-DD>
 GET    /api/user/targets/<id>/backtest
+GET    /api/user/targets/backtests
 POST   /api/user/targets/preview
 ```
 
@@ -3084,6 +3085,84 @@ rather than a suppressed one; no Diet evidence exists to be withheld.
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another
 account -- foreign ids are never reported as `403`.
+
+#### Backtest every Target
+
+```http
+GET /api/user/targets/backtests
+Authorization: Bearer <firebase-id-token>
+```
+
+Returns the [Backtest](#backtest-one-target-over-the-season-to-date) of every
+one of the caller's Targets in one request, so the Targets page no longer asks
+for them one at a time. It takes no parameters and covers all of the caller's
+Targets. The path never reaches `/api/user/targets/<id>`, whose id only matches
+integers.
+
+```json
+{
+  "success": true,
+  "season": "2025-26",
+  "backtests": [
+    {
+      "target_id": 9,
+      "status": "error",
+      "error": {
+        "code": "operation_failed",
+        "message": "Failed to backtest the target."
+      }
+    },
+    {
+      "target_id": 7,
+      "status": "ok",
+      "backtest": {
+        "target": {"id": 7, "opponent": "OKC", "title": "OKC vs Corner 3 ≥ 40%", "...": "..."},
+        "season": "2025-26",
+        "proxy": "Outcomes are box-score proxies for the Qualifier slices, ...",
+        "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
+        "summary": {"players": 1, "games": 2, "columns": {"...": "..."}},
+        "players": ["..."],
+        "games_considered": {"played": 2, "kept": 2}
+      }
+    }
+  ]
+}
+```
+
+- `season` is the configured current season, the same one each Backtest
+  echoes.
+- `backtests` has one item per Target, in the order
+  [`GET /api/user/targets`](#targets) lists them (newest first), each naming
+  its `target_id`.
+- `status: "ok"` carries `backtest`: exactly the body
+  `GET /api/user/targets/<id>/backtest` returns for that Target, minus
+  `success` -- the same keys in the same order, including `games_considered`.
+- `status: "error"` isolates a failure to that Target, so one failing Target
+  never blanks the others. `error` is the standard `{code, message}` object
+  (plus `details` where that error defines them) the single route would have
+  answered for the same failure: an application error keeps its own code and
+  message, and anything unexpected is `operation_failed` with
+  `"Failed to backtest the target."`, its detail logged and never returned.
+- Every `ok` item is composed from one Publication generation, so the
+  Backtests in one response never mix generations.
+
+**Cache.** Each Target is served through the same shared Redis result cache as
+the single route, under the same keys and invalidation, so an entry either
+route files is a hit for the other. A request whose every Target hits reads no
+publication payload at all. The request log's `targets_cache` is `hit` when
+every `ok` item hit, `miss` when any missed, else `bypass` when any bypassed,
+else `-`.
+
+**Empty state.** A caller with no Targets gets `200` with `"backtests": []`.
+
+**Errors.** `401 authentication_required` for an unauthenticated caller. A
+failure before any Target is read -- the Target list or the generation capture
+-- fails the whole request with the standard error shape, e.g. `500
+operation_failed` with `"Failed to backtest the targets."`.
+
+**Compatibility.** The single-Target route is unchanged and remains the Target
+detail page's read. A client deployed ahead of this route gets `404` for the
+path and can fall back to the per-Target route.
 
 #### Preview a Draft Target
 

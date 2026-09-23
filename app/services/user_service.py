@@ -756,15 +756,28 @@ class UserService:
 
         session = self._get_session()
         try:
-            rows = (
-                session.query(Target)
-                .filter(Target.firebase_uid == firebase_uid)
-                .order_by(Target.created_at.desc(), Target.id.desc())
-                .all()
-            )
-            return [row.to_dict() for row in rows]
+            return self.list_targets_in_session(session, firebase_uid)
         finally:
             session.close()
+
+    @staticmethod
+    def list_targets_in_session(
+        session: Any, firebase_uid: str
+    ) -> List[Dict[str, Any]]:
+        """List the caller's targets on a caller-owned session.
+
+        The same rows, in the same order, as ``list_targets``; a read
+        composing every Target's Backtest on one ``request_read_scope``
+        connection passes its session so the list joins that one checkout.
+        """
+
+        rows = (
+            session.query(Target)
+            .filter(Target.firebase_uid == firebase_uid)
+            .order_by(Target.created_at.desc(), Target.id.desc())
+            .all()
+        )
+        return [row.to_dict() for row in rows]
 
     def get_target(self, firebase_uid: str, target_id: int) -> Dict[str, Any]:
         """Return one of the caller's targets, or report it missing."""

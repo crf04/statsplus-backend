@@ -175,6 +175,9 @@ backtest service returns, as
 refused and the result is written nowhere, and stays `-` when the feature is
 off (no Redis client, or `TARGET_BACKTEST_CACHE_ENABLED=false`) — the Lab's
 Draft Target read never touches the cache, so it never stamps a decision.
+The every-Target read (`GET /api/user/targets/backtests`) stamps one value for
+all its items through `aggregate_cache_state`: `hit` when every item hit,
+`miss` when any missed, else `bypass` when any bypassed, else `-`.
 This line is
 the source for latency/regression triggers; the in-process telemetry deques
 are not. Unhandled catastrophic failures at shutdown skip after_request, so
@@ -2139,8 +2142,9 @@ share, binding the publication snapshot's session to it and passing it as
 that same checkout through `UserService.get_target_in_session` instead of the
 per-call `get_target`, so one saved backtest checks out exactly one pooled
 connection, and the per-call default remains for wirings without an engine.
-The Targets page backtests its saved Targets one at a
-time, each against the same active publication but naming a different
+The Targets page backtests every saved Target -- one request per
+Target, or one every-Target request (see below) -- each against the same
+active publication but naming a different
 opponent's player pool, so `PlayerGameLogRepository` additionally caches
 each player's decoded season rows under the publication that produced
 them: a Publication's projection is immutable once composed, so a later
@@ -2215,6 +2219,22 @@ degrades the way an unmet Target does instead of refusing.
 The backtest is a separate route from resolution deliberately: the league-wide
 game-log scan runs only when a reader expands one Target, so the Slate's own
 read stays the cost of one Slate plus the Matchups its Targets name.
+
+`backtest_all(uid)` serves the Targets page's every-Target read
+(`GET /api/user/targets/backtests`) on one `request_read_scope`: it lists the
+Targets on that checkout (`UserService.list_targets_in_session`), asks the
+pointer-only `generation()` once, and reads every Target's result-cache entry
+under that generation with the single route's own keys. A request whose every
+Target hits captures no snapshot. The first miss captures the one
+`_publication_snapshot` every miss is computed from and filed under; if that
+capture has moved past the pre-checked generation, the hits already read are
+discarded and re-read under the captured one, so no response mixes
+generations. Each Target's failure -- in its cache read or its computation --
+is isolated into that item as `isolated_error_body` (`app/errors.py`) renders
+it: the same translation, logging, and failure count `route_error_boundary`
+and the central handler give the single route, with the unexpected case's
+traceback logged against the Target id. The list or the capture failing is
+still the whole request's standard error.
 
 ### Target preview (#253)
 

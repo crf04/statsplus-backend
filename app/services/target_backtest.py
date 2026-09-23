@@ -54,6 +54,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
 from app.config.settings import RuntimeSettings
+from app.errors import AppError, isolated_error_body
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.domain.target_statistics import target_stat_columns
@@ -177,6 +178,41 @@ TARGET_BACKTEST_CACHE_SCHEMA = 1
 #: different questions, so the key keeps ``repr`` of the full float. The
 #: prefix carries the schema constant so one knob versions the whole entry.
 _CACHE_KEY_PREFIX_TEMPLATE = "targets:backtest:v{schema}:"
+
+
+#: The safe message a Backtest failure nothing more specific describes is
+#: reported with, by the single route and by each item of the every-Target
+#: read alike.
+BACKTEST_FAILED_MESSAGE = "Failed to backtest the target."
+
+
+def _normalized_generation(
+    generation: Any,
+) -> tuple[tuple[str, str | None, int | None, int | None], ...] | None:
+    """One comparable form of a generation, whichever reader produced it."""
+
+    if generation is None:
+        return None
+    return tuple(tuple(entry) for entry in generation)
+
+
+def aggregate_cache_state(states: Iterable[str]) -> str:
+    """Reduce several Backtests' cache outcomes to one request log value.
+
+    ``hit`` when every item hit, ``miss`` when any item missed, otherwise the
+    single read's rule: ``bypass`` when any item bypassed, else the unbilled
+    ``-``.  Only items that produced a Backtest have an outcome; a request
+    with none is ``-``.
+    """
+
+    states = list(states)
+    if states and all(state == "hit" for state in states):
+        return "hit"
+    if "miss" in states:
+        return "miss"
+    if "bypass" in states:
+        return "bypass"
+    return "-"
 
 
 def backtest_cache_key(
@@ -350,6 +386,133 @@ class TargetBacktestService:
                 target, connection=connection, session=session
             )
 
+    def backtest_all(self, firebase_uid: str) -> tuple[dict[str, Any], str]:
+        """Return every one of the caller's Targets with its season to date.
+
+        One item per Target in ``list_targets`` order: ``ok`` with the body
+        ``backtest`` returns for that Target, or ``error`` with the standard
+        error object the single read's route would have answered, so one
+        failing Target never blanks the rest.  A failure before any Target is
+        read -- the list itself, or the generation capture -- is raised.
+
+        Every ``ok`` item is composed from one Publication generation.  The
+        per-Target result cache is the single read's own: the same keys,
+        pre-checked against one pointer-only generation, so a request whose
+        every Target hits captures no snapshot at all.  The first miss
+        captures the one snapshot every miss is computed from; should that
+        capture have moved past the pre-checked generation, earlier hits are
+        discarded and re-read under the captured one, so hits and misses can
+        never mix generations.
+
+        The second element is the request's aggregate cache outcome (see
+        ``aggregate_cache_state``) for the caller to stamp on the log.
+        """
+
+        season = self.settings.nba.current_season
+        with request_read_scope(self._engine) as (connection, session):
+            if session is not None:
+                listed = self.targets.list_targets_in_session(
+                    session, firebase_uid
+                )
+            else:
+                listed = self.targets.list_targets(firebase_uid)
+            targets = [dict(target) for target in listed]
+            if not targets:
+                return {"season": season, "backtests": []}, "-"
+
+            results: list[tuple[dict[str, Any], str] | Exception | None] = [
+                None
+            ] * len(targets)
+            generation = self._cache_generation(season, session)
+            if generation is not None:
+                self._read_cached(targets, results, season, generation)
+
+            if any(result is None for result in results):
+                snapshot = self._publication_snapshot(season, session=session)
+                captured = _normalized_generation(
+                    getattr(snapshot, "generation", None)
+                )
+                if generation is not None and captured != generation:
+                    # The pointers advanced between the pre-check and the
+                    # capture: every hit read so far is the older generation.
+                    for index, result in enumerate(results):
+                        if isinstance(result, tuple):
+                            results[index] = None
+                    if captured is not None:
+                        self._read_cached(targets, results, season, captured)
+                for index, target in enumerate(targets):
+                    if results[index] is not None:
+                        continue
+                    try:
+                        results[index] = self._compute(
+                            target,
+                            publication_snapshot=snapshot,
+                            connection=connection,
+                            session=session,
+                            cacheable=(
+                                generation is not None
+                                and target.get("id") is not None
+                            ),
+                        )
+                    except Exception as error:  # isolated per Target
+                        results[index] = error
+
+        items = []
+        states = []
+        for target, result in zip(targets, results):
+            if isinstance(result, tuple):
+                body, state = result
+                states.append(state)
+                items.append(
+                    {"target_id": target.get("id"), "status": "ok", "backtest": body}
+                )
+            else:
+                # The error object below is logged and counted as the
+                # central handler would; this line names the Target, and an
+                # unexpected failure's traceback, which that one cannot.
+                logger.warning(
+                    "Target backtest item failed target_id=%s",
+                    target.get("id"),
+                    exc_info=(
+                        None
+                        if isinstance(result, AppError)
+                        else (type(result), result, result.__traceback__)
+                    ),
+                )
+                items.append(
+                    {
+                        "target_id": target.get("id"),
+                        "status": "error",
+                        "error": isolated_error_body(
+                            result, BACKTEST_FAILED_MESSAGE
+                        ),
+                    }
+                )
+        return {"season": season, "backtests": items}, aggregate_cache_state(
+            states
+        )
+
+    def _read_cached(
+        self,
+        targets: Sequence[Mapping[str, Any]],
+        results: list[Any],
+        season: str,
+        generation: Sequence[tuple[str, str | None, int | None, int | None]],
+    ) -> None:
+        """Fill every pending saved Target's slot that hits ``generation``."""
+
+        for index, target in enumerate(targets):
+            if results[index] is not None or target.get("id") is None:
+                continue
+            try:
+                evidence = self._cache_read(
+                    self._cache_key(target, season, generation)
+                )
+                if evidence is not None:
+                    results[index] = (self._cached_body(target, evidence), "hit")
+            except Exception as error:  # isolated per Target
+                results[index] = error
+
     def backtest_target(
         self,
         target: Mapping[str, Any],
@@ -393,10 +556,7 @@ class TargetBacktestService:
         route that wants the outcome on the request log.
         """
 
-        cache_state = "-"
         season = self.settings.nba.current_season
-        qualifiers = list(target["qualifiers"])
-        markets = self._stat_columns(qualifiers)
         # A saved Target is the only caller whose response may be served from
         # the shared Redis result cache (#279): ``backtest`` loads it through
         # the request scope, so a cache hit still echoes that fresh row,
@@ -416,15 +576,51 @@ class TargetBacktestService:
                 # publication row (its checksum, payload, or projection)
                 # advances no pointer, so it is not detected until the next
                 # generation.
-                return {
-                    "target": dict(target),
-                    "season": evidence["season"],
-                    "proxy": PROXY_NOTE,
-                    "stat_columns": evidence["stat_columns"],
-                    "summary": evidence["summary"],
-                    "players": evidence["players"],
-                    "games_considered": evidence["games_considered"],
-                }, "hit"
+                return self._cached_body(target, evidence), "hit"
+        return self._compute(
+            target,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+            session=session,
+            cacheable=cache_key is not None,
+        )
+
+    @staticmethod
+    def _cached_body(
+        target: Mapping[str, Any], evidence: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Compose a hit's body in the construction order a miss returns."""
+
+        return {
+            "target": dict(target),
+            "season": evidence["season"],
+            "proxy": PROXY_NOTE,
+            "stat_columns": evidence["stat_columns"],
+            "summary": evidence["summary"],
+            "players": evidence["players"],
+            "games_considered": evidence["games_considered"],
+        }
+
+    def _compute(
+        self,
+        target: Mapping[str, Any],
+        *,
+        publication_snapshot: Any,
+        connection: Connection | None,
+        session: Session | None,
+        cacheable: bool,
+    ) -> tuple[dict[str, Any], str]:
+        """Compute one Backtest and, when ``cacheable``, file its evidence.
+
+        The evidence is filed under the generation of the snapshot it was
+        computed from, whoever captured that snapshot, so the single read and
+        the every-Target read file and find the same entries.
+        """
+
+        cache_state = "-"
+        season = self.settings.nba.current_season
+        qualifiers = list(target["qualifiers"])
+        markets = self._stat_columns(qualifiers)
         with ExitStack() as scope:
             # One connection for every read this request composes, exactly as
             # the Matchup and Selection reads share theirs; a caller already
@@ -487,7 +683,7 @@ class TargetBacktestService:
                     for stream in eligibility
                 )
             )
-            if cache_key is not None:
+            if cacheable:
                 if eligible:
                     # A pointer advance between the pre-check generation and
                     # this capture files the result under the captured
@@ -586,6 +782,20 @@ class TargetBacktestService:
         contacted in that case and ``targets_cache`` stays ``-``.
         """
 
+        generation = self._cache_generation(season, session)
+        if generation is None:
+            return None
+        return self._cache_key(target, season, generation)
+
+    def _cache_generation(
+        self, season: str, session: Session | None
+    ) -> tuple[tuple[str, str | None, int | None, int | None], ...] | None:
+        """Read the current generation pointer-only, or ``None`` when off.
+
+        ``None`` is the cache deciding it has nothing to say for this
+        request; see ``_saved_backtest_cache_key``.
+        """
+
         if not self._cache_enabled:
             return None
         reader = self.publication_reader
@@ -604,7 +814,7 @@ class TargetBacktestService:
             return None
         if generation is None:
             return None
-        return self._cache_key(target, season, generation)
+        return _normalized_generation(generation)
 
     def _cache_key(
         self,
@@ -975,4 +1185,8 @@ class TargetBacktestService:
         return None if value is None else cls._number(value)
 
 
-__all__ = ["TargetBacktestService"]
+__all__ = [
+    "BACKTEST_FAILED_MESSAGE",
+    "TargetBacktestService",
+    "aggregate_cache_state",
+]

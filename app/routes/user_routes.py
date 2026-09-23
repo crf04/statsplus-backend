@@ -19,6 +19,7 @@ from app.utils.auth import (
     require_auth,
     require_auth_optional,
 )
+from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint
@@ -399,9 +400,33 @@ def preview_target():
     )
     return jsonify({'success': True, **target_preview_service.preview(draft)})
 
+@user_bp.route('/targets/backtests', methods=['GET'])
+@require_auth
+@route_error_boundary("Failed to backtest the targets.")
+def backtest_targets():
+    """
+    Report every one of the caller's Targets' seasons to date at once.
+
+    One item per Target, in the order the Target list shows them: ``ok``
+    with the body the single Target's backtest returns, minus ``success``,
+    or ``error`` with the standard error object that route would have
+    returned, so one failing Target never blanks the others.  Every ``ok``
+    item comes from one Publication generation.  ``<int:target_id>`` only
+    matches integers, so this path never reaches the per-Target routes.
+
+    Returns:
+        JSON response with the season and one Backtest item per Target
+    """
+    backtested, cache_state = target_backtest_service.backtest_all(
+        _authenticated_uid()
+    )
+    # Every item's result-cache outcome, reduced by the service to one value.
+    g.targets_cache = cache_state
+    return jsonify({'success': True, **backtested})
+
 @user_bp.route('/targets/<int:target_id>/backtest', methods=['GET'])
 @require_auth
-@route_error_boundary("Failed to backtest the target.")
+@route_error_boundary(BACKTEST_FAILED_MESSAGE)
 def backtest_target(target_id):
     """
     Report one Target's season to date over the whole league.

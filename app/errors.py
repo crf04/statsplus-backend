@@ -364,6 +364,43 @@ def route_error_boundary(
     return decorator
 
 
+def isolated_error_body(
+    error: Exception,
+    safe_message: str,
+    *,
+    error_type: type[AppError] = OperationFailedError,
+) -> dict[str, Any]:
+    """Return the public error object for one failure a response isolates.
+
+    A composed response that reports several independent items -- every
+    Target's Backtest, say -- must not let one item's failure fail the rest.
+    Each item's failure is translated exactly as :func:`route_error_boundary`
+    and the central handler would translate it for a route serving that item
+    alone, logged and counted the same way, and returned as the ``error``
+    object of the standard shape (``code``, ``message``, optional
+    ``details``) instead of being raised.
+    """
+
+    if isinstance(error, ProviderResponseError):
+        app_error: AppError = ProviderUnavailableError(detail=error)
+    elif isinstance(error, AppError):
+        app_error = error
+    else:
+        app_error = error_type(safe_message, detail=error)
+
+    _log_application_error(app_error)
+    if app_error.code != "provider_unavailable":
+        record_application_failure(app_error.code)
+
+    body: dict[str, Any] = {
+        "code": app_error.code,
+        "message": app_error.public_message,
+    }
+    if app_error.public_details is not None:
+        body["details"] = app_error.public_details
+    return body
+
+
 def _error_response(
     code: str,
     message: str,
