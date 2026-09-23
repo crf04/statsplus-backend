@@ -640,3 +640,44 @@ def test_materialize_rejects_ledger_l15_that_mismatches_governance(tmp_path):
             games,
             governance=(expected_game_ids, mismatched, team_ids),
         )
+
+
+def test_load_games_reads_the_ledger_with_a_statement_count_independent_of_game_count(
+    tmp_path,
+):
+    from sqlalchemy import event
+
+    def load(name, games):
+        engine = _engine(tmp_path, name)
+        repository = CanonicalGameLedgerRepository(engine)
+        repository.replace_games_atomic(games)
+        service = LedgerMatchupMaterializationService(
+            repository,
+            TeamMatchupRepository(engine),
+            clock=lambda: RETRIEVED_AT,
+        )
+        statements = []
+
+        def count(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", count)
+        try:
+            loaded, checksums = service._load_games("2025-26", AS_OF)
+        finally:
+            event.remove(engine, "before_cursor_execute", count)
+        expected = tuple(
+            repository.get_game(summary.game_id)
+            for summary in repository.list_games("2025-26", through=AS_OF)
+        )
+        return loaded, checksums, expected, len(statements)
+
+    games = _league_games()
+    few, few_checksums, few_expected, few_statements = load("few.sqlite3", games[:15])
+    many, many_checksums, many_expected, many_statements = load("many.sqlite3", games)
+
+    assert few == few_expected and len(few) == 15
+    assert many == many_expected and len(many) == len(games)
+    assert many_checksums == {game.game_id: game.checksum for game in many}
+    assert few_checksums == {game.game_id: game.checksum for game in few}
+    assert many_statements == few_statements

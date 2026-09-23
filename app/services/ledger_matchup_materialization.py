@@ -821,19 +821,18 @@ class LedgerMatchupMaterializationService:
                 raise
             summaries = self.repository.list_games(season, through=as_of)
 
-        def read_game(game_id):
-            try:
-                return self.repository.get_game(game_id, connection=connection)
-            except TypeError as error:
-                if "connection" not in str(error):
-                    raise
-                return self.repository.get_game(game_id)
+        game_ids = tuple(summary.game_id for summary in summaries)
+        try:
+            stored = self.repository.get_games(game_ids, connection=connection)
+        except TypeError as error:
+            if "connection" not in str(error):
+                raise
+            stored = self.repository.get_games(game_ids)
 
         games = tuple(
             game
-            for summary in summaries
-            if (game := read_game(summary.game_id)) is not None
-            and game.season_type == REGULAR_SEASON_TYPE
+            for game in stored
+            if game is not None and game.season_type == REGULAR_SEASON_TYPE
         )
         checksums = {
             summary.game_id: summary.checksum
