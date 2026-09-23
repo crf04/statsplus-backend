@@ -26,7 +26,7 @@ State that must not cross `fork` is owned per worker:
 
 | Resource | Handling |
 | --- | --- |
-| Durable refresh dispatcher | The config sets `STATSPLUS_DEFER_DATA_REFRESH_DISPATCHER=1` before the app loads, so the master constructs `DataRefreshJobService` with `defer_start=True` (no recovery dispatch, no poller thread, no claimed lease). `post_fork` calls `start_dispatcher()` in each worker, which generates that process' lease owner (`uuid:pid:thread`) and then dispatches and starts the poller as construction does elsewhere. A service whose dispatcher started before a fork refuses to start in the child. |
+| Durable refresh dispatcher | The config sets `STATSPLUS_DEFER_DATA_REFRESH_DISPATCHER=1` before the app loads, so the master constructs `DataRefreshJobService` with `defer_start=True` (no recovery dispatch, no poller thread, no claimed lease). `post_fork` calls `start_dispatcher()` in each worker, which generates that process' lease owner (`uuid:pid:thread`) and then dispatches and starts the poller as construction does elsewhere. Each start logs one INFO line, `Data refresh dispatcher started pid=<pid> owner=<owner> poller=on`, so a deploy's logs show one line per worker, each with a distinct pid and owner. A service whose dispatcher started before a fork refuses to start in the child. |
 | SQLAlchemy engine pool | `post_fork` calls `engine.dispose(close=False)`, so a worker never reuses a DBAPI connection opened in the master. |
 | Redis client | No action: redis-py's connection pool records its pid and resets itself on first use in a new process. |
 | Firebase Admin | No action: `initialize_app` parses credentials without I/O or threads; the auth client and its HTTP session are built lazily in the worker that verifies a token. |

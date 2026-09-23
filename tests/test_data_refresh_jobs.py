@@ -6,6 +6,7 @@ bundled ``nba_play_types.db`` fixture and external providers are never touched.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -881,6 +882,36 @@ def test_deferred_service_starts_no_thread_and_dispatches_nothing(job_engine):
         # Idempotent within one process.
         service.start_dispatcher()
         assert len(executor.calls) == 1
+    finally:
+        service.shutdown()
+
+
+def test_starting_the_dispatcher_logs_its_process_once(job_engine, caplog):
+    """Operators confirm each pre-forked worker runs a dispatcher from logs."""
+
+    service = DataRefreshJobService(
+        job_engine,
+        executor=_ManualExecutor(),
+        handlers={},
+        clock=_fixed_clock,
+        dispatch_on_startup=False,
+        start_poller=True,
+        defer_start=True,
+    )
+    try:
+        with caplog.at_level(logging.INFO, logger="app.services.job_service"):
+            service.start_dispatcher()
+            service.start_dispatcher()
+        started = [
+            record
+            for record in caplog.records
+            if record.getMessage().startswith("Data refresh dispatcher started")
+        ]
+        assert len(started) == 1
+        message = started[0].getMessage()
+        assert f"pid={os.getpid()}" in message
+        assert f"owner={service._owner}" in message
+        assert "poller=on" in message
     finally:
         service.shutdown()
 
