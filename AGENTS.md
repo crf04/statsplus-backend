@@ -41,6 +41,9 @@ authentication flow, or error contract.
 - Treat `nba_play_types.db` as a public, read-only demo fixture containing no
   real user records.
 - Exercise data-replacement services with mocks or a temporary database.
+- Tests get migrated SQLite databases from a per-worker template; mark a test
+  `@pytest.mark.real_migrations` when it must run the migration code itself.
+  See "Database changes" in [CONTRIBUTING.md](CONTRIBUTING.md).
 - Treat authentication and data-update routes as security boundaries; verify
   their behavior against the authoritative architecture and API documents.
 
