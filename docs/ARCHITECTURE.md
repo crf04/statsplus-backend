@@ -3351,7 +3351,18 @@ would append one observation per market, so an unchanged repeat kept growing
 the audit. Contradicted evidence therefore never enters a canonical comparison
 in any market order, and repeated markets, repeated board reads, and a repeat
 that lists the same markets in another order all append no further decision and
-leave the same durable row. Later evidence that disagrees with
+leave the same durable row. A repeat that would change nothing writes nothing
+either: the automatic mapping row is updated only when its state, activity,
+conflict columns, or any canonical or provider column it records would change —
+each column is compared, not the idempotency fingerprint — so re-reading an
+unchanged board issues only the identity lock, the governing re-reads, and the
+latest-decision lookup, plus the observation-clock update when the snapshot is
+newer. `last_seen_at` is an activity marker accurate to
+`MAPPING_LAST_SEEN_TOUCH_INTERVAL` (15 minutes, the interval a user's
+`last_login` uses), not a per-read log: it moves with any real change to the
+row, and an unchanged observation rewrites it only once the stored value is at
+least that old, measured by the repository's persistence clock. Event mappings
+follow the same rule with the same interval. Later evidence that disagrees with
 an active automatic mapping deactivates it as `mapping_conflict` while keeping
 the conflicting evidence in the current row and audit history. Operator
 approve/override/reject/clear actions require an identity and reason; approve
@@ -3427,8 +3438,13 @@ established or queue a conflict between two canonical athletes that were never
 claimed at the same time. A read contemporaneous with the governing instant is
 not from before it, so replaying one stays idempotent, and a caller that
 reports no observation instant is never fenced.
-The per-identity lock row is inserted inside a savepoint that is always left
-before a duplicate `IntegrityError` is handled, so PostgreSQL rolls back the
+The identity transaction first selects the per-identity lock row for update and
+inserts it only when it is missing, so a steady-state read never issues a
+failing insert. The lock row stays locked until the transaction ends, so the
+observation clock read with it is reused for the fence rather than read again.
+A missing row is inserted inside a savepoint that is always left
+before a duplicate `IntegrityError` is handled — a concurrent transaction may
+create the row between the select and the insert — so PostgreSQL rolls back the
 failed savepoint instead of leaving the surrounding transaction aborted;
 `tests/integration/test_postgres.py` covers that concurrency path against a
 real database when `TEST_DATABASE_URL` is set. The process-local identity lock
@@ -3490,8 +3506,10 @@ provider identity, an append-only `event_mapping_decisions` audit log, typed
 suppressions, and a per-identity lock row carrying that identity's observation
 clock. Governance is the one established for athletes and behaves identically:
 active-mapping precedence, append-only decisions suppressed only for a repeated
-*consecutive* observation, per-identity serialization with the lock row inserted
-inside a savepoint that is left before a duplicate `IntegrityError` is handled,
+*consecutive* observation, per-identity serialization that selects the lock row
+for update and inserts a missing one inside a savepoint that is left before a
+duplicate `IntegrityError` is handled, no mapping write for an unchanged repeat
+with a throttled `last_seen_at`,
 `observed_at` fencing of a read taken before the newest governing instant, and
 one documented failure type — `EventMappingPersistenceError`, defined in
 `app.services.event_mapping_errors` — for every repository read and operator

@@ -9,13 +9,13 @@ import threading
 from contextlib import contextmanager
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any
 
 from sqlalchemy import and_, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, NoResultFound, SQLAlchemyError
 
 from app.errors import InvalidConfigurationError
 from app.models.athlete_mapping import (
@@ -45,6 +45,14 @@ from app.utils.db import is_demo_database_url
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+#: How stale a mapping row's ``last_seen_at`` may grow before an unchanged
+#: board observation writes it again.  Every board read re-observes every
+#: identity it names, so touching the row on each read would turn a read into
+#: one write per athlete; like a user's last login, the column is an activity
+#: marker accurate to this interval, not a per-read log.
+MAPPING_LAST_SEEN_TOUCH_INTERVAL = timedelta(minutes=15)
 
 
 #: Unresolved outcomes retained as durable, typed observations.  They never
@@ -147,6 +155,35 @@ def _utc(value: datetime | None = None) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+#: Marks an identity whose observation clock this transaction has not read.
+_NO_CLOCK = object()
+
+
+def _observation_clock_key(provider: str, provider_id: str) -> tuple[str, str, str]:
+    """Name the transaction-local copy of an identity's observation clock."""
+
+    return ("athlete_mapping_observation_clock", provider, provider_id)
+
+
+def _mapping_touch_due(last_seen_at: datetime | None, now: datetime) -> bool:
+    """Return whether an unchanged mapping row's ``last_seen_at`` is stale."""
+
+    if last_seen_at is None:
+        return True
+    return _utc(now) - _utc(last_seen_at) >= MAPPING_LAST_SEEN_TOUCH_INTERVAL
+
+
+def _stored_value_equal(stored: Any, value: Any) -> bool:
+    """Compare a stored column with the value a write would store.
+
+    SQLite returns timestamps without a zone, so instants are compared as UTC.
+    """
+
+    if isinstance(stored, datetime) and isinstance(value, datetime):
+        return _utc(stored) == _utc(value)
+    return stored == value
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -526,29 +563,59 @@ class AthleteMappingRepository:
         with self._identity_locks_guard:
             lock = self._identity_locks.setdefault(key, threading.RLock())
         with lock, self.engine.begin() as connection:
-            try:
-                # The savepoint must be released or rolled back by leaving the
-                # block, so the duplicate is caught outside it.  PostgreSQL
-                # otherwise leaves the surrounding transaction aborted.
-                with connection.begin_nested():
-                    connection.execute(
-                        insert(AthleteMappingLock.__table__).values(
-                            provider=provider, provider_athlete_id=provider_id
+            # Every identity a board has observed before already has its lock
+            # row, so the row is locked first and only inserted when missing.
+            # Inserting it unconditionally would fail, and roll back a
+            # savepoint, on every steady-state read.
+            row = self._select_lock_row(connection, provider, provider_id)
+            if row is None:
+                try:
+                    # The savepoint must be released or rolled back by leaving
+                    # the block, so the duplicate is caught outside it.
+                    # PostgreSQL otherwise leaves the surrounding transaction
+                    # aborted.  A duplicate means a concurrent transaction
+                    # created the row after the select above missed it.
+                    with connection.begin_nested():
+                        connection.execute(
+                            insert(AthleteMappingLock.__table__).values(
+                                provider=provider, provider_athlete_id=provider_id
+                            )
                         )
-                    )
-            except IntegrityError:
-                pass
-            connection.execute(
-                select(AthleteMappingLock.__table__)
-                .where(
-                    and_(
-                        AthleteMappingLock.provider == provider,
-                        AthleteMappingLock.provider_athlete_id == provider_id,
-                    )
+                except IntegrityError:
+                    pass
+                row = self._select_lock_row(connection, provider, provider_id)
+                if row is None:
+                    raise NoResultFound("the identity lock row was not created")
+            clock_key = _observation_clock_key(provider, provider_id)
+            previous = connection.info.get(clock_key, _NO_CLOCK)
+            # The row stays locked until this transaction ends and only
+            # ``_advance_observation_clock`` changes its clock, so the value
+            # just read is the clock for the rest of the transaction.
+            connection.info[clock_key] = row["last_observed_at"]
+            try:
+                yield connection
+            finally:
+                if previous is _NO_CLOCK:
+                    connection.info.pop(clock_key, None)
+                else:
+                    connection.info[clock_key] = previous
+
+    @staticmethod
+    def _select_lock_row(
+        connection: Connection, provider: str, provider_id: str
+    ) -> Mapping[str, Any] | None:
+        """Select the identity's lock row for update, if it exists yet."""
+
+        return connection.execute(
+            select(AthleteMappingLock.__table__)
+            .where(
+                and_(
+                    AthleteMappingLock.provider == provider,
+                    AthleteMappingLock.provider_athlete_id == provider_id,
                 )
-                .with_for_update()
-            ).one()
-            yield connection
+            )
+            .with_for_update()
+        ).mappings().one_or_none()
 
     # -- reads -------------------------------------------------------------
 
@@ -837,7 +904,7 @@ class AthleteMappingRepository:
         fingerprint = self._idempotency_key(resolution)
 
         with self._transaction(provider, provider_id) as connection:
-            governed = self._governing_decision(connection, provider, provider_id)
+            governed, existing = self._governing_state(connection, provider, provider_id)
             if governed is not None:
                 return governed
             stale = self._stale_observation(connection, provider, provider_id, resolution)
@@ -845,7 +912,9 @@ class AthleteMappingRepository:
                 return stale
             self._advance_observation_clock(connection, provider, provider_id, resolution)
 
-            existing = self._select_mapping(connection, provider, provider_id, lock=True)
+            # ``existing`` was selected for update by the governing re-read in
+            # this transaction, and nothing since has written the mapping row.
+            current = existing
             if existing is not None:
                 state = str(existing["mapping_state"])
                 if state == MappingResolutionState.MAPPING_CONFLICT.value:
@@ -871,25 +940,27 @@ class AthleteMappingRepository:
                         resolution,
                         now=now,
                     )
-                connection.execute(
-                    update(ProviderAthleteMapping.__table__)
-                    .where(
-                        and_(
-                            ProviderAthleteMapping.provider == provider,
-                            ProviderAthleteMapping.provider_athlete_id == provider_id,
+                if self._auto_update_due(existing, values, now=now):
+                    current = None
+                    connection.execute(
+                        update(ProviderAthleteMapping.__table__)
+                        .where(
+                            and_(
+                                ProviderAthleteMapping.provider == provider,
+                                ProviderAthleteMapping.provider_athlete_id == provider_id,
+                            )
+                        )
+                        .values(
+                            **values,
+                            mapping_state=MappingResolutionState.AUTO.value,
+                            is_active=True,
+                            # Whatever this row was before, it is now an automatic
+                            # mapping, so it names no conflict for an operator.
+                            conflict_canonical_player_id=None,
+                            conflict_canonical_name=None,
+                            last_seen_at=now,
                         )
                     )
-                    .values(
-                        **values,
-                        mapping_state=MappingResolutionState.AUTO.value,
-                        is_active=True,
-                        # Whatever this row was before, it is now an automatic
-                        # mapping, so it names no conflict for an operator.
-                        conflict_canonical_player_id=None,
-                        conflict_canonical_name=None,
-                        last_seen_at=now,
-                    )
-                )
             else:
                 try:
                     with connection.begin_nested():
@@ -924,7 +995,7 @@ class AthleteMappingRepository:
                 now=now,
                 idempotency_key=fingerprint,
             )
-            mapping = self._select_mapping(connection, provider, provider_id)
+            mapping = current or self._select_mapping(connection, provider, provider_id)
             return MappingPersistenceResult(
                 MappingResolutionState.AUTO.value,
                 decision is not None,
@@ -1552,13 +1623,39 @@ class AthleteMappingRepository:
         nothing to conflict with.
         """
 
+        return self._governing_state(
+            connection,
+            provider,
+            provider_id,
+            promoting_conflict=promoting_conflict,
+            resolution=resolution,
+        )[0]
+
+    def _governing_state(
+        self,
+        connection: Connection,
+        provider: str,
+        provider_id: str,
+        *,
+        promoting_conflict: bool = False,
+        resolution: AthleteResolution | None = None,
+    ) -> tuple[MappingPersistenceResult | None, Mapping[str, Any] | None]:
+        """Return ``_governing_decision`` and the mapping row it locked.
+
+        A caller that goes on to write the mapping reuses the row rather than
+        selecting it for update a second time in the same transaction.
+        """
+
         rejection = self._select_rejection(connection, provider, provider_id, lock=True)
         mapping = self._select_mapping(connection, provider, provider_id, lock=True)
         if rejection is not None and rejection["is_active"]:
-            return MappingPersistenceResult(
-                MappingResolutionState.REJECTED.value,
-                False,
-                mapping=self._mapping_record(mapping),
+            return (
+                MappingPersistenceResult(
+                    MappingResolutionState.REJECTED.value,
+                    False,
+                    mapping=self._mapping_record(mapping),
+                ),
+                mapping,
             )
         if (
             mapping is not None
@@ -1575,12 +1672,45 @@ class AthleteMappingRepository:
                 )
             )
         ):
-            return MappingPersistenceResult(
-                str(mapping["mapping_state"]),
-                False,
-                mapping=self._mapping_record(mapping),
+            return (
+                MappingPersistenceResult(
+                    str(mapping["mapping_state"]),
+                    False,
+                    mapping=self._mapping_record(mapping),
+                ),
+                mapping,
             )
-        return None
+        return None, mapping
+
+    @staticmethod
+    def _auto_update_due(
+        existing: Mapping[str, Any],
+        values: Mapping[str, Any],
+        *,
+        now: datetime,
+    ) -> bool:
+        """Return whether an automatic observation has to write its mapping row.
+
+        The row is left alone only when the write would change nothing it
+        reports: it is already an active automatic mapping naming no conflict,
+        every current column the observation writes already holds the observed
+        value, and ``last_seen_at`` is fresher than
+        ``MAPPING_LAST_SEEN_TOUCH_INTERVAL``.  Columns are compared one by one
+        rather than through the idempotency fingerprint, which covers the
+        provider evidence but not every canonical column the row reports.
+        """
+
+        unchanged = (
+            str(existing["mapping_state"]) == MappingResolutionState.AUTO.value
+            and bool(existing["is_active"])
+            and existing["conflict_canonical_player_id"] is None
+            and existing["conflict_canonical_name"] is None
+            and all(
+                _stored_value_equal(existing[column], value)
+                for column, value in values.items()
+            )
+        )
+        return not unchanged or _mapping_touch_due(existing["last_seen_at"], now)
 
     @classmethod
     def _stale_observation(
@@ -1653,8 +1783,18 @@ class AthleteMappingRepository:
         provider: str,
         provider_id: str,
     ) -> datetime | None:
-        """Read the durable high-water mark of this identity's provider reads."""
+        """Read the durable high-water mark of this identity's provider reads.
 
+        ``_transaction`` already read it with the lock row, which stays locked
+        until the transaction ends, so that copy is used instead of a second
+        read of the same row.
+        """
+
+        cached = connection.info.get(
+            _observation_clock_key(provider, provider_id), _NO_CLOCK
+        )
+        if cached is not _NO_CLOCK:
+            return cached
         return connection.execute(
             select(AthleteMappingLock.last_observed_at).where(
                 and_(
@@ -1700,6 +1840,9 @@ class AthleteMappingRepository:
             )
             .values(last_observed_at=observed_at)
         )
+        clock_key = _observation_clock_key(provider, provider_id)
+        if clock_key in connection.info:
+            connection.info[clock_key] = observed_at
 
     @classmethod
     def _conflict_still_applies(
