@@ -1,32 +1,89 @@
 """
 LLM Service for NBA Query Processing
 
-This service handles integration with OpenAI chat models for natural language
-query processing with proper error handling, retry logic, and configuration.
+This service asks an OpenAI chat model to parse a natural-language query into
+a strict JSON schema. The schema is the contract: the SDK sends it as a
+structured-output response format, so the model cannot return a shape the
+backend does not understand, and the reply is validated into
+``LLMParsedQuery`` before anything else reads it.
+
+Player names in the reply are free text. Resolving them against the roster is
+the caller's job (``NLService``), because the deterministic parser already owns
+the alias, exact, and fuzzy matching.
 """
 
 import os
-import json
-from typing import Optional, Dict, Any, List
+import time
+from typing import Any, Dict, List, Literal, Optional
 import logging
+
 from openai import OpenAI
-from openai.types.chat import ChatCompletion
-from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from app.config.settings import LLMSettings, RuntimeSettings, get_runtime_settings
 
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROMPT_PATH = "prompts/system_prompt_optimized.txt"
+
+# The opponent filters the game-log endpoint accepts (docs/API_DOCUMENTATION.md,
+# "Common opponent filters"). An enum keeps the model inside that vocabulary.
+OpponentFilterType = Literal[
+    "OPP_PTS", "OPP_REB", "OPP_AST", "OPP_STOCKS", "OPP_FTA", "OPP_TOV",
+    "OPP_BLK", "OPP_STL", "OPP_FG3M", "OPP_FG3A",
+    "C&S PTS", "C&S 3s", "C&S 3A", "PU PTS", "PU 2s", "PU 3s",
+    "Less Than 10 ft",
+    "PRBallHandler", "PRRollMan", "Transition", "Isolation", "Spotup", "Cut",
+    "Handoff", "OffScreen", "Postup", "OffRebound", "Misc",
+]
+
+
+class LLMOpponentFilter(BaseModel):
+    filter_type: OpponentFilterType
+    # +N = the N teams with the highest value of the metric, -N = the lowest
+    # (GameService._select_rank over a most-allowed-first ranking).
+    rank: int
+
+
+class LLMSelfFilter(BaseModel):
+    stat_column: str
+    operator: Literal["gte", "gt", "lt", "lte", "eq", "between"]
+    value: float
+    value2: Optional[float]
+
+
+class LLMMinutesRange(BaseModel):
+    min: int
+    max: int
+
+
+class LLMParsedQuery(BaseModel):
+    """The structured-output schema the model must fill.
+
+    Structured outputs require every field, so optional values are nullable
+    rather than defaulted.
+    """
+
+    player_name: Optional[str]
+    team_name: Optional[str]
+    game_count: Optional[int]
+    date_range: Optional[str]
+    location: Optional[Literal["home", "away"]]
+    minutes_filter: Optional[LLMMinutesRange]
+    self_filters: List[LLMSelfFilter]
+    opponent_filters: List[LLMOpponentFilter]
+    players_on: List[str]
+    players_off: List[str]
+    season: Optional[str]
+    intent: Optional[Literal["game_logs", "player_profile", "team_stats"]]
+    time_period: Optional[Literal["recent", "season", "month", "week"]]
+    confidence: float
 
 
 class LLMConfig:
     """Configuration class for LLM service settings"""
-    
+
     def __init__(self, settings: RuntimeSettings | None = None):
         llm_settings: LLMSettings = (
             settings.llm if settings is not None else get_runtime_settings().llm
@@ -37,22 +94,20 @@ class LLMConfig:
         self.max_tokens: int = llm_settings.max_tokens
         self.timeout: float = llm_settings.timeout_seconds
         self.max_retries: int = llm_settings.max_retries
-        self.enable_fallback: bool = llm_settings.enable_fallback
-        self.confidence_threshold: float = llm_settings.confidence_threshold
-    
+
     def validate(self) -> bool:
         """Validate configuration settings"""
         if not self.api_key:
             logger.error("OpenAI API key not found in environment variables")
             return False
-        
+
         if self.temperature < 0 or self.temperature > 2:
             logger.warning(f"Temperature {self.temperature} outside recommended range [0, 2]")
-        
+
         if self.max_tokens < 1:
             logger.error(f"Max tokens must be positive, got {self.max_tokens}")
             return False
-        
+
         return True
 
 
@@ -62,114 +117,33 @@ class LLMError(Exception):
 
 
 class LLMService:
-    """
-    Service for processing NBA queries using an OpenAI chat model.
-    
-    Handles prompt management, error handling, retry logic, and response parsing.
-    """
-    
-    def __init__(self, engine=None, settings: RuntimeSettings | None = None):
-        """
-        Initialize the LLM service.
-        
-        Args:
-            engine: Database engine for loading player/team aliases (optional)
-        """
+    """Parse NBA queries into ``LLMParsedQuery`` with an OpenAI chat model."""
+
+    def __init__(self, settings: RuntimeSettings | None = None, client=None):
         self.config = LLMConfig(settings=settings)
         if not self.config.validate():
             raise LLMError("Invalid LLM configuration")
-        
-        # Initialize the OpenAI client
-        self.client = OpenAI(api_key=self.config.api_key)
-        
-        self.engine = engine
-        self.player_aliases: Dict[str, str] = {}
-        self.team_aliases: Dict[str, str] = {}
-        
-        # Load aliases if engine is provided
-        if self.engine:
-            self._load_aliases()
-        
+
+        self.client = client or OpenAI(api_key=self.config.api_key)
+        self.system_prompt = self._load_system_prompt_from_file(DEFAULT_PROMPT_PATH)
+
         logger.info(f"LLM Service initialized with model: {self.config.model}")
-    
-    def _load_aliases(self) -> None:
-        """Load player and team aliases from database"""
-        try:
-            # Load player aliases
-            with self.engine.connect() as conn:
-                result = conn.execute("SELECT DISTINCT PLAYER_NAME FROM nba_play_types")
-                players = [row[0] for row in result.fetchall()]
-                self.player_aliases = {player.lower(): player for player in players}
-            
-            # Load team aliases (simplified - you may want to expand this)
-            self.team_aliases = {
-                'lal': 'Los Angeles Lakers',
-                'gsw': 'Golden State Warriors',
-                'bos': 'Boston Celtics',
-                'mia': 'Miami Heat',
-                'chi': 'Chicago Bulls',
-                # Add more as needed
-            }
-            
-            logger.info(f"Loaded {len(self.player_aliases)} player aliases and {len(self.team_aliases)} team aliases")
-            
-        except Exception as e:
-            logger.warning(f"Failed to load aliases from database: {e}")
-    
+
     def _get_default_prompt(self) -> str:
-        """
-        Get the default system prompt.
-        
-        Returns:
-            str: Default system prompt
-        """
-        return """You are an expert at parsing NBA statistics queries and converting them into structured JSON requests.
+        """Prompt used when the prompt file is missing."""
+        return (
+            "You are an expert at parsing NBA statistics queries into the "
+            "provided JSON schema. Fill every field; use null or [] for "
+            "anything the query does not mention."
+        )
 
-Parse the user's query and return a JSON object with these fields:
-- player_name: Main player name (string or null)
-- team_name: Team name (string or null)  
-- game_count: Number of games (integer or null)
-- date_range: Date range YYYY-MM-DD (string or null)
-- opponent_filters: List of [filter_type, rank] pairs or []
-- location: "home", "away", or null
-- minutes_filter: [min, max] tuple or null
-- self_filters: List of stat filters or []
-- players_on: List of teammate names or []
-- players_off: List of excluded player names or []
-- season: Season string or null
-- intent: "game_logs", "player_profile", "team_stats", or null
-- confidence: Overall confidence score 0-1
-- field_confidence: Object with confidence for each field
-
-Focus on accuracy and provide confidence scores for each extracted component."""
-
-    def _build_system_prompt(self) -> str:
-        """
-        Build the complete system prompt with context.
-        
-        Returns:
-            str: Complete system prompt
-        """
-        # Try to load from file first
-        prompt = self._load_system_prompt_from_file()
-        
-        # Add dynamic context if available
-        if self.player_aliases:
-            sample_players = list(self.player_aliases.values())[:20]
-            prompt += f"\n\nKNOWN PLAYERS (sample): {', '.join(sample_players)}"
-        
-        if self.team_aliases:
-            prompt += f"\n\nKNOWN TEAMS: {', '.join(self.team_aliases.values())}"
-        
-        return prompt
-    
-    def _load_system_prompt_from_file(self, file_path: str = "prompts/system_prompt.txt") -> str:
+    def _load_system_prompt_from_file(self, file_path: str = DEFAULT_PROMPT_PATH) -> str:
         """
         Load the system prompt from a text file.
-        
+
         Args:
             file_path: Path to the prompt file
-            
+
         Returns:
             str: Content of the prompt file
         """
@@ -178,19 +152,19 @@ Focus on accuracy and provide confidence scores for each extracted component."""
             if os.path.exists(file_path):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     return f.read().strip()
-            
+
             # Try relative to this file's directory
             current_dir = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.dirname(os.path.dirname(current_dir))
             full_path = os.path.join(project_root, file_path)
-            
+
             if os.path.exists(full_path):
                 with open(full_path, 'r', encoding='utf-8') as f:
                     return f.read().strip()
-            
+
             logger.warning(f"Prompt file not found at {file_path} or {full_path}, using default prompt")
             return self._get_default_prompt()
-            
+
         except Exception as e:
             logger.error(f"Error loading prompt file: {e}")
             return self._get_default_prompt()
@@ -207,173 +181,74 @@ Focus on accuracy and provide confidence scores for each extracted component."""
             "temperature": self.config.temperature,
         }
 
-    def query_llm(self, user_query: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
+    def _build_prompt(self, player_context: Dict[str, Any]) -> str:
+        """Append the parser's resolved players so the model reuses them."""
+        if not player_context:
+            return self.system_prompt
+        return (
+            f"{self.system_prompt}\n\n"
+            "RESOLVED PLAYERS (matched against our roster; reuse these exact "
+            "names when the query refers to the same people):\n"
+            f"{self._format_player_context(player_context)}"
+        )
+
+    def parse_query(
+        self, user_query: str, player_context: Optional[Dict[str, Any]] = None
+    ) -> LLMParsedQuery:
         """
-        Raw LLM query for testing prompts and responses.
-        
+        Parse one query into the structured-output schema.
+
         Args:
             user_query: The user's natural language query
-            system_prompt: Optional custom system prompt (uses default if None)
-            
+            player_context: Players the deterministic parser already resolved
+
         Returns:
-            Dict containing the LLM response and metadata
+            LLMParsedQuery: The validated model reply
+
+        Raises:
+            LLMError: When every attempt fails, is refused, or returns no parse
         """
-        if system_prompt is None:
-            system_prompt = self._build_system_prompt()
-        
-        try:
-            for attempt in range(self.config.max_retries):
-                try:
-                    response: ChatCompletion = self.client.chat.completions.create(
-                        model=self.config.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_query}
-                        ],
-                        timeout=self.config.timeout,
-                        **self._completion_options(),
-                    )
-                    
-                    # Extract response content
-                    content = response.choices[0].message.content
-                    
-                    # Try to parse as JSON
-                    try:
-                        parsed_content = json.loads(content)
-                    except json.JSONDecodeError:
-                        parsed_content = {"raw_response": content, "parsing_error": True}
-                    
-                    return {
-                        "success": True,
-                        "content": parsed_content,
-                        "raw_response": content,
-                        "usage": response.usage.model_dump() if response.usage else None,
-                        "model": response.model,
-                        "attempt": attempt + 1
-                    }
-                    
-                except Exception as e:
-                    logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
-                    if attempt == self.config.max_retries - 1:
-                        raise
-                    import time
+        messages = [
+            {"role": "system", "content": self._build_prompt(player_context or {})},
+            {"role": "user", "content": user_query},
+        ]
+        last_error: Exception | None = None
+        for attempt in range(self.config.max_retries):
+            try:
+                response = self.client.chat.completions.parse(
+                    model=self.config.model,
+                    messages=messages,
+                    response_format=LLMParsedQuery,
+                    timeout=self.config.timeout,
+                    **self._completion_options(),
+                )
+                message = response.choices[0].message
+                if message.refusal:
+                    raise LLMError(f"Model refused the query: {message.refusal}")
+                if message.parsed is None:
+                    raise LLMError("Model returned no structured output")
+                return message.parsed
+            except Exception as e:
+                last_error = e
+                logger.warning(f"LLM attempt {attempt + 1} failed: {e}")
+                if attempt < self.config.max_retries - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
-            
-        except Exception as e:
-            logger.error(f"LLM query failed after {self.config.max_retries} attempts: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "content": None
-            }
-    
-    def test_queries(self, queries: List[str]) -> List[Dict[str, Any]]:
-        """
-        Test multiple queries for prompt development and validation.
-        
-        Args:
-            queries: List of test queries
-            
-        Returns:
-            List of results for each query
-        """
-        results = []
-        for query in queries:
-            logger.info(f"Testing query: {query}")
-            result = self.query_llm(query)
-            results.append({
-                "query": query,
-                "result": result
-            })
-        
-        return results
-    
-    def test_prompt_with_context(self, prompt_file: str, test_query: str, player_context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Test a prompt file with player context for hybrid NLP-LLM processing.
-        
-        Args:
-            prompt_file: Path to the prompt file to test
-            test_query: Query to test with
-            player_context: Dict containing NLP-extracted player info
-            
-        Returns:
-            Dict containing the test result
-        """
-        try:
-            custom_prompt = self._load_system_prompt_from_file(prompt_file)
-            
-            # Add player context to prompt if available
-            if player_context:
-                context_str = self._format_player_context(player_context)
-                custom_prompt += f"\n\nNLP PLAYER CONTEXT:\n{context_str}"
-                custom_prompt += "\n\nYou can override player info only if you're very confident (95%+) it's wrong."
-            
-            # Add aliases to custom prompt
-            if self.player_aliases:
-                sample_players = list(self.player_aliases.values())[:10]
-                custom_prompt += f"\n\nKNOWN PLAYERS (sample): {', '.join(sample_players)}"
-            
-            if self.team_aliases:
-                custom_prompt += f"\n\nKNOWN TEAMS: {', '.join(self.team_aliases.values())}"
-            
-            result = self.query_llm(test_query, system_prompt=custom_prompt)
-            result["prompt_file"] = prompt_file
-            result["player_context"] = player_context
-            return result
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Error testing prompt with context: {str(e)}",
-                "prompt_file": prompt_file,
-                "player_context": player_context
-            }
-    
+
+        raise LLMError(
+            f"LLM query failed after {self.config.max_retries} attempts: {last_error}"
+        ) from last_error
+
     def _format_player_context(self, player_context: Dict[str, Any]) -> str:
         """Format player context for inclusion in LLM prompt"""
         context_parts = []
-        
+
         if player_context.get('player_name'):
             context_parts.append(f"Main player: {player_context['player_name']}")
-            
+
         if player_context.get('players_on'):
             context_parts.append(f"Players on court: {', '.join(player_context['players_on'])}")
-            
+
         if player_context.get('players_off'):
             context_parts.append(f"Players off court: {', '.join(player_context['players_off'])}")
-            
+
         return '\n'.join(context_parts) if context_parts else "No player context provided"
-    
-    def test_prompt_file(self, prompt_file: str, test_query: str) -> Dict[str, Any]:
-        """
-        Test a specific prompt file with a query.
-        
-        Args:
-            prompt_file: Path to the prompt file to test
-            test_query: Query to test with
-            
-        Returns:
-            Dict containing the test result
-        """
-        try:
-            custom_prompt = self._load_system_prompt_from_file(prompt_file)
-            
-            # Add aliases to custom prompt
-            if self.player_aliases:
-                sample_players = list(self.player_aliases.values())[:10]
-                custom_prompt += f"\n\nKNOWN PLAYERS (sample): {', '.join(sample_players)}"
-            
-            if self.team_aliases:
-                custom_prompt += f"\n\nKNOWN TEAMS: {', '.join(self.team_aliases.values())}"
-            
-            result = self.query_llm(test_query, system_prompt=custom_prompt)
-            result["prompt_file"] = prompt_file
-            return result
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Failed to test prompt file {prompt_file}: {e}",
-                "prompt_file": prompt_file
-            }

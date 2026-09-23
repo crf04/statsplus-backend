@@ -357,6 +357,25 @@ def _relabel_self_filter_failure(
     )
 
 
+def _parse_rank(entry: Any) -> int | tuple[int, int]:
+    """Parse one rank_filter entry: ``N``, ``-N``, or an inclusive ``low,high``.
+
+    A range uses the same ``low,high`` grammar as ``minutes_filter`` and
+    ``self_filters``. Its ranks are 1-based positions in the ranked list, so
+    both ends must be at least 1 and ``low`` may not exceed ``high``.
+    """
+    if isinstance(entry, str) and "," in entry:
+        entry = entry.split(",")
+    if isinstance(entry, (list, tuple)):
+        if len(entry) != 2:
+            raise ValueError("a rank range has exactly two ends")
+        low, high = (int(str(end).strip()) for end in entry)
+        if low < 1 or high < low:
+            raise ValueError("a rank range needs 1 <= low <= high")
+        return (low, high)
+    return int(entry)
+
+
 class GameLogQuery(BaseModel):
     """One typed, validated game-log filter request.
 
@@ -372,7 +391,10 @@ class GameLogQuery(BaseModel):
     players_off: list[str] = Field(default_factory=list)
     date_filter: date | None = None
     teams_against: list[str] = Field(default_factory=list)
-    rank_filter: list[int] = Field(default_factory=list)
+    # One entry per teams_against filter: N (the first N ranked teams), -N (the
+    # last N), or (low, high) for inclusive 1-based ranks, rank 1 being the
+    # highest value of the filter's metric.
+    rank_filter: list[int | tuple[int, int]] = Field(default_factory=list)
     opponent_tricode: str | None = None
     location_filter: Location = "Both"
     game_filter: int | None = Field(default=None, ge=1)
@@ -461,18 +483,18 @@ class GameLogQuery(BaseModel):
 
     @field_validator("rank_filter", mode="before")
     @classmethod
-    def normalize_rank_filter(cls, value: Any) -> list[int]:
+    def normalize_rank_filter(cls, value: Any) -> list[int | tuple[int, int]]:
         if value is None:
             return []
         if isinstance(value, (int, str)):
             value = [value]
         # Like teams_against, report every unusable entry and leave the
         # parseable ranks out of the details.
-        ranks: list[int] = []
+        ranks: list[int | tuple[int, int]] = []
         invalid: list[Any] = []
         for entry in value:
             try:
-                ranks.append(int(entry))
+                ranks.append(_parse_rank(entry))
             except (TypeError, ValueError):
                 invalid.append(entry)
         if invalid:
