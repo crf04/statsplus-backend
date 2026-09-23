@@ -1877,7 +1877,25 @@ payload with one targeted select so the row's checksum is verified on the first
 decode of an immutable `(publication_id, fence, version)` row and its decoded
 facts are stored in the bounded Diet decode cache, which a later hit reuses
 without re-verify. Because a decoded-only hit serves no payload, callers that
-read `.payload` must not opt in.
+read `.payload` must not opt in unless they handle `payload=None` with a full
+read of their own.
+
+The Zone Shooting profile is the one such caller. `PlayerService` reads
+`exact_shot_zones` decoded-only and memoizes the transformed league profile
+frame (decode, whole-league frame, `to_numeric`, and
+`transform_player_zone_profile`) under the `(publication_id, fence, version)`
+that read names. The memo is bounded to two rows by an `OrderedDict` behind a
+`Lock`, least recently used first, mirroring the Diet decode cache. It cannot
+serve stale data for the same reasons: the key names one immutable
+publication row, a pointer advance or rollback names a different key, and the
+read's availability, authority, season, and legacy-fallback checks run on
+every request before the memo is consulted, so an inactive, missing, or
+legacy-authoritative stream never reaches it. On a memo miss whose
+decoded-only read was a decode-cache hit (no payload), the service performs
+one full read, reruns those checks, and keys the result by that read's own
+labels. The memoized frame is shared across requests and treated read-only:
+the profile selects its row by boolean indexing, which copies, and returns
+fresh `to_dict` records.
 Composition and rollback write the
 projection in the publication transaction, while migration 036 backfills
 existing valid versions; the projection therefore preserves exact active and
