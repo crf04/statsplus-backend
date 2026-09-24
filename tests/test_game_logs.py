@@ -599,7 +599,41 @@ def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(
     body = response.get_json()
     assert [row["MATCHUP"] for row in body["game_logs"]] == ["BOS vs. LAL"]
     assert body["next_game"] is None
+    # The filters keep 1 game; the season total still counts all 3.
+    assert body["season_game_count"] == 3
     GameLogResponse.model_validate(body)
+
+
+def test_route_reports_the_season_total_when_no_games_match(
+    client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
+):
+    """An empty filtered result still reports the unfiltered season's size."""
+
+    from app.routes import game_routes
+
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    dependencies.game_service = service
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            lambda player_name, query: GameService.get_filtered_logs(
+                service, player_name, query
+            ),
+        )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&minutes_filter=45,48"
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["game_logs"] == []
+    assert body["averages"] == []
+    assert len(body["season_averages"]) == 1
+    assert body["season_game_count"] == 3
 
 
 def test_route_returns_empty_when_player_log_publication_is_unavailable(
