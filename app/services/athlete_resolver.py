@@ -226,6 +226,36 @@ def normalize_athlete_name(value: str | None) -> str:
     return "".join(tokens)
 
 
+def match_catalog_athlete(
+    rows: Iterable[Mapping[str, Any]], name: str | None
+) -> CanonicalAthlete | None:
+    """Resolve one typed name to a season's canonical catalog row, or none.
+
+    The comparison is ``normalize_athlete_name`` equality, so case,
+    punctuation, and diacritics never decide a match and nothing fuzzier
+    does.  Two rows with the same normalized name resolve to the one active
+    for the season, then to the lowest canonical id, so the answer is stable.
+    """
+
+    target = normalize_athlete_name(name)
+    if not target:
+        return None
+    matches = [
+        CanonicalAthlete.from_row(row)
+        for row in rows
+        if normalize_athlete_name(row.get("display_name")) == target
+    ]
+    if not matches:
+        return None
+    return min(
+        matches,
+        key=lambda athlete: (
+            not athlete.is_active_for_season,
+            athlete.player_id,
+        ),
+    )
+
+
 def normalize_team_abbreviation(value: str | None) -> str:
     """Normalize reviewed provider/NBA tricode dialects."""
 
@@ -961,5 +991,6 @@ __all__ = [
     "BoardAthleteResolver",
     "CanonicalAthlete",
     "MappingResolutionState",
+    "match_catalog_athlete",
     "normalize_athlete_name",
 ]

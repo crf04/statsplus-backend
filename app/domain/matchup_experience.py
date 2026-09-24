@@ -14,6 +14,10 @@ HISTORICAL_MODE = "historical"
 CURRENT_MODE = "current"
 GAME_LOG_SOURCE = "game_logs"
 PLAYER_POOL_SOURCE = "player_pool"
+#: An Unscheduled Matchup (crf04/statsplus#95) has no Slate game: its players
+#: come from the current-season Athlete Catalog rather than a pool or a game.
+UNSCHEDULED_MODE = "unscheduled"
+ATHLETE_CATALOG_SOURCE = "athlete_catalog"
 
 
 def is_historical_matchup(event: Mapping[str, Any], pool_players: Sized) -> bool:
@@ -37,10 +41,12 @@ def player_source(historical: bool) -> str:
 
 
 __all__ = [
+    "ATHLETE_CATALOG_SOURCE",
     "CURRENT_MODE",
     "GAME_LOG_SOURCE",
     "HISTORICAL_MODE",
     "PLAYER_POOL_SOURCE",
+    "UNSCHEDULED_MODE",
     "experience_mode",
     "is_historical_matchup",
     "player_source",

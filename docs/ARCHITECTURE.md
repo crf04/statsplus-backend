@@ -1972,6 +1972,21 @@ GET /api/games/matchup?game_id
   → additive Historical Matchup declaration and section-owned evidence
 ```
 
+The Unscheduled Matchup (crf04/statsplus#95) composes the same seams with no
+game, and scores through the same `MatchupService._players` player-row seam,
+which takes each player's opponent from its caller instead of from a game:
+
+```text
+GET /api/matchups/unscheduled?(player_id|player_name|team)&opponent
+  → strict query parsing + Firebase auth
+  → one Publication snapshot for the request
+  → current-season Athlete Catalog (engine-bound reader) names the player or the team's players
+  → PlayerDietService bulk Season facts; players without a Diet are not scored
+  → PlayerGameLogRepository bulk Season rates + combined-phase last ten
+  → TeamMatchupQueryService latest Season + Last-15 windows (no as-of date)
+  → league/team metrics, availability, freshness, and the as-of block
+```
+
 ### Historical Matchup composition (#208, #209)
 
 `MatchupService._experience` shapes the additive `experience` block, and
