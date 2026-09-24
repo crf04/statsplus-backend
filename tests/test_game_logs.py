@@ -82,6 +82,8 @@ def test_game_log_query_rejects_nonfinite_playstyle_range(value):
         {"minutes_filter": "20,10"},
         {"location_filter": "everywhere"},
         {"date_filter": "not-a-date"},
+        {"date_to": "not-a-date"},
+        {"date_filter": "2024-02-01", "date_to": "2024-01-31"},
         {"teams_against": ["OPP_PTS"], "rank_filter": []},
         {"teams_against": ["OPP_PTS"], "rank_filter": ["3", "9"]},
         {"opponent_tricode": "XXX"},
@@ -537,6 +539,85 @@ def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
     assert matchups(date_filter="2024-01-01") == ["BOS @ MIA"]
 
 
+def test_date_to_trims_the_logs_and_filtered_averages_only(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#307: an inclusive end date trims logs and averages, not the season."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+    whole = service.get_filtered_logs(
+        "LeBron James", GameLogQuery(season_filter="2024-25")
+    )
+    trimmed = service.get_filtered_logs(
+        "LeBron James",
+        GameLogQuery(season_filter="2024-25", date_to="2024-01-17"),
+    )
+
+    # Inclusive: the game played on the end date itself is kept.
+    assert [row["MATCHUP"] for row in trimmed["game_logs"]] == [
+        "BOS vs. LAL",
+        "BOS @ MIA",
+    ]
+    assert trimmed["averages"][0]["PTS"] == 20.0
+    assert trimmed["averages"][0]["MIN"] == 25.0
+    assert trimmed["season_averages"] == whole["season_averages"]
+
+
+def test_date_filter_and_date_to_select_an_inclusive_range(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+
+    def matchups(**filters):
+        query = GameLogQuery(season_filter="2024-25", **filters)
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    assert matchups(date_filter="2024-01-17", date_to="2024-01-17") == ["BOS @ MIA"]
+    assert matchups(date_filter="2024-01-15", date_to="2024-01-18") == [
+        "BOS vs. LAL",
+        "BOS @ MIA",
+    ]
+    # An empty range is the normal successful empty result.
+    assert matchups(date_filter="2024-01-20", date_to="2024-01-30") == []
+
+
+def test_the_same_team_filter_ranks_identically_with_and_without_date_to(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#307: date_to trims the logs but never reshapes Season Rankings."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "CHI", "LAL"]
+    )
+
+    def matchups(**filters):
+        query = GameLogQuery(
+            season_filter="2024-25",
+            teams_against=["OPP_PTS"],
+            rank_filter=[2],
+            **filters,
+        )
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    assert matchups() == ["BOS @ MIA", "BOS vs. CHI"]
+    # The same two ranked opponents; the end date only drops the later game.
+    assert matchups(date_to="2024-01-18") == ["BOS @ MIA"]
+    assert service.team_filter_rankings.calls == [
+        (("OPP_PTS",), "2024-25"),
+        (("OPP_PTS",), "2024-25"),
+    ]
+
+
 def test_a_historical_season_never_borrows_current_season_rankings(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
@@ -891,6 +972,40 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
     assert captured["query"].opponent_tricode == "OKC"
 
 
+def test_route_passes_an_inclusive_date_range_to_the_service(client, monkeypatch):
+    """#307: date_to reaches the typed query beside date_filter."""
+
+    from datetime import date
+
+    from app.routes import game_routes
+
+    captured = {}
+
+    def fake_get_filtered_logs(player_name, query):
+        captured["query"] = query
+        return {
+            "game_logs": [],
+            "averages": [],
+            "season_averages": [],
+            "next_game": None,
+        }
+
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
+        )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James"
+        "&date_filter=2024-01-15&date_to=2024-01-15"
+    )
+
+    assert response.status_code == 200
+    assert captured["query"].date_filter == date(2024, 1, 15)
+    assert captured["query"].date_to == date(2024, 1, 15)
+
+
 @pytest.mark.parametrize(
     "query_string,expected_filters",
     [
@@ -921,6 +1036,14 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
         (
             "player_name=LeBron%20James&game_filter=0",
             [{"parameter": "game_filter", "values": ["0"]}],
+        ),
+        (
+            "player_name=LeBron%20James&date_to=not-a-date",
+            [{"parameter": "date_to", "values": ["not-a-date"]}],
+        ),
+        (
+            "player_name=LeBron%20James&date_filter=2024-02-01&date_to=2024-01-31",
+            [{"parameter": "date_to", "values": ["2024-01-31"]}],
         ),
     ],
 )

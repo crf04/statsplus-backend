@@ -108,6 +108,7 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         "players_on": request.args.getlist("players_on[]"),
         "players_off": request.args.getlist("players_off[]"),
         "date_filter": request.args.get("date_filter"),
+        "date_to": request.args.get("date_to"),
         "teams_against": request.args.getlist("teams_against[]"),
         "rank_filter": request.args.getlist("rank_filter[]"),
         "opponent_tricode": request.args.get("opponent_tricode"),
@@ -140,7 +141,7 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
 #: rejection at the HTTP seam, the original submitted value in hand. Their
 #: accepted grammar is pydantic's, so acceptance is untouched.
 _UNTYPED_PARAMETER_NAMES = frozenset(
-    {"date_filter", "location_filter", "game_filter"}
+    {"date_filter", "date_to", "location_filter", "game_filter"}
 )
 
 
@@ -234,7 +235,8 @@ def _game_log_rejected_filter(
             facts["supported_aliases"] = list(cause.supported_aliases)
         return facts
 
-    # A parser pydantic owns (``date_filter``, ``location_filter``) has no
+    # A parser pydantic owns (``date_filter``, ``date_to``,
+    # ``location_filter``) has no
     # typed cause, but the route holds exactly the value the caller
     # submitted and it is a scalar string, so publish that. Anything still
     # unknown is skipped, keeping the other rejected filters' facts.
