@@ -145,6 +145,29 @@ def test_detailed_health_reports_both_providers(client):
     assert checks["pbp_stats"]["provider"] == "pbp_stats"
 
 
+def test_detailed_health_reports_an_unhealthy_dependency_as_unavailable(
+    client, dependencies
+):
+    dependencies.provider_health_service.detailed.return_value = {
+        "status": "unhealthy",
+        "checks": {
+            "database": {"status": "unhealthy", "error": "db-host-sentinel refused"},
+            "nba_api": {"status": "healthy", "provider": "nba_stats"},
+        },
+    }
+
+    response = client.get("/api/health/detailed")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": {
+            "code": "provider_unavailable",
+            "message": "One or more health-check dependencies are unavailable.",
+        }
+    }
+    assert b"db-host-sentinel" not in response.data
+
+
 def test_player_routes_preserve_profile_response_shapes(client):
     service = client.application.extensions["dependencies"].player_service
     service.get_all_players.return_value = ["Jayson Tatum"]
