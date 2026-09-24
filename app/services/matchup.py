@@ -32,12 +32,15 @@ from app.domain.play_type_matchup import complete_play_type_shares, play_type_ma
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import ProviderUnavailableError, ResourceNotFoundError
 from app.domain.team_matchup_taxonomy import (
+    DEFENSE_SHEET_BASES,
     SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
     THREE_POINT_SHOT_ZONES,
     TWO_POINT_SHOT_ZONES,
+    defense_sheet_display_slice,
+    defense_sheet_row_key,
 )
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
@@ -75,13 +78,7 @@ from app.services.request_reads import request_read_scope
 
 
 EASTERN = ZoneInfo("America/New_York")
-DEFENSE_BASES = (
-    "play_types",
-    "shot_zones",
-    "shot_types",
-    "assist_locations",
-    "traditional",
-)
+DEFENSE_BASES = DEFENSE_SHEET_BASES
 DEFENSIVE_COLUMNS = ("OPP_TOV", "OPP_STL", "OPP_BLK")
 _REQUIRED_TRADITIONAL_IDENTITIES = frozenset(
     (key, key) for key in DEFENSIVE_COLUMNS
@@ -2100,12 +2097,8 @@ class MatchupService:
 
     @staticmethod
     def _metric_key(base: str, slice_key: str, stat_key: str) -> str:
-        display_slice = MatchupService._display_slice(base, slice_key)
-        return (
-            display_slice
-            if display_slice == stat_key
-            else f"{display_slice}:{stat_key}"
-        )
+        # The ``sheet:`` game-log Team Filters resolve these same keys.
+        return defense_sheet_row_key(base, slice_key, stat_key)
 
     @staticmethod
     def _metric_label(base: str, slice_key: str, stat_key: str) -> str:
@@ -2117,9 +2110,7 @@ class MatchupService:
 
     @staticmethod
     def _display_slice(base: str, slice_key: str) -> str:
-        if base == "shot_types":
-            return _SHOT_TYPE_DISPLAY_SLICES[slice_key]
-        return slice_key
+        return defense_sheet_display_slice(base, slice_key)
 
     @staticmethod
     def _event_team(event: Mapping[str, Any], team_id: int) -> Mapping[str, Any]:

@@ -18,12 +18,12 @@ from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_TAXONOMY,
     NBA_PUBLICATION_WINDOWS,
     PLAY_TYPE_STATS,
-    SHOT_TYPE_DISPLAY_TO_STORED,
     SHOT_TYPE_SLICES,
     SHOT_TYPE_STATS,
     SHOT_TYPE_STORED_TO_DISPLAY,
     SHOT_ZONE_SLICES,
     SHOT_ZONE_STATS,
+    publication_metric_identity,
 )
 
 
@@ -366,17 +366,6 @@ def resolve_governed_season_is_complete(
         ) is True
     except PublicationGovernanceUnavailable:
         return False
-
-
-def publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
-    """Split one publication key into the existing matchup taxonomy."""
-
-    if "_" not in metric_key:
-        return metric_key, metric_key
-    slice_key, stat_key = metric_key.rsplit("_", 1)
-    if base == "shot_types":
-        slice_key = SHOT_TYPE_DISPLAY_TO_STORED.get(slice_key, slice_key)
-    return slice_key, stat_key
 
 
 def publication_stream(base: str, window: str) -> str:

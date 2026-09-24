@@ -33,7 +33,7 @@ from app.utils.tables import normalize_table_name
 from .nba_cache import NBAGameCache
 from .team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
-    TEAM_FILTER_RANKINGS,
+    team_filter_ranking,
 )
 
 logger = logging.getLogger(__name__)
@@ -557,7 +557,7 @@ class GameService:
         """Rank every requested Team Filter from one publication generation."""
 
         for team_filter in team_filters:
-            if team_filter not in TEAM_FILTER_RANKINGS:
+            if team_filter_ranking(team_filter) is None:
                 raise ValueError(f"Unsupported team filter: {team_filter!r}")
         if self.team_filter_rankings is None:
             logger.warning(

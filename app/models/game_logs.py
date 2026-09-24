@@ -40,6 +40,7 @@ from pydantic import (
 )
 
 from app.domain.nba_teams import NBA_TEAM_TRICODES
+from app.domain.team_matchup_taxonomy import defense_sheet_filter
 from app.models.catalogs import (
     SUPPORTED_SELF_FILTER_STATS,
     TEAM_FILTER_ALIASES,
@@ -607,8 +608,15 @@ class GameLogQuery(BaseModel):
         # callers can migrate without changing the canonical service/table
         # value they receive back.
         value = [TEAM_FILTER_ALIASES.get(item, item) for item in value]
+        # A Defense Sheet row reference (``sheet:<base>:<row key>``, #308)
+        # is accepted when it names a row the Matchup's Sheet publishes.  It
+        # is data-shaped rather than a named filter, so it never joins the
+        # enumerated vocabulary below.
         unsupported = [
-            item for item in value if item not in SUPPORTED_TEAM_FILTERS
+            item
+            for item in value
+            if item not in SUPPORTED_TEAM_FILTERS
+            and defense_sheet_filter(item) is None
         ]
         if unsupported:
             raise GameLogFilterError(
@@ -616,9 +624,10 @@ class GameLogQuery(BaseModel):
                 tuple(unsupported),
                 f"teams_against contains unsupported filters: {unsupported}. "
                 "Supported filters are: "
-                + ", ".join(SUPPORTED_TEAM_FILTERS),
-                # The canonical vocabulary travels with the refusal, so a
-                # caller never needs a copy of these constants to recover.
+                + ", ".join(SUPPORTED_TEAM_FILTERS)
+                + ", or a Defense Sheet row as sheet:<base>:<row key>",
+                # The canonical named vocabulary travels with the refusal, so
+                # a caller never needs a copy of these constants to recover.
                 supported_values=tuple(SUPPORTED_TEAM_FILTERS),
                 supported_aliases=tuple(TEAM_FILTER_ALIASES),
             )

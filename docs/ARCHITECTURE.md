@@ -993,6 +993,16 @@ are derived as `3 * FG3M + 2 * FG2M` from the made-shot counts),
 `synergy_play_types_opponent_season` ranks points per possession, and
 `assist_locations_season` ranks the published location counters.
 
+A Defense Sheet row reference, `sheet:<base>:<row key>` (#308), ranks the one
+Season publication metric behind that Matchup Sheet row, per 48 with no
+denominator; shot zones are reachable only this way, through
+`exact_shot_zones_opponent_season`.  The row keys and their publication metrics
+come from `app.domain.team_matchup_taxonomy` (`DEFENSE_SHEET_ROW_METRICS`),
+which the Sheet's own projection (`TeamMatchupQueryService`) and row keys
+(`MatchupService._metric_key`) also use, so the two cannot drift.  The
+references are validated by `GameLogQuery` but never join the named
+`SUPPORTED_TEAM_FILTERS` vocabulary.
+
 There is no governed-window parameter and no request-time provider call: the
 game service holds no NBA Stats adapter, so the previous dated
 `fetch_opponent_team_stats`/`fetch_opponent_shot_chart` branch and its daily

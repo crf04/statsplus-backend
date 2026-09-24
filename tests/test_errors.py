@@ -272,6 +272,42 @@ def test_game_logs_teams_against_rejection_carries_the_canonical_vocabulary(
     assert "<10 Ft" in details["supported_aliases"]
 
 
+def test_game_logs_rejects_an_unknown_defense_sheet_row_with_details(
+    client,
+) -> None:
+    """#308: an unknown Sheet base or row key is refused like any filter."""
+
+    from app.models.catalogs import SUPPORTED_TEAM_FILTERS
+
+    response = client.get(
+        "/api/games/game_logs"
+        "?player_name=LeBron%20James"
+        "&teams_against%5B%5D="
+        + urllib.parse.quote("sheet:shot_zones:Restricted Area:FGM")
+        + "&teams_against%5B%5D="
+        + urllib.parse.quote("sheet:shot_zones:Paint:FGM")
+        + "&teams_against%5B%5D="
+        + urllib.parse.quote("sheet:defense:Transition:PTS")
+        + "&rank_filter%5B%5D=5&rank_filter%5B%5D=5&rank_filter%5B%5D=5"
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["error"]["code"] == "invalid_input"
+    # The known Sheet row is honoured; only the unknown references appear.
+    rejected = _rejected_filters(payload["error"]["details"])
+    assert rejected == {
+        "teams_against": [
+            "sheet:shot_zones:Paint:FGM",
+            "sheet:defense:Transition:PTS",
+        ]
+    }
+    # The enumerated vocabulary stays the named filters only: Sheet rows are
+    # data from the Matchup, never a list the web app consumes.
+    details = payload["error"]["details"]["filters"][0]
+    assert details["supported_values"] == list(SUPPORTED_TEAM_FILTERS)
+
+
 def test_game_logs_rejected_opponent_tricode_names_parameter_and_value(client) -> None:
     response = client.get(
         "/api/games/game_logs"

@@ -96,6 +96,120 @@ LEDGER_OWNED_MATCHUP_STREAM_KEYS = frozenset(
 )
 
 
+def publication_metric_identity(base: str, metric_key: str) -> tuple[str, str]:
+    """Split one publication key into the existing matchup taxonomy."""
+
+    if "_" not in metric_key:
+        return metric_key, metric_key
+    slice_key, stat_key = metric_key.rsplit("_", 1)
+    if base == "shot_types":
+        slice_key = SHOT_TYPE_DISPLAY_TO_STORED.get(slice_key, slice_key)
+    return slice_key, stat_key
+
+
+#: The Matchup Defense Sheet's bases, in the order the response lists them.
+DEFENSE_SHEET_BASES: tuple[str, ...] = (
+    "play_types",
+    "shot_zones",
+    "shot_types",
+    "assist_locations",
+    "traditional",
+)
+
+#: The ledger-owned Defense Sheet rows: each row's display identity and the
+#: publication metric it projects.  The NBA-owned bases project every key
+#: their publication carries, split by :func:`publication_metric_identity`.
+LEDGER_DEFENSE_SHEET_METRICS: dict[str, dict[str, str]] = {
+    "traditional": {
+        "OPP_REB": "rebounds",
+        "OPP_TOV": "turnovers",
+        "OPP_STL": "steals",
+        "OPP_BLK": "blocks",
+    },
+    "assist_locations": {
+        "Assists": "assists",
+        "Arc3Assists": "arc3_assists",
+        "Corner3Assists": "corner3_assists",
+        "AtRimAssists": "at_rim_assists",
+        "ShortMidRangeAssists": "short_mid_range_assists",
+        "LongMidRangeAssists": "long_mid_range_assists",
+    },
+}
+
+
+def defense_sheet_identities(base: str) -> tuple[tuple[str, str, str], ...]:
+    """Return ``(slice_key, stat_key, metric_key)`` for one base's Sheet rows.
+
+    Grouped shot/zone/Synergy publications carry their complete identity in
+    the metric key (for example ``Isolation_PTS``); the ledger-owned bases
+    project the curated rows above.
+    """
+
+    display = LEDGER_DEFENSE_SHEET_METRICS.get(base)
+    if display is None:
+        return tuple(
+            (*publication_metric_identity(base, key), key)
+            for key in NBA_PUBLICATION_METRIC_KEYS[base]
+        )
+    return tuple(
+        (display_key, display_key, metric_key)
+        for display_key, metric_key in display.items()
+    )
+
+
+def defense_sheet_display_slice(base: str, slice_key: str) -> str:
+    """The slice as the Sheet shows it (shot types by their display name)."""
+
+    if base == "shot_types":
+        return SHOT_TYPE_STORED_TO_DISPLAY[slice_key]
+    return slice_key
+
+
+def defense_sheet_row_key(base: str, slice_key: str, stat_key: str) -> str:
+    """The ``defense_sheet[<base>][].key`` of one Sheet row."""
+
+    display_slice = defense_sheet_display_slice(base, slice_key)
+    return (
+        display_slice
+        if display_slice == stat_key
+        else f"{display_slice}:{stat_key}"
+    )
+
+
+#: Every Defense Sheet row key and the Season publication metric behind it,
+#: per base: the vocabulary ``sheet:<base>:<row key>`` Team Filters accept.
+DEFENSE_SHEET_ROW_METRICS: dict[str, dict[str, str]] = {
+    base: {
+        defense_sheet_row_key(base, slice_key, stat_key): metric_key
+        for slice_key, stat_key, metric_key in defense_sheet_identities(base)
+    }
+    for base in DEFENSE_SHEET_BASES
+}
+
+#: The prefix marking a ``teams_against`` entry as a Defense Sheet row.
+DEFENSE_SHEET_FILTER_PREFIX = "sheet:"
+
+
+def defense_sheet_filter(team_filter: str) -> tuple[str, str] | None:
+    """Resolve ``sheet:<base>:<row key>`` to ``(base, metric_key)``.
+
+    ``None`` means the value is not a Defense Sheet row reference this
+    taxonomy knows: not prefixed, an unknown base, or an unknown row key.
+    """
+
+    if not team_filter.startswith(DEFENSE_SHEET_FILTER_PREFIX):
+        return None
+    base, separator, row_key = team_filter[
+        len(DEFENSE_SHEET_FILTER_PREFIX):
+    ].partition(":")
+    if not separator:
+        return None
+    metric_key = DEFENSE_SHEET_ROW_METRICS.get(base, {}).get(row_key)
+    if metric_key is None:
+        return None
+    return base, metric_key
+
+
 def matchup_stream_key(surface: str, window: str) -> str:
     """Return the canonical ledger-owned stream key for one surface and window."""
 
@@ -107,6 +221,10 @@ def matchup_stream_key(surface: str, window: str) -> str:
 
 
 __all__ = [
+    "DEFENSE_SHEET_BASES",
+    "DEFENSE_SHEET_FILTER_PREFIX",
+    "DEFENSE_SHEET_ROW_METRICS",
+    "LEDGER_DEFENSE_SHEET_METRICS",
     "LEDGER_OWNED_MATCHUP_STREAM_KEYS",
     "LEDGER_OWNED_MATCHUP_STREAM_PREFIX",
     "LEDGER_OWNED_MATCHUP_SURFACES",
@@ -126,5 +244,10 @@ __all__ = [
     "SHOT_ZONE_STATS",
     "THREE_POINT_SHOT_ZONES",
     "TWO_POINT_SHOT_ZONES",
+    "defense_sheet_display_slice",
+    "defense_sheet_filter",
+    "defense_sheet_identities",
+    "defense_sheet_row_key",
     "matchup_stream_key",
+    "publication_metric_identity",
 ]
