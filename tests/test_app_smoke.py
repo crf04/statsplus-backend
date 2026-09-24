@@ -136,23 +136,7 @@ def test_pbp_health_has_distinct_provider_signal(client, dependencies, monkeypat
     assert event["outcome"] == telemetry.OUTCOME_HTTP_ERROR
 
 
-def test_detailed_health_reports_both_providers(client, monkeypatch):
-    from app.routes import health_routes
-
-    with client.application.app_context():
-        monkeypatch.setattr(
-            health_routes.health_service,
-            "detailed",
-            lambda: {
-                "status": "healthy",
-                "checks": {
-                    "database": {"status": "healthy"},
-                    "nba_api": {"status": "healthy", "provider": "nba_stats"},
-                    "pbp_stats": {"status": "healthy", "provider": "pbp_stats"},
-                },
-            },
-        )
-
+def test_detailed_health_reports_both_providers(client):
     response = client.get("/api/health/detailed")
 
     assert response.status_code == 200

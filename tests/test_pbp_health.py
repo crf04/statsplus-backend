@@ -76,22 +76,3 @@ def test_pbp_health_provider_failure_uses_central_error_contract(
         }
     }
 
-
-def test_detailed_health_reports_pbp_stats_check(client, monkeypatch) -> None:
-    from app.routes import health_routes
-
-    with client.application.app_context():
-        monkeypatch.setattr(health_routes.health_service, "detailed", lambda: {
-            "status": "healthy",
-            "checks": {
-                "database": {"status": "healthy", "dialect": "sqlite", "driver": "pysqlite"},
-                "nba_api": {"status": "healthy", "provider": "nba_stats"},
-                "pbp_stats": HealthyProvider().health_check(),
-            },
-        })
-
-    response = client.get("/api/health/detailed")
-
-    assert response.status_code == 200
-    checks = response.get_json()["checks"]
-    assert checks["pbp_stats"]["provider"] == "PBP Stats"
