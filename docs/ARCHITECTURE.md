@@ -1019,9 +1019,7 @@ provider calls behind them) are deleted rather than left unwired.  Migration
 `GET /api/teams/stats` cut over to the publications, the tables had no reader
 left, so there was nothing to keep them for.  `opp_shooting_zone` is
 deliberately not part of that drop -- it is fenced, not retired.
-`tests/services/test_legacy_ranking_tables.py` pins the fence, and its
-allow-list is the repository-wide search proving no reader survives: every
-remaining mention is the fence, the migration, or shared vocabulary.
+`tests/services/test_legacy_ranking_tables.py` pins the fence.
 
 The rankings are read for the request's own `season_filter`.  A publication
 stream carries one pointer, so only the published season can rank: a request

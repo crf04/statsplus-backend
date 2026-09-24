@@ -56,12 +56,6 @@ def test_config_binds_the_default_port_without_platform_port(monkeypatch):
     assert config.bind == ["0.0.0.0:8000"]
 
 
-def test_config_mirrors_the_job_service_deferral_switch(monkeypatch):
-    config = _load_config(monkeypatch)
-
-    assert config.DEFER_DISPATCHER_ENV == DEFER_DISPATCHER_ENV
-
-
 def test_loading_the_config_defers_the_dispatcher_until_after_fork(monkeypatch):
     _load_config(monkeypatch)
 

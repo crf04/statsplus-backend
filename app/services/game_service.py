@@ -524,6 +524,7 @@ class GameService:
             game_logs=_records(filtered_logs),
             averages=filtered_average_rows,
             season_averages=season_average_rows,
+            season_game_count=len(full_game_logs),
             next_game=self._get_team_name_by_id(next_team),
         )
         return result.model_dump()

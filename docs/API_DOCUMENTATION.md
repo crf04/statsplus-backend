@@ -1208,6 +1208,24 @@ array contains one object per game, and `averages` / `season_averages` are
 arrays holding a single averages object; all three fields are ordinary JSON
 arrays, never JSON strings.
 
+Season game count (crf04/statsplus#88): `season_game_count` is an integer
+≥ 0, always present on a successful response. It counts the games in the
+player's log for the requested `season_filter` before any filter is applied,
+which are exactly the games `season_averages` averages, so no filter changes it.
+It is `0` when the season has no games (and `season_averages` is then `[]`).
+The filtered count is the length of `game_logs`. Together they let a caller
+state a sample as "12 of 71 games".
+
+```json
+{
+  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31 }],
+  "averages": [{ "PTS": 31.0 }],
+  "season_averages": [{ "PTS": 27.4 }],
+  "season_game_count": 71,
+  "next_game": null
+}
+```
+
 The request-time game-log source is database-only. A complete, valid durable
 `player_game_logs` publication supplies the response; a season without one
 returns the normal successful empty result and never calls NBA Stats or PBP
@@ -1320,7 +1338,7 @@ other parameter are unchanged.
   remains `null` under the existing contract.
 - Empty result sets return empty arrays (`[]`) for `game_logs` and `averages`;
   `season_averages` still carries the season aggregate when the full season has
-  games. `next_game` may be `null`.
+  games, and `season_game_count` still counts them. `next_game` may be `null`.
 
 Query parameters:
 

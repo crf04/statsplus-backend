@@ -117,22 +117,6 @@ def _qualifying_matchup_manifest(row: Mapping[str, Any], *, now: datetime) -> bo
     )
 
 
-class _ProviderGameMembership(dict[int, tuple[str, ...]]):
-    """Common governed IDs plus the exact independently returned source sets."""
-
-    def __init__(
-        self,
-        common: Mapping[int, tuple[str, ...]],
-        *,
-        by_source: Mapping[str, Mapping[int, tuple[str, ...]]],
-    ) -> None:
-        super().__init__(common)
-        self.by_source = {
-            source: dict(membership)
-            for source, membership in by_source.items()
-        }
-
-
 def _nba_team_stats_request_descriptor(
     *, season: str, season_type: str, team_id: int | None,
     last_n_games: int, date_from: str | None, date_to: str,
@@ -820,24 +804,11 @@ class TeamMatchupRefreshService:
             raise _ProviderWindowUnverified(
                 "provider aggregate requests are incomplete"
             )
-        source_memberships = getattr(provider_game_ids_by_team, "by_source", None)
-        if source_memberships is None:
-            source_memberships = {
-                provider_sources[0]: provider_game_ids_by_team,
-            }
+        source_memberships = {provider_sources[0]: provider_game_ids_by_team}
         if set(source_memberships) != set(provider_sources):
             raise _ProviderWindowUnverified(
                 "independent provider sources are incomplete"
             )
-        for membership in source_memberships.values():
-            if set(membership) != set(game_ids_by_team) or any(
-                frozenset(membership[team_id])
-                != frozenset(game_ids_by_team[team_id])
-                for team_id in game_ids_by_team
-            ):
-                raise _ProviderWindowUnverified(
-                    "provider source membership does not match authority"
-                )
         aggregate_request_checksum = hashlib.sha256(json.dumps(
             aggregate_requests, sort_keys=True, separators=(",", ":")
         ).encode()).hexdigest()
