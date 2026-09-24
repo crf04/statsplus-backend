@@ -1045,6 +1045,12 @@ def test_route_passes_an_inclusive_date_range_to_the_service(client, monkeypatch
             "player_name=LeBron%20James&date_filter=2024-02-01&date_to=2024-01-31",
             [{"parameter": "date_to", "values": ["2024-01-31"]}],
         ),
+        (
+            # A lax spelling pydantic accepts (epoch seconds for 2024-01-31)
+            # is reported exactly as submitted, never as the normalized date.
+            "player_name=LeBron%20James&date_filter=2024-02-01&date_to=1706659200",
+            [{"parameter": "date_to", "values": ["1706659200"]}],
+        ),
     ],
 )
 def test_route_returns_400_for_malformed_filters(client, monkeypatch, query_string, expected_filters):

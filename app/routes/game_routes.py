@@ -220,14 +220,27 @@ def _game_log_rejected_filter(
             # Internal two-parameter marker, never published as a name:
             # report the bounds the caller actually submitted.
             return _playstyle_range_failures(filters, args)
+        submitted = (
+            filters.get(cause.parameter)
+            if cause.parameter in _UNTYPED_PARAMETER_NAMES
+            else None
+        )
+        if isinstance(submitted, str):
+            # A pydantic-parsed scalar (``date_to`` earlier than
+            # ``date_filter``) reaches the model normalized: an epoch or
+            # other lax spelling would be reported as a date the caller
+            # never sent, so publish the value exactly as submitted.
+            values = [sanitize_public_value(submitted)]
+        else:
+            values = _redacted_split_values(
+                list(cause.values),
+                [cause.context] if isinstance(cause.context, str) else [],
+            )
         facts = {
             # Caller-supplied content can appear inside a parameter name
             # (a self_filter's stat), so it is redacted like the values.
             "parameter": sanitize_public_value(cause.parameter),
-            "values": _redacted_split_values(
-                list(cause.values),
-                [cause.context] if isinstance(cause.context, str) else [],
-            ),
+            "values": values,
         }
         if cause.supported_values is not None:
             facts["supported_values"] = list(cause.supported_values)

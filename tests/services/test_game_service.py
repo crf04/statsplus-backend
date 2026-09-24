@@ -370,6 +370,18 @@ def test_date_to_includes_a_timestamped_game_on_the_end_date(service, game_logs)
     assert result["GAME_ID"].tolist() == ["0001", "0002"]
 
 
+def test_date_filter_includes_a_timestamped_game_on_the_start_date(service, game_logs):
+    game_logs["GAME_DATE"] = game_logs["GAME_DATE"] + "T19:30:00"
+
+    result = run(
+        service.apply_filters(
+            game_logs, make_query(date_filter="2025-01-05", date_to="2025-01-10")
+        )
+    )
+
+    assert result["GAME_ID"].tolist() == ["0002", "0003"]
+
+
 def test_home_location_filter_excludes_away_games(service, game_logs):
     result = run(service.apply_filters(game_logs, make_query(location_filter="Home")))
 

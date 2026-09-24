@@ -308,14 +308,16 @@ class GameService:
         df = df[(df['MIN'] >= min_filter) & (df['MIN'] <= max_filter)]
 
         # Apply the inclusive date range: ``date_filter`` is the start date
-        # and ``date_to`` the end date. Dates compare by calendar day, so a
-        # timestamped game on the end date itself is kept.
-        if query.date_filter:
-            game_dates = pd.to_datetime(df['GAME_DATE'], errors='coerce')
-            df = df[game_dates >= pd.Timestamp(query.date_filter)]
-        if query.date_to:
+        # and ``date_to`` the end date. Both bounds compare by calendar day,
+        # so a timestamped game on either boundary date is kept.
+        if query.date_filter or query.date_to:
             game_days = pd.to_datetime(df['GAME_DATE'], errors='coerce').dt.normalize()
-            df = df[game_days <= pd.Timestamp(query.date_to)]
+            in_range = pd.Series(True, index=df.index)
+            if query.date_filter:
+                in_range &= game_days >= pd.Timestamp(query.date_filter)
+            if query.date_to:
+                in_range &= game_days <= pd.Timestamp(query.date_to)
+            df = df[in_range]
 
         # Apply location filter
         if query.location_filter != 'Both':

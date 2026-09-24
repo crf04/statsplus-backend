@@ -1297,7 +1297,8 @@ other parameter are unchanged.
   the unusable entries appear, so a `teams_against` request mixing
   supported and unsupported names reports only the unsupported ones, and a
   reversed `minutes_filter` range reports the submitted `min,max` pair,
-  and a `date_to` earlier than `date_filter` reports the `date_to` value.
+  and a `date_to` earlier than `date_filter` reports the `date_to` value
+  exactly as submitted (never a normalized date).
   Failures that identify no single value (for example `rank_filter[]` not
   matching `teams_against[]`) report the submitted ranks. For
   `teams_against`, `supported_values` carries the authoritative canonical
