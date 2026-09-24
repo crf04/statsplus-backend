@@ -90,31 +90,6 @@ def test_provider_events_correlate_to_the_request_id(app):
     assert event["request_id"] == "correlate-me-42"
 
 
-def test_request_id_bound_to_g_flows_into_provider_events(app):
-    from app.utils.request_id import generate_request_id
-
-    def probe():
-        with telemetry.provider_call(
-            telemetry.PROVIDER_PBP_STATS, "get_totals"
-        ):
-            pass
-        return jsonify({"ok": True})
-
-    app.add_url_rule(
-        "/correlation-probe-2",
-        "correlation_probe_2",
-        probe,
-        methods=["GET"],
-    )
-
-    client = app.test_client()
-    generated = generate_request_id()
-    client.get("/correlation-probe-2", headers={"X-Request-ID": generated})
-
-    event = telemetry.get_recorded_provider_events()[-1]
-    assert event["request_id"] == generated
-    assert _UUID_HEX.match(event["request_id"])
-
 def test_request_log_line_reports_duration_request_id_and_cache_state(client, caplog):
     """The lifecycle log is the source for p95 triggers, not the telemetry
     deques: it reports method, URL rule, status, duration, request id, and

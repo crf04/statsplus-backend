@@ -1029,9 +1029,7 @@ provider calls behind them) are deleted rather than left unwired.  Migration
 `GET /api/teams/stats` cut over to the publications, the tables had no reader
 left, so there was nothing to keep them for.  `opp_shooting_zone` is
 deliberately not part of that drop -- it is fenced, not retired.
-`tests/services/test_legacy_ranking_tables.py` pins the fence, and its
-allow-list is the repository-wide search proving no reader survives: every
-remaining mention is the fence, the migration, or shared vocabulary.
+`tests/services/test_legacy_ranking_tables.py` pins the fence.
 
 The rankings are read for the request's own `season_filter`.  A publication
 stream carries one pointer, so only the published season can rank: a request
@@ -1040,9 +1038,9 @@ rankings and attributing them to the wrong year.  A Team Filter on a historical
 season therefore resolves to an empty opponent set until that season is
 published.
 
-`date_filter` trims the player's own game logs and never reshapes a ranking,
-so a date-plus-Team-Filter request stays valid and season-ranked.  The
-publication is all thirty opponents or nothing: NBA-owned streams prove the
+`date_filter` and its inclusive end date `date_to` trim the player's own game
+logs and never reshape a ranking, so a date-plus-Team-Filter request stays
+valid and season-ranked.  The publication is all thirty opponents or nothing: NBA-owned streams prove the
 canonical league and its tricodes at their decode boundary, and the
 ledger-owned traditional and assist-location streams are proved here, so a
 partial or mislabelled publication refuses rather than ranking a plausible but

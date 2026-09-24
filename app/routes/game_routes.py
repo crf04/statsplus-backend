@@ -108,6 +108,7 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         "players_on": request.args.getlist("players_on[]"),
         "players_off": request.args.getlist("players_off[]"),
         "date_filter": request.args.get("date_filter"),
+        "date_to": request.args.get("date_to"),
         "teams_against": request.args.getlist("teams_against[]"),
         "rank_filter": request.args.getlist("rank_filter[]"),
         "opponent_tricode": request.args.get("opponent_tricode"),
@@ -136,11 +137,20 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         ) from error
 
 
-#: Parsers the typed models do not own, translated from one pydantic-native
-#: rejection at the HTTP seam, the original submitted value in hand. Their
-#: accepted grammar is pydantic's, so acceptance is untouched.
-_UNTYPED_PARAMETER_NAMES = frozenset(
-    {"date_filter", "location_filter", "game_filter"}
+#: Scalar parameters whose grammar is pydantic's own, which normalizes the
+#: value before any check sees it. The name decides two things at the HTTP
+#: seam, both publishing the original submitted string rather than the
+#: normalized one:
+#:
+#: - a pydantic-native rejection of one of them, which no typed cause owns,
+#:   is translated into facts naming the parameter and that string; and
+#: - a typed ``GameLogFilterError`` naming one of them (``date_to`` earlier
+#:   than ``date_filter``) reports that string instead of the model's
+#:   normalized value.
+#:
+#: Acceptance is untouched either way.
+_PYDANTIC_SCALAR_PARAMETER_NAMES = frozenset(
+    {"date_filter", "date_to", "location_filter", "game_filter"}
 )
 
 
@@ -219,14 +229,27 @@ def _game_log_rejected_filter(
             # Internal two-parameter marker, never published as a name:
             # report the bounds the caller actually submitted.
             return _playstyle_range_failures(filters, args)
+        submitted = (
+            filters.get(cause.parameter)
+            if cause.parameter in _PYDANTIC_SCALAR_PARAMETER_NAMES
+            else None
+        )
+        if isinstance(submitted, str):
+            # A pydantic-parsed scalar (``date_to`` earlier than
+            # ``date_filter``) reaches the model normalized: an epoch or
+            # other lax spelling would be reported as a date the caller
+            # never sent, so publish the value exactly as submitted.
+            values = [sanitize_public_value(submitted)]
+        else:
+            values = _redacted_split_values(
+                list(cause.values),
+                [cause.context] if isinstance(cause.context, str) else [],
+            )
         facts = {
             # Caller-supplied content can appear inside a parameter name
             # (a self_filter's stat), so it is redacted like the values.
             "parameter": sanitize_public_value(cause.parameter),
-            "values": _redacted_split_values(
-                list(cause.values),
-                [cause.context] if isinstance(cause.context, str) else [],
-            ),
+            "values": values,
         }
         if cause.supported_values is not None:
             facts["supported_values"] = list(cause.supported_values)
@@ -234,13 +257,18 @@ def _game_log_rejected_filter(
             facts["supported_aliases"] = list(cause.supported_aliases)
         return facts
 
-    # A parser pydantic owns (``date_filter``, ``location_filter``) has no
+    # A parser pydantic owns (``date_filter``, ``date_to``,
+    # ``location_filter``) has no
     # typed cause, but the route holds exactly the value the caller
     # submitted and it is a scalar string, so publish that. Anything still
     # unknown is skipped, keeping the other rejected filters' facts.
     field = validation_error.get("loc", ())
     field = field[0] if field and isinstance(field[0], str) else None
-    submitted = filters.get(field) if field in _UNTYPED_PARAMETER_NAMES else None
+    submitted = (
+        filters.get(field)
+        if field in _PYDANTIC_SCALAR_PARAMETER_NAMES
+        else None
+    )
     if isinstance(submitted, str):
         return {
             "parameter": field,

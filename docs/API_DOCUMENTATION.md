@@ -1208,6 +1208,24 @@ array contains one object per game, and `averages` / `season_averages` are
 arrays holding a single averages object; all three fields are ordinary JSON
 arrays, never JSON strings.
 
+Season game count (crf04/statsplus#88): `season_game_count` is an integer
+≥ 0, always present on a successful response. It counts the games in the
+player's log for the requested `season_filter` before any filter is applied,
+which are exactly the games `season_averages` averages, so no filter changes it.
+It is `0` when the season has no games (and `season_averages` is then `[]`).
+The filtered count is the length of `game_logs`. Together they let a caller
+state a sample as "12 of 71 games".
+
+```json
+{
+  "game_logs": [{ "GAME_DATE": "2026-01-15", "PTS": 31 }],
+  "averages": [{ "PTS": 31.0 }],
+  "season_averages": [{ "PTS": 27.4 }],
+  "season_game_count": 71,
+  "next_game": null
+}
+```
+
 The request-time game-log source is database-only. A complete, valid durable
 `player_game_logs` publication supplies the response; a season without one
 returns the normal successful empty result and never calls NBA Stats or PBP
@@ -1258,17 +1276,29 @@ the Sheet row's Season `rank`. Rank 1 is the highest value (allows the most),
 on the same scale as every `rank_filter[]`, so a team at Sheet Season rank `r`
 (ascending, 1 = allows the fewest) holds rank `31 - r` under the matching
 filter; see the tie rule under Filtering Reference. It pairs with
-`rank_filter[]` one per one and composes with every other filter and
-`date_filter`. An unknown base or row key is rejected with `400`
+`rank_filter[]` one per one and composes with every other filter,
+`date_filter`, and `date_to`. An unknown base or row key is rejected with `400`
 `invalid_input`, naming `teams_against` and the submitted value. Named filters
 keep their own definitions and rankings (play types still rank points per
 possession), and the web app never sends this form.
 
+Inclusive end date (#307): `date_to` is an optional `YYYY-MM-DD` end date that
+pairs with `date_filter` (the start date). A game is kept when its calendar
+date is on or before `date_to`, so `date_filter` plus `date_to` selects an
+inclusive range, and `date_to` alone trims only the end. Like `date_filter`, it
+trims only the player's own game logs: Team Filter rankings stay
+whole-Regular-Season, `averages` cover only the trimmed rows, and
+`season_averages` is unchanged. A range that keeps no games is the normal
+successful empty result. An unparsable `date_to`, or a `date_to` earlier than
+`date_filter`, joins the malformed values of the #9 note and returns a `400`
+`invalid_input` whose `details` name `date_to`. The response schema and every
+other parameter are unchanged.
+
 ### Contract and migration note (#9)
 
 - Filters are validated into one typed `GameLogQuery` before the service runs.
-  Malformed values (non-numeric `minutes_filter`, an unparsable `date_filter`,
-  `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
+  Malformed values (non-numeric `minutes_filter`, an unparsable `date_filter`
+  or `date_to`, a `date_to` earlier than `date_filter`, `game_filter` below 1, or `rank_filter[]` not matching `teams_against[]` one
   per one) return a `400` error with code `invalid_input` and message:
   `One or more game log filters are invalid.`
 - Rejected filter details (#145): a rejected game-log filter names the
@@ -1294,14 +1324,16 @@ possession), and the web app never sends this form.
 
   Each entry's `parameter` is the canonical filter name: `teams_against`,
   `rank_filter`, `opponent_tricode`, `minutes_filter`, `game_filter`,
-  `season_filter`, `date_filter`, `location_filter`,
+  `season_filter`, `date_filter`, `date_to`, `location_filter`,
   `playstyle_RTG_min`/`playstyle_RTG_max` (the reversed range names only
   the bounds the caller actually submitted, each as its own entry), or
   `self_filters[STAT]` with the actual stat. `values` lists the unusable
   submitted values, redacted and length-bounded like the diagnostics: only
   the unusable entries appear, so a `teams_against` request mixing
   supported and unsupported names reports only the unsupported ones, and a
-  reversed `minutes_filter` range reports the submitted `min,max` pair.
+  reversed `minutes_filter` range reports the submitted `min,max` pair,
+  and a `date_to` earlier than `date_filter` reports the `date_to` value
+  exactly as submitted (never a normalized date).
   Failures that identify no single value (for example `rank_filter[]` not
   matching `teams_against[]`) report the submitted ranks. For
   `teams_against`, `supported_values` carries the authoritative canonical
@@ -1325,7 +1357,7 @@ possession), and the web app never sends this form.
   remains `null` under the existing contract.
 - Empty result sets return empty arrays (`[]`) for `game_logs` and `averages`;
   `season_averages` still carries the season aggregate when the full season has
-  games. `next_game` may be `null`.
+  games, and `season_game_count` still counts them. `next_game` may be `null`.
 
 Query parameters:
 
@@ -1336,6 +1368,7 @@ Query parameters:
 | `players_on[]` | No | Teammates that must have a game-log appearance in the same game for the same team; this is game-level played/didn't-play evidence, not lineup-stint evidence |
 | `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
+| `date_to` | No | `YYYY-MM-DD` inclusive end date that trims the player's own game logs; with `date_filter` it selects an inclusive range (#307). It never reshapes Team Filter rankings, which are always whole-Regular-Season. An unparsable value, or one earlier than `date_filter`, is rejected with `400` `invalid_input` |
 | `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145). An entry may instead be a Defense Sheet row reference, `sheet:<base>:<row key>`, which ranks that Sheet row's Season allowed per 48 (#308; see Filtering Reference) |
 | `rank_filter[]` | No | One rank per opponent filter: `N` keeps the N teams with the highest value of the filter's metric, `-N` the N with the lowest, and `low,high` the inclusive ranks low through high, rank 1 being the highest value (see Ranking convention). A range needs `1 <= low <= high`; anything else is rejected with `400` `invalid_input` |
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |

@@ -10,6 +10,7 @@ free of per-request event loops (#10).
 import pandas as pd
 import pytest
 import requests
+from pydantic import ValidationError
 
 from app.config.settings import (
     CacheSettings,
@@ -82,6 +83,8 @@ def test_game_log_query_rejects_nonfinite_playstyle_range(value):
         {"minutes_filter": "20,10"},
         {"location_filter": "everywhere"},
         {"date_filter": "not-a-date"},
+        {"date_to": "not-a-date"},
+        {"date_filter": "2024-02-01", "date_to": "2024-01-31"},
         {"teams_against": ["OPP_PTS"], "rank_filter": []},
         {"teams_against": ["OPP_PTS"], "rank_filter": ["3", "9"]},
         {"opponent_tricode": "XXX"},
@@ -273,6 +276,7 @@ def test_game_log_response_models_plain_arrays():
         game_logs=[{"GAME_DATE": "2024-01-15", "PTS": 25}],
         averages=[{"PTS": 25.0}],
         season_averages=[{"PTS": 24.0}],
+        season_game_count=1,
         next_game="Boston Celtics",
     )
 
@@ -285,11 +289,19 @@ def test_game_log_response_models_plain_arrays():
 
 def test_game_log_response_allows_empty_arrays():
     dumped = GameLogResponse(
-        game_logs=[], averages=[], season_averages=[], next_game=None
+        game_logs=[], averages=[], season_averages=[], season_game_count=0, next_game=None
     ).model_dump()
     assert dumped["game_logs"] == []
     assert dumped["averages"] == []
     assert dumped["season_averages"] == []
+    assert dumped["season_game_count"] == 0
+
+
+def test_game_log_response_requires_a_non_negative_season_game_count():
+    with pytest.raises(ValidationError):
+        GameLogResponse(game_logs=[], averages=[], season_averages=[])
+    with pytest.raises(ValidationError):
+        GameLogResponse(game_logs=[], averages=[], season_averages=[], season_game_count=-1)
 
 
 # ------------------------------------------------------------------ helpers
@@ -380,6 +392,8 @@ def test_game_service_returns_plain_arrays_for_filtered_logs(
     assert result["game_logs"][0]["MATCHUP"] == "BOS vs. LAL"
     assert result["game_logs"][0]["MIN"] == 30
     assert result["next_game"] is None
+    # The season total counts the unfiltered season: the games season_averages averages.
+    assert result["season_game_count"] == 3
 
     GameLogResponse.model_validate(result)
 
@@ -437,6 +451,7 @@ def test_service_returns_empty_arrays_when_no_games_match(
     assert result["game_logs"] == []
     assert result["averages"] == []
     assert len(result["season_averages"]) == 1
+    assert result["season_game_count"] == 3
 
 
 def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
@@ -627,9 +642,10 @@ def test_a_shot_zone_sheet_row_filters_game_logs(
     assert matchups([restricted], ["1,1"]) == ["BOS @ MIA"]
     assert matchups([restricted], ["1,2"]) == ["BOS vs. LAL", "BOS @ MIA"]
     assert matchups([restricted], ["-1"]) == ["BOS vs. CHI"]
-    # It composes with a named filter's own ranking and with a date.
+    # It composes with a named filter's own ranking and with either date bound.
     assert matchups(["sheet:shot_zones:Corner 3:FGM"], ["1"]) == ["BOS vs. CHI"]
     assert matchups([restricted], ["2"], date_filter="2024-01-16") == ["BOS @ MIA"]
+    assert matchups([restricted], ["2"], date_to="2024-01-16") == ["BOS vs. LAL"]
 
 
 def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
@@ -654,6 +670,85 @@ def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
     assert [row["MATCHUP"] for row in response.get_json()["game_logs"]] == [
         "BOS vs. LAL",
         "BOS @ MIA",
+    ]
+
+
+def test_date_to_trims_the_logs_and_filtered_averages_only(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#307: an inclusive end date trims logs and averages, not the season."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+    whole = service.get_filtered_logs(
+        "LeBron James", GameLogQuery(season_filter="2024-25")
+    )
+    trimmed = service.get_filtered_logs(
+        "LeBron James",
+        GameLogQuery(season_filter="2024-25", date_to="2024-01-17"),
+    )
+
+    # Inclusive: the game played on the end date itself is kept.
+    assert [row["MATCHUP"] for row in trimmed["game_logs"]] == [
+        "BOS vs. LAL",
+        "BOS @ MIA",
+    ]
+    assert trimmed["averages"][0]["PTS"] == 20.0
+    assert trimmed["averages"][0]["MIN"] == 25.0
+    assert trimmed["season_averages"] == whole["season_averages"]
+
+
+def test_date_filter_and_date_to_select_an_inclusive_range(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+
+    def matchups(**filters):
+        query = GameLogQuery(season_filter="2024-25", **filters)
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    assert matchups(date_filter="2024-01-17", date_to="2024-01-17") == ["BOS @ MIA"]
+    assert matchups(date_filter="2024-01-15", date_to="2024-01-18") == [
+        "BOS vs. LAL",
+        "BOS @ MIA",
+    ]
+    # An empty range is the normal successful empty result.
+    assert matchups(date_filter="2024-01-20", date_to="2024-01-30") == []
+
+
+def test_the_same_team_filter_ranks_identically_with_and_without_date_to(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#307: date_to trims the logs but never reshapes Season Rankings."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "CHI", "LAL"]
+    )
+
+    def matchups(**filters):
+        query = GameLogQuery(
+            season_filter="2024-25",
+            teams_against=["OPP_PTS"],
+            rank_filter=[2],
+            **filters,
+        )
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    assert matchups() == ["BOS @ MIA", "BOS vs. CHI"]
+    # The same two ranked opponents; the end date only drops the later game.
+    assert matchups(date_to="2024-01-18") == ["BOS @ MIA"]
+    assert service.team_filter_rankings.calls == [
+        (("OPP_PTS",), "2024-25"),
+        (("OPP_PTS",), "2024-25"),
     ]
 
 
@@ -706,7 +801,41 @@ def test_route_serves_a_legacy_date_plus_team_filter_url_unchanged(
     body = response.get_json()
     assert [row["MATCHUP"] for row in body["game_logs"]] == ["BOS vs. LAL"]
     assert body["next_game"] is None
+    # The filters keep 1 game; the season total still counts all 3.
+    assert body["season_game_count"] == 3
     GameLogResponse.model_validate(body)
+
+
+def test_route_reports_the_season_total_when_no_games_match(
+    client, dependencies, monkeypatch, mock_db_engine, mock_redis_client
+):
+    """An empty filtered result still reports the unfiltered season's size."""
+
+    from app.routes import game_routes
+
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    dependencies.game_service = service
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service,
+            "get_filtered_logs",
+            lambda player_name, query: GameService.get_filtered_logs(
+                service, player_name, query
+            ),
+        )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&minutes_filter=45,48"
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["game_logs"] == []
+    assert body["averages"] == []
+    assert len(body["season_averages"]) == 1
+    assert body["season_game_count"] == 3
 
 
 def test_route_returns_empty_when_player_log_publication_is_unavailable(
@@ -765,6 +894,7 @@ def test_route_returns_empty_when_player_log_publication_is_unavailable(
     assert body["game_logs"] == []
     assert body["averages"] == []
     assert body["season_averages"] == []
+    assert body["season_game_count"] == 0
 
 
 def test_game_service_never_caches_player_logs_in_redis(
@@ -1011,6 +1141,40 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
     assert captured["query"].opponent_tricode == "OKC"
 
 
+def test_route_passes_an_inclusive_date_range_to_the_service(client, monkeypatch):
+    """#307: date_to reaches the typed query beside date_filter."""
+
+    from datetime import date
+
+    from app.routes import game_routes
+
+    captured = {}
+
+    def fake_get_filtered_logs(player_name, query):
+        captured["query"] = query
+        return {
+            "game_logs": [],
+            "averages": [],
+            "season_averages": [],
+            "next_game": None,
+        }
+
+    _stub_route_settings(monkeypatch)
+    with client.application.app_context():
+        monkeypatch.setattr(
+            game_routes.game_service, "get_filtered_logs", fake_get_filtered_logs
+        )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James"
+        "&date_filter=2024-01-15&date_to=2024-01-15"
+    )
+
+    assert response.status_code == 200
+    assert captured["query"].date_filter == date(2024, 1, 15)
+    assert captured["query"].date_to == date(2024, 1, 15)
+
+
 @pytest.mark.parametrize(
     "query_string,expected_filters",
     [
@@ -1041,6 +1205,20 @@ def test_route_passes_a_specific_opponent_to_the_service(client, monkeypatch):
         (
             "player_name=LeBron%20James&game_filter=0",
             [{"parameter": "game_filter", "values": ["0"]}],
+        ),
+        (
+            "player_name=LeBron%20James&date_to=not-a-date",
+            [{"parameter": "date_to", "values": ["not-a-date"]}],
+        ),
+        (
+            "player_name=LeBron%20James&date_filter=2024-02-01&date_to=2024-01-31",
+            [{"parameter": "date_to", "values": ["2024-01-31"]}],
+        ),
+        (
+            # A lax spelling pydantic accepts (epoch seconds for 2024-01-31)
+            # is reported exactly as submitted, never as the normalized date.
+            "player_name=LeBron%20James&date_filter=2024-02-01&date_to=1706659200",
+            [{"parameter": "date_to", "values": ["1706659200"]}],
         ),
     ],
 )

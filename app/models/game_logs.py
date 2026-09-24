@@ -391,6 +391,9 @@ class GameLogQuery(BaseModel):
     players_on: list[str] = Field(default_factory=list)
     players_off: list[str] = Field(default_factory=list)
     date_filter: date | None = None
+    # Inclusive end date pairing with ``date_filter`` (a start date). Like
+    # ``date_filter`` it trims only the player's own logs, never a ranking.
+    date_to: date | None = None
     teams_against: list[str] = Field(default_factory=list)
     # One entry per teams_against filter: N (the first N ranked teams), -N (the
     # last N), or (low, high) for inclusive 1-based ranks, rank 1 being the
@@ -647,6 +650,16 @@ class GameLogQuery(BaseModel):
                 (f"{self.minutes_filter[0]},{self.minutes_filter[1]}",),
                 "minutes_filter min must not exceed minutes_filter max",
             )
+        if (
+            self.date_filter is not None
+            and self.date_to is not None
+            and self.date_to < self.date_filter
+        ):
+            raise GameLogFilterError(
+                "date_to",
+                (self.date_to.isoformat(),),
+                "date_to must not be earlier than date_filter",
+            )
         if self.playstyle_range[0] > self.playstyle_range[1]:
             raise GameLogFilterError(
                 "playstyle_RTG_range",
@@ -669,12 +682,14 @@ class GameLogResponse(BaseModel):
 
     ``game_logs``, ``averages``, and ``season_averages`` are ordinary JSON
     arrays; ``next_game`` remains ``null`` under the existing game-log
-    contract.
+    contract. ``season_game_count`` is how many games the unfiltered season
+    holds: exactly the games ``season_averages`` averages (crf04/statsplus#88).
     """
 
     game_logs: list[dict[str, Any]]
     averages: list[dict[str, Any]]
     season_averages: list[dict[str, Any]]
+    season_game_count: int = Field(ge=0)
     next_game: str | None = None
 
 
