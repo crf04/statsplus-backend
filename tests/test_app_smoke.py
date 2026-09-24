@@ -161,13 +161,6 @@ def test_detailed_health_reports_both_providers(client, monkeypatch):
     assert checks["pbp_stats"]["provider"] == "pbp_stats"
 
 
-def test_players_endpoint_smoke(client):
-    response = client.get("/api/players")
-
-    assert response.status_code == 200
-    assert isinstance(response.get_json(), list)
-
-
 def test_player_routes_preserve_profile_response_shapes(client):
     service = client.application.extensions["dependencies"].player_service
     service.get_all_players.return_value = ["Jayson Tatum"]
