@@ -10,6 +10,7 @@ free of per-request event loops (#10).
 import pandas as pd
 import pytest
 import requests
+from pydantic import ValidationError
 
 from app.config.settings import (
     CacheSettings,
@@ -252,6 +253,7 @@ def test_game_log_response_models_plain_arrays():
         game_logs=[{"GAME_DATE": "2024-01-15", "PTS": 25}],
         averages=[{"PTS": 25.0}],
         season_averages=[{"PTS": 24.0}],
+        season_game_count=1,
         next_game="Boston Celtics",
     )
 
@@ -264,11 +266,19 @@ def test_game_log_response_models_plain_arrays():
 
 def test_game_log_response_allows_empty_arrays():
     dumped = GameLogResponse(
-        game_logs=[], averages=[], season_averages=[], next_game=None
+        game_logs=[], averages=[], season_averages=[], season_game_count=0, next_game=None
     ).model_dump()
     assert dumped["game_logs"] == []
     assert dumped["averages"] == []
     assert dumped["season_averages"] == []
+    assert dumped["season_game_count"] == 0
+
+
+def test_game_log_response_requires_a_non_negative_season_game_count():
+    with pytest.raises(ValidationError):
+        GameLogResponse(game_logs=[], averages=[], season_averages=[])
+    with pytest.raises(ValidationError):
+        GameLogResponse(game_logs=[], averages=[], season_averages=[], season_game_count=-1)
 
 
 # ------------------------------------------------------------------ helpers
@@ -359,6 +369,8 @@ def test_game_service_returns_plain_arrays_for_filtered_logs(
     assert result["game_logs"][0]["MATCHUP"] == "BOS vs. LAL"
     assert result["game_logs"][0]["MIN"] == 30
     assert result["next_game"] is None
+    # The season total counts the unfiltered season: the games season_averages averages.
+    assert result["season_game_count"] == 3
 
     GameLogResponse.model_validate(result)
 
@@ -416,6 +428,7 @@ def test_service_returns_empty_arrays_when_no_games_match(
     assert result["game_logs"] == []
     assert result["averages"] == []
     assert len(result["season_averages"]) == 1
+    assert result["season_game_count"] == 3
 
 
 def test_service_returns_no_logs_when_opponent_filter_resolves_empty(
@@ -645,6 +658,7 @@ def test_route_returns_empty_when_player_log_publication_is_unavailable(
     assert body["game_logs"] == []
     assert body["averages"] == []
     assert body["season_averages"] == []
+    assert body["season_game_count"] == 0
 
 
 def test_game_service_never_caches_player_logs_in_redis(

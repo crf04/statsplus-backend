@@ -660,12 +660,14 @@ class GameLogResponse(BaseModel):
 
     ``game_logs``, ``averages``, and ``season_averages`` are ordinary JSON
     arrays; ``next_game`` remains ``null`` under the existing game-log
-    contract.
+    contract. ``season_game_count`` is how many games the unfiltered season
+    holds: exactly the games ``season_averages`` averages (crf04/statsplus#88).
     """
 
     game_logs: list[dict[str, Any]]
     averages: list[dict[str, Any]]
     season_averages: list[dict[str, Any]]
+    season_game_count: int = Field(ge=0)
     next_game: str | None = None
 
 
