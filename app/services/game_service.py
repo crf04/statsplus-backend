@@ -307,10 +307,17 @@ class GameService:
         min_filter, max_filter = query.minutes_filter
         df = df[(df['MIN'] >= min_filter) & (df['MIN'] <= max_filter)]
 
-        # Apply date filter
-        if query.date_filter:
-            game_dates = pd.to_datetime(df['GAME_DATE'], errors='coerce')
-            df = df[game_dates >= pd.Timestamp(query.date_filter)]
+        # Apply the inclusive date range: ``date_filter`` is the start date
+        # and ``date_to`` the end date. Both bounds compare by calendar day,
+        # so a timestamped game on either boundary date is kept.
+        if query.date_filter or query.date_to:
+            game_days = pd.to_datetime(df['GAME_DATE'], errors='coerce').dt.normalize()
+            in_range = pd.Series(True, index=df.index)
+            if query.date_filter:
+                in_range &= game_days >= pd.Timestamp(query.date_filter)
+            if query.date_to:
+                in_range &= game_days <= pd.Timestamp(query.date_to)
+            df = df[in_range]
 
         # Apply location filter
         if query.location_filter != 'Both':
@@ -543,9 +550,9 @@ class GameService:
         """Select opponents by Season Rankings: the first N, last N, or a rank range.
 
         The rankings are whole-Regular-Season aggregates for the requested
-        season, so ``date_filter`` deliberately takes no part here: a date
-        trims the player's own logs without reshaping which opponents rank
-        where.  The read is not cached: an activation, a rollback, or a season
+        season, so ``date_filter`` and ``date_to`` deliberately take no part
+        here: a date trims the player's own logs without reshaping which
+        opponents rank where.  The read is not cached: an activation, a rollback, or a season
         rollover must never be shadowed by a previous generation's ranking.
         """
 
