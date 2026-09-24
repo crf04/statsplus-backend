@@ -23,6 +23,7 @@ from app.config.settings import (
 from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
 from app.services.matchup import MatchupService
+from app.services.player_diet import PlayerDietFact, PlayerDietObservation
 from app.services.publication_snapshot_calls import call_with_read_scope
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.stats_freshness_repository import StatsFreshnessRepository
@@ -61,17 +62,28 @@ def test_unscheduled_matchup_passes_one_parsed_selector_to_the_service(
     assert response.status_code == 200
     assert response.get_json() == {"experience": {"mode": "unscheduled"}}
     dependencies.matchup_service.get_unscheduled_matchup.assert_called_once_with(
-        opponent="BOS", player_id=2544, player_name=None, team=None
+        opponent="BOS",
+        player_id=2544,
+        player_name=None,
+        player_team=None,
+        team=None,
     )
 
 
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
-        ("team=det&opponent=CHA", {"team": "DET", "player_name": None}),
+        (
+            "team=det&opponent=CHA",
+            {"team": "DET", "player_name": None, "player_team": None},
+        ),
         (
             "player_name=Cade%20Cunningham&opponent=CHA",
-            {"team": None, "player_name": "Cade Cunningham"},
+            {"team": None, "player_name": "Cade Cunningham", "player_team": None},
+        ),
+        (
+            "player_name=Cade%20Cunningham&player_team=det&opponent=CHA",
+            {"team": None, "player_name": "Cade Cunningham", "player_team": "DET"},
         ),
     ],
 )
@@ -113,6 +125,15 @@ def test_unscheduled_matchup_accepts_team_and_player_name_selectors(
         ("team=DE&opponent=CHA", ["team"]),
         # A team is never its own opponent.
         ("team=cha&opponent=CHA", ["opponent"]),
+        # player_team only narrows a player_name, and is a tricode.
+        ("player_id=2544&player_team=LAL&opponent=CHA", ["player_team"]),
+        ("team=DET&player_team=LAL&opponent=CHA", ["player_team"]),
+        ("player_team=LAL&opponent=CHA", ["player_id", "player_name", "team"]),
+        ("player_name=LeBron&player_team=LA&opponent=CHA", ["player_team"]),
+        (
+            "player_name=LeBron&player_team=LAL&player_team=BOS&opponent=CHA",
+            ["player_team"],
+        ),
         # Unknown parameters are refused by name.
         ("player_id=2544&opponent=CHA&date=2026-04-10", ["date"]),
     ],
@@ -181,6 +202,9 @@ CATALOG_ROWS = (
     _catalog_row(2544, "LeBron James", LAL, "LAL"),
     _catalog_row(1629029, "Luka Dončić", LAL, "LAL"),
     _catalog_row(1628369, "Jayson Tatum", BOS, "BOS"),
+    # Namesakes: two catalog athletes who normalize to the same name.
+    _catalog_row(1630001, "Jalen Williams", BOS, "BOS"),
+    _catalog_row(1630002, "Jalen Williams", LAL, "LAL"),
 )
 
 
@@ -195,7 +219,9 @@ class _RecordedAthleteCatalog:
         return [dict(row) for row in self.rows]
 
 
-def _fixture_client(tmp_path, *, drop_last_15=False, with_service=False):
+def _fixture_client(
+    tmp_path, *, drop_last_15=False, with_service=False, diet_players=()
+):
     engine = create_engine(f"sqlite:///{tmp_path / 'unscheduled.sqlite3'}")
     run_migrations(engine)
     settings = RuntimeSettings(
@@ -210,11 +236,14 @@ def _fixture_client(tmp_path, *, drop_last_15=False, with_service=False):
     team_matchups = _team_matchups(engine)
     if drop_last_15:
         _drop_last_15_snapshots(engine)
+    player_diets = _player_diets(engine)
+    if diet_players:
+        _copy_lebron_diet(player_diets, diet_players)
     service = MatchupService(
         event_catalog=_event_catalog(engine, settings),
         player_pool=_player_pool(engine),
         player_logs=_player_logs(engine, catalog),
-        player_diets=_player_diets(engine),
+        player_diets=player_diets,
         team_matchups=team_matchups,
         stats_freshness=stats_freshness,
         settings=settings,
@@ -240,6 +269,35 @@ def _fixture_client(tmp_path, *, drop_last_15=False, with_service=False):
     )
     client = app.test_client()
     return (client, service) if with_service else client
+
+
+def _copy_lebron_diet(player_diets, player_ids):
+    """Republish the season Diet with LeBron's facts also stored for others."""
+
+    stored = player_diets.repository.get_for_players(SEASON, (2544,))
+    facts = [
+        PlayerDietFact(
+            player_id,
+            fact.base,
+            fact.slice_key,
+            fact.share,
+            fact.volume,
+            fact.games_played,
+            fact.volume_unit,
+            fact.provider,
+        )
+        for player_id in (2544, *player_ids)
+        for fact in stored.players[2544]
+    ]
+    player_diets.repository.publish(
+        SEASON,
+        tuple(facts),
+        tuple(
+            PlayerDietObservation(observation.base, observation.status)
+            for observation in stored.observations
+        ),
+        retrieved_at=NOW,
+    )
 
 
 class _Generation:
@@ -294,6 +352,7 @@ def test_unscheduled_matchup_reads_one_publication_snapshot(tmp_path):
         "get_latest_window",
         "get_player_summaries",
         "get_read_freshness",
+        "publication_season_is_complete",
     ]
     assert all(snapshot is generation for _name, snapshot in seen)
     assert response.get_json()["provenance"] == {}
@@ -374,7 +433,7 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
         "season": SEASON,
         "season_defense": "2026-01-15",
         "last_15_defense": "2026-01-15",
-        "player_diets": NOW.isoformat(),
+        "player_diets": "2026-01-15",
     }
     assert set(payload["freshness"]) == {
         "stats",
@@ -462,23 +521,151 @@ def test_unscheduled_team_mode_scores_the_teams_players_with_diets(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "query",
+    ("query", "reason", "message"),
     [
         # Not in the current-season Athlete Catalog.
-        "player_id=203999&opponent=BOS",
-        "player_name=Nobody%20Here&opponent=BOS",
+        (
+            "player_id=203999&opponent=BOS",
+            "player_not_found",
+            "The requested player was not found.",
+        ),
+        (
+            "player_name=Nobody%20Here&opponent=BOS",
+            "player_not_found",
+            "The requested player was not found.",
+        ),
+        # A real name, but not on the named team.
+        (
+            "player_name=LeBron%20James&player_team=BOS&opponent=CHA",
+            "player_not_found",
+            "The requested player was not found.",
+        ),
         # In the catalog, but no current-season Diet.
-        "player_id=1629029&opponent=BOS",
-        "player_name=Luka%20Doncic&opponent=BOS",
+        (
+            "player_id=1629029&opponent=BOS",
+            "no_player_diet",
+            "The requested player has no current-season Player Diet.",
+        ),
+        (
+            "player_name=Luka%20Doncic&opponent=BOS",
+            "no_player_diet",
+            "The requested player has no current-season Player Diet.",
+        ),
         # Well-formed tricodes that name no NBA team.
-        "player_id=2544&opponent=XYZ",
-        "team=XYZ&opponent=BOS",
+        (
+            "player_id=2544&opponent=XYZ",
+            "team_not_found",
+            "The requested team was not found.",
+        ),
+        (
+            "team=XYZ&opponent=BOS",
+            "team_not_found",
+            "The requested team was not found.",
+        ),
+        (
+            "player_name=LeBron%20James&player_team=XYZ&opponent=BOS",
+            "team_not_found",
+            "The requested team was not found.",
+        ),
     ],
 )
-def test_unscheduled_matchup_reports_unknown_resources(tmp_path, query):
+def test_unscheduled_matchup_reports_unknown_resources(
+    tmp_path, query, reason, message
+):
     client = _fixture_client(tmp_path)
 
     response = client.get(f"{UNSCHEDULED}?{query}")
 
     assert response.status_code == 404
-    assert response.get_json()["error"]["code"] == "resource_not_found"
+    assert response.get_json()["error"] == {
+        "code": "resource_not_found",
+        "message": message,
+        "details": {"reason": reason},
+    }
+
+
+def test_unscheduled_matchup_refuses_an_ambiguous_player_name(tmp_path):
+    client = _fixture_client(tmp_path, diet_players=(1630001, 1630002))
+
+    response = client.get(f"{UNSCHEDULED}?player_name=jalen%20williams&opponent=CHA")
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert error["code"] == "invalid_input"
+    assert error["details"] == {
+        "parameter": "player_name",
+        "parameters": ["player_name"],
+        "candidates": [
+            {"name": "Jalen Williams", "team": "BOS"},
+            {"name": "Jalen Williams", "team": "LAL"},
+        ],
+    }
+
+
+def test_unscheduled_matchup_ignores_namesakes_without_a_diet(tmp_path):
+    """Only a namesake the route could score makes a name ambiguous."""
+
+    client = _fixture_client(tmp_path, diet_players=(1630002,))
+
+    response = client.get(f"{UNSCHEDULED}?player_name=Jalen%20Williams&opponent=BOS")
+
+    assert response.status_code == 200
+    assert [row["canonical_id"] for row in response.get_json()["players"]] == [
+        1630002
+    ]
+
+
+def test_unscheduled_player_team_narrows_a_namesake(tmp_path):
+    client = _fixture_client(tmp_path, diet_players=(1630001, 1630002))
+
+    response = client.get(
+        f"{UNSCHEDULED}?player_name=Jalen%20Williams&player_team=bos&opponent=CHA"
+    )
+
+    assert response.status_code == 200
+    (player,) = response.get_json()["players"]
+    assert (player["canonical_id"], player["tricode"]) == (1630001, "BOS")
+
+
+class _CompletedSeasonWindows:
+    """The fixture's windows, with their publications' governance saying the
+    configured season is over."""
+
+    def __init__(self, target):
+        self._target = target
+        self.snapshots = []
+
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+
+    def publication_season_is_complete(self, season, *, publication_snapshot=None):
+        assert season == SEASON
+        self.snapshots.append(publication_snapshot)
+        return True
+
+
+def test_unscheduled_defense_sections_say_completed_season_in_the_offseason(
+    tmp_path,
+):
+    client, service = _fixture_client(tmp_path, with_service=True)
+    service.team_matchups = _CompletedSeasonWindows(service.team_matchups)
+
+    payload = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS").get_json()
+
+    sections = payload["experience"]["sections"]
+    assert sections["season_defense"]["context"] == "completed_season"
+    assert sections["last_15_defense"]["context"] == "completed_season"
+    assert sections["season_defense"]["status"] == "available"
+    assert service.team_matchups.snapshots
+
+
+def test_unscheduled_offseason_keeps_an_unavailable_section_contextless(tmp_path):
+    client, service = _fixture_client(tmp_path, with_service=True, drop_last_15=True)
+    service.team_matchups = _CompletedSeasonWindows(service.team_matchups)
+
+    sections = client.get(
+        f"{UNSCHEDULED}?player_id=2544&opponent=BOS"
+    ).get_json()["experience"]["sections"]
+
+    assert sections["season_defense"]["context"] == "completed_season"
+    assert sections["last_15_defense"]["context"] is None

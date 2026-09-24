@@ -230,6 +230,20 @@ class ResourceNotFoundError(AppError):
     code = "resource_not_found"
     default_message = "The requested resource was not found."
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        public_details: dict[str, Any] | None = None,
+    ) -> None:
+        self._public_details = public_details
+        super().__init__(message, detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any] | None:
+        return self._public_details
+
 
 class ProviderUnavailableError(AppError):
     """An upstream provider required to serve the request is unavailable."""

@@ -735,6 +735,29 @@ class TeamMatchupQueryService:
             return self._expected_l15_game_ids_source
         return self._publication_reader
 
+    def publication_season_is_complete(
+        self, season: str, *, publication_snapshot=None
+    ) -> bool:
+        """Whether the latest Season window's publications say ``season`` is over.
+
+        This asks the same per-publication governance the completed-season
+        fallback asks (``_publication_season_is_complete``), of the Season
+        window streams in the caller's one generation. Any available
+        publication whose governance proves the season complete answers yes;
+        with no generation, or nothing provable, the answer fails closed.
+        """
+
+        if publication_snapshot is None:
+            return False
+        return any(
+            read.available
+            and self._publication_season_is_complete(read, requested_season=season)
+            for read in (
+                publication_snapshot.read(stream_key)
+                for stream_key in TEAM_MATCHUP_PUBLICATION_STREAMS["season"].values()
+            )
+        )
+
     def _publication_season_is_complete(
         self, read, *, requested_season: str
     ) -> bool:

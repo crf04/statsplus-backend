@@ -510,8 +510,10 @@ own `status` (`available | unavailable | missing`), `source`, `context`, and
 of `event_catalog`, `player_game_logs`, `player_pool`,
 `team_matchup_publication`, `rotowire`, or `null`. `context` is one of
 `completed_season_catalog`, `current_season_catalog`, `completed_season`,
-`pregame`, `posted_markets`, `current`, or `null`; `completed_season` is the
-hindsight label a client renders beside a completed-season window.
+`pregame`, `posted_markets`, `current`, `latest`, or `null`;
+`completed_season` is the label a client renders beside a completed-season
+window (hindsight in a Historical Matchup). `latest` appears only in an
+Unscheduled Matchup (see Get Unscheduled Matchup).
 
 The Schedule section is always `available` and additionally carries
 `collected_at`, the same Event Catalog collection time reported by
@@ -1064,6 +1066,7 @@ Parameters:
 | `player_id` | One selector | Canonical NBA player ID, a positive decimal integer |
 | `player_name` | One selector | A display name, matched against the current-season Athlete Catalog without regard to case, punctuation, spacing, or diacritics, exactly as the Playtypes player profile resolves a name. There is no fuzzy or nickname match |
 | `team` | One selector | Three-letter NBA tricode; scores that team's players |
+| `player_team` | No | Three-letter NBA tricode; only with `player_name`, keeps only the namesake on that current-season Athlete Catalog team |
 | `opponent` | Yes | Three-letter NBA tricode of the defense |
 
 Tricodes are case-insensitive. Exactly one of `player_id`, `player_name`, or
@@ -1077,12 +1080,45 @@ parameter names, which the message also names:
   three letters, a `player_id` that is not a canonical ID, or a blank
   `player_name`;
 - `team` equal to `opponent` (`opponent` is listed);
+- `player_team` with `player_id` or `team`, or a `player_team` that is not
+  three letters (`player_team` is listed);
 - any other parameter, such as `date` (that name is listed).
 
-`404 resource_not_found` is returned for a well-formed tricode that names no
-NBA team, a player ID or name absent from the current-season Athlete Catalog,
-and a catalog player with no current-season Player Diet. A team with no player
-holding a Diet is not an error: it returns `200` with `players: []`.
+A `player_name` that matches more than one current-season catalog athlete with
+a Diet (after any `player_team` narrowing) is also `400 invalid_input`, naming
+the candidates sorted by name, then team, so the caller can retry with
+`player_team`. Namesakes without a Diet cannot be scored and never make a name
+ambiguous.
+
+```json
+{
+  "error": {
+    "code": "invalid_input",
+    "message": "The player_name matches more than one player; narrow it with player_team.",
+    "details": {
+      "parameter": "player_name",
+      "parameters": ["player_name"],
+      "candidates": [
+        {"name": "Jalen Williams", "team": "DEN"},
+        {"name": "Jalen Williams", "team": "OKC"}
+      ]
+    }
+  }
+}
+```
+
+A candidate's `team` is `null` when the catalog names no team for them.
+
+`404 resource_not_found` carries `details.reason`, one of:
+
+| `details.reason` | Message | When |
+| --- | --- | --- |
+| `team_not_found` | The requested team was not found. | `opponent`, `team`, or `player_team` is a well-formed tricode naming no NBA team |
+| `player_not_found` | The requested player was not found. | No current-season Athlete Catalog athlete has that ID, or that name (on `player_team`, when given) |
+| `no_player_diet` | The requested player has no current-season Player Diet. | The player exists but has no stored current-season Diet, so nothing can be scored |
+
+A team with no player holding a Diet is not an error: it returns `200` with
+`players: []`.
 
 The request makes no NBA Stats, PBP Stats, DFS, or injury-provider call and
 reads no Player Pool or Event Catalog game (the Event Catalog supplies only the
@@ -1152,8 +1188,15 @@ and derived as in the game Matchup, with the same `status` and
 Base is, and otherwise repeats the first governed Base reason (Synergy's
 permanent `provider_window_unsupported` comes first). Its `context` is
 `latest`, because the window is the newest published one rather than a
-pregame or hindsight reading. `participants_basis` is present only in team
-mode and states how the player set was chosen.
+pregame reading, except in the offseason: when the configured current season
+is over, `context` is `completed_season` on both sections, so a reader knows
+the answer is last season's data (with no game date, it is not hindsight).
+"Over" is the same signal the completed-season fallback uses: the Season
+window publications' own governance proves every governed game of that season
+final. Without a Publication generation, or without that proof, it stays
+`latest`. A section that is not `available` keeps `context: null` in both
+cases. `participants_basis` is present only in team mode and states how the
+player set was chosen.
 
 `as_of` states what the answer is as of:
 
@@ -1162,15 +1205,16 @@ mode and states how the player set was chosen.
   "season": "2025-26",
   "season_defense": "2026-04-12",
   "last_15_defense": "2026-04-12",
-  "player_diets": "2026-04-13T09:00:00+00:00"
+  "player_diets": "2026-04-13"
 }
 ```
 
 `season_defense` and `last_15_defense` are the Eastern as-of dates of the
 Defense Sheet windows used, or `null` when that window's section is not
-`available`. `player_diets` is the collection timestamp of the Diet evidence,
-the same value as `freshness.player_diets.retrieved_at` (the earliest across
-Bases), or `null` when none is stored.
+`available`. `player_diets` is the Eastern date of the Diet evidence's
+publication: the date of `freshness.player_diets.retrieved_at` (the earliest
+across Bases) in `America/New_York`, or `null` when none is stored. All three
+dates are `YYYY-MM-DD`.
 
 `league` has the game Matchup's shape and values. `teams` holds the opponent's
 Defense Sheet and defensive columns in player mode, and `[team, opponent]` in

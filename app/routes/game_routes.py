@@ -44,7 +44,9 @@ _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
 _CANONICAL_PLAYER_ID = re.compile(r"[1-9][0-9]*\Z")
 _MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
 _UNSCHEDULED_SELECTORS = ("player_id", "player_name", "team")
-_UNSCHEDULED_PARAMETERS = frozenset({*_UNSCHEDULED_SELECTORS, "opponent"})
+_UNSCHEDULED_PARAMETERS = frozenset(
+    {*_UNSCHEDULED_SELECTORS, "player_team", "opponent"}
+)
 _TRICODE = re.compile(r"[A-Za-z]{3}\Z")
 
 
@@ -122,8 +124,13 @@ def get_unscheduled_matchup():
     if len(selectors) != 1:
         raise _invalid_unscheduled(*(selectors or _UNSCHEDULED_SELECTORS))
     (selector,) = selectors
+    if "player_team" in request.args and selector != "player_name":
+        # player_team only narrows a name; an id or a team needs no narrowing.
+        raise _invalid_unscheduled("player_team")
     values = {
-        name: request.args.getlist(name) for name in (selector, "opponent")
+        name: request.args.getlist(name)
+        for name in (selector, "opponent", "player_team")
+        if name in request.args or name != "player_team"
     }
     for name, submitted in values.items():
         if len(submitted) != 1:
@@ -133,7 +140,12 @@ def get_unscheduled_matchup():
     if _TRICODE.fullmatch(opponent) is None:
         raise _invalid_unscheduled("opponent")
     opponent = opponent.upper()
-    selected: dict[str, Any] = {"player_id": None, "player_name": None, "team": None}
+    selected: dict[str, Any] = {
+        "player_id": None,
+        "player_name": None,
+        "player_team": None,
+        "team": None,
+    }
     if selector == "player_id":
         if not _is_canonical_player_id(value):
             raise _invalid_unscheduled("player_id")
@@ -142,6 +154,11 @@ def get_unscheduled_matchup():
         if not value.strip():
             raise _invalid_unscheduled("player_name")
         selected["player_name"] = value
+        if "player_team" in values:
+            player_team = values["player_team"][0]
+            if _TRICODE.fullmatch(player_team) is None:
+                raise _invalid_unscheduled("player_team")
+            selected["player_team"] = player_team.upper()
     else:
         if _TRICODE.fullmatch(value) is None:
             raise _invalid_unscheduled("team")
