@@ -66,6 +66,28 @@ def setup_logging():
     import logging
     logging.basicConfig(level=logging.DEBUG)
     
+@pytest.fixture(autouse=True)
+def reset_route_service_proxies():
+    """Drop attributes a test patched onto a module-level route service proxy.
+
+    ``monkeypatch.setattr(team_routes.team_service, ...)`` reads the old value
+    through the proxy, so its undo writes that test's Mock back onto the proxy
+    instead of deleting it, and every later request in the worker would call it.
+    """
+    yield
+    import sys
+
+    from app.routes._service_proxy import CurrentAppService
+
+    for name, module in list(sys.modules.items()):
+        if not name.startswith("app.routes"):
+            continue
+        for value in vars(module).values():
+            if isinstance(value, CurrentAppService):
+                for attribute in [key for key in vars(value) if key != "_name"]:
+                    delattr(value, attribute)
+
+
 @pytest.fixture
 def runtime_settings():
     """Credential-free settings shared by the app and its injected dependencies."""
