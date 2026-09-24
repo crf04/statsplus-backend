@@ -137,10 +137,19 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         ) from error
 
 
-#: Parsers the typed models do not own, translated from one pydantic-native
-#: rejection at the HTTP seam, the original submitted value in hand. Their
-#: accepted grammar is pydantic's, so acceptance is untouched.
-_UNTYPED_PARAMETER_NAMES = frozenset(
+#: Scalar parameters whose grammar is pydantic's own, which normalizes the
+#: value before any check sees it. The name decides two things at the HTTP
+#: seam, both publishing the original submitted string rather than the
+#: normalized one:
+#:
+#: - a pydantic-native rejection of one of them, which no typed cause owns,
+#:   is translated into facts naming the parameter and that string; and
+#: - a typed ``GameLogFilterError`` naming one of them (``date_to`` earlier
+#:   than ``date_filter``) reports that string instead of the model's
+#:   normalized value.
+#:
+#: Acceptance is untouched either way.
+_PYDANTIC_SCALAR_PARAMETER_NAMES = frozenset(
     {"date_filter", "date_to", "location_filter", "game_filter"}
 )
 
@@ -222,7 +231,7 @@ def _game_log_rejected_filter(
             return _playstyle_range_failures(filters, args)
         submitted = (
             filters.get(cause.parameter)
-            if cause.parameter in _UNTYPED_PARAMETER_NAMES
+            if cause.parameter in _PYDANTIC_SCALAR_PARAMETER_NAMES
             else None
         )
         if isinstance(submitted, str):
@@ -255,7 +264,11 @@ def _game_log_rejected_filter(
     # unknown is skipped, keeping the other rejected filters' facts.
     field = validation_error.get("loc", ())
     field = field[0] if field and isinstance(field[0], str) else None
-    submitted = filters.get(field) if field in _UNTYPED_PARAMETER_NAMES else None
+    submitted = (
+        filters.get(field)
+        if field in _PYDANTIC_SCALAR_PARAMETER_NAMES
+        else None
+    )
     if isinstance(submitted, str):
         return {
             "parameter": field,
