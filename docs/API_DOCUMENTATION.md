@@ -1265,6 +1265,23 @@ tricode, so a caller can read a player's games against one team without ranking
 opponents. Its value must be one of the 30 canonical NBA tricodes; anything else
 joins the malformed values of the #9 note and returns a `400` `invalid_input`.
 
+Defense Sheet row filters (#308): a `teams_against[]` entry may also name one
+Matchup Defense Sheet row as `sheet:<base>:<row key>`, where `<base>` is
+`play_types`, `shot_types`, `shot_zones`, `assist_locations`, or `traditional`
+and `<row key>` is exactly a `defense_sheet[<base>][].key` from
+`GET /api/games/matchup` (for example `sheet:play_types:PRBallHandler:PTS` or
+`sheet:shot_zones:Restricted Area:FGM`). It ranks the 30 opponents by that
+row's Season **allowed per 48**, with no denominator, which is the value behind
+the Sheet row's Season `rank`. Rank 1 is the highest value (allows the most),
+on the same scale as every `rank_filter[]`, so a team at Sheet Season rank `r`
+(ascending, 1 = allows the fewest) holds rank `31 - r` under the matching
+filter; see the tie rule under Filtering Reference. It pairs with
+`rank_filter[]` one per one and composes with every other filter,
+`date_filter`, and `date_to`. An unknown base or row key is rejected with `400`
+`invalid_input`, naming `teams_against` and the submitted value. Named filters
+keep their own definitions and rankings (play types still rank points per
+possession), and the web app never sends this form.
+
 Inclusive end date (#307): `date_to` is an optional `YYYY-MM-DD` end date that
 pairs with `date_filter` (the start date). A game is kept when its calendar
 date is on or before `date_to`, so `date_filter` plus `date_to` selects an
@@ -1322,7 +1339,9 @@ other parameter are unchanged.
   `teams_against`, `supported_values` carries the authoritative canonical
   vocabulary from the backend's own constant and `supported_aliases` the
   accepted legacy spellings, so a caller never needs a copy of either;
-  other entries omit them. Each rejection is translated separately, so one
+  other entries omit them. `supported_values` lists the named filters only:
+  Defense Sheet row references (#308) are data-shaped, validated against the
+  Sheet's own row keys, and never enumerated there. Each rejection is translated separately, so one
   failure with no safely actionable detail (unknown internal shapes) is
   skipped rather than blanking the known ones, and if nothing is
   actionable the generic message stands alone with no `details` object.
@@ -1350,7 +1369,7 @@ Query parameters:
 | `players_off[]` | No | Teammates that must have no game-log appearance in the same game for the same team; multiple names exclude the union of their appearances |
 | `date_filter` | No | `YYYY-MM-DD` start date that trims the player's own game logs. It never reshapes Team Filter rankings, which are always whole-Regular-Season |
 | `date_to` | No | `YYYY-MM-DD` inclusive end date that trims the player's own game logs; with `date_filter` it selects an inclusive range (#307). It never reshapes Team Filter rankings, which are always whole-Regular-Season. An unparsable value, or one earlier than `date_filter`, is rejected with `400` `invalid_input` |
-| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145) |
+| `teams_against[]` | No | Opponent filter names such as `OPP_PTS`. Every filter ranks opponents from the durable Season publications for the requested `season_filter` (#198); a request-time provider call is no longer made for any combination of filters. A season with no Season publication ranks no opponents, so the filter resolves to an empty result rather than borrowing another season's rankings. The authoritative accepted set (and its legacy aliases) is not enumerated here except by example: a rejection's `details` carry the full canonical `supported_values` and `supported_aliases` (#145). An entry may instead be a Defense Sheet row reference, `sheet:<base>:<row key>`, which ranks that Sheet row's Season allowed per 48 (#308; see Filtering Reference) |
 | `rank_filter[]` | No | One rank per opponent filter: `N` keeps the N teams with the highest value of the filter's metric, `-N` the N with the lowest, and `low,high` the inclusive ranks low through high, rank 1 being the highest value (see Ranking convention). A range needs `1 <= low <= high`; anything else is rejected with `400` `invalid_input` |
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
@@ -3489,6 +3508,54 @@ metric such as `OPP_PTS`, the highest values are the weakest defenses, so "top
 5 defenses by points allowed" is `-5`. Whether a high value is the tougher
 defense depends on each metric, which is why the frontend labels ranks
 "highest" and "lowest" rather than "best" and "worst".
+
+Ties: teams with equal values are ordered by tricode (alphabetically) and each
+holds its own consecutive rank, so a range boundary may fall inside a tie.
+
+### Defense Sheet Row Filters
+
+A `teams_against[]` entry of the form `sheet:<base>:<row key>` (#308) ranks
+opponents by one Matchup Defense Sheet row, so a follow-up game-log query ranks
+on exactly the metric the Matchup showed:
+
+| `<base>` | Row keys (examples) |
+| --- | --- |
+| `play_types` | `PRBallHandler:PTS`, `Isolation:POSS` (each play type with `PTS` and `POSS`) |
+| `shot_zones` | `Restricted Area:FGM`, `Mid-Range:FGA`, `Corner 3:FGM` (each governed zone with `FGM` and `FGA`) |
+| `shot_types` | `Catch and Shoot:FG3M`, `Pullups:FG2A`, `Less Than 10 ft:FG2M` (each shot type with `FG2M`, `FG2A`, `FG3M`, `FG3A`) |
+| `assist_locations` | `Assists`, `Arc3Assists`, `Corner3Assists`, `AtRimAssists`, `ShortMidRangeAssists`, `LongMidRangeAssists` |
+| `traditional` | `OPP_REB`, `OPP_TOV`, `OPP_STL`, `OPP_BLK` |
+
+`<row key>` is exactly a `defense_sheet[<base>][].key` from
+`GET /api/games/matchup`; the backend resolves it through the same key and
+publication-metric mapping the Sheet itself uses. The filter ranks the 30
+opponents by that row's Season allowed per 48 (no denominator), highest first,
+from the same Season publication the Sheet reads. It uses the ordinary ranking
+convention and `rank_filter[]` forms above; URL-encode the spaces, for example
+`teams_against[]=sheet%3Ashot_zones%3ARestricted%20Area%3AFGM&rank_filter[]=1,10`.
+
+- **Relation to the Sheet rank.** The Sheet ranks ascending (1 = allows the
+  fewest), so a team at Sheet Season rank `r` holds rank `31 - r` here.
+- **Tie rule.** The Sheet gives the `m` teams tied at one value a shared
+  competition rank `r`. Here they hold the distinct consecutive ranks
+  `32 - r - m` through `31 - r` in tricode order, so only the last of them sits
+  exactly at `31 - r`, and a `rank_filter[]` boundary inside that span keeps
+  some of the tied teams and not others. Untied teams always hold `31 - r`.
+- **Missing values.** A `sheet:` ranking has no denominator, so there is no
+  per-team "no rate" exclusion as there is for the play-type filters. A row
+  that any team lacks refuses the whole ranking (empty result), like an
+  untrusted publication; the base's other rows still rank normally.
+  Publication validation makes this unreachable for the NBA-owned bases
+  (`play_types`, `shot_types`, `shot_zones`); it is possible for the
+  ledger-owned bases (`assist_locations`, `traditional`). An untrustworthy or
+  missing Season publication likewise ranks no team, so the filter resolves
+  to an empty result, exactly like a named filter.
+- **Errors.** An unknown base or row key returns `400` `invalid_input` whose
+  `details` name `teams_against` and the submitted value (#145).
+- **Named filters are unchanged.** For example, the `PRBallHandler` filter
+  still ranks points per possession and `C&S PTS` still ranks `3 x FG3M +
+  2 x FG2M`, while `sheet:play_types:PRBallHandler:PTS` and
+  `sheet:shot_types:Catch and Shoot:FG3M` rank the Sheet's own per-48 rows.
 
 ### One Specific Opponent
 

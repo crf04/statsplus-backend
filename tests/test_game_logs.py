@@ -250,6 +250,27 @@ def test_less_than_ten_feet_filter_aliases_are_normalized(legacy):
 # ------------------------------------------------------------- response model
 
 
+def test_game_log_query_accepts_defense_sheet_row_references():
+    """#308: ``sheet:<base>:<row key>`` pairs with rank_filter like any filter."""
+
+    query = GameLogQuery(
+        season_filter="2024-25",
+        teams_against=[
+            "sheet:play_types:PRBallHandler:PTS",
+            "sheet:shot_zones:Restricted Area:FGM",
+            "OPP_PTS",
+        ],
+        rank_filter=["1,10", "5", "-3"],
+    )
+
+    assert query.teams_against == [
+        "sheet:play_types:PRBallHandler:PTS",
+        "sheet:shot_zones:Restricted Area:FGM",
+        "OPP_PTS",
+    ]
+    assert query.rank_filter == [(1, 10), 5, -3]
+
+
 def test_game_log_response_models_plain_arrays():
     response = GameLogResponse(
         game_logs=[{"GAME_DATE": "2024-01-15", "PTS": 25}],
@@ -550,6 +571,106 @@ def test_the_same_team_filter_ranks_identically_with_and_without_a_date(
 
     assert matchups() == ["BOS @ MIA"]
     assert matchups(date_filter="2024-01-01") == ["BOS @ MIA"]
+
+
+def _shot_zone_ranked_service(monkeypatch, mock_db_engine, mock_redis_client):
+    """Team Filters ranked by a real service over one shot-zone publication.
+
+    MIA allows the most Restricted Area makes per 48, LAL the second most,
+    and CHI the fewest, while CHI allows the most Corner 3 makes.
+    """
+
+    from app.domain.team_matchup_taxonomy import NBA_PUBLICATION_TAXONOMY
+    from app.services.team_filter_rankings import TeamFilterRankingService
+    from tests.support.publication_stubs import (
+        StubGovernance,
+        StubReader,
+        league,
+        read,
+    )
+
+    restricted = {"MIA": 40.0, "LAL": 35.0, "CHI": 1.0}
+    corner = {"CHI": 9.0}
+
+    def per48(tricode):
+        metrics = {key: 5.0 for key in NBA_PUBLICATION_TAXONOMY["shot_zones"]}
+        metrics["Restricted Area_FGM"] = restricted.get(tricode, 20.0)
+        metrics["Corner 3_FGM"] = corner.get(tricode, 2.0)
+        return metrics
+
+    stream = "exact_shot_zones_opponent_season"
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        team_filter_rankings=TeamFilterRankingService(
+            StubReader({stream: read(stream, league(per48))}),
+            governance_resolver=StubGovernance(),
+        ),
+    )
+    monkeypatch.setattr(
+        service, "_get_game_logs", lambda name, season: (_game_logs_frame(), None)
+    )
+    return service
+
+
+def test_a_shot_zone_sheet_row_filters_game_logs(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """#308: shot zones are filterable through their Defense Sheet row."""
+
+    service = _shot_zone_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client
+    )
+
+    def matchups(teams_against, rank_filter, **filters):
+        query = GameLogQuery(
+            season_filter="2024-25",
+            teams_against=teams_against,
+            rank_filter=rank_filter,
+            **filters,
+        )
+        return [
+            row["MATCHUP"]
+            for row in service.get_filtered_logs("LeBron James", query)["game_logs"]
+        ]
+
+    restricted = "sheet:shot_zones:Restricted Area:FGM"
+    assert matchups([restricted], ["1,1"]) == ["BOS @ MIA"]
+    assert matchups([restricted], ["1,2"]) == ["BOS vs. LAL", "BOS @ MIA"]
+    assert matchups([restricted], ["-1"]) == ["BOS vs. CHI"]
+    # It composes with a named filter's own ranking and with either date bound.
+    assert matchups(["sheet:shot_zones:Corner 3:FGM"], ["1"]) == ["BOS vs. CHI"]
+    assert matchups([restricted], ["2"], date_filter="2024-01-16") == ["BOS @ MIA"]
+    assert matchups([restricted], ["2"], date_to="2024-01-16") == ["BOS vs. LAL"]
+
+
+def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """#308 end to end: the encoded spaces and colons survive the route."""
+
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    dependencies.game_service = _shot_zone_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client
+    )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&teams_against[]=sheet%3Ashot_zones%3ARestricted%20Area%3AFGM"
+        "&rank_filter[]=1,2"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert [row["MATCHUP"] for row in response.get_json()["game_logs"]] == [
+        "BOS vs. LAL",
+        "BOS @ MIA",
+    ]
 
 
 def test_date_to_trims_the_logs_and_filtered_averages_only(

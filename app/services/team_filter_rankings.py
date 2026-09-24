@@ -28,6 +28,7 @@ from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_STREAMS,
     PLAY_TYPES,
+    defense_sheet_filter,
     matchup_stream_key,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
@@ -191,6 +192,25 @@ TEAM_FILTER_RANKINGS: dict[str, TeamFilterRanking] = {
 }
 
 
+def team_filter_ranking(team_filter: str) -> TeamFilterRanking | None:
+    """The ranking one ``teams_against`` entry names, or ``None`` if unknown.
+
+    A named Team Filter uses its canonical definition.  A Defense Sheet row
+    reference, ``sheet:<base>:<row key>``, ranks the one Season publication
+    metric behind that Sheet row -- its allowed per 48, with no denominator --
+    so it orders opponents by exactly the value the Matchup's Sheet ranks.
+    """
+
+    ranking = TEAM_FILTER_RANKINGS.get(team_filter)
+    if ranking is not None:
+        return ranking
+    sheet_row = defense_sheet_filter(team_filter)
+    if sheet_row is None:
+        return None
+    base, metric_key = sheet_row
+    return TeamFilterRanking(base, ((metric_key, 1.0),))
+
+
 class TeamFilterRankingService:
     """Rank opponents for Team Filters from their Season publications."""
 
@@ -237,20 +257,22 @@ class TeamFilterRankingService:
         """
 
         requested = tuple(team_filters)
-        rankings = {}
+        definitions = {}
         for team_filter in requested:
-            if team_filter not in TEAM_FILTER_RANKINGS:
+            ranking = team_filter_ranking(team_filter)
+            if ranking is None:
                 raise ValueError(f"Unsupported team filter: {team_filter!r}")
-        bases = {TEAM_FILTER_RANKINGS[name].base for name in requested}
+            definitions[team_filter] = ranking
+        bases = {ranking.base for ranking in definitions.values()}
         rows_by_base = self._rows_by_base(
             bases, season, publication_snapshot=publication_snapshot
         )
-        for team_filter in requested:
-            ranking = TEAM_FILTER_RANKINGS[team_filter]
-            rankings[team_filter] = self._rank(
+        return {
+            team_filter: self._rank(
                 team_filter, ranking, rows_by_base[ranking.base]
             )
-        return rankings
+            for team_filter, ranking in definitions.items()
+        }
 
     @staticmethod
     def _rank(team_filter: str, ranking: TeamFilterRanking, rows) -> list[str]:
@@ -281,7 +303,9 @@ class TeamFilterRankingService:
                 continue
             scored.append((value, row.team_tricode))
         # Descending by value; the tricode breaks ties so one publication
-        # always produces one ranking.
+        # always produces one ranking.  Tied teams therefore hold distinct,
+        # consecutive ranks in tricode order, where the Defense Sheet's
+        # ascending competition rank gives them one shared rank.
         scored.sort(key=lambda item: (-item[0], item[1]))
         return [tricode for _value, tricode in scored]
 
@@ -442,6 +466,7 @@ __all__ = [
     "TEAM_FILTER_PUBLICATION_STREAM_KEYS",
     "TeamFilterRanking",
     "TeamFilterRankingService",
+    "team_filter_ranking",
 ]
 
 

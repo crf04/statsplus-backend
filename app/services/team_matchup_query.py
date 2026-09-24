@@ -16,6 +16,7 @@ from sqlalchemy.engine import Connection
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.team_matchup_taxonomy import (
     NBA_PUBLICATION_WINDOWS,
+    defense_sheet_identities,
     matchup_stream_key,
 )
 from app.services.team_matchup_repository import (
@@ -41,8 +42,6 @@ from app.services.team_matchup_publications import (
     SEASON_COMPLETE_SNAPSHOT_REASON,
     publication_cutoff_reason,
     publication_lineage,
-    publication_metric_identity,
-    publication_metric_keys,
     validate_publication_rows,
     resolve_governed_season_is_complete,
     resolve_governed_team_game_ids,
@@ -636,41 +635,11 @@ class TeamMatchupQueryService:
         retrieved_at: datetime,
         publication: PublicationLineage | None = None,
     ) -> TeamMatchupWindow:
-        stat_names = {
-            "traditional": {
-                "OPP_REB": "rebounds",
-                "OPP_TOV": "turnovers",
-                "OPP_STL": "steals",
-                "OPP_BLK": "blocks",
-            },
-            "assist_locations": {
-                "Assists": "assists",
-                "Arc3Assists": "arc3_assists",
-                "Corner3Assists": "corner3_assists",
-                "AtRimAssists": "at_rim_assists",
-                "ShortMidRangeAssists": "short_mid_range_assists",
-                "LongMidRangeAssists": "long_mid_range_assists",
-            },
-        }.get(base)
-        if stat_names is None:
-            # Grouped shot/zone/Synergy publications carry their complete
-            # identity in the metric key (for example
-            # ``Isolation_PTS``).  Do not substitute the legacy surface when
-            # one of those streams is active; project exactly the keys the
-            # immutable payload supplied.
-            keys = publication_metric_keys(base)
-            identities = tuple(
-                (
-                    *publication_metric_identity(base, key),
-                    key,
-                )
-                for key in keys
-            )
-        else:
-            identities = tuple(
-                (display_key, display_key, metric_key)
-                for display_key, metric_key in stat_names.items()
-            )
+        # One Sheet taxonomy, shared with the ``sheet:`` Team Filters: the
+        # grouped shot/zone/Synergy publications project exactly the keys the
+        # immutable payload supplied (never a legacy surface), and the
+        # ledger-owned bases their curated rows.
+        identities = defense_sheet_identities(base)
         # The league table covers every published key; this surface projects
         # the curated identities the matchup response contracts for.
         table = publication_league_table(rows)
