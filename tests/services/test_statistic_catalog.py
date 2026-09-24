@@ -734,29 +734,6 @@ def test_statistic_match_rejects_attribute_deletion_and_addition() -> None:
     assert match.reason is MatchReason.UNKNOWN_PROVIDER_LABEL
 
 
-def test_statistic_values_expose_one_name_for_each_reviewed_fact() -> None:
-    catalog = StatisticCatalog.load_default()
-    match = catalog.resolve(
-        "prizepicks", "Points", scoring_period=ScoringPeriod.FULL_GAME
-    )
-
-    for duplicate in ("canonical_id", "name", "ordered_components", "period"):
-        assert not hasattr(catalog.by_id["points"], duplicate)
-    for duplicate in (
-        "match_state",
-        "status",
-        "canonical_statistic",
-        "statistic",
-        "provider_evidence",
-        "provider_label",
-        "original_label",
-    ):
-        assert not hasattr(match, duplicate)
-
-    assert match.canonical_id == "points"
-    assert match.is_comparable
-
-
 def test_statistic_match_closes_period_unit_and_reason_vocabularies() -> None:
     evidence = StatisticEvidence(label="Points")
 

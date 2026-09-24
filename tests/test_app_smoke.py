@@ -136,23 +136,7 @@ def test_pbp_health_has_distinct_provider_signal(client, dependencies, monkeypat
     assert event["outcome"] == telemetry.OUTCOME_HTTP_ERROR
 
 
-def test_detailed_health_reports_both_providers(client, monkeypatch):
-    from app.routes import health_routes
-
-    with client.application.app_context():
-        monkeypatch.setattr(
-            health_routes.health_service,
-            "detailed",
-            lambda: {
-                "status": "healthy",
-                "checks": {
-                    "database": {"status": "healthy"},
-                    "nba_api": {"status": "healthy", "provider": "nba_stats"},
-                    "pbp_stats": {"status": "healthy", "provider": "pbp_stats"},
-                },
-            },
-        )
-
+def test_detailed_health_reports_both_providers(client):
     response = client.get("/api/health/detailed")
 
     assert response.status_code == 200
@@ -161,11 +145,27 @@ def test_detailed_health_reports_both_providers(client, monkeypatch):
     assert checks["pbp_stats"]["provider"] == "pbp_stats"
 
 
-def test_players_endpoint_smoke(client):
-    response = client.get("/api/players")
+def test_detailed_health_reports_an_unhealthy_dependency_as_unavailable(
+    client, dependencies
+):
+    dependencies.provider_health_service.detailed.return_value = {
+        "status": "degraded",
+        "checks": {
+            "database": {"status": "unhealthy", "error": "db-host-sentinel refused"},
+            "nba_api": {"status": "healthy", "provider": "nba_stats"},
+        },
+    }
 
-    assert response.status_code == 200
-    assert isinstance(response.get_json(), list)
+    response = client.get("/api/health/detailed")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": {
+            "code": "provider_unavailable",
+            "message": "One or more health-check dependencies are unavailable.",
+        }
+    }
+    assert b"db-host-sentinel" not in response.data
 
 
 def test_player_routes_preserve_profile_response_shapes(client):

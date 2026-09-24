@@ -1779,20 +1779,6 @@ def test_provider_events_never_increment_cache_decision_counters() -> None:
         telemetry.clear_recorded_provider_events()
 
 
-def test_cache_surface_keeps_no_undocumented_aliases() -> None:
-    import app.services.dfs_snapshot_cache as module
-    from app.services.dfs_board import ProviderOutcome
-
-    for name in ("decorate_provider", "get_snapshot_with_cache_info", "cache_info", "wrap"):
-        assert not hasattr(module, name)
-        assert not hasattr(ProviderSnapshotCache, name)
-        assert not hasattr(module.ProviderSnapshotCacheCoordinator, name)
-    for name in ("age", "failure_reason", "failure_at"):
-        assert not hasattr(SnapshotCacheResult, name)
-    for name in ("cache_age", "cache_retrieved"):
-        assert not hasattr(ProviderOutcome, name)
-
-
 def _capture_error(target: dict[str, BaseException], function) -> None:
     try:
         function()

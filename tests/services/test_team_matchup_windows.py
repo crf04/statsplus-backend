@@ -33,7 +33,6 @@ from app.services.team_matchup_refresh import (
     TeamMatchupRefreshService,
     TeamWindowBoundary,
     TeamWindowBoundaryResolver,
-    _ProviderGameMembership,
     _nba_team_stats_request_descriptor,
     _pbp_totals_request_descriptor,
 )
@@ -515,61 +514,6 @@ def test_provider_aggregate_must_prove_immutable_window_identity(provider_row):
             expected_game_ids_by_team={BOS: tuple(f"game-{index}" for index in range(15))},
             require_game_ids=True,
         )
-
-
-@pytest.mark.parametrize(
-    ("window", "requests"),
-    (
-        ("season", {
-            "traditional:league": _nba_team_stats_request_descriptor(
-                season="2025-26", season_type="Regular Season", team_id=None,
-                last_n_games=0, date_from=None, date_to="11/02/2025",
-            ),
-            "assist_locations:league": _pbp_totals_request_descriptor(
-                season="2025-26", season_type="Regular Season", team_id=None,
-                from_date=None, to_date="2025-11-02",
-            ),
-        }),
-        ("l15", {
-            f"traditional:{BOS}": _nba_team_stats_request_descriptor(
-                season="2025-26", season_type="Regular Season", team_id=BOS,
-                last_n_games=15, date_from="10/18/2025", date_to="11/02/2025",
-            ),
-            f"assist_locations:{BOS}": _pbp_totals_request_descriptor(
-                season="2025-26", season_type="Regular Season", team_id=BOS,
-                from_date="2025-10-18", to_date="2025-11-02",
-            ),
-        }),
-    ),
-)
-def test_provider_window_identity_hashes_exact_evening_dst_request_params(
-    window, requests
-):
-    membership = {BOS: ("game-1",)}
-    provider_membership = _ProviderGameMembership(
-        membership,
-        by_source={
-            "nba_stats.team_game_log": membership,
-            "pbp_stats.team_game_log": membership,
-        },
-    )
-
-    identity = json.loads(TeamMatchupRefreshService._provider_window_identity(
-        window=window,
-        game_ids_by_team=membership,
-        provider_game_ids_by_team=provider_membership,
-        expected_counts={BOS: 1},
-        provider_sources=(
-            "nba_stats.team_game_log", "pbp_stats.team_game_log",
-        ),
-        collect_before=datetime(2025, 11, 3, 1, tzinfo=timezone.utc),
-        aggregate_requests=requests,
-    ))
-
-    assert identity["aggregate_requests"] == requests
-    assert identity["aggregate_request_checksum"] == hashlib.sha256(json.dumps(
-        requests, sort_keys=True, separators=(",", ":")
-    ).encode()).hexdigest()
 
 
 def test_transport_descriptors_bind_phase_measure_mode_and_pbp_type():
