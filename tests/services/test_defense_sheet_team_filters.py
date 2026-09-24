@@ -298,3 +298,39 @@ def test_a_sheet_filter_refuses_an_untrusted_publication_like_any_filter():
     assert TeamFilterRankingService(StubReader({})).ranked_teams(
         "sheet:shot_zones:Corner 3:FGM", SEASON
     ) == []
+
+
+def test_a_sheet_row_that_any_team_lacks_refuses_the_whole_ranking():
+    """The corrected #91 contract: no per-team exclusion for ``sheet:``.
+
+    A ``sheet:`` ranking has no denominator, so there is no "no rate" case.
+    On a ledger base a team missing the row's metric makes the publication
+    untrusted for that one filter, which returns an empty ranking, while the
+    base's other rows still rank all thirty teams.
+    """
+
+    base = "assist_locations"
+    full = _per48_builder(base)
+
+    def per48(tricode):
+        values = full(tricode)
+        if tricode == "LAL":
+            del values["corner3_assists"]
+        return values
+
+    rows = _rows(base, per48)
+    service = _service(base, rows)
+    lacking = "sheet:assist_locations:Corner3Assists"
+    others = tuple(
+        f"sheet:{base}:{key}"
+        for key in DEFENSE_SHEET_ROW_METRICS[base]
+        if f"sheet:{base}:{key}" != lacking
+    )
+
+    rankings = service.rank_all((lacking, *others), SEASON)
+
+    assert rankings[lacking] == []
+    assert others
+    for reference in others:
+        assert len(rankings[reference]) == TEAM_COUNT, reference
+        assert "LAL" in rankings[reference], reference

@@ -632,6 +632,31 @@ def test_a_shot_zone_sheet_row_filters_game_logs(
     assert matchups([restricted], ["2"], date_filter="2024-01-16") == ["BOS @ MIA"]
 
 
+def test_a_url_encoded_sheet_row_filters_game_logs_over_http(
+    monkeypatch, mock_db_engine, mock_redis_client, dependencies, client
+):
+    """#308 end to end: the encoded spaces and colons survive the route."""
+
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: None)
+    dependencies.game_service = _shot_zone_ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client
+    )
+
+    response = client.get(
+        "/api/games/game_logs?player_name=LeBron%20James&season_filter=2024-25"
+        "&teams_against[]=sheet%3Ashot_zones%3ARestricted%20Area%3AFGM"
+        "&rank_filter[]=1,2"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    assert [row["MATCHUP"] for row in response.get_json()["game_logs"]] == [
+        "BOS vs. LAL",
+        "BOS @ MIA",
+    ]
+
+
 def test_a_historical_season_never_borrows_current_season_rankings(
     monkeypatch, mock_db_engine, mock_redis_client
 ):

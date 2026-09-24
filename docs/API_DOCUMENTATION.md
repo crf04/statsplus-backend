@@ -3508,9 +3508,15 @@ convention and `rank_filter[]` forms above; URL-encode the spaces, for example
   `32 - r - m` through `31 - r` in tricode order, so only the last of them sits
   exactly at `31 - r`, and a `rank_filter[]` boundary inside that span keeps
   some of the tied teams and not others. Untied teams always hold `31 - r`.
-- **Missing values.** A team with no value for the row is not ranked by it. An
-  untrustworthy or missing Season publication ranks no team, so the filter
-  resolves to an empty result, exactly like a named filter.
+- **Missing values.** A `sheet:` ranking has no denominator, so there is no
+  per-team "no rate" exclusion as there is for the play-type filters. A row
+  that any team lacks refuses the whole ranking (empty result), like an
+  untrusted publication; the base's other rows still rank normally.
+  Publication validation makes this unreachable for the NBA-owned bases
+  (`play_types`, `shot_types`, `shot_zones`); it is possible for the
+  ledger-owned bases (`assist_locations`, `traditional`). An untrustworthy or
+  missing Season publication likewise ranks no team, so the filter resolves
+  to an empty result, exactly like a named filter.
 - **Errors.** An unknown base or row key returns `400` `invalid_input` whose
   `details` name `teams_against` and the submitted value (#145).
 - **Named filters are unchanged.** For example, the `PRBallHandler` filter
