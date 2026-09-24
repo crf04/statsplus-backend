@@ -171,12 +171,6 @@ def seeded_db_url(tmp_path):
 
 
 @pytest.fixture
-def empty_db_url(tmp_path):
-    """Point at a temporary SQLite database with no tables at all."""
-    return f"sqlite:///{tmp_path / 'empty.db'}"
-
-
-@pytest.fixture
 def make_client(monkeypatch):
     """Build a test client whose services are bound to a given database URL.
 
