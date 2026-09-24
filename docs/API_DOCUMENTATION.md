@@ -1128,17 +1128,22 @@ snapshot for the whole request and reads, from it:
 - **Season:** the configured current season, the same one the game Matchup
   reads. In the offseason that is the completed season, and `as_of.season`
   says so.
-- **Defense Sheet:** the latest Season and Last-15 windows, with no as-of
-  date, including the completed-season fallback the game Matchup uses.
+- **Defense Sheet:** the newest stored Season and Last-15 windows, read with
+  no as-of date. The completed-season fallback, which lets a later Season
+  publication answer for an earlier date, never applies to that read; only
+  its governance check is shared (see the section contexts below).
 - **Diets and Season summaries:** keyed by season, read exactly as the game
   Matchup reads them.
 - **Players:** in player mode, the one named player; in team mode, every
   current-season Athlete Catalog player on `team` with a stored Diet. Each
   player's team is their current-season Athlete Catalog team.
 
-Reads are cached exactly as the game Matchup's are: Diet decodes, Diet
-baselines, and Season summaries are held per Publication generation by their
-repositories, so a repeated question in the same generation reuses them.
+The reads it shares with the game Matchup are cached as the game Matchup's
+are: Diet decodes, Diet baselines, and Season summaries are held per
+Publication generation by their repositories, so a repeated question in the
+same generation reuses them. Two reads are not cached: the Defense Sheet
+windows (as in the game Matchup) and the season-completeness governance
+check behind the section contexts, which is read afresh on every request.
 
 The response is the game Matchup document without its per-game parts:
 

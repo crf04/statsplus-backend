@@ -7,6 +7,7 @@ the Flask test client, so the equivalence test compares the two public
 documents rather than any private scoring function.
 """
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -202,9 +203,10 @@ CATALOG_ROWS = (
     _catalog_row(2544, "LeBron James", LAL, "LAL"),
     _catalog_row(1629029, "Luka Dončić", LAL, "LAL"),
     _catalog_row(1628369, "Jayson Tatum", BOS, "BOS"),
-    # Namesakes: two catalog athletes who normalize to the same name.
-    _catalog_row(1630001, "Jalen Williams", BOS, "BOS"),
+    # Namesakes: two catalog athletes who normalize to the same name, listed
+    # out of candidate order (LAL before BOS) so the sort is observable.
     _catalog_row(1630002, "Jalen Williams", LAL, "LAL"),
+    _catalog_row(1630001, "Jalen Williams", BOS, "BOS"),
 )
 
 
@@ -220,7 +222,12 @@ class _RecordedAthleteCatalog:
 
 
 def _fixture_client(
-    tmp_path, *, drop_last_15=False, with_service=False, diet_players=()
+    tmp_path,
+    *,
+    drop_last_15=False,
+    with_service=False,
+    diet_players=(),
+    diet_retrieved_at=None,
 ):
     engine = create_engine(f"sqlite:///{tmp_path / 'unscheduled.sqlite3'}")
     run_migrations(engine)
@@ -237,8 +244,10 @@ def _fixture_client(
     if drop_last_15:
         _drop_last_15_snapshots(engine)
     player_diets = _player_diets(engine)
-    if diet_players:
-        _copy_lebron_diet(player_diets, diet_players)
+    if diet_players or diet_retrieved_at is not None:
+        _copy_lebron_diet(
+            player_diets, diet_players, retrieved_at=diet_retrieved_at or NOW
+        )
     service = MatchupService(
         event_catalog=_event_catalog(engine, settings),
         player_pool=_player_pool(engine),
@@ -271,7 +280,7 @@ def _fixture_client(
     return (client, service) if with_service else client
 
 
-def _copy_lebron_diet(player_diets, player_ids):
+def _copy_lebron_diet(player_diets, player_ids, *, retrieved_at=NOW):
     """Republish the season Diet with LeBron's facts also stored for others."""
 
     stored = player_diets.repository.get_for_players(SEASON, (2544,))
@@ -296,7 +305,7 @@ def _copy_lebron_diet(player_diets, player_ids):
             PlayerDietObservation(observation.base, observation.status)
             for observation in stored.observations
         ),
-        retrieved_at=NOW,
+        retrieved_at=retrieved_at,
     )
 
 
@@ -457,6 +466,21 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
     # defensive markets carry none.
     assert player["scores"]["PTS"]["season"]["blend"] is not None
     assert "blend" not in player["scores"]["TOV"]["season"]
+
+
+def test_unscheduled_diet_as_of_is_the_eastern_publication_date(tmp_path):
+    """03:00Z on Jan 15 is still Jan 14 in New York."""
+
+    client = _fixture_client(
+        tmp_path, diet_retrieved_at=datetime(2026, 1, 15, 3, tzinfo=timezone.utc)
+    )
+
+    payload = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS").get_json()
+
+    assert payload["freshness"]["player_diets"]["retrieved_at"] == (
+        "2026-01-15T03:00:00+00:00"
+    )
+    assert payload["as_of"]["player_diets"] == "2026-01-14"
 
 
 def test_unscheduled_matchup_resolves_a_player_name_like_the_profile(tmp_path):
