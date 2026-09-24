@@ -21,12 +21,16 @@ def engine(tmp_path):
     return create_engine(f"sqlite:///{tmp_path / 'data.db'}")
 
 
-@pytest.fixture
-def service(engine):
+def make_service(engine, **dependencies):
     from app.config.settings import load_settings
     from app.services.data_service import DataService
 
-    return DataService(engine, settings=load_settings())
+    return DataService(engine, settings=load_settings(), **dependencies)
+
+
+@pytest.fixture
+def service(engine):
+    return make_service(engine)
 
 
 def read_table(engine, name):
@@ -80,39 +84,43 @@ class _FakeProvider:
         return self._result
 
 
-def test_pbp_data_is_stored_for_players(service, engine):
-    service.pbp_provider = _FakeProvider(
+def test_pbp_data_is_stored_for_players(engine):
+    service = make_service(engine, pbp_provider=_FakeProvider(
         pd.DataFrame([{"Name": "LeBron James", "Points": 30}])
-    )
+    ))
 
     assert service.fetch_PBP_data() is True
     assert read_table(engine, "pbp_player_stats")["Name"].tolist() == ["LeBron James"]
     assert service.pbp_provider.calls == ["player"]
 
 
-def test_pbp_data_requests_opponent_totals_for_the_opponent_type(service, engine):
-    service.pbp_provider = _FakeProvider(pd.DataFrame([{"Name": "LAL"}]))
+def test_pbp_data_requests_opponent_totals_for_the_opponent_type(engine):
+    service = make_service(
+        engine, pbp_provider=_FakeProvider(pd.DataFrame([{"Name": "LAL"}]))
+    )
 
     assert service.fetch_PBP_data(data_type="Opponent") is True
     assert service.pbp_provider.calls == ["Opponent"]
     assert read_table(engine, "pbp_Opponent_stats")["Name"].tolist() == ["LAL"]
 
 
-def test_pbp_storage_failures_are_reported_without_raising(service):
+def test_pbp_storage_failures_are_reported_without_raising(engine):
     """A local failure keeps the boolean contract."""
-    service.pbp_provider = _FakeProvider(ValueError("malformed payload"))
+    service = make_service(
+        engine, pbp_provider=_FakeProvider(ValueError("malformed payload"))
+    )
 
     assert service.fetch_PBP_data() is False
 
 
-def test_pbp_provider_outages_propagate_to_the_error_handler(service):
+def test_pbp_provider_outages_propagate_to_the_error_handler(engine):
     """Provider unavailability is translated to HTTP by the route boundary,
     so it must not be flattened into a False return."""
     from app.errors import ProviderUnavailableError
 
-    service.pbp_provider = _FakeProvider(
+    service = make_service(engine, pbp_provider=_FakeProvider(
         ProviderUnavailableError("pbpstats is unavailable.")
-    )
+    ))
 
     with pytest.raises(ProviderUnavailableError):
         service.fetch_PBP_data()

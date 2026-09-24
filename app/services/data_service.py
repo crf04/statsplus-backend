@@ -382,26 +382,20 @@ class DataService:
             return False
         progress.transform("Transforming PBP totals")
         progress.publish("Publishing PBP totals")
-        if not isinstance(self.engine, Engine):
-            # Tiny provider-interface tests sometimes use a Mock engine to
-            # assert the injected provider call only. Real application engines
-            # always expose ``begin`` and use the atomic publisher below.
-            frame.to_sql(table_name, self.engine, if_exists="replace", index=False)
-        else:
-            def final_fence(connection):
-                if publication_fence is not None:
-                    publication_fence(connection)
-                checker = getattr(self.write_fence, "assert_writable", None)
-                stream_key = {
-                    "pbp_player_stats": "player_assist_locations",
-                    "pbp_opponent_stats": "assist_locations_season",
-                }.get(table_name)
-                if stream_key is not None and callable(checker):
-                    checker(stream_key, connection=connection)
+        def final_fence(connection):
+            if publication_fence is not None:
+                publication_fence(connection)
+            checker = getattr(self.write_fence, "assert_writable", None)
+            stream_key = {
+                "pbp_player_stats": "player_assist_locations",
+                "pbp_opponent_stats": "assist_locations_season",
+            }.get(table_name)
+            if stream_key is not None and callable(checker):
+                checker(stream_key, connection=connection)
 
-            self.publisher.publish(
-                {table_name: frame}, publication_fence=final_fence
-            )
+        self.publisher.publish(
+            {table_name: frame}, publication_fence=final_fence
+        )
         progress.complete()
         return True
 
