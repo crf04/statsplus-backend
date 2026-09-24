@@ -149,7 +149,7 @@ def test_detailed_health_reports_an_unhealthy_dependency_as_unavailable(
     client, dependencies
 ):
     dependencies.provider_health_service.detailed.return_value = {
-        "status": "unhealthy",
+        "status": "degraded",
         "checks": {
             "database": {"status": "unhealthy", "error": "db-host-sentinel refused"},
             "nba_api": {"status": "healthy", "provider": "nba_stats"},
