@@ -510,8 +510,10 @@ own `status` (`available | unavailable | missing`), `source`, `context`, and
 of `event_catalog`, `player_game_logs`, `player_pool`,
 `team_matchup_publication`, `rotowire`, or `null`. `context` is one of
 `completed_season_catalog`, `current_season_catalog`, `completed_season`,
-`pregame`, `posted_markets`, `current`, or `null`; `completed_season` is the
-hindsight label a client renders beside a completed-season window.
+`pregame`, `posted_markets`, `current`, `latest`, or `null`;
+`completed_season` is the label a client renders beside a completed-season
+window (hindsight in a Historical Matchup). `latest` appears only in an
+Unscheduled Matchup (see Get Unscheduled Matchup).
 
 The Schedule section is always `available` and additionally carries
 `collected_at`, the same Event Catalog collection time reported by
@@ -1040,6 +1042,211 @@ predates the newest completed, non-postponed stored game; it is `missing` when
 no successful publication exists. Team facts for a started or past game are
 bounded by its Eastern Slate Date; a future tip requests the latest current
 stored team scopes without passing a future cutoff.
+
+### Get Unscheduled Matchup
+
+```http
+GET /api/matchups/unscheduled?player_id=<canonical_id>&opponent=<tricode>
+GET /api/matchups/unscheduled?player_name=<name>&opponent=<tricode>
+GET /api/matchups/unscheduled?team=<tricode>&opponent=<tricode>
+Authorization: Bearer <firebase-id-token>
+```
+
+An Unscheduled Matchup (crf04/statsplus#95) is a player, or a team's players,
+seen against one opponent's Defense Sheet with no Slate game, as of the latest
+published data. It is a sibling of the game Matchup, not a game Matchup read
+without a date: it answers "how does this player match up against Charlotte?"
+at any time of year, including the offseason and before a meeting is
+scheduled.
+
+Parameters:
+
+| Parameter | Required | Meaning |
+| --- | --- | --- |
+| `player_id` | One selector | Canonical NBA player ID, a positive decimal integer |
+| `player_name` | One selector | A display name, matched against the current-season Athlete Catalog without regard to case, punctuation, spacing, or diacritics, exactly as the Playtypes player profile resolves a name. There is no fuzzy or nickname match |
+| `team` | One selector | Three-letter NBA tricode; scores that team's players |
+| `player_team` | No | Three-letter NBA tricode; only with `player_name`, keeps only the namesake on that current-season Athlete Catalog team |
+| `opponent` | Yes | Three-letter NBA tricode of the defense |
+
+Tricodes are case-insensitive. Exactly one of `player_id`, `player_name`, or
+`team` is required, and each parameter may appear once. Every invalid request
+returns `400 invalid_input` whose `details.parameters` lists the offending
+parameter names, which the message also names:
+
+- no selector (all three are listed) or more than one selector (the given
+  ones are listed);
+- a missing, repeated, or malformed value: `opponent` or `team` that is not
+  three letters, a `player_id` that is not a canonical ID, or a blank
+  `player_name`;
+- `team` equal to `opponent` (`opponent` is listed);
+- `player_team` with `player_id` or `team`, or a `player_team` that is not
+  three letters (`player_team` is listed);
+- any other parameter, such as `date` (that name is listed).
+
+A `player_name` that matches more than one current-season catalog athlete with
+a Diet (after any `player_team` narrowing) is also `400 invalid_input`, naming
+the candidates sorted by name, then team, so the caller can retry with
+`player_team`. Namesakes without a Diet cannot be scored and never make a name
+ambiguous.
+
+```json
+{
+  "error": {
+    "code": "invalid_input",
+    "message": "The player_name matches more than one player; narrow it with player_team.",
+    "details": {
+      "parameter": "player_name",
+      "parameters": ["player_name"],
+      "candidates": [
+        {"name": "Jalen Williams", "team": "DEN"},
+        {"name": "Jalen Williams", "team": "OKC"}
+      ]
+    }
+  }
+}
+```
+
+A candidate's `team` is `null` when the catalog names no team for them.
+
+`404 resource_not_found` carries `details.reason`, one of:
+
+| `details.reason` | Message | When |
+| --- | --- | --- |
+| `team_not_found` | The requested team was not found. | `opponent`, `team`, or `player_team` is a well-formed tricode naming no NBA team |
+| `player_not_found` | The requested player was not found. | No current-season Athlete Catalog athlete has that ID, or that name (on `player_team`, when given) |
+| `no_player_diet` | The requested player has no current-season Player Diet. | The player exists but has no stored current-season Diet, so nothing can be scored |
+
+A team with no player holding a Diet is not an error: it returns `200` with
+`players: []`.
+
+The request makes no NBA Stats, PBP Stats, DFS, or injury-provider call and
+reads no Player Pool or Event Catalog game (the Event Catalog supplies only the
+newest completed-game tip time behind `freshness.stats`). It captures one Publication
+snapshot for the whole request and reads, from it:
+
+- **Season:** the configured current season, the same one the game Matchup
+  reads. In the offseason that is the completed season, and `as_of.season`
+  says so.
+- **Defense Sheet:** the newest stored Season and Last-15 windows, read with
+  no as-of date. The completed-season fallback, which lets a later Season
+  publication answer for an earlier date, never applies to that read; only
+  its governance check is shared (see the section contexts below).
+- **Diets and Season summaries:** keyed by season, read exactly as the game
+  Matchup reads them.
+- **Players:** in player mode, the one named player; in team mode, every
+  current-season Athlete Catalog player on `team` with a stored Diet. Each
+  player's team is their current-season Athlete Catalog team.
+
+The reads it shares with the game Matchup are cached as the game Matchup's
+are: Diet decodes, Diet baselines, and Season summaries are held per
+Publication generation by their repositories, so a repeated question in the
+same generation reuses them. Two reads are not cached: the Defense Sheet
+windows (as in the game Matchup) and the season-completeness governance
+check behind the section contexts, which is read afresh on every request.
+
+The response is the game Matchup document without its per-game parts:
+
+```text
+experience, as_of, league, teams, players, freshness, provenance, coverage
+```
+
+**Absent, and why.** `game` and `injuries` are absent because there is no
+game to head or to report injuries for. `experience.sections.schedule`,
+`participants`, and `injuries` are absent because no schedule row, pool, or
+game-log appearance chose these players. `freshness.schedule`, `pool`, and
+`injuries` are absent for the same reason. Each player row omits
+`focal_game_line`, `posted_markets`, and `injury_badge_ref`: there is no focal
+game, no posted line, and no injury report. Nothing per-game is invented in
+their place.
+
+`experience`:
+
+```json
+{
+  "mode": "unscheduled",
+  "player_source": "athlete_catalog",
+  "sections": {
+    "season_defense": {
+      "status": "available",
+      "source": "team_matchup_publication",
+      "context": "latest",
+      "unavailable_reason": null
+    },
+    "last_15_defense": {
+      "status": "unavailable",
+      "source": null,
+      "context": null,
+      "unavailable_reason": "provider_window_unsupported"
+    }
+  },
+  "participants_basis": {
+    "source": "athlete_catalog",
+    "context": "season_roster_with_player_diet"
+  }
+}
+```
+
+`sections` contains exactly `season_defense` and `last_15_defense`, each shaped
+and derived as in the game Matchup, with the same `status` and
+`unavailable_reason` vocabulary: a window is `available` whenever any governed
+Base is, and otherwise repeats the first governed Base reason (Synergy's
+permanent `provider_window_unsupported` comes first). Its `context` is
+`latest`, because the window is the newest published one rather than a
+pregame reading, except in the offseason: when the configured current season
+is over, `context` is `completed_season` on both sections, so a reader knows
+the answer is last season's data (with no game date, it is not hindsight).
+"Over" is the same signal the completed-season fallback uses: the Season
+window publications' own governance proves every governed game of that season
+final. Without a Publication generation, or without that proof, it stays
+`latest`. A section that is not `available` keeps `context: null` in both
+cases. `participants_basis` is present only in team mode and states how the
+player set was chosen.
+
+`as_of` states what the answer is as of:
+
+```json
+{
+  "season": "2025-26",
+  "season_defense": "2026-04-12",
+  "last_15_defense": "2026-04-12",
+  "player_diets": "2026-04-13"
+}
+```
+
+`season_defense` and `last_15_defense` are the Eastern as-of dates of the
+Defense Sheet windows used, or `null` when that window's section is not
+`available`. `player_diets` is the Eastern date of the Diet evidence's
+publication: the date of `freshness.player_diets.retrieved_at` (the earliest
+across Bases) in `America/New_York`, or `null` when none is stored. All three
+dates are `YYYY-MM-DD`.
+
+`league` has the game Matchup's shape and values. `teams` holds the opponent's
+Defense Sheet and defensive columns in player mode, and `[team, opponent]` in
+team mode, each in the game Matchup team shape with `name` the team's full
+name. Rank direction is unchanged: `rank` 1 = allows the fewest.
+
+Each player row has the game Matchup player shape without the three per-game
+keys. `player_source` is `athlete_catalog`, `provenance` is `{}` (no DFS
+provider posted anything), and `team_id` and `tricode` are the player's
+current-season Athlete Catalog team (`null` when the catalog names none).
+`stat_categories` is every scoreable category in the governed Statistic
+Catalog, as in a Historical Matchup, because there is no Player Pool to name
+posted markets.
+
+`scores`, `diet_shares`, `diet_thin`, `season_scoring`, and `last_10_minutes`
+are computed by the same code the game Matchup uses, with the opponent named
+by the request rather than by a game. For a game whose Defense Sheet as-of is
+the latest window, a player's Unscheduled `scores` equal that game's `scores`
+for the player, market by market and window by window. The Blend follows the
+current-mode rules: the historical rule that withholds a Blend when
+`missing_inputs` is nonempty applies only to game-log participants, so it does
+not apply here. Defensive markets (TOV, STL, BLK, STKS) carry no Blend, as
+documented above.
+
+`freshness` carries `stats`, `team_matchups`, `player_diets`, and
+`player_game_logs`, shaped as in the game Matchup. `provenance` and `coverage`
+are the same additive publication envelope.
 
 ### Get Matchup Selection
 

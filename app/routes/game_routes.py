@@ -29,6 +29,9 @@ from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 game_bp = Blueprint('games', __name__)
+#: Matchups with no Slate game (crf04/statsplus#95), served at
+#: ``/api/matchups``; they share this module's Matchup parameter rules.
+matchups_bp = Blueprint("matchups", __name__)
 
 
 game_service = CurrentAppService("game")
@@ -40,6 +43,19 @@ _MATCHUP_PARAMETERS = frozenset({"game_id"})
 _SELECTION_PARAMETERS = frozenset({"game_id", "player_id"})
 _CANONICAL_PLAYER_ID = re.compile(r"[1-9][0-9]*\Z")
 _MAX_CANONICAL_PLAYER_ID = (1 << 63) - 1
+_UNSCHEDULED_SELECTORS = ("player_id", "player_name", "team")
+_UNSCHEDULED_PARAMETERS = frozenset(
+    {*_UNSCHEDULED_SELECTORS, "player_team", "opponent"}
+)
+_TRICODE = re.compile(r"[A-Za-z]{3}\Z")
+
+
+def _is_canonical_player_id(value: str) -> bool:
+    return (
+        _CANONICAL_PLAYER_ID.fullmatch(value) is not None
+        and len(value) <= 19
+        and int(value) <= _MAX_CANONICAL_PLAYER_ID
+    )
 
 
 @game_bp.route('/slate', methods=['GET'])
@@ -77,9 +93,7 @@ def get_matchup_selection():
         or not game_ids[0]
         or game_ids[0] != game_ids[0].strip()
         or len(player_ids) != 1
-        or _CANONICAL_PLAYER_ID.fullmatch(player_ids[0]) is None
-        or len(player_ids[0]) > 19
-        or int(player_ids[0]) > _MAX_CANONICAL_PLAYER_ID
+        or not _is_canonical_player_id(player_ids[0])
     ):
         raise InvalidInputError("The matchup selection parameters are invalid.")
     return jsonify(
@@ -87,6 +101,72 @@ def get_matchup_selection():
             game_id=game_ids[0],
             player_id=int(player_ids[0]),
         )
+    )
+
+
+def _invalid_unscheduled(*parameters: str) -> InvalidInputError:
+    names = ", ".join(parameters)
+    return InvalidInputError(
+        f"The unscheduled matchup parameters are invalid: {names}.",
+        public_details={"parameters": list(parameters)},
+    )
+
+
+@matchups_bp.route("/unscheduled", methods=["GET"])
+@require_auth
+def get_unscheduled_matchup():
+    """Score a player, or a team's players, against one opponent, no game."""
+    unknown = sorted(set(request.args) - _UNSCHEDULED_PARAMETERS)
+    if unknown:
+        # Only names from the documented vocabulary are echoed back.
+        raise _invalid_unscheduled(*(sanitize_public_value(name) for name in unknown))
+    selectors = [name for name in _UNSCHEDULED_SELECTORS if name in request.args]
+    if len(selectors) != 1:
+        raise _invalid_unscheduled(*(selectors or _UNSCHEDULED_SELECTORS))
+    (selector,) = selectors
+    if "player_team" in request.args and selector != "player_name":
+        # player_team only narrows a name; an id or a team needs no narrowing.
+        raise _invalid_unscheduled("player_team")
+    values = {
+        name: request.args.getlist(name)
+        for name in (selector, "opponent", "player_team")
+        if name in request.args or name != "player_team"
+    }
+    for name, submitted in values.items():
+        if len(submitted) != 1:
+            raise _invalid_unscheduled(name)
+    value = values[selector][0]
+    opponent = values["opponent"][0]
+    if _TRICODE.fullmatch(opponent) is None:
+        raise _invalid_unscheduled("opponent")
+    opponent = opponent.upper()
+    selected: dict[str, Any] = {
+        "player_id": None,
+        "player_name": None,
+        "player_team": None,
+        "team": None,
+    }
+    if selector == "player_id":
+        if not _is_canonical_player_id(value):
+            raise _invalid_unscheduled("player_id")
+        selected["player_id"] = int(value)
+    elif selector == "player_name":
+        if not value.strip():
+            raise _invalid_unscheduled("player_name")
+        selected["player_name"] = value
+        if "player_team" in values:
+            player_team = values["player_team"][0]
+            if _TRICODE.fullmatch(player_team) is None:
+                raise _invalid_unscheduled("player_team")
+            selected["player_team"] = player_team.upper()
+    else:
+        if _TRICODE.fullmatch(value) is None:
+            raise _invalid_unscheduled("team")
+        selected["team"] = value.upper()
+        if selected["team"] == opponent:
+            raise _invalid_unscheduled("opponent")
+    return jsonify(
+        matchup_service.get_unscheduled_matchup(opponent=opponent, **selected)
     )
 
 

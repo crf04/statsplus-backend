@@ -19,7 +19,7 @@ from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.play_type_matchup import complete_play_type_shares
 from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
 from app.models.catalogs import PLAY_TYPES, SHOOTING_TYPES
-from app.services.athlete_resolver import CanonicalAthlete, normalize_athlete_name
+from app.services.athlete_resolver import match_catalog_athlete
 from app.services.player_diet import (
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
     PlayerDietResult,
@@ -240,23 +240,7 @@ class PlayerService:
 
         season = self.settings.nba.current_season
         rows = self.profile_reader.get_catalog(season, active_only=False)
-        target = normalize_athlete_name(player_name)
-        if not target:
-            return None
-        matches = [
-            CanonicalAthlete.from_row(row)
-            for row in rows
-            if normalize_athlete_name(row.get("display_name")) == target
-        ]
-        if not matches:
-            return None
-        return min(
-            matches,
-            key=lambda athlete: (
-                not athlete.is_active_for_season,
-                athlete.player_id,
-            ),
-        )
+        return match_catalog_athlete(rows, player_name)
 
     def _read_diets(self, season, player_ids):
         """Read Player Diet facts through one decoded-only snapshot.

@@ -702,6 +702,13 @@ def build_dependencies(
         database_only=not demo_database,
         publication_reader=publication_reader,
         engine=engine,
+        # Names an Unscheduled Matchup's players (crf04/statsplus#95) through
+        # the same engine-bound reader, so no catalog refresh is reachable.
+        athlete_catalog=(
+            AthleteCatalogReader(engine)
+            if athlete_catalog_service is not None
+            else None
+        ),
     )
     user_service = UserService(engine, settings=settings, player_logs=player_game_log_repository)
     # Target resolution reads no provider: it composes the same Slate and

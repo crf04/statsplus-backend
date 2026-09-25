@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from nba_api.stats.static import teams as static_nba_teams
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
 
@@ -19,18 +20,25 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.matchup_experience import (
+    ATHLETE_CATALOG_SOURCE,
     CURRENT_MODE,
     GAME_LOG_SOURCE,
     HISTORICAL_MODE,
     PLAYER_POOL_SOURCE,
+    UNSCHEDULED_MODE,
     experience_mode,
     is_historical_matchup,
     player_source,
 )
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE, NBA_TEAM_TRICODE_TO_ID
 from app.domain.nba_events import resolve_stored_event_classification
 from app.domain.play_type_matchup import complete_play_type_shares, play_type_matchup
 from app.domain.utc import assume_utc, parse_utc_iso
-from app.errors import ProviderUnavailableError, ResourceNotFoundError
+from app.errors import (
+    InvalidInputError,
+    ProviderUnavailableError,
+    ResourceNotFoundError,
+)
 from app.domain.team_matchup_taxonomy import (
     DEFENSE_SHEET_BASES,
     SHOT_TYPE_DISPLAY_TO_STORED,
@@ -42,6 +50,7 @@ from app.domain.team_matchup_taxonomy import (
     defense_sheet_display_slice,
     defense_sheet_row_key,
 )
+from app.services.athlete_resolver import CanonicalAthlete, catalog_athlete_matches
 from app.services.player_diet import (
     PLAYER_DIET_BASES,
     PLAYER_DIET_PUBLICATION_STREAM_KEYS,
@@ -219,6 +228,16 @@ _DECODED_ONLY_STREAM_KEYS = PLAYER_DIET_PUBLICATION_STREAM_KEYS
 #: caller that captures one generation to share with another read (#253).
 MATCHUP_PUBLICATION_STREAM_KEYS = _PUBLICATION_STREAM_KEYS
 MATCHUP_PROJECTION_ONLY_STREAM_KEYS = _PROJECTION_ONLY_STREAM_KEYS
+#: The player-row keys that describe one game, which an Unscheduled Matchup
+#: has none of: a focal line, posted markets, and an injury badge.
+_PER_GAME_PLAYER_KEYS = frozenset(
+    {"focal_game_line", "posted_markets", "injury_badge_ref"}
+)
+#: How an Unscheduled Matchup's team mode chose its players.
+_TEAM_MODE_PARTICIPANTS_BASIS = {
+    "source": ATHLETE_CATALOG_SOURCE,
+    "context": "season_roster_with_player_diet",
+}
 #: "Use the service's own": the compose path resolves its snapshot and reads
 #: its injuries itself unless a caller hands it either.
 _OWN = object()
@@ -302,6 +321,12 @@ class TeamMatchupReader(Protocol):
     ) -> TeamMatchupWindow | None: ...
 
 
+class AthleteCatalogReader(Protocol):
+    def get_catalog(
+        self, season: str, *, active_only: bool = False
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+
 class StatsFreshnessReader(Protocol):
     def get(self) -> StatsFreshness: ...
 
@@ -330,8 +355,8 @@ class _Participant:
 
     canonical_player_id: int
     name: str
-    team_id: int
-    tricode: str
+    team_id: int | None
+    tricode: str | None
     market_categories: tuple[str, ...]
     provenance: Mapping[str, tuple[str, ...]]
     source: str
@@ -511,6 +536,7 @@ class MatchupService:
         database_only: bool = False,
         publication_reader: DatabaseFirstPublicationReader | None = None,
         engine: Engine | None = None,
+        athlete_catalog: AthleteCatalogReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
         self.player_pool = player_pool
@@ -520,6 +546,8 @@ class MatchupService:
         self.stats_freshness = stats_freshness
         self.settings = settings
         self.injuries = injuries
+        # Names the players of an Unscheduled Matchup, which has no pool.
+        self.athlete_catalog = athlete_catalog
         # Historical Stat Categories come from the governed Statistic Catalog
         # crossed with the score-input contract, never from a DFS archive.
         self._statistics = (
@@ -581,6 +609,274 @@ class MatchupService:
                 injuries=injuries,
                 compose_cache=compose_cache,
             )
+
+    def get_unscheduled_matchup(
+        self,
+        *,
+        opponent: str,
+        player_id: int | None = None,
+        player_name: str | None = None,
+        player_team: str | None = None,
+        team: str | None = None,
+    ) -> dict[str, Any]:
+        """Score a player, or a team's players, against one opponent.
+
+        An Unscheduled Matchup (crf04/statsplus#95) has no Slate game: it
+        reads the latest Defense Sheet windows and the season's Diets from
+        one Publication snapshot and scores through the same player-row seam
+        the game Matchup uses. Exactly one of ``player_id``, ``player_name``,
+        or ``team`` names who is scored; the route enforces that.
+        ``player_team`` narrows a ``player_name`` to one team's namesake.
+        """
+
+        with request_read_scope(self._engine) as (connection, session):
+            return self._compose_unscheduled(
+                opponent=opponent,
+                player_id=player_id,
+                player_name=player_name,
+                player_team=player_team,
+                team=team,
+                connection=connection,
+                session=session,
+            )
+
+    def _compose_unscheduled(
+        self,
+        *,
+        opponent: str,
+        player_id: int | None,
+        player_name: str | None,
+        player_team: str | None,
+        team: str | None,
+        connection: Connection | None,
+        session: Session | None,
+    ) -> dict[str, Any]:
+        season = self.settings.nba.current_season
+        opponent_id = self._known_team_id(opponent)
+        team_id = None if team is None else self._known_team_id(team)
+        player_team_id = (
+            None if player_team is None else self._known_team_id(player_team)
+        )
+        publication_snapshot = self._publication_snapshot(season, session=session)
+        # One per-request memo, as a Target composing many games shares one.
+        compose_cache = MatchupComposeCache()
+        catalog = (
+            ()
+            if self.athlete_catalog is None
+            else tuple(self.athlete_catalog.get_catalog(season, active_only=False))
+        )
+        if team_id is not None:
+            athletes = tuple(
+                CanonicalAthlete.from_row(row)
+                for row in catalog
+                if row.get("team_id") is not None and int(row["team_id"]) == team_id
+            )
+        elif player_name is not None:
+            # Every namesake is a candidate until the Diet read below says
+            # which of them could be scored.
+            athletes = tuple(
+                athlete
+                for athlete in catalog_athlete_matches(catalog, player_name)
+                if player_team_id is None or athlete.team_id == player_team_id
+            )
+        else:
+            athletes = tuple(
+                CanonicalAthlete.from_row(row)
+                for row in catalog
+                if int(row["player_id"]) == player_id
+            )
+        if team_id is None and not athletes:
+            raise ResourceNotFoundError(
+                "The requested player was not found.",
+                public_details={"reason": "player_not_found"},
+            )
+        candidates = tuple(
+            _Participant(
+                canonical_player_id=athlete.player_id,
+                name=athlete.display_name,
+                team_id=athlete.team_id,
+                tricode=(
+                    None
+                    if athlete.team_id is None
+                    else NBA_TEAM_ID_TO_TRICODE.get(
+                        athlete.team_id, athlete.team_abbreviation
+                    )
+                ),
+                # With no Player Pool, every scoreable category is scored, as
+                # a Historical Matchup already does.
+                market_categories=self._historical_categories,
+                provenance={},
+                source=ATHLETE_CATALOG_SOURCE,
+            )
+            for athlete in athletes
+        )
+        diets = self._diets(
+            season,
+            candidates,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+            baseline_cache=compose_cache.diet_baselines,
+        )
+        # Only a player with a stored season Diet can be scored.
+        players = tuple(
+            player for player in candidates if diets.players.get(player.canonical_player_id)
+        )
+        if team_id is None and not players:
+            raise ResourceNotFoundError(
+                "The requested player has no current-season Player Diet.",
+                public_details={"reason": "no_player_diet"},
+            )
+        if team_id is None and len(players) > 1:
+            raise InvalidInputError(
+                "The player_name matches more than one player; "
+                "narrow it with player_team.",
+                public_details={
+                    "parameter": "player_name",
+                    "parameters": ["player_name"],
+                    "candidates": sorted(
+                        (
+                            {"name": player.name, "team": player.tricode}
+                            for player in players
+                        ),
+                        key=lambda candidate: (
+                            candidate["name"],
+                            candidate["team"] or "",
+                        ),
+                    ),
+                },
+            )
+        player_ids = tuple(player.canonical_player_id for player in players)
+        summaries = call_with_read_scope(
+            self.player_logs.get_player_summaries,
+            season,
+            player_ids,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+        log_freshness = call_with_read_scope(
+            self.player_logs.get_read_freshness,
+            season,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        )
+        windows, metric_indexes = self._defense_windows(
+            season,
+            as_of=None,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+            compose_cache=compose_cache,
+        )
+        team_ids = (opponent_id,) if team_id is None else (team_id, opponent_id)
+        availability = self._surface_availability(windows, metric_indexes, team_ids)
+        # The offseason is visible: once the configured season's own
+        # publication governance proves it over, the latest windows are the
+        # completed season's, and the sections say so.
+        context = (
+            "completed_season"
+            if self.team_matchups is not None
+            and call_with_read_scope(
+                self.team_matchups.publication_season_is_complete,
+                season,
+                publication_snapshot=publication_snapshot,
+            )
+            else "latest"
+        )
+        sections = {
+            "season_defense": self._defense_section(
+                availability, "season", context=context, historical_reason=None
+            ),
+            "last_15_defense": self._defense_section(
+                availability, "last_15", context=context, historical_reason=None
+            ),
+        }
+        experience: dict[str, Any] = {
+            "mode": UNSCHEDULED_MODE,
+            "player_source": ATHLETE_CATALOG_SOURCE,
+            "sections": sections,
+        }
+        if team_id is not None:
+            experience["participants_basis"] = dict(_TEAM_MODE_PARTICIPANTS_BASIS)
+        player_rows = self._players(
+            players,
+            summaries,
+            diets,
+            lambda _player: opponent_id,
+            windows,
+            metric_indexes,
+            availability,
+            {},
+        )
+        diet_freshness = self._diet_freshness(diets)
+        return {
+            "experience": experience,
+            "as_of": {
+                "season": season,
+                **{
+                    f"{name}_defense": (
+                        windows[name].scope.as_of.isoformat()
+                        if sections[f"{name}_defense"]["status"] == "available"
+                        else None
+                    )
+                    for name in ("season", "last_15")
+                },
+                "player_diets": (
+                    None
+                    if diet_freshness["retrieved_at"] is None
+                    else parse_utc_iso(diet_freshness["retrieved_at"])
+                    .astimezone(EASTERN)
+                    .date()
+                    .isoformat()
+                ),
+            },
+            "league": self._league(windows, metric_indexes, availability),
+            "teams": [
+                self._team(
+                    self._team_identity(team_id),
+                    team_id,
+                    windows,
+                    metric_indexes,
+                    availability,
+                )
+                for team_id in team_ids
+            ],
+            "players": [
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in _PER_GAME_PLAYER_KEYS
+                }
+                for row in player_rows
+            ],
+            "freshness": {
+                "stats": self._stats_freshness(season, connection=connection),
+                "team_matchups": self._team_matchups_freshness(
+                    windows, availability
+                ),
+                "player_diets": diet_freshness,
+                "player_game_logs": self._timestamped_status(log_freshness),
+            },
+            **self._publication_metadata(season, publication_snapshot),
+        }
+
+    @staticmethod
+    def _known_team_id(tricode: str) -> int:
+        team_id = NBA_TEAM_TRICODE_TO_ID.get(tricode)
+        if team_id is None:
+            raise ResourceNotFoundError(
+                "The requested team was not found.",
+                public_details={"reason": "team_not_found"},
+            )
+        return team_id
+
+    @staticmethod
+    def _team_identity(team_id: int) -> dict[str, str]:
+        """The tricode and full name a game's Event Catalog row would carry."""
+
+        team = static_nba_teams.find_team_name_by_id(team_id)
+        return {
+            "tricode": NBA_TEAM_ID_TO_TRICODE[team_id],
+            "name": team["full_name"],
+        }
 
     def _compose_matchup(
         self,
@@ -681,27 +977,13 @@ class MatchupService:
         slate_date = self._event_date(event)
         scheduled_at = parse_utc_iso(str(event["scheduled_at"]))
         team_as_of = slate_date if scheduled_at <= observed_at else None
-        season_window = self._team_window(
+        windows, metric_indexes = self._defense_windows(
             season,
-            window_games=None,
             as_of=team_as_of,
             publication_snapshot=publication_snapshot,
             connection=connection,
-            cache=None if compose_cache is None else compose_cache.windows,
+            compose_cache=compose_cache,
         )
-        last_15_window = self._team_window(
-            season,
-            window_games=15,
-            as_of=team_as_of,
-            publication_snapshot=publication_snapshot,
-            connection=connection,
-            cache=None if compose_cache is None else compose_cache.windows,
-        )
-        windows = {"season": season_window, "last_15": last_15_window}
-        metric_indexes = {
-            name: None if not window else _WindowMetricIndex.build(window)
-            for name, window in windows.items()
-        }
         availability = self._surface_availability(
             windows, metric_indexes, team_ids
         )
@@ -713,7 +995,7 @@ class MatchupService:
         league = self._league(windows, metric_indexes, availability)
         teams = [
             self._team(
-                event,
+                self._event_team(event, team_id),
                 team_id,
                 windows,
                 metric_indexes,
@@ -754,7 +1036,11 @@ class MatchupService:
                 players,
                 summaries,
                 diets,
-                event,
+                # The game names the opponent: whichever of its two teams
+                # the player is not on.
+                lambda player: next(
+                    team_id for team_id in team_ids if team_id != player.team_id
+                ),
                 windows,
                 metric_indexes,
                 availability,
@@ -765,16 +1051,9 @@ class MatchupService:
                 "schedule": schedule_freshness,
                 "pool": dict(pool.freshness),
                 "stats": self._stats_freshness(season, connection=connection),
-                "team_matchups": {
-                    name: self._team_window_freshness(
-                        window,
-                        {
-                            base: availability[base][name]
-                            for base in DEFENSE_BASES
-                        },
-                    )
-                    for name, window in windows.items()
-                },
+                "team_matchups": self._team_matchups_freshness(
+                    windows, availability
+                ),
                 "player_diets": self._diet_freshness(diets),
                 "player_game_logs": self._timestamped_status(log_freshness),
                 "injuries": injury_freshness,
@@ -1170,6 +1449,42 @@ class MatchupService:
             cache[key] = window
         return window
 
+    def _defense_windows(
+        self,
+        season: str,
+        *,
+        as_of: date | None,
+        publication_snapshot=None,
+        connection: Connection | None = None,
+        compose_cache: MatchupComposeCache | None = None,
+    ) -> tuple[
+        dict[str, TeamMatchupWindow | None],
+        dict[str, _WindowMetricIndex | None],
+    ]:
+        """Read the Season and Last-15 Defense Sheet windows and index them.
+
+        ``as_of=None`` is the latest-window read an Unscheduled Matchup and a
+        not-yet-started game both make.
+        """
+
+        cache = None if compose_cache is None else compose_cache.windows
+        windows = {
+            name: self._team_window(
+                season,
+                window_games=window_games,
+                as_of=as_of,
+                publication_snapshot=publication_snapshot,
+                connection=connection,
+                cache=cache,
+            )
+            for name, window_games in (("season", None), ("last_15", 15))
+        }
+        metric_indexes = {
+            name: None if not window else _WindowMetricIndex.build(window)
+            for name, window in windows.items()
+        }
+        return windows, metric_indexes
+
     def _diets(
         self,
         season: str,
@@ -1246,7 +1561,7 @@ class MatchupService:
     @classmethod
     def _team(
         cls,
-        event: Mapping[str, Any],
+        team: Mapping[str, Any],
         team_id: int,
         windows: Mapping[str, TeamMatchupWindow | None],
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
@@ -1273,7 +1588,6 @@ class MatchupService:
                     },
                 }
             )
-        team = cls._event_team(event, team_id)
         return {
             "team_id": team_id,
             "tricode": str(team["tricode"]),
@@ -1298,12 +1612,21 @@ class MatchupService:
         players: Sequence[_Participant],
         summaries: Mapping[int, PlayerSeasonLogSummary],
         diets: PlayerDietResult,
-        event: Mapping[str, Any],
+        opponent_of: Callable[[_Participant], int],
         windows: Mapping[str, TeamMatchupWindow | None],
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
     ) -> list[dict[str, Any]]:
+        """Compose every player row, scored against ``opponent_of(player)``.
+
+        The one scoring seam both Matchup reads share: a game Matchup names
+        each player's opponent from its two teams, an Unscheduled Matchup
+        names the one requested opponent, and everything else -- Diet
+        shares, thin verdicts, and every score window -- is computed here
+        the same way for both.
+        """
+
         rows = []
         for player in players:
             # One shared season-summary read feeds both the rail's display
@@ -1369,7 +1692,7 @@ class MatchupService:
                 player,
                 summary,
                 diet,
-                event,
+                opponent_of(player),
                 windows,
                 metric_indexes,
                 availability,
@@ -1378,7 +1701,9 @@ class MatchupService:
                 {
                     "canonical_id": int(player.canonical_player_id),
                     "name": player.name,
-                    "team_id": int(player.team_id),
+                    "team_id": (
+                        None if player.team_id is None else int(player.team_id)
+                    ),
                     "tricode": player.tricode,
                     "player_source": player.source,
                     "stat_categories": list(player.market_categories),
@@ -1421,16 +1746,11 @@ class MatchupService:
         player: _Participant,
         summary: PlayerSeasonLogSummary | None,
         diet: _PlayerDiet,
-        event: Mapping[str, Any],
+        opponent_id: int,
         windows: Mapping[str, TeamMatchupWindow | None],
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
     ) -> dict[str, Any]:
-        opponent_id = next(
-            team_id
-            for team_id in (int(event["away_team_id"]), int(event["home_team_id"]))
-            if team_id != player.team_id
-        )
         memo: dict[tuple[str, str], dict[str, Any]] = {}
         withhold = player.source == GAME_LOG_SOURCE
         return {
@@ -2195,6 +2515,20 @@ class MatchupService:
             "status": status,
             "retrieved_at": retrieved[0] if retrieved else None,
             "surfaces": surfaces,
+        }
+
+    @classmethod
+    def _team_matchups_freshness(
+        cls,
+        windows: Mapping[str, TeamMatchupWindow | None],
+        availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    ) -> dict[str, Any]:
+        return {
+            name: cls._team_window_freshness(
+                window,
+                {base: availability[base][name] for base in DEFENSE_BASES},
+            )
+            for name, window in windows.items()
         }
 
     @staticmethod

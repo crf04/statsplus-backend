@@ -2470,3 +2470,70 @@ def test_latest_window_rejects_future_cutoffs_and_ignores_future_observations(
         query.get_latest_window(
             "2024-25", window_games=15, as_of=date(2025, 4, 16)
         )
+
+
+class _SeasonGovernance:
+    def __init__(self, complete):
+        self.complete = complete
+        self.calls = []
+
+    def resolve_season_is_complete(self, season, cutoff, **binding):
+        self.calls.append((season, cutoff, binding))
+        return self.complete
+
+
+def _season_window_snapshot(*, season="2025-26", status="active"):
+    from types import SimpleNamespace
+
+    from app.services.database_first_activation import PublicationRead
+
+    return SimpleNamespace(
+        read=lambda stream_key: PublicationRead(
+            stream_key=stream_key,
+            publication_id=f"publication-{stream_key}",
+            season=season,
+            cutoff="2026-04-13T08:00:00+00:00",
+            version=1,
+            status=status,
+            freshness="stale",
+            age_seconds=0,
+            payload={},
+            manifest_id="manifest-1",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("complete", "snapshot", "expected"),
+    [
+        (True, _season_window_snapshot(), True),
+        (False, _season_window_snapshot(), False),
+        # Another season's publication proves nothing about this one.
+        (True, _season_window_snapshot(season="2024-25"), False),
+        # A read that is not available proves nothing either.
+        (True, _season_window_snapshot(status="missing"), False),
+        # No generation, no publication governance: fail closed.
+        (True, None, False),
+    ],
+)
+def test_publication_season_is_complete_asks_the_season_windows_governance(
+    complete, snapshot, expected
+):
+    governance = _SeasonGovernance(complete)
+    service = TeamMatchupQueryService(
+        None,
+        publication_reader=object(),
+        l15_expectation_resolver=governance,
+    )
+
+    assert (
+        service.publication_season_is_complete(
+            "2025-26", publication_snapshot=snapshot
+        )
+        is expected
+    )
+    if expected:
+        season, cutoff, binding = governance.calls[0]
+        assert season == "2025-26"
+        assert cutoff == datetime(2026, 4, 13, 8, tzinfo=timezone.utc)
+        assert binding["manifest_id"] == "manifest-1"
