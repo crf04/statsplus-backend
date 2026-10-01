@@ -4803,6 +4803,18 @@ class PublicationService(_SessionService):
         }
         if not corrected_sources_by_game:
             return
+        # Lock the pointer before enumerating anything.  A concurrent rollback
+        # or composition also takes this lock first, so it either committed
+        # before the enumeration below (and is seen) or waits until this
+        # correction commits (and then sees the corrected pointer).  Callers
+        # hold the stream row, if any, first; the order is always stream, then
+        # pointer, then versions.
+        pointer = session.scalar(
+            select(PublicationPointer)
+            .where(PublicationPointer.stream_key == stream_key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         versions = list(session.scalars(select(PublicationVersion).where(
             PublicationVersion.stream_key == stream_key,
             PublicationVersion.season == season,
@@ -4865,12 +4877,6 @@ class PublicationService(_SessionService):
                 version.status = "superseded"
         if not stale_ids:
             return
-        pointer = session.scalar(
-            select(PublicationPointer)
-            .where(PublicationPointer.stream_key == stream_key)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
         if pointer is not None and pointer.active_publication_id in stale_ids:
             pointer.previous_publication_id = pointer.active_publication_id
             pointer.active_publication_id = None
