@@ -131,6 +131,8 @@ def dependencies(runtime_settings, mock_db_engine):
     }
     for service in services.values():
         service.settings = runtime_settings
+    # Game logs default to the GameService's published season.
+    services["game"].default_season.return_value = runtime_settings.nba.current_season
     services["player"].get_all_players.return_value = []
     services["team"].get_all_teams.return_value = []
     services["user"].create_or_update_user.return_value = None

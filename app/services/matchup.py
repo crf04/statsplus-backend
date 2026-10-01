@@ -84,6 +84,12 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
+from app.services.research_season import (
+    event_season,
+    focal_game_rows,
+    published_capture,
+    research_season,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -585,6 +591,7 @@ class MatchupService:
         publication_snapshot: Any | None,
         injuries: MatchupInjuryReader | None,
         compose_cache: MatchupComposeCache | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -597,7 +604,8 @@ class MatchupService:
         caller composing many games from the same snapshot may hand in one
         instance so the identical league-wide team window and Diet baseline
         reads are not repeated per game; omitting it keeps today's per-call
-        behavior.
+        behavior. ``season`` is the evidence season the caller captured the
+        snapshot for, so the two cannot disagree; omitted, it is resolved here.
         """
 
         with request_read_scope(self._engine) as (connection, session):
@@ -608,6 +616,7 @@ class MatchupService:
                 publication_snapshot=publication_snapshot,
                 injuries=injuries,
                 compose_cache=compose_cache,
+                season=season,
             )
 
     def get_unscheduled_matchup(
@@ -651,13 +660,16 @@ class MatchupService:
         connection: Connection | None,
         session: Session | None,
     ) -> dict[str, Any]:
-        season = self.settings.nba.current_season
         opponent_id = self._known_team_id(opponent)
         team_id = None if team is None else self._known_team_id(team)
         player_team_id = (
             None if player_team is None else self._known_team_id(player_team)
         )
-        publication_snapshot = self._publication_snapshot(season, session=session)
+        season, publication_snapshot = published_capture(
+            self.settings,
+            self.publication_reader,
+            lambda season: self._publication_snapshot(season, session=session),
+        )
         # One per-request memo, as a Target composing many games shares one.
         compose_cache = MatchupComposeCache()
         catalog = (
@@ -887,14 +899,25 @@ class MatchupService:
         publication_snapshot: Any = _OWN,
         injuries: Any = _OWN,
         compose_cache: MatchupComposeCache | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
-        season = self.settings.nba.current_season
-        observed_at = assume_utc(self._clock())
+        # Evidence (logs, Diets, windows) is the published season's; the
+        # game's own schedule facts (event, pool, injuries) are its season's,
+        # so opening night composes before the new season publishes.
         if publication_snapshot is _OWN:
-            publication_snapshot = self._publication_snapshot(season, session=session)
-        event = self._event(season, game_id, connection=connection)
+            # One capture decides the evidence season and holds its evidence.
+            season, publication_snapshot = published_capture(
+                self.settings,
+                self.publication_reader,
+                lambda season: self._publication_snapshot(season, session=session),
+            )
+        elif season is None:
+            season = research_season(self.settings, self.publication_reader)
+        schedule_season = event_season(self.settings, game_id, season)
+        observed_at = assume_utc(self._clock())
+        event = self._event(schedule_season, game_id, connection=connection)
         schedule_freshness = self._schedule_freshness(
-            season, observed_at=observed_at, connection=connection
+            schedule_season, observed_at=observed_at, connection=connection
         )
 
         pool = (
@@ -902,7 +925,7 @@ class MatchupService:
             if self.player_pool is None
             else call_with_read_scope(
                 self.player_pool.get_pool_for_game,
-                season=season,
+                season=schedule_season,
                 game_id=game_id,
                 connection=connection,
             )
@@ -915,7 +938,7 @@ class MatchupService:
         )
         injury_result = self._injuries(
             event,
-            season,
+            schedule_season,
             pool_players,
             reader=self.injuries if injuries is _OWN else injuries,
         )
@@ -924,9 +947,10 @@ class MatchupService:
         historical = is_historical_matchup(event, pool_players)
         if historical:
             players, participants_section = self._historical_participants(
-                season,
+                schedule_season,
                 game_id,
                 team_ids,
+                evidence_season=season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
             )
@@ -1070,10 +1094,15 @@ class MatchupService:
         game_id: str,
         team_ids: Sequence[int],
         *,
+        evidence_season: str | None = None,
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> tuple[tuple[_Participant, ...], dict[str, Any]]:
-        """Name the players with a complete canonical row for this game."""
+        """Name the players with a complete canonical row for this game.
+
+        ``season`` is the game's own; ``evidence_season`` is the request's
+        published season, which a past season's game no longer matches.
+        """
 
         sync = call_with_read_scope(
             self.player_logs.get_sync_status,
@@ -1090,13 +1119,22 @@ class MatchupService:
                 "context": None,
                 "unavailable_reason": "game_logs_incomplete",
             }
-        rows = call_with_read_scope(
-            self.player_logs.list_game_rows,
+        rows = focal_game_rows(
+            self.player_logs,
             season,
             game_id,
+            evidence_season=evidence_season,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
+        if rows is None:
+            # A season other than the published one holds no row authority.
+            return (), {
+                "status": "unavailable",
+                "source": "player_game_logs",
+                "context": None,
+                "unavailable_reason": "game_logs_incomplete",
+            }
         participants = tuple(
             _Participant(
                 canonical_player_id=int(record.player_id),

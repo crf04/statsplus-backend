@@ -172,7 +172,7 @@ def get_unscheduled_matchup():
 
 def _default_season() -> str:
     """The season used when a request omits ``season_filter``."""
-    return game_service.settings.nba.current_season
+    return game_service.default_season()
 
 
 def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
@@ -182,8 +182,12 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
     if not player_name:
         raise InvalidInputError("player_name is required.")
 
+    # Only an omitted season discovers the published default.
+    season_filter = request.args.get("season_filter")
     filters = {
-        "season_filter": request.args.get("season_filter", _default_season()),
+        "season_filter": (
+            _default_season() if season_filter is None else season_filter
+        ),
         "minutes_filter": request.args.get("minutes_filter", "0,48"),
         "players_on": request.args.getlist("players_on[]"),
         "players_off": request.args.getlist("players_off[]"),

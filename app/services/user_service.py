@@ -26,6 +26,7 @@ from app.models.saved_filter_set import (
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.domain.target_statistics import validate_stat_preferences
+from app.services.research_season import research_season
 from app.services.target_conditions import validate_conditions
 from app.models.target import (
     TARGET_COMPARATORS,
@@ -252,11 +253,20 @@ class UserService:
     using SQLAlchemy ORM.
     """
     
-    def __init__(self, db_engine=None, settings: RuntimeSettings | None = None, *, player_logs=None):
+    def __init__(
+        self,
+        db_engine=None,
+        settings: RuntimeSettings | None = None,
+        *,
+        player_logs=None,
+        publication_reader=None,
+    ):
         """Initialize the service with the active app's engine and settings."""
         self.settings = settings or get_runtime_settings()
         self.engine = db_engine or get_engine(self.settings)
         self.player_logs = player_logs
+        # Names the published season a defender is validated against.
+        self.publication_reader = publication_reader
 
     def _get_session(self):
         """Create a session bound to this service's app-scoped engine."""
@@ -809,7 +819,8 @@ class UserService:
             if self.player_logs is None:
                 raise InvalidConfigurationError("Target defender validation is unavailable.")
             defender = conditions['defender']
-            rows = self.player_logs.list_player_rows(self.settings.nba.current_season, defender['player_id'])
+            season = research_season(self.settings, self.publication_reader)
+            rows = self.player_logs.list_player_rows(season, defender['player_id'])
             if not any(row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
                        and row.season_type == 'Regular Season' for row in rows):
                 raise InvalidInputError("The defender must appear in the opponent's season game logs.")

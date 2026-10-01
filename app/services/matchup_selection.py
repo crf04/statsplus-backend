@@ -37,6 +37,11 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
+from app.services.research_season import (
+    event_season,
+    focal_game_rows,
+    published_capture,
+)
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -133,15 +138,20 @@ class MatchupSelectionService:
         connection: Connection | None,
         session: Session | None,
     ) -> dict[str, Any]:
-        season = self.settings.nba.current_season
-        publication_snapshot = self._publication_snapshot(season, session=session)
-        event = self._event(season, game_id, connection=connection)
+        season, publication_snapshot = published_capture(
+            self.settings,
+            self.publication_reader,
+            lambda season: self._publication_snapshot(season, session=session),
+        )
+        # The game's schedule facts are its own season's; evidence is published.
+        schedule_season = event_season(self.settings, game_id, season)
+        event = self._event(schedule_season, game_id, connection=connection)
         pool = (
             None
             if self.player_pool is None
             else call_with_read_scope(
                 self.player_pool.get_pool_for_game,
-                season=season,
+                season=schedule_season,
                 game_id=game_id,
                 connection=connection,
             )
@@ -171,9 +181,10 @@ class MatchupSelectionService:
         focal_record = None
         if historical:
             focal_record = self._focal_record(
-                season,
+                schedule_season,
                 game_id,
                 player_id,
+                evidence_season=season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
             )
@@ -280,6 +291,7 @@ class MatchupSelectionService:
         game_id: str,
         player_id: int,
         *,
+        evidence_season: str | None = None,
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> PlayerGameLogRecord:
@@ -296,13 +308,19 @@ class MatchupSelectionService:
             raise ProviderUnavailableError(
                 "The stored canonical game logs for this matchup are incomplete."
             )
-        rows = call_with_read_scope(
-            self.player_logs.list_game_rows,
+        rows = focal_game_rows(
+            self.player_logs,
             season,
             game_id,
+            evidence_season=evidence_season,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
+        if rows is None:
+            # A season other than the published one holds no row authority.
+            raise ProviderUnavailableError(
+                "The stored canonical game logs for this matchup are incomplete."
+            )
         record = next(
             (row for row in rows if int(row.player_id) == player_id), None
         )

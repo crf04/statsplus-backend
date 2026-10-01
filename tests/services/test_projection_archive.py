@@ -3029,3 +3029,29 @@ def test_replay_still_rejects_a_v2_mixed_form_document(tmp_path):
             canonical_team_id=10,
             replayed_at=OBSERVED_AT - timedelta(minutes=1),
         )
+
+
+def test_a_reader_scoped_to_the_calendar_season_reads_the_requested_season(tmp_path):
+    """The rollover Slate asks for 2025-26 while collection is scoped to 2026-27.
+
+    Request reads follow the season they are asked for; only the recording
+    scope stays on the calendar season.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'projection-rollover.sqlite3'}")
+    run_migrations(engine)
+    catalog = StatisticCatalog.load_default()
+    ProjectionArchive(engine, catalog).ingest_complete_snapshot(
+        _closing_snapshot(catalog, OBSERVED_AT),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=OBSERVED_AT,
+    )
+    reader = _reader(engine, query=NBAMarketQuery(season="2026-27"))
+
+    assert reader.get_pool(season=SEASON, game_ids=()).players == ()
+    pool = reader.get_pool(season=SEASON, game_ids=(GAME_ID,))
+    assert [player.canonical_player_id for player in pool.players] == [2544]
+    by_game = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert [player.canonical_player_id for player in by_game.players] == [2544]
+    # The calendar season's own scope is untouched and holds nothing.
+    assert reader.get_pool(season="2026-27", game_ids=(GAME_ID,)).players == ()

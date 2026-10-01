@@ -3,6 +3,7 @@
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.errors import InvalidInputError
 from app.services.publication_snapshot_calls import call_with_read_scope
+from app.services.research_season import published_capture
 
 
 class TargetSeasonMinutesService:
@@ -15,15 +16,15 @@ class TargetSeasonMinutesService:
         tricode = tricode.strip().upper()
         if tricode not in NBA_TEAM_TRICODE_TO_ID:
             raise InvalidInputError("The team must be a canonical NBA tricode.")
-        season = self.settings.nba.current_season
-        snapshot = (
-            self.publication_reader.snapshot(
+        # The season and the rows come from one capture.
+        season, snapshot = published_capture(
+            self.settings,
+            self.publication_reader,
+            lambda season: self.publication_reader.snapshot(
                 ("player_game_logs",),
                 season=season,
                 projection_only_keys=frozenset({"player_game_logs"}),
-            )
-            if self.publication_reader
-            else None
+            ),
         )
         players = {}
         for row in call_with_read_scope(

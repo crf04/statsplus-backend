@@ -2848,3 +2848,34 @@ def test_central_reconciliation_refuses_evidence_the_collector_would_have():
     short["records"] = short["records"][:4]
     with pytest.raises(ValueError, match="zone reconciliation incomplete"):
         _assert_zone_reconciliation(short)
+
+
+def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db):
+    """A superseded rehearsal candidate was never activated, so it is no authority."""
+
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.research_season import focal_game_rows
+    from app.services.statistic_catalog import StatisticCatalog
+
+    # Leaves 2025-26 active with 25 points, through candidate and rollback.
+    test_player_log_candidate_and_rollback_keep_indexed_projection(control_db)
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    for points in (40, 41):
+        publications.compose_inactive_ledger(
+            "player_game_logs", season="2025-26", cutoff=now,
+            payload=_player_log_payload(points=points),
+            provenance={"pbp:game-1": "game-1"},
+        )
+    assert json.loads(publications.current("player_game_logs").payload)["rows"][0]["points"] == 25
+    repository = PlayerGameLogRepository(
+        control_db,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season="2025-26",
+        stats_surface_max_age=timedelta(hours=30),
+    )
+
+    rows = focal_game_rows(repository, "2025-26", "game-1", evidence_season="2026-27")
+
+    assert 40 not in [row.points for row in rows or ()]
+    assert 41 not in [row.points for row in rows or ()]

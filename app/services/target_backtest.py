@@ -89,6 +89,7 @@ from app.services.target_conditions import (
     player_minutes_are_kept,
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
+from app.services.research_season import published_capture, research_season
 
 
 logger = getLogger(__name__)
@@ -401,6 +402,7 @@ class TargetBacktestService:
         value (``aggregate_cache_state``).
         """
 
+        # The response's season if the published one cannot be read either.
         season = self.settings.nba.current_season
         with request_read_scope(self._engine) as (_connection, session):
             if session is not None:
@@ -410,6 +412,7 @@ class TargetBacktestService:
             else:
                 listed = self.targets.list_targets(firebase_uid)
             try:
+                season = research_season(self.settings, self.publication_reader)
                 generation = self._read_cache_generation(season, session)
             except Exception:
                 # Degrade like a disabled cache, as the single route's
@@ -474,6 +477,7 @@ class TargetBacktestService:
         publication_snapshot: Any = _OWN,
         connection: Connection | None = None,
         session: Session | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
         """Return one Target mapping with its season to date.
 
@@ -484,7 +488,8 @@ class TargetBacktestService:
         exist yet exactly as the detail evaluates one that does.
 
         A caller composing this read alongside another passes the generation
-        it already holds as ``publication_snapshot``; none is captured then.
+        it already holds as ``publication_snapshot``, and the ``season`` it
+        captured that generation for; none is captured then.
         """
 
         return self._backtest_stateful(
@@ -492,6 +497,7 @@ class TargetBacktestService:
             publication_snapshot=publication_snapshot,
             connection=connection,
             session=session,
+            season=season,
         )[0]
 
     def _backtest_stateful(
@@ -501,6 +507,7 @@ class TargetBacktestService:
         publication_snapshot: Any = _OWN,
         connection: Connection | None = None,
         session: Session | None = None,
+        season: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Compute the backtest and report its result-cache outcome.
 
@@ -511,7 +518,11 @@ class TargetBacktestService:
         """
 
         cache_state = "-"
-        season = self.settings.nba.current_season
+        # The cache pre-check needs a season before any capture; an own
+        # capture below then decides the season the evidence is read in.
+        season_given = season is not None
+        if season is None:
+            season = research_season(self.settings, self.publication_reader)
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
         # A saved Target is the only caller whose response may be served from
@@ -547,11 +558,15 @@ class TargetBacktestService:
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
             # evidence.
-            snapshot = (
-                self._publication_snapshot(season, session=session)
-                if publication_snapshot is _OWN
-                else publication_snapshot
-            )
+            snapshot = publication_snapshot
+            if publication_snapshot is _OWN and season_given:
+                snapshot = self._publication_snapshot(season, session=session)
+            elif publication_snapshot is _OWN:
+                season, snapshot = published_capture(
+                    self.settings,
+                    self.publication_reader,
+                    lambda season: self._publication_snapshot(season, session=session),
+                )
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
             rows = tuple(record for record in call_with_read_scope(
                 self.player_logs.list_opponent_rows, season, opponent_team_id,

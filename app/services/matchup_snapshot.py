@@ -75,17 +75,29 @@ class SnapshotMatchups:
     """
 
     def __init__(
-        self, composer: SnapshotMatchupComposer, snapshot: Any, injuries: Any
+        self,
+        composer: SnapshotMatchupComposer,
+        snapshot: Any,
+        injuries: Any,
+        *,
+        season: str | None = None,
     ) -> None:
         self.composer = composer
         self.snapshot = snapshot
         self.injuries = injuries
+        # The season ``snapshot`` was captured for, so every Matchup composed
+        # from it reads its evidence in that season and no other.
+        self.season = season
         self._compose_cache = MatchupComposeCache()
 
     def get_matchup(self, *, game_id: str) -> Mapping[str, Any]:
         kwargs: dict[str, Any] = {}
         if accepts_keyword(self.composer.get_matchup_from_snapshot, "compose_cache"):
             kwargs["compose_cache"] = self._compose_cache
+        if self.season is not None and accepts_keyword(
+            self.composer.get_matchup_from_snapshot, "season"
+        ):
+            kwargs["season"] = self.season
         return self.composer.get_matchup_from_snapshot(
             game_id=game_id,
             publication_snapshot=self.snapshot,

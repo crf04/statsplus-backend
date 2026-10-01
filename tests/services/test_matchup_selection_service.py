@@ -370,3 +370,288 @@ def test_projection_and_payload_reads_render_the_same_card(tmp_path):
     via_payload = service.get_selection(game_id=GAME_ID, player_id=2544)
 
     assert via_projection == via_payload
+
+
+def test_an_opening_night_selection_reads_the_new_game_with_published_evidence(tmp_path):
+    """The 2026-27 opener resolves while player logs still publish 2025-26."""
+
+    opener = "0022600001"
+
+    class SeasonEvents:
+        def __init__(self):
+            self.seasons = []
+
+        def count_events(self, season):
+            return 1 if season == "2026-27" else 0
+
+        def get_event(self, season, game_id):
+            self.seasons.append(season)
+            if season != "2026-27" or game_id != opener:
+                return None
+            return {
+                "nba_game_id": opener,
+                "classification": "Regular Season",
+                "home_team_id": BOS,
+                "away_team_id": LAL,
+            }
+
+    _, service, _, _ = _published_selection_service(tmp_path, _default_rows())
+    events = SeasonEvents()
+    service.event_catalog = events
+    # Unpinned: the calendar default on 2026-10-01.
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    card = service.get_selection(game_id=opener, player_id=2544)
+
+    assert events.seasons == ["2026-27"]
+    # Last season's published games are the card's evidence.
+    assert '"game_date": "2026-01-02"' in json.dumps(card)
+
+
+def _advance_to_next_season(engine, publication):
+    """Seed last season's completed sync row, then publish 2026-27 logs."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO player_game_log_sync (season, game_id, season_type, "
+                "status, checksum, row_count, source_provider, retrieved_at) "
+                "VALUES ('2025-26', '0022500001', 'Regular Season', 'complete', "
+                "'c', 1, 'ledger', '2026-01-03 00:00:00')"
+            )
+        )
+    later = RETRIEVED_AT + timedelta(days=280)
+    PublicationService(engine, clock=lambda: later).compose(
+        "player_game_logs",
+        season="2026-27",
+        cutoff=later,
+        payload={"rows": [{
+            **_log_row(game_id="0022600001", game_date="2026-10-21", points=12, minutes=30.0),
+            "season": "2026-27",
+        }]},
+        expected_fence=publication.fence,
+    )
+
+
+def test_a_past_season_historical_selection_fails_closed_after_the_publication_advances(
+    tmp_path,
+):
+    """A completed April game with no closing projections, once logs publish 2026-27.
+
+    No retained record names 2025-26's last activated, unrevoked publication,
+    so its rows have no authority: the card is unavailable, never guessed.
+    """
+
+    import pytest
+
+    from app.errors import ProviderUnavailableError
+
+    class PastEvents:
+        def __init__(self):
+            self.seasons = []
+
+        def count_events(self, season):
+            return 1
+
+        def get_event(self, season, game_id):
+            self.seasons.append(season)
+            if season != "2025-26" or game_id != "0022500001":
+                return None
+            return {
+                "nba_game_id": "0022500001",
+                "classification": "Regular Season",
+                "status_code": 3,
+                "status_text": "Final",
+                "scheduled_at": "2026-01-03T00:30:00+00:00",
+                "home_team_id": BOS,
+                "away_team_id": LAL,
+            }
+
+    engine, service, _, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+    _advance_to_next_season(engine, publication)
+    service.event_catalog = PastEvents()
+    service.player_pool = type(
+        "NoClosingSet", (), {"get_pool_for_game": lambda self, *, season, game_id: PlayerPool((), {}, {})}
+    )()
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        service.get_selection(game_id="0022500001", player_id=2544)
+    assert service.event_catalog.seasons == ["2025-26"]
+
+
+def test_a_past_season_historical_matchup_fails_closed_after_the_publication_advances(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import tests.services.test_matchup_service as doubles
+    from app.services.matchup import MatchupService
+    from app.services.stats_freshness_repository import StatsFreshness
+
+    engine, _, reader, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+    _advance_to_next_season(engine, publication)
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season="2026-27",
+        clock=lambda: NOW,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    # Evidence doubles serve, and assert, only the published 2026-27 season.
+    monkeypatch.setattr(doubles, "SEASON", "2026-27")
+    past = {
+        **doubles._event(),
+        "nba_game_id": "0022500001",
+        "season": "2025-26",
+        "scheduled_at": "2026-01-03T00:30:00+00:00",
+        "status_code": 3,
+        "status_text": "Final",
+    }
+    seasons = []
+
+    class PastEvents(doubles.RecordedEvents):
+        def count_events(self, season):
+            return 1
+
+        def get_event(self, season, game_id):
+            seasons.append(season)
+            return past if (season, game_id) == ("2025-26", "0022500001") else None
+
+        def latest_final_scheduled_at(self, season):
+            return None
+
+        def get_freshness(self, season, *, now):
+            return {"last_success_at": None, "fresh": False}
+
+    service = MatchupService(
+        event_catalog=PastEvents(),
+        player_pool=doubles.RecordedPool(PlayerPool((), {}, {})),
+        player_logs=repository,
+        player_diets=doubles.RecordedDiets(),
+        team_matchups=doubles.RecordedTeamWindows(
+            doubles._window(), doubles._window(last_15=True)
+        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(RETRIEVED_AT)),
+        injuries=None,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings.model_construct(
+                _fields_set=set(), current_season="2026-27"
+            ),
+        ),
+        publication_reader=reader,
+        clock=lambda: NOW + timedelta(days=280),
+    )
+
+    payload = service.get_matchup(game_id="0022500001")
+
+    assert seasons == ["2025-26"]
+    assert payload["experience"]["mode"] == "historical"
+    assert payload["players"] == []
+    assert payload["experience"]["sections"]["participants"]["unavailable_reason"] == (
+        "game_logs_incomplete"
+    )
+
+
+def test_a_selection_reads_one_season_when_the_next_activates_mid_request(tmp_path):
+    """Activation between season discovery and capture must not empty the card."""
+
+    engine, service, reader, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+
+    class ActivatesAfterFirstRead:
+        def __init__(self):
+            self.activated = False
+
+        def __getattr__(self, name):
+            return getattr(reader, name)
+
+        def snapshot(self, *args, **kwargs):
+            captured = reader.snapshot(*args, **kwargs)
+            if not self.activated:
+                self.activated = True
+                _advance_to_next_season(engine, publication)
+            return captured
+
+    racing = ActivatesAfterFirstRead()
+    service.publication_reader = racing
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    card = service.get_selection(game_id=GAME_ID, player_id=2544)
+
+    assert racing.activated
+    assert '"game_date": "2026-01-02"' in json.dumps(card)
+
+
+def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
+    """Publish 2026-27, roll back to 2025-26: the rejected rows are no authority."""
+
+    import pytest
+
+    from app.errors import ProviderUnavailableError
+    from app.services.research_season import focal_game_rows
+
+    engine, service, reader, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+    _advance_to_next_season(engine, publication)
+    publications = PublicationService(engine, clock=lambda: NOW + timedelta(days=281))
+    rejected = publications.current("player_game_logs")
+    restored = publications.rollback(
+        "player_game_logs", reason="reject the first new-season publication",
+        expected_fence=rejected.fence,
+    )
+    assert restored.season == "2025-26"
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO player_game_log_sync (season, game_id, season_type, status, "
+            "checksum, row_count, source_provider, retrieved_at) VALUES ('2026-27', "
+            "'0022600001', 'Regular Season', 'complete', 'c', 1, 'ledger', "
+            "'2026-10-22 00:00:00')"
+        ))
+
+    class RejectedSeasonEvents:
+        def count_events(self, season):
+            return 1
+
+        def get_event(self, season, game_id):
+            if (season, game_id) != ("2026-27", "0022600001"):
+                return None
+            return {
+                "nba_game_id": "0022600001", "classification": "Regular Season",
+                "status_code": 3, "status_text": "Final",
+                "scheduled_at": "2026-10-21T23:30:00+00:00",
+                "home_team_id": BOS, "away_team_id": LAL,
+            }
+
+    service.event_catalog = RejectedSeasonEvents()
+    service.player_pool = type(
+        "NoClosingSet", (), {"get_pool_for_game": lambda self, *, season, game_id: PlayerPool((), {}, {})}
+    )()
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    rows = focal_game_rows(
+        service.player_logs, "2026-27", "0022600001", evidence_season="2025-26"
+    )
+    assert not rows
+    with pytest.raises(ProviderUnavailableError):
+        service.get_selection(game_id="0022600001", player_id=2544)

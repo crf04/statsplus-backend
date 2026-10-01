@@ -11,6 +11,7 @@ from app.domain.nba_events import (
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.domain.utc import parse_utc_iso
 from app.errors import ResourceNotFoundError
+from app.services.research_season import schedule_season
 from app.services.team_filter_rankings import (
     TEAM_FILTER_PUBLICATION_STREAM_KEYS,
     TEAM_FILTER_RANKINGS,
@@ -27,7 +28,9 @@ class NextOpponentService:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def get_next_opponent(self, player_name):
-        season = self.game.settings.nba.current_season
+        # Who the player is and how opponents rank come from the published
+        # season; the next game comes from the schedule covering today.
+        season = self.game.default_season()
         try:
             player_id = self.game.get_player_id(player_name, season)
         except ValueError as error:
@@ -48,7 +51,10 @@ class NextOpponentService:
             return empty
         now = self.clock()
         candidates = []
-        for event in self.events.get_events(season):
+        schedule = schedule_season(
+            self.game.settings, self.events, now.astimezone(ZoneInfo("America/New_York")).date()
+        )
+        for event in self.events.get_events(schedule):
             at = parse_utc_iso(event["scheduled_at"])
             if (
                 at < now

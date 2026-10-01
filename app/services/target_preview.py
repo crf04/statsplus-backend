@@ -40,6 +40,7 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
+from app.services.research_season import published_capture
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -67,7 +68,7 @@ PREVIEW_DECODED_ONLY_STREAM_KEYS = BACKTEST_DECODED_ONLY_STREAM_KEYS & frozenset
 
 class BacktestReader(Protocol):
     def backtest_target(
-        self, target: Mapping[str, Any], *, publication_snapshot: Any
+        self, target: Mapping[str, Any], *, publication_snapshot: Any, season: str
     ) -> dict[str, Any]: ...
 
 
@@ -104,19 +105,26 @@ class TargetPreviewService:
         returns; it is echoed as the response's ``target``.
         """
 
-        snapshot = capture_publication_snapshot(
+        # One capture decides the season, and every read uses both.
+        season, snapshot = published_capture(
+            self.settings,
             self.publication_reader,
-            PREVIEW_PUBLICATION_STREAM_KEYS,
-            projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
-            decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
-            season=self.settings.nba.current_season,
+            lambda season: capture_publication_snapshot(
+                self.publication_reader,
+                PREVIEW_PUBLICATION_STREAM_KEYS,
+                projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
+                decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
+                season=season,
+            ),
         )
         previewed = self.backtests.backtest_target(
-            draft, publication_snapshot=snapshot
+            draft, publication_snapshot=snapshot, season=season
         )
         today = self.resolutions.today(
             draft,
-            matchups=SnapshotMatchups(self.matchups, snapshot, self.injuries),
+            matchups=SnapshotMatchups(
+                self.matchups, snapshot, self.injuries, season=season
+            ),
         )
         return {**previewed, "today": today}
 

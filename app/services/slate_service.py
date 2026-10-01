@@ -1,4 +1,4 @@
-"""Current-season slate reads from the canonical event catalog."""
+"""Slate reads from the canonical event catalog, in the slate date's season."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from app.domain.utc import assume_utc, parse_utc_iso
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
+from app.services.research_season import schedule_season
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -75,11 +76,13 @@ class SlateService:
 
     def get_slate(self, requested_date: str | None = None) -> dict[str, Any]:
         slate_date = self._parse_slate_date(requested_date)
-        season = self.settings.nba.current_season
         if self.event_catalog is None:
             raise ProviderUnavailableError(
                 "The NBA schedule is not available. Please try again later."
             )
+        # The date's own season, so a past date reads its own schedule and an
+        # offseason date before collection reads the previous one's (empty).
+        season = schedule_season(self.settings, self.event_catalog, slate_date)
 
         observed_at = assume_utc(self._clock())
         if self.event_catalog.count_events(season) == 0:

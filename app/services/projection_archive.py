@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, nullcontext
+from copy import copy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -2803,11 +2804,32 @@ class LatestProjectionPlayerPoolReader:
         )
         return pool
 
+    def _for_season(self, season: str) -> "LatestProjectionPlayerPoolReader":
+        """This reader with every scope's query moved to ``season``.
+
+        Collection records under the calendar season, but a request reads the
+        season it names: the Slate of a past date, or the previous season's
+        schedule after the October rollover.  The provider set, query shape,
+        and freshness policy stay exactly as configured.
+        """
+
+        if season == self.scope.query.season:
+            return self
+        scoped = copy(self)
+        scoped.scopes = tuple(
+            replace(item, query=replace(item.query, season=season))
+            for item in self.scopes
+        )
+        scoped.scope = scoped.scopes[0]
+        return scoped
+
     def get_pool_for_game_with_closing_state(
         self, *, season: str, game_id: str
     ) -> tuple[PlayerPool, bool]:
         if season != self.scope.query.season:
-            raise ValueError("projection archive read season is outside its scope")
+            return self._for_season(season).get_pool_for_game_with_closing_state(
+                season=season, game_id=game_id
+            )
         requested_games = (str(game_id),)
         started_games = self._started_games(season, requested_games)
         return (
@@ -2826,7 +2848,7 @@ class LatestProjectionPlayerPoolReader:
 
     def get_pool(self, *, season: str, game_ids: Iterable[str]) -> PlayerPool:
         if season != self.scope.query.season:
-            raise ValueError("projection archive read season is outside its scope")
+            return self._for_season(season).get_pool(season=season, game_ids=game_ids)
         requested_games = tuple(sorted({str(game_id) for game_id in game_ids}))
         if not requested_games:
             return PlayerPool((), {}, PlayerPool.missing_projection_freshness(), {})

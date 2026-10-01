@@ -41,6 +41,7 @@ from app.services.matchup_snapshot import (
     capture_publication_snapshot,
 )
 from app.services.target_conditions import date_is_kept, minutes_are_kept
+from app.services.research_season import published_capture
 
 
 _WINDOW_NAMES = ("season", "last_15")
@@ -142,13 +143,17 @@ class TargetResolutionService:
             or not callable(getattr(composer, "get_matchup_from_snapshot", None))
         ):
             return self.matchups
-        snapshot = capture_publication_snapshot(
+        season, snapshot = published_capture(
+            self.settings,
             self.publication_reader,
-            MATCHUP_PUBLICATION_STREAM_KEYS,
-            projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-            season=self.settings.nba.current_season,
+            lambda season: capture_publication_snapshot(
+                self.publication_reader,
+                MATCHUP_PUBLICATION_STREAM_KEYS,
+                projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
+                season=season,
+            ),
         )
-        return SnapshotMatchups(composer, snapshot, self.injuries)
+        return SnapshotMatchups(composer, snapshot, self.injuries, season=season)
 
     def today(
         self,
