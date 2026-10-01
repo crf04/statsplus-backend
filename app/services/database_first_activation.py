@@ -954,8 +954,24 @@ class PublicationReadSnapshot:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PublishedSeason:
+    """A snapshot season decided inside the capture itself.
+
+    The capture reads in the season of the active player-game-log publication
+    it selects in the same statement, or in ``fallback`` when that stream has
+    no available publication, so a season activation between discovering the
+    season and capturing in it cannot split one request.
+    """
+
+    fallback: str
+
+
 class DatabaseFirstPublicationReader:
     """Read active publication pointers without provider or legacy fallback."""
+
+    #: ``snapshot`` accepts ``season=PublishedSeason(...)``.
+    captures_published_season = True
 
     #: A Diet stream's decoded facts stay valid for as long as the immutable
     #: publication row they name exists, so only the number of versions kept
@@ -1025,7 +1041,7 @@ class DatabaseFirstPublicationReader:
         self,
         stream_keys: Iterable[str],
         *,
-        season: str | None = None,
+        season: str | PublishedSeason | None = None,
         require_active: bool = True,
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
@@ -1169,7 +1185,7 @@ class DatabaseFirstPublicationReader:
         self,
         stream_keys: Iterable[str],
         *,
-        season: str | None,
+        season: str | PublishedSeason | None,
         require_active: bool,
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
@@ -1177,6 +1193,16 @@ class DatabaseFirstPublicationReader:
     ) -> PublicationReadSnapshot:
         """Capture one immutable generation through its selected read shape."""
 
+        published = season if isinstance(season, PublishedSeason) else None
+        if published is not None:
+            # The season comes from this capture's own player-log pointer.
+            requested = set(str(key) for key in stream_keys)
+            if "player_game_logs" not in requested:
+                projection_only_keys = frozenset(projection_only_keys) | {
+                    "player_game_logs"
+                }
+            stream_keys = requested | {"player_game_logs"}
+            season = published.fallback
         keys = tuple(sorted(set(str(key) for key in stream_keys)))
         if not keys:
             return PublicationReadSnapshot(season, {}, ())
@@ -1260,6 +1286,26 @@ class DatabaseFirstPublicationReader:
                 }
             now = _utc(self.clock())
             missing = _SnapshotRow(None, None, None)
+            if published is not None:
+                row = snapshot.get("player_game_logs", missing)
+                selected = self._read_row(
+                    "player_game_logs",
+                    stream=row.stream,
+                    pointer=row.pointer,
+                    publication=row.publication,
+                    projection_ready=(
+                        "player_game_logs" in projection_keys and row.projection_ready
+                    ),
+                    hydrate_payload="player_game_logs" not in projection_keys,
+                    decoded_only="player_game_logs" in decoded_keys,
+                    payload_text=row.payload_text,
+                    season=None,
+                    require_active=require_active,
+                    now=now,
+                    session=session,
+                )
+                if selected.available and isinstance(selected.season, str):
+                    season = selected.season
             reads = {
                 key: self._read_row(key, **{
                     "stream": snapshot.get(key, missing).stream,

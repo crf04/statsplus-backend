@@ -553,3 +553,37 @@ def test_a_past_season_historical_matchup_names_its_participants_after_the_publi
     assert seasons == ["2025-26"]
     assert payload["experience"]["mode"] == "historical"
     assert [player["canonical_id"] for player in payload["players"]] == [2544]
+
+
+def test_a_selection_reads_one_season_when_the_next_activates_mid_request(tmp_path):
+    """Activation between season discovery and capture must not empty the card."""
+
+    engine, service, reader, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+
+    class ActivatesAfterFirstRead:
+        def __init__(self):
+            self.activated = False
+
+        def __getattr__(self, name):
+            return getattr(reader, name)
+
+        def snapshot(self, *args, **kwargs):
+            captured = reader.snapshot(*args, **kwargs)
+            if not self.activated:
+                self.activated = True
+                _advance_to_next_season(engine, publication)
+            return captured
+
+    racing = ActivatesAfterFirstRead()
+    service.publication_reader = racing
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    card = service.get_selection(game_id=GAME_ID, player_id=2544)
+
+    assert racing.activated
+    assert '"game_date": "2026-01-02"' in json.dumps(card)

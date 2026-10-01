@@ -84,7 +84,12 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
-from app.services.research_season import event_season, focal_game_rows, research_season
+from app.services.research_season import (
+    event_season,
+    focal_game_rows,
+    published_capture,
+    research_season,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -655,13 +660,16 @@ class MatchupService:
         connection: Connection | None,
         session: Session | None,
     ) -> dict[str, Any]:
-        season = research_season(self.settings, self.publication_reader)
         opponent_id = self._known_team_id(opponent)
         team_id = None if team is None else self._known_team_id(team)
         player_team_id = (
             None if player_team is None else self._known_team_id(player_team)
         )
-        publication_snapshot = self._publication_snapshot(season, session=session)
+        season, publication_snapshot = published_capture(
+            self.settings,
+            self.publication_reader,
+            lambda season: self._publication_snapshot(season, session=session),
+        )
         # One per-request memo, as a Target composing many games shares one.
         compose_cache = MatchupComposeCache()
         catalog = (
@@ -896,12 +904,17 @@ class MatchupService:
         # Evidence (logs, Diets, windows) is the published season's; the
         # game's own schedule facts (event, pool, injuries) are its season's,
         # so opening night composes before the new season publishes.
-        if season is None:
+        if publication_snapshot is _OWN:
+            # One capture decides the evidence season and holds its evidence.
+            season, publication_snapshot = published_capture(
+                self.settings,
+                self.publication_reader,
+                lambda season: self._publication_snapshot(season, session=session),
+            )
+        elif season is None:
             season = research_season(self.settings, self.publication_reader)
         schedule_season = event_season(self.settings, game_id, season)
         observed_at = assume_utc(self._clock())
-        if publication_snapshot is _OWN:
-            publication_snapshot = self._publication_snapshot(season, session=session)
         event = self._event(schedule_season, game_id, connection=connection)
         schedule_freshness = self._schedule_freshness(
             schedule_season, observed_at=observed_at, connection=connection

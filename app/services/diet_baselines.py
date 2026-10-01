@@ -2,7 +2,7 @@
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import call_with_read_scope
-from app.services.research_season import research_season
+from app.services.research_season import published_capture
 
 
 class DietBaselinesService:
@@ -12,15 +12,16 @@ class DietBaselinesService:
         self.publication_reader = publication_reader
 
     def get(self):
-        season = research_season(self.settings, self.publication_reader)
-        snapshot = (
-            self.publication_reader.snapshot(
+        season, snapshot = published_capture(
+            self.settings,
+            self.publication_reader,
+            lambda season: self.publication_reader.snapshot(
                 tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)),
                 season=season,
                 # Baselines need only decoded facts; a decode-cache hit never
                 # selects or parses the league-wide diet payloads.
                 decoded_only_keys=PLAYER_DIET_PUBLICATION_STREAM_KEYS,
-            ) if self.publication_reader is not None else None
+            ),
         )
         result = (
             call_with_read_scope(

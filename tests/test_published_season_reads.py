@@ -568,3 +568,118 @@ def test_an_explicit_game_log_season_never_discovers_the_default(dependencies, c
     assert dependencies.game_service.get_filtered_logs.call_args.args[1].season_filter == "2024-25"
     assert malformed.status_code == 400
     dependencies.game_service.default_season.assert_not_called()
+
+
+def test_season_minutes_stay_consistent_when_a_season_activates_mid_request(tmp_path):
+    """Activation between season discovery and capture must not empty the read."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.collection_control import PublicationService
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.statistic_catalog import StatisticCatalog
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+    from tests.services.test_matchup_selection_service import BOS, LAL, _log_row
+
+    def _game(game_id, game_date, laker, season):
+        """One LAL player and one BOS opponent in one game."""
+
+        lal = _log_row(player_id=laker, game_id=game_id, game_date=game_date,
+                       points=20, minutes=30.0)
+        bos = {**_log_row(player_id=1628369, game_id=game_id, game_date=game_date,
+                          points=18, minutes=33.0, opponent_team_id=LAL),
+               "team_id": BOS, "team_tricode": "BOS", "opponent_team_tricode": "LAL"}
+        return [{**lal, "season": season}, {**bos, "season": season}]
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'race.sqlite3'}")
+    run_migrations(engine)
+    at = datetime(2026, 9, 30, tzinfo=timezone.utc)
+    publisher = PublicationService(engine, clock=lambda: at)
+    publisher.register_stream(
+        "player_game_logs", provider="ledger", owner="railway",
+        required_observations=(), publication_strategy="replace", enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    first = publisher.compose(
+        "player_game_logs", season=PUBLISHED, cutoff=at,
+        payload={"rows": _game("0022500001", "2026-01-02", 2544, PUBLISHED)},
+    )
+
+    class ActivatesAfterFirstRead:
+        """The real reader; the next season activates right after its first capture."""
+
+        def __init__(self, reader):
+            self._reader = reader
+            self.activated = False
+
+        def __getattr__(self, name):
+            return getattr(self._reader, name)
+
+        def snapshot(self, *args, **kwargs):
+            captured = self._reader.snapshot(*args, **kwargs)
+            if not self.activated:
+                self.activated = True
+                later = at + timedelta(days=22)
+                PublicationService(engine, clock=lambda: later).compose(
+                    "player_game_logs", season=CALENDAR, cutoff=later,
+                    payload={"rows": _game("0022600001", "2026-10-21", 1641705, CALENDAR)},
+                    expected_fence=first.fence,
+                )
+            return captured
+
+    reader = DatabaseFirstPublicationReader(engine)
+    logs = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=CALENDAR,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    racing = ActivatesAfterFirstRead(reader)
+    service = TargetSeasonMinutesService(
+        player_logs=logs, settings=_settings(), publication_reader=racing
+    )
+
+    during = service.get("LAL")
+    after = service.get("LAL")
+
+    assert racing.activated
+    assert (during["season"], [p["player_id"] for p in during["players"]]) == (PUBLISHED, [2544])
+    assert (after["season"], [p["player_id"] for p in after["players"]]) == (CALENDAR, [1641705])
+    engine.dispose()
+
+
+def test_a_published_season_capture_reads_in_its_own_pointer_season(tmp_path):
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.database_first_activation import (
+        DatabaseFirstPublicationReader,
+        PublishedSeason,
+    )
+    from tests.services.test_database_first_activation import (
+        _seed_player_game_log_publication,
+    )
+
+    empty = create_engine(f"sqlite:///{tmp_path / 'empty.sqlite3'}")
+    run_migrations(empty)
+    unpublished = DatabaseFirstPublicationReader(empty).snapshot(
+        ("player_game_logs",), season=PublishedSeason(CALENDAR)
+    )
+    assert unpublished.season == CALENDAR
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'published.sqlite3'}")
+    run_migrations(engine)
+    _seed_player_game_log_publication(engine)
+    # A capture that does not name the player-log stream still follows it.
+    captured = DatabaseFirstPublicationReader(engine).snapshot(
+        ("player_diet_play_types",), season=PublishedSeason(CALENDAR)
+    )
+    assert captured.season == PUBLISHED
+    assert captured.read("player_game_logs").available
+    empty.dispose()
+    engine.dispose()

@@ -19,6 +19,7 @@ from datetime import date
 
 from app.config.settings import current_nba_season
 from app.domain.nba_events import season_for_game_id
+from app.services.database_first_activation import PublishedSeason
 from app.services.publication_snapshot_calls import call_with_read_scope
 
 
@@ -125,3 +126,25 @@ def focal_game_rows(
         publication_snapshot=publication_snapshot,
         connection=connection,
     )
+
+
+def published_capture(settings, publication_reader, capture):
+    """Capture one snapshot and return ``(season, snapshot)`` from it.
+
+    ``capture(season)`` takes the season to capture in. A reader that can
+    decide the season inside its own capture (``PublishedSeason``) does, so a
+    season activation cannot fall between discovering the season and reading
+    in it; any other reader keeps the two-step lookup. A pin, or no reader,
+    captures in the settings season.
+    """
+
+    if publication_reader is None:
+        return settings.nba.current_season, None
+    if season_is_pinned(settings):
+        return settings.nba.current_season, capture(settings.nba.current_season)
+    if getattr(publication_reader, "captures_published_season", False) is True:
+        snapshot = capture(PublishedSeason(settings.nba.current_season))
+        season = getattr(snapshot, "season", None)
+        return (season if isinstance(season, str) else settings.nba.current_season), snapshot
+    season = research_season(settings, publication_reader)
+    return season, capture(season)

@@ -89,7 +89,7 @@ from app.services.target_conditions import (
     player_minutes_are_kept,
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
-from app.services.research_season import research_season
+from app.services.research_season import published_capture, research_season
 
 
 logger = getLogger(__name__)
@@ -518,6 +518,9 @@ class TargetBacktestService:
         """
 
         cache_state = "-"
+        # The cache pre-check needs a season before any capture; an own
+        # capture below then decides the season the evidence is read in.
+        season_given = season is not None
         if season is None:
             season = research_season(self.settings, self.publication_reader)
         qualifiers = list(target["qualifiers"])
@@ -555,11 +558,15 @@ class TargetBacktestService:
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
             # evidence.
-            snapshot = (
-                self._publication_snapshot(season, session=session)
-                if publication_snapshot is _OWN
-                else publication_snapshot
-            )
+            snapshot = publication_snapshot
+            if publication_snapshot is _OWN and season_given:
+                snapshot = self._publication_snapshot(season, session=session)
+            elif publication_snapshot is _OWN:
+                season, snapshot = published_capture(
+                    self.settings,
+                    self.publication_reader,
+                    lambda season: self._publication_snapshot(season, session=session),
+                )
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
             rows = tuple(record for record in call_with_read_scope(
                 self.player_logs.list_opponent_rows, season, opponent_team_id,

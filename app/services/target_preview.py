@@ -40,7 +40,7 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
-from app.services.research_season import research_season
+from app.services.research_season import published_capture
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -105,14 +105,17 @@ class TargetPreviewService:
         returns; it is echoed as the response's ``target``.
         """
 
-        # One season, resolved once, for the capture and every read of it.
-        season = research_season(self.settings, self.publication_reader)
-        snapshot = capture_publication_snapshot(
+        # One capture decides the season, and every read uses both.
+        season, snapshot = published_capture(
+            self.settings,
             self.publication_reader,
-            PREVIEW_PUBLICATION_STREAM_KEYS,
-            projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
-            decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
-            season=season,
+            lambda season: capture_publication_snapshot(
+                self.publication_reader,
+                PREVIEW_PUBLICATION_STREAM_KEYS,
+                projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
+                decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
+                season=season,
+            ),
         )
         previewed = self.backtests.backtest_target(
             draft, publication_snapshot=snapshot, season=season
