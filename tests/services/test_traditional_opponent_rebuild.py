@@ -581,6 +581,37 @@ def test_family_rollback_moves_both_windows_together(family):
         assert after[stream_key][1] == promoted[stream_key][1] + 1
 
 
+def test_family_promotion_and_rollback_each_write_history_with_the_pointer_move(
+    family,
+):
+    engine, publications = family
+    from tests.support.pointer_history import pointer_history
+
+    initial = _pointers(engine)
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.run(rebuild.rebuild_id, owner="worker-1")
+    promoted = _pointers(engine)
+
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        assert pointer_history(engine, stream_key) == [
+            (initial[stream_key][0], SEASON, 1, False),
+            (promoted[stream_key][0], SEASON, 2, False),
+        ]
+
+    service.rollback(actor=ACTOR, reason="restore the previous format")
+    restored = _pointers(engine)
+
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        assert pointer_history(engine, stream_key) == [
+            (initial[stream_key][0], SEASON, 1, False),
+            (promoted[stream_key][0], SEASON, 2, True),
+            (restored[stream_key][0], SEASON, 3, False),
+        ]
+
+
 def test_rollback_refuses_a_target_this_deployment_cannot_read(tmp_path):
     """Production's exact shape: v2 active, v1 retained as previous.
 

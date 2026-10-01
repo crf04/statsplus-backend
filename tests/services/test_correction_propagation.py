@@ -62,6 +62,7 @@ from app.services.team_matchup_repository import (
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
+from tests.support.pointer_history import pointer_history
 
 
 UTC = timezone.utc
@@ -3648,6 +3649,17 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
     assert statuses[stale_two.publication_id] == "superseded"
     assert statuses[corrected.publication_id] == (
         "active" if enabled else "candidate"
+    )
+    # The activated candidate the correction invalidated is revoked; one that
+    # never activated has no history, and the corrected version has a row
+    # only when it was composed active.
+    assert pointer_history(engine, stream_key) == (
+        [
+            (stale_two.publication_id, "2025-26", 1, True),
+            (corrected.publication_id, "2025-26", 2, False),
+        ]
+        if enabled
+        else [(stale_two.publication_id, "2025-26", 1, True)]
     )
     if enabled:
         assert pointer is not None

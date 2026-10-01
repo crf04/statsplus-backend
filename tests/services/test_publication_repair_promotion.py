@@ -41,6 +41,7 @@ from app.services.collection_control import (
     ControlPlaneError,
     PublicationService,
 )
+from tests.support.pointer_history import pointer_history
 from tests.services.test_collection_control import (
     L15_ZONES,
     SEASON_ZONES,
@@ -350,6 +351,10 @@ def test_grouped_promotion_advances_both_pointers_and_records_one_audit(repair):
     for stream_key in (SEASON_ZONES, L15_ZONES):
         assert statuses[displaced[stream_key].publication_id] == "superseded"
         assert statuses[after[stream_key][0]] == "active"
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        assert pointer_history(engine, stream_key)[-1] == (
+            after[stream_key][0], "2025-26", after[stream_key][2], False,
+        )
 
     # Both replacements carry the repaired value, so the pair is coherent.
     with engine.connect() as connection:

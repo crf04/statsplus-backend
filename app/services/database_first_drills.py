@@ -28,6 +28,7 @@ from app.models.collection_control import (
     CollectorStatusTransition,
     CompositionJob,
     PublicationPointer,
+    PublicationPointerHistory,
 )
 from app.models.canonical_game_ledger import CanonicalGameLedgerGame
 from app.services.canonical_game_ledger import raw_rows_from_facts
@@ -59,6 +60,7 @@ DOMAIN_TABLES = frozenset({
     "composition_jobs",
     "publication_activations",
     "publication_observations",
+    "publication_pointer_history",
     "publication_pointers",
     "publication_streams",
     "publication_versions",
@@ -1049,6 +1051,14 @@ class FailureDrillRunner:
                         previous_publication_id=restore_prior_publication,
                         fence=1,
                         updated_at=now,
+                    ))
+                    connection.execute(PublicationPointerHistory.__table__.insert().values(
+                        history_id=str(uuid4()),
+                        stream_key=restore_stream,
+                        publication_id=publication["publication_id"],
+                        season=publication["season"],
+                        fence=1,
+                        activated_at=now,
                     ))
                 if connection.execute(
                     CollectionObservation.__table__.select().where(

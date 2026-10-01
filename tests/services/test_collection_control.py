@@ -49,6 +49,7 @@ from app.services.collection_control import (
 )
 from app.services.database_first_activation import decode_player_diet
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from tests.support.pointer_history import pointer_history
 
 
 UTC = timezone.utc
@@ -2366,6 +2367,9 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
             PublicationPointer.stream_key == "player_assist_locations",
         )).mappings().one()
     assert pointer["active_publication_id"] == candidate.publication_id
+    assert pointer_history(control_db, "player_assist_locations") == [
+        (candidate.publication_id, "2025-26", 1, False),
+    ]
     decoded = decode_player_diet(
         json.loads(candidate.payload), base="assist_locations", retrieved_at=now,
     )

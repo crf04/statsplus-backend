@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime as PythonDateTime, timezone
 import json
 import logging
+import uuid
 from typing import Callable, Final
 
 from sqlalchemy import (
@@ -2172,6 +2173,62 @@ def _add_player_diet_shooting_detail(connection: Connection) -> None:
     ))
 
 
+def _create_publication_pointer_history(connection: Connection) -> None:
+    """Create the pointer history and seed one row per current active pointer.
+
+    Seeding captures the authority already serving at deploy time (production's
+    2025-26 ``player_game_logs``) without inferring it from version statuses.
+    Rerun-safe: the table is created ``checkfirst`` and a pointer whose active
+    publication already has a history row is not seeded again.
+    """
+
+    from app.models.collection_control import PublicationPointerHistory
+
+    PublicationPointerHistory.__table__.create(connection, checkfirst=True)
+    inspector = inspect(connection)
+    if not inspector.has_table("publication_pointers") or not inspector.has_table(
+        "publication_versions"
+    ):
+        return
+    from app.models.collection_control import PublicationPointer, PublicationVersion
+
+    history = PublicationPointerHistory.__table__
+    pointer_table = PublicationPointer.__table__
+    pointers = connection.execute(
+        select(
+            pointer_table.c.stream_key,
+            pointer_table.c.active_publication_id,
+            pointer_table.c.fence,
+            pointer_table.c.updated_at,
+            PublicationVersion.__table__.c.season,
+        )
+        .join(
+            PublicationVersion.__table__,
+            PublicationVersion.__table__.c.publication_id
+            == pointer_table.c.active_publication_id,
+        )
+        .where(pointer_table.c.active_publication_id.is_not(None))
+        .order_by(pointer_table.c.stream_key)
+    ).all()
+    for stream_key, publication_id, fence, updated_at, season in pointers:
+        recorded = connection.execute(
+            select(history.c.history_id).where(
+                history.c.stream_key == stream_key,
+                history.c.publication_id == publication_id,
+            ).limit(1)
+        ).first()
+        if recorded is not None:
+            continue
+        connection.execute(history.insert().values(
+            history_id=str(uuid.uuid4()),
+            stream_key=stream_key,
+            publication_id=publication_id,
+            season=season,
+            fence=int(fence or 0),
+            activated_at=updated_at,
+        ))
+
+
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
     """Index the projection's ``(publication_id, game_id)`` filter.
 
@@ -2336,6 +2393,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         56,
         "056_publication_player_game_log_game_index",
         _add_publication_player_game_log_game_index,
+    ),
+    Migration(
+        57,
+        "057_publication_pointer_history",
+        _create_publication_pointer_history,
     ),
 )
 
