@@ -624,6 +624,11 @@ def test_family_rollback_cannot_restore_a_target_a_correction_withdrew(family):
     )
 
     engine, publications = family
+    # Promote a second generation so both windows hold a rollback target.
+    rebuild = _service(engine).start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    _service(engine).run(rebuild.rebuild_id, owner="worker-1")
     before = _pointers(engine)
     with engine.begin() as connection:
         connection.execute(CollectionObservation.__table__.insert().values(
@@ -655,8 +660,8 @@ def test_family_rollback_cannot_restore_a_target_a_correction_withdrew(family):
         )
 
     history = pointer_history(engine, SEASON_STREAM)
-    assert history[0] == (before[SEASON_STREAM][0], SEASON, 1, True)
-    assert history[1:] == [(corrected.publication_id, SEASON, 2, False)]
+    assert [row[3] for row in history[:-1]] == [True, True]
+    assert history[-1] == (corrected.publication_id, SEASON, 3, False)
     assert _pointers(engine)[L15_STREAM] == before[L15_STREAM]
 
 
