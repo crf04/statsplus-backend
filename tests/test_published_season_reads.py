@@ -549,3 +549,22 @@ def test_a_saved_backtest_reads_the_published_season(settings, season):
 
     assert reader.captures == [season]
     assert body["season"] == season
+
+
+def test_an_explicit_game_log_season_never_discovers_the_default(dependencies, client):
+    dependencies.game_service.default_season.side_effect = RuntimeError(
+        "publication pointers unavailable"
+    )
+    dependencies.game_service.get_filtered_logs.return_value = {
+        "game_logs": [], "averages": [], "season_averages": [], "next_game": None,
+    }
+
+    explicit = client.get("/api/games/game_logs?player_name=LeBron+James&season_filter=2024-25")
+    malformed = client.get(
+        "/api/games/game_logs?player_name=LeBron+James&season_filter=2024-25&minutes_filter=abc"
+    )
+
+    assert explicit.status_code == 200
+    assert dependencies.game_service.get_filtered_logs.call_args.args[1].season_filter == "2024-25"
+    assert malformed.status_code == 400
+    dependencies.game_service.default_season.assert_not_called()
