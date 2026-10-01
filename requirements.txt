@@ -19,7 +19,7 @@ MarkupSafe==3.0.3
 nba_api==1.11.4
 numpy==2.4.6
 pandas==2.2.2
-PyJWT==2.13.0
+PyJWT==2.15.0
 pymongo==4.17.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
@@ -29,7 +29,7 @@ six==1.17.0
 SQLAlchemy==2.0.52
 typing_extensions==4.16.0
 tzdata==2026.3
-urllib3==2.7.0
+urllib3==2.8.0
 Werkzeug==3.1.8
 
 # Natural Language Processing
