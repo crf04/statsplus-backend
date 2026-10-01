@@ -22,6 +22,7 @@ def make_service(llm_service=None, parser=None, shadow_sampler=None):
 
     service = NLService.__new__(NLService)
     service.settings = load_settings()
+    service.publication_reader = None
     service.nl_parser = parser or SimpleNamespace()
     service.query_executor = SimpleNamespace()
     service.llm_service = llm_service

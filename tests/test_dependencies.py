@@ -951,3 +951,120 @@ def test_a_half_correct_redis_policy_still_warns_the_expected_one(config, caplog
     assert "maxmemory-policy=allkeys-lru" in message
     assert f"maxmemory={config['maxmemory']}" in message
     assert f"maxmemory-policy={config['maxmemory-policy']}" in message
+
+
+def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch):
+    """The public query must keep the named player and use available data."""
+    from datetime import date
+    from sqlalchemy import create_engine, text
+    from app import create_app
+    from app.config import settings as settings_module
+    from app.dependencies import build_dependencies
+    from app.migrations import run_migrations
+    from tests.services.test_database_first_activation import (
+        _seed_player_game_log_publication,
+    )
+
+    class OctoberDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 10, 1)
+
+    monkeypatch.setattr(settings_module, "date", OctoberDate)
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    _seed_player_game_log_publication(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO athlete_catalog "
+            "(season, player_id, display_name, roster_status, is_active, "
+            "is_active_for_season, team_id, team_abbreviation, published_at) "
+            "VALUES ('2025-26', 1630552, 'Jalen Johnson', 'active', 1, 1, "
+            "1610612737, 'ATL', '2026-09-01')"
+        ))
+    monkeypatch.setattr("app.utils.db.get_engine", lambda settings: engine)
+    settings = RuntimeSettings(
+        environment="testing", database={"url": "sqlite:///:memory:"},
+        auth={"firebase_admin_disabled": True}, cache={"enabled": False},
+    )
+    dependencies = build_dependencies(settings)
+    app = create_app({
+        "TESTING": True, "RUNTIME_SETTINGS": settings,
+        "DEPENDENCIES": dependencies, "SKIP_FIREBASE_INIT": True,
+        "SKIP_TABLE_CREATE": True,
+    })
+    response = app.test_client().post(
+        "/api/nl-query", json={"query": "jalen johnson this year"}
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["player_name"] == "Jalen Johnson"
+    assert payload["season"] == "2025-26"
+    assert payload["parsed_by"] == "nlp"
+    assert dependencies.settings.nba.current_season == "2026-27"
+    assert dependencies.game_service.settings.nba.current_season == "2026-27"
+    assert dependencies.slate_service.settings.nba.current_season == "2026-27"
+
+    # Profile reads accompanying Search must use available data as well.
+    from types import SimpleNamespace
+    from tests.services.test_player_service import _durable_profile_reader
+    from tests.services.test_team_stats_publications import _traditional_reads
+    from tests.support.publication_stubs import team_service
+
+    profile = _durable_profile_reader()
+    catalog = profile.catalog
+    profile.get_catalog = lambda season, **kwargs: (
+        catalog if season == "2025-26" else []
+    )
+    dependencies.player_service.profile_reader = profile
+    player_profile = dependencies.player_service.get_player_profile(
+        "Jayson Tatum", "Playtypes"
+    )
+    assert player_profile["PLAYER_NAME"] == "Jayson Tatum"
+    assert player_profile["Transition%"] == 20.0
+    assert dependencies.player_service.get_all_players() == ["Jayson Tatum"]
+    rows = team_service(_traditional_reads()).publications.season_rows(
+        "traditional", "2025-26"
+    )
+    dependencies.team_service.publications = SimpleNamespace(
+        season_rows=lambda base, season: rows if season == "2025-26" else None
+    )
+    team_profile = dependencies.team_service.get_team_stats(
+        "Traditional", "Los Angeles Lakers"
+    )
+    assert team_profile["OPP_PTS"] == 120.0
+    assert team_profile["OPP_PTS_RANK"] == 30
+
+    # A later publication advances research immediately in the same process.
+    from datetime import datetime, timezone
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.collection_control import PublicationService
+
+    reader = DatabaseFirstPublicationReader(engine)
+    logs = reader.read("player_game_logs").payload
+    row = logs["rows"][0]
+    row.update(season="2026-27", game_date="2026-10-25", game_id="0022600001")
+    published_at = datetime(2026, 10, 26, tzinfo=timezone.utc)
+    publisher = PublicationService(engine, clock=lambda: published_at)
+    publisher.register_stream(
+        "player_game_logs", provider="ledger", owner="railway",
+        required_observations=(), publication_strategy="replace", enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    publisher.compose(
+        "player_game_logs", season="2026-27", cutoff=published_at, payload=logs,
+        expected_fence=reader.read("player_game_logs").fence,
+    )
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE athlete_catalog SET season = '2026-27', "
+            "display_name = 'Published Season Rookie' "
+            "WHERE player_id = 1630552"
+        ))
+    advanced = app.test_client().post(
+        "/api/nl-query", json={"query": "Published Season Rookie this year"}
+    )
+    assert advanced.status_code == 200
+    assert advanced.get_json()["player_name"] == "Published Season Rookie"
+    assert advanced.get_json()["season"] == "2026-27"
+    engine.dispose()

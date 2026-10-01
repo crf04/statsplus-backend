@@ -1266,7 +1266,8 @@ class BaseQueryParser:
                 if len(phrase) > 2:
                     alias_match = process.extractOne(
                         phrase,
-                        [a.strip().lower() for a in self.player_aliases.keys()],
+                        [a.strip().lower() for a in self.player_aliases.keys()
+                         if len(a.strip()) > 2],
                         scorer=fuzz.partial_ratio,
                         score_cutoff=90  # Keep at 90 to allow misspellings like "currey" -> "stephen curry"
                     )

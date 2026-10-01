@@ -2,15 +2,22 @@ from app.services.nl_query.parser import BaseQueryParser
 from app.services.llm_service import LLMParsedQuery, LLMService
 from app.services import nl_shadow
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.services.research_season import research_service
 import logging
 import time
+from copy import copy
+from collections import OrderedDict
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
 class NLService:
-    def __init__(self, engine, settings: RuntimeSettings | None = None):
+    def __init__(self, engine, settings: RuntimeSettings | None = None, publication_reader=None):
         self.engine = engine
         self.settings = settings or get_runtime_settings()
+        self.publication_reader = publication_reader
+        self._research_parsers = OrderedDict()
+        self._research_parser_lock = Lock()
         self.nl_parser = None
         self.llm_service = None
         self.shadow_sampler = None
@@ -45,6 +52,26 @@ class NLService:
         logger.info("Natural language query system initialized")
 
     def process_query(self, query):
+        scoped = research_service(self, self.publication_reader)
+        generation = getattr(scoped, "_research_generation", None)
+        if generation is not None:
+            scoped = copy(scoped)
+            with self._research_parser_lock:
+                context = self._research_parsers.get(generation)
+                if context is None:
+                    parser = BaseQueryParser(self.engine, settings=scoped.settings)
+                    llm = (
+                        LLMService(settings=scoped.settings)
+                        if self.llm_service is not None else None
+                    )
+                    context = (parser, llm)
+                    self._research_parsers[generation] = context
+                    while len(self._research_parsers) > 2:
+                        self._research_parsers.popitem(last=False)
+                scoped.nl_parser, scoped.llm_service = context
+        return scoped._process_query(query)
+
+    def _process_query(self, query):
         """Process natural language query with hybrid NLP+LLM routing"""
         if not query or not query.strip():
             raise ValueError("Empty query provided")

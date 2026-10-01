@@ -337,8 +337,14 @@ def build_dependencies(
         if publication_reader is not None
         else None
     )
+    research_publications = (
+        publication_reader
+        if publication_reader is not None and inspect(engine).has_table("publication_pointers")
+        else None
+    )
     team_service = TeamService(
         settings=settings,
+        publication_reader=research_publications,
         season_publications=season_rankings,
     )
     stats_freshness_repository = StatsFreshnessRepository(engine)
@@ -512,7 +518,7 @@ def build_dependencies(
     player_service = PlayerService(
         engine,
         settings=settings,
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
         profile_reader=player_profile_reader,
         game_logs=player_game_log_repository,
     )
@@ -785,7 +791,7 @@ def build_dependencies(
         event_mapping_repository=event_mapping_repository,
         event_resolver=event_resolver,
         provider_health_service=provider_health_service,
-        nl_service=NLService(engine, settings=settings),
+        nl_service=NLService(engine, settings=settings, publication_reader=research_publications),
         user_service=user_service,
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,

@@ -128,6 +128,13 @@ when a dependency is degraded.
 POST /api/nl-query
 ```
 
+The default research season (including “this year”) follows the active,
+available player-game-log publication, so an October rollover does not select
+an unpublished season. Player and team profiles use the same research default;
+schedules and collectors retain their calendar-season defaults. Explicit runtime
+season overrides are preserved, and a new publication takes effect on the next
+research request without restarting the application.
+
 Request:
 
 ```json

@@ -89,3 +89,13 @@ def test_a_missing_catalog_degrades_to_no_names_rather_than_failing(tmp_path):
         assert parser.players == []
     finally:
         engine.dispose()
+
+
+def test_short_alias_is_not_a_fuzzy_prefix_when_catalog_is_missing():
+    engine = create_engine("sqlite://")
+    try:
+        parser = BaseQueryParser(engine, load_settings())
+        assert parser.resolve_player_name("jalen johnson") is None
+        assert parser.resolve_player_name("ja") == "Ja Morant"
+    finally:
+        engine.dispose()
