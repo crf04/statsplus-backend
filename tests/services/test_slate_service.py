@@ -677,3 +677,34 @@ def test_an_unpinned_slate_without_either_seasons_schedule_stays_unavailable():
 
     with pytest.raises(ProviderUnavailableError):
         service.get_slate()
+
+
+def test_an_offseason_slate_reads_the_production_projection_pool_for_the_fallback_season(
+    tmp_path,
+):
+    """The real projection reader is scoped to collection's calendar season."""
+
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.providers.dfs import NBAMarketQuery
+    from app.services.projection_archive import (
+        LatestProjectionPlayerPoolReader,
+        ProjectionArchiveReadScope,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'slate-pool.sqlite3'}")
+    run_migrations(engine)
+    reader = LatestProjectionPlayerPoolReader(
+        engine,
+        ProjectionArchiveReadScope(provider="dabble", query=NBAMarketQuery(season="2026-27")),
+    )
+    catalog = SeasonCatalog({
+        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+    })
+    service = _rollover_service(catalog, player_pool=reader)
+
+    assert service.get_slate()["games"] == []
+    past = service.get_slate("2026-04-10")
+    assert [game["game_id"] for game in past["games"]] == ["0022501150"]
+    engine.dispose()
