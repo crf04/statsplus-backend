@@ -3808,3 +3808,36 @@ list entries and are applied sequentially.
   production seams with no network. Live provider-contract tests in
   `tests/live/` are marked `live` and excluded from the default gate; opt in
   with `LIVE_CONTRACT_TESTS=true` plus `-m live`.
+
+### Player's Next Opponent
+
+`GET /api/players/next-opponent?player_name=LeBron%20James` requires Firebase
+bearer authentication. `player_name` is the sole required parameter and resolves
+through the game-log identity reader. Unknown players return the same `404
+resource_not_found` error as game logs. Malformed or repeated parameters return
+`400 invalid_input`.
+
+The response is `{next_game, opponent_ranks}`. `next_game` is null when the player
+has no scheduled game (including unavailable team identity or schedule), otherwise
+it contains `game_id`, ET `date` (`YYYY-MM-DD`), opponent `opponent` tricode,
+`opponent_name`, and boolean `home`. The earliest future scheduled, non-postponed
+stored event for the player's current team wins. No provider calls or writes occur.
+
+`opponent_ranks` is empty with no next game. Otherwise it carries every available
+stat in the Opposing Team Profile's five Season categories (excluding Playtype
+Points). Each entry has `group`, `label`, `value`, `vs_league_pct`, `most_rank`,
+`ranked_teams`, `team_filter` (a named Team Filter or null), and `unit` (`count`,
+`percent`, or `league_ratio`). Play-type and assist values are ratios to the
+league average; their percentage is `(ratio - 1) * 100`. Percentage values such
+as FG% are fractions. Missing or untrusted publications omit their categories.
+All five categories read one publication generation and share the profile's
+league-table calculations.
+
+`most_rank` is the direct highest-first Team Filter position, with alphabetical
+tricode tie breaking, never a reversal of the profile's competition rank. Teams
+without a play-type rate are excluded from that statistic's population. A
+non-null `team_filter` can be passed to game logs as `teams_against[]`, using
+`rank_filter[]=1,8` at the most end or
+`rank_filter[]=<ranked_teams - 7>,<ranked_teams>` at the fewest end. Those tiers
+include the opponent when its returned position belongs to the tier. The
+existing game-log `next_game` contract remains null.

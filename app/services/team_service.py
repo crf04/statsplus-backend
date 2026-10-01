@@ -28,6 +28,7 @@ from app.domain.team_matchup_taxonomy import (
     SHOT_ZONE_STATS,
 )
 from app.errors import InvalidInputError
+from app.services.team_filter_rankings import TEAM_FILTER_RANKINGS, TeamFilterRanking
 from app.services.team_matchup_query import (
     LeagueMetricColumn,
     league_metric_column,
@@ -194,47 +195,23 @@ def _place_ratio(stats, field, column, team_id) -> None:
 
 
 def _traditional_profile(table, team_id) -> dict:
-    stats: dict = {}
-    for field, metric_key in _TRADITIONAL_FIELDS.items():
-        column = table.get(metric_key)
-        if column is None:
-            # Unreachable while one format is supported: the read boundary
-            # proves the publication carries the full taxonomy before these
-            # rows arrive.  Kept so that opening the next compatibility window
-            # omits a field rather than failing the whole panel, which is the
-            # same choice `_place` makes for a team with no value.
-            continue
+    stats = {}
+    fields = {metric: field for field, metric in _TRADITIONAL_FIELDS.items()}
+    for _, label, column, definition, token, unit in opponent_profile_metrics("traditional", table):
+        if unit == "percent":
+            field = "OPP_FG_PCT" if label == "FG%" else "OPP_FG3_PCT"
+        elif token == "OPP_STOCKS":
+            field = "OPP_STL+BLK"
+        else:
+            field = fields[definition.numerator[0][0]]
         _place(stats, field, column, team_id)
-    _place(
-        stats,
-        "OPP_STL+BLK",
-        _combined_column(table, (("steals", 1.0), ("blocks", 1.0))),
-        team_id,
-    )
-    _place(
-        stats,
-        "OPP_FG_PCT",
-        _rate_column(table, "field_goals_made", "field_goals_attempted"),
-        team_id,
-    )
-    _place(
-        stats,
-        "OPP_FG3_PCT",
-        _rate_column(table, "three_pointers_made", "three_pointers_attempted"),
-        team_id,
-    )
     return stats
 
 
 def _play_type_profile(table, team_id) -> dict:
-    stats: dict = {}
-    for play_type in PLAY_TYPES:
-        _place_ratio(
-            stats,
-            play_type,
-            _rate_column(table, f"{play_type}_PTS", f"{play_type}_POSS"),
-            team_id,
-        )
+    stats = {}
+    for _, _, column, _, token, _ in opponent_profile_metrics("play_types", table):
+        _place_ratio(stats, token, column, team_id)
     return stats
 
 
@@ -246,62 +223,30 @@ def _play_type_points_profile(table, team_id) -> dict:
 
 
 def _assist_profile(table, team_id) -> dict:
-    stats: dict = {}
-    for field, metric_key in _ASSIST_FIELDS.items():
-        _place_ratio(stats, field, table[metric_key], team_id)
-    _place_ratio(
-        stats,
-        "AssistPoints",
-        _combined_column(
-            table, (("two_point_assists", 2.0), ("three_point_assists", 3.0))
-        ),
-        team_id,
-    )
+    stats = {}
+    fields = {metric: field for field, metric in _ASSIST_FIELDS.items()}
+    for _, _, column, definition, _, _ in opponent_profile_metrics("assist_locations", table):
+        field = fields[definition.numerator[0][0]] if len(definition.numerator) == 1 else "AssistPoints"
+        _place_ratio(stats, field, column, team_id)
     return stats
 
 
 def _shot_zone_profile(table, team_id) -> dict:
-    stats: dict = {}
-    for zone in SHOT_ZONE_SLICES:
-        for stat_key in SHOT_ZONE_STATS:
-            _place(
-                stats,
-                f"{zone}_OPP_{stat_key}",
-                table[f"{zone}_{stat_key}"],
-                team_id,
-            )
+    stats = {}
+    for _, _, column, definition, _, _ in opponent_profile_metrics("shot_zones", table):
+        zone, stat = definition.numerator[0][0].rsplit("_", 1)
+        _place(stats, f"{zone}_OPP_{stat}", column, team_id)
     return stats
 
 
 def _shot_type_profile(table, team_id) -> list:
-    profile = []
-    for slice_key in SHOT_TYPE_SLICES:
-        stats = {"ShootingType": SHOT_TYPE_STORED_TO_DISPLAY[slice_key]}
-        _place(
-            stats,
-            "PTS",
-            _combined_column(
-                table,
-                (
-                    (f"{slice_key}_FG2M", 2.0),
-                    (f"{slice_key}_FG3M", 3.0),
-                ),
-            ),
-            team_id,
-        )
-        _place(
-            stats,
-            "FGA",
-            _combined_column(
-                table,
-                ((f"{slice_key}_FG2A", 1.0), (f"{slice_key}_FG3A", 1.0)),
-            ),
-            team_id,
-        )
-        for stat_key in SHOT_TYPE_STATS:
-            _place(stats, stat_key, table[f"{slice_key}_{stat_key}"], team_id)
-        profile.append(stats)
-    return profile
+    profiles = {slice_key: {"ShootingType": SHOT_TYPE_STORED_TO_DISPLAY[slice_key]} for slice_key in SHOT_TYPE_SLICES}
+    for _, _, column, definition, _, _ in opponent_profile_metrics("shot_types", table):
+        slice_key, stat = definition.numerator[0][0].rsplit("_", 1)
+        if len(definition.numerator) > 1:
+            stat = "PTS" if definition.numerator[0][1] == 2.0 else "FGA"
+        _place(profiles[slice_key], stat, column, team_id)
+    return list(profiles.values())
 
 
 #: One row per panel category: the publication base it is served from, the
@@ -315,3 +260,153 @@ _CATEGORIES: dict[str, tuple[str, Callable, Callable]] = {
     "Zone Shooting": ("shot_zones", _shot_zone_profile, dict),
     "Shooting Type": ("shot_types", _shot_type_profile, list),
 }
+
+
+def opponent_profile_metrics(base, table):
+    """Project the same five categories as the Opposing Team Profile."""
+    if base == "traditional":
+        labels = {
+            "OPP_PTS": "Points",
+            "OPP_REB": "Rebounds",
+            "OPP_AST": "Assists",
+            "OPP_STL": "Steals",
+            "OPP_BLK": "Blocks",
+            "OPP_FTA": "Free throw attempts",
+            "OPP_TOV": "Turnovers forced",
+            "OPP_FG3M": "3s made",
+            "OPP_FG3A": "3PT attempts",
+            "OPP_FGM": "FG made",
+            "OPP_FGA": "FG attempts",
+            "OPP_OREB": "Off. rebounds",
+            "OPP_DREB": "Def. rebounds",
+        }
+        for field, key in _TRADITIONAL_FIELDS.items():
+            if key in table:
+                yield (
+                    "General",
+                    labels[field],
+                    table[key],
+                    TeamFilterRanking(base, ((key, 1.0),)),
+                    field if field in TEAM_FILTER_RANKINGS else None,
+                    "count",
+                )
+        yield (
+            "General",
+            "Steals + blocks",
+            _combined_column(table, (("steals", 1.0), ("blocks", 1.0))),
+            TEAM_FILTER_RANKINGS["OPP_STOCKS"],
+            "OPP_STOCKS",
+            "count",
+        )
+        for label, numerator, denominator in [
+            ("FG%", "field_goals_made", "field_goals_attempted"),
+            ("3PT%", "three_pointers_made", "three_pointers_attempted"),
+        ]:
+            yield (
+                "General",
+                label,
+                _rate_column(table, numerator, denominator),
+                TeamFilterRanking(base, ((numerator, 1.0),), denominator),
+                None,
+                "percent",
+            )
+    elif base == "play_types":
+        for key in PLAY_TYPES:
+            yield (
+                "Play type",
+                {
+                    "PRBallHandler": "P&R ball-handler",
+                    "PRRollMan": "P&R roll-man",
+                    "Spotup": "Spot-up",
+                    "OffScreen": "Off-screen",
+                    "Postup": "Post-up",
+                    "OffRebound": "Putbacks",
+                    "Misc": "Misc.",
+                    "Cut": "Cuts",
+                }.get(key, key)
+                + " (per poss.)",
+                _rate_column(table, key + "_PTS", key + "_POSS"),
+                TEAM_FILTER_RANKINGS[key],
+                key,
+                "league_ratio",
+            )
+    elif base == "assist_locations":
+        for field, key in _ASSIST_FIELDS.items():
+            yield (
+                "Assists",
+                {
+                    "Assists": "All assists",
+                    "TwoPtAssists": "2PT assists",
+                    "ThreePtAssists": "3PT assists",
+                    "Arc3Assists": "Arc-3 assists",
+                    "Corner3Assists": "Corner-3 assists",
+                    "AtRimAssists": "At-rim assists",
+                    "ShortMidRangeAssists": "Short mid assists",
+                    "LongMidRangeAssists": "Long mid assists",
+                }[field],
+                table[key],
+                TeamFilterRanking(base, ((key, 1.0),)),
+                field if field in TEAM_FILTER_RANKINGS else None,
+                "league_ratio",
+            )
+        terms = (("two_point_assists", 2.0), ("three_point_assists", 3.0))
+        yield (
+            "Assists",
+            "Assist points",
+            _combined_column(table, terms),
+            TeamFilterRanking(base, terms),
+            None,
+            "league_ratio",
+        )
+    elif base == "shot_zones":
+        for zone in SHOT_ZONE_SLICES:
+            for stat in SHOT_ZONE_STATS:
+                key = zone + "_" + stat
+                yield (
+                    "Zones",
+                    zone + (" makes" if stat == "FGM" else " attempts"),
+                    table[key],
+                    TeamFilterRanking(base, ((key, 1.0),)),
+                    None,
+                    "count",
+                )
+    elif base == "shot_types":
+        for shot in SHOT_TYPE_SLICES:
+            columns = [(stat, ((shot + "_" + stat, 1.0),)) for stat in SHOT_TYPE_STATS]
+            columns += [
+                ("PTS", ((shot + "_FG2M", 2.0), (shot + "_FG3M", 3.0))),
+                ("FGA", ((shot + "_FG2A", 1.0), (shot + "_FG3A", 1.0))),
+            ]
+            for stat, terms in columns:
+                definition = TeamFilterRanking(base, terms)
+                token = next(
+                    (
+                        name
+                        for name, ranking in TEAM_FILTER_RANKINGS.items()
+                        if ranking.base == definition.base
+                        and dict(ranking.numerator) == dict(definition.numerator)
+                        and ranking.denominator == definition.denominator
+                    ),
+                    None,
+                )
+                yield (
+                    "Shot type",
+                    {
+                        "catch_and_shoot": "C&S",
+                        "pullups": "Pull-up",
+                        "less_than_10_ft": "Inside 10 ft",
+                    }.get(shot, SHOT_TYPE_STORED_TO_DISPLAY[shot])
+                    + " "
+                    + {
+                        "PTS": "points",
+                        "FGA": "attempts",
+                        "FG2M": "2s",
+                        "FG2A": "2PA",
+                        "FG3M": "3s",
+                        "FG3A": "3PA",
+                    }[stat],
+                    _combined_column(table, terms),
+                    definition,
+                    token,
+                    "count",
+                )
