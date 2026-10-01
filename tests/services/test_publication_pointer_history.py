@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
 from app.services.collection_control import PublicationService
+from app.services.player_game_log_repository import PlayerGameLogRepository
+from app.services.research_season import focal_game_rows
+from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_matchup_selection_service import _log_row
 from tests.support.pointer_history import pointer_history
 
@@ -82,6 +85,13 @@ def test_pruning_keeps_the_publication_each_season_retains(lifecycle):
     fourth = _compose(
         publications, "2026-27", points=12, expected_fence=third.fence
     )
+    # Activating a stream's candidate marks the publication it displaces
+    # superseded; 2025-26's retained publication carries that status.
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE publication_versions SET status = 'superseded' "
+            "WHERE publication_id = :id"
+        ), {"id": first.publication_id})
 
     publications.prune_history(stream_key=STREAM)
 
@@ -98,3 +108,51 @@ def test_pruning_keeps_the_publication_each_season_retains(lifecycle):
         (third.publication_id, "2026-27", 3, False),
         (fourth.publication_id, "2026-27", 4, False),
     ]
+
+
+def _repository(engine):
+    return PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season="2025-26",
+        stats_surface_max_age=timedelta(hours=30),
+    )
+
+
+def test_a_past_season_reads_its_latest_unrevoked_activation(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=10)
+    second = _compose(
+        publications, "2025-26", points=11, expected_fence=first.fence
+    )
+    _compose(publications, "2026-27", points=12, expected_fence=second.fence)
+
+    rows = focal_game_rows(
+        _repository(engine), "2025-26", "0022500001", evidence_season="2026-27"
+    )
+
+    assert [row.points for row in rows] == [11]
+
+
+def test_a_retained_publication_without_its_projection_stays_unavailable(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26")
+    _compose(publications, "2026-27", expected_fence=first.fence)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM publication_player_game_logs WHERE publication_id = :id"
+        ), {"id": first.publication_id})
+
+    assert focal_game_rows(
+        _repository(engine), "2025-26", "0022500001", evidence_season="2026-27"
+    ) is None
+
+
+def test_a_game_of_a_later_season_than_the_evidence_is_never_retained():
+    class Everything:
+        def retained_game_rows(self, season, game_id, *, connection=None):
+            return ("rows",)
+
+    assert focal_game_rows(
+        Everything(), "2026-27", "0022600001", evidence_season="2025-26"
+    ) is None
