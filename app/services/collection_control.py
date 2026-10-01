@@ -1629,6 +1629,7 @@ def _revoke_pointer_history(
     publication_ids: Iterable[str],
     *,
     now: datetime,
+    fence: int,
 ) -> None:
     """Stamp ``revoked_at`` on the unrevoked history of withdrawn publications."""
 
@@ -1643,7 +1644,7 @@ def _revoke_pointer_history(
             PublicationPointerHistory.publication_id.in_(sorted(ids)),
             PublicationPointerHistory.revoked_at.is_(None),
         )
-        .values(revoked_at=now)
+        .values(revoked_at=now, revoked_fence=int(fence))
     )
 
 
@@ -4806,7 +4807,17 @@ class PublicationService(_SessionService):
             PublicationVersion.stream_key == stream_key,
             PublicationVersion.season == season,
             PublicationVersion.publication_id != keep_publication_id,
-            PublicationVersion.status.in_(("active", "candidate")),
+            or_(
+                PublicationVersion.status.in_(("active", "candidate")),
+                # A publication that once served stays reachable through the
+                # retained history whatever its status became afterwards.
+                PublicationVersion.publication_id.in_(
+                    select(PublicationPointerHistory.publication_id).where(
+                        PublicationPointerHistory.stream_key == stream_key,
+                        PublicationPointerHistory.revoked_at.is_(None),
+                    )
+                ),
+            ),
         )))
         if not versions:
             return
@@ -4848,11 +4859,12 @@ class PublicationService(_SessionService):
             )
         }
         for version in versions:
-            if version.publication_id in stale_ids:
+            if version.publication_id in stale_ids and version.status in (
+                "active", "candidate",
+            ):
                 version.status = "superseded"
         if not stale_ids:
             return
-        _revoke_pointer_history(session, stream_key, stale_ids, now=now)
         pointer = session.scalar(
             select(PublicationPointer)
             .where(PublicationPointer.stream_key == stream_key)
@@ -4864,6 +4876,10 @@ class PublicationService(_SessionService):
             pointer.active_publication_id = None
             pointer.fence = int(pointer.fence or 0) + 1
             pointer.updated_at = now
+        _revoke_pointer_history(
+            session, stream_key, stale_ids, now=now,
+            fence=int(pointer.fence) if pointer is not None else 0,
+        )
 
     def recompose_ledger(
         self,
@@ -5545,7 +5561,8 @@ class PublicationService(_SessionService):
             prior.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
             _revoke_pointer_history(
-                session, stream_key, (current.publication_id,), now=now
+                session, stream_key, (current.publication_id,), now=now,
+                fence=pointer.fence,
             )
             _record_pointer_activation(session, pointer, version, now=now)
         return version
@@ -5775,7 +5792,8 @@ class PublicationService(_SessionService):
                 pointer.active_publication_id = version.publication_id
                 pointer.updated_at = now
                 _revoke_pointer_history(
-                    session, stream_key, (current.publication_id,), now=now
+                    session, stream_key, (current.publication_id,), now=now,
+                    fence=pointer.fence,
                 )
                 _record_pointer_activation(session, pointer, version, now=now)
                 rolled_back.append(version)

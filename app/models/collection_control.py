@@ -272,8 +272,8 @@ class PublicationPointerHistory(Base):
     invalidation stamps ``revoked_at`` on the rows it withdraws.  A row replaced
     by a later publication is *not* revoked; it stays the retained authority for
     its season, which is what a past season's reads need once a newer season is
-    active.  Pruning a version deletes its rows with it and keeps each season's
-    latest unrevoked publication.  ``fence`` is the stream pointer's generation, so it orders the rows
+    active.  Rows outlive pruning of their publication, which keeps each season's
+    latest unrevoked publication so its reads stay served.  ``fence`` is the stream pointer's generation, so it orders the rows
     of one stream even when a test clock does not advance.
     """
 
@@ -281,15 +281,16 @@ class PublicationPointerHistory(Base):
 
     history_id = Column(String(36), primary_key=True)
     stream_key = Column(String(96), nullable=False)
-    publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    # No foreign key: pruning a publication's payload and projection must not
+    # delete the record that it once served.  Reads verify the projection exists.
+    publication_id = Column(String(36), nullable=False)
     season = Column(String(16), nullable=False)
     fence = Column(Integer, nullable=False)
     activated_at = Column(DateTime(timezone=True), nullable=False)
     revoked_at = Column(DateTime(timezone=True), nullable=True)
+    # The pointer generation at the revocation: the cleared pointer's new fence
+    # when the revoked publication was active, else the unchanged fence.
+    revoked_fence = Column(Integer, nullable=True)
 
     __table_args__ = (
         Index(

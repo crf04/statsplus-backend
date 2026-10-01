@@ -26,3 +26,18 @@ def pointer_history(engine, stream_key):
         (publication_id, season, fence, revoked_at is not None)
         for publication_id, season, fence, revoked_at in rows
     ]
+
+
+def revoked_fences(engine, stream_key):
+    """The ``revoked_fence`` of each revoked row, oldest pointer move first."""
+
+    table = PublicationPointerHistory.__table__
+    with engine.connect() as connection:
+        return [
+            row.revoked_fence
+            for row in connection.execute(
+                select(table.c.revoked_fence)
+                .where(table.c.stream_key == stream_key, table.c.revoked_at.is_not(None))
+                .order_by(table.c.fence)
+            )
+        ]

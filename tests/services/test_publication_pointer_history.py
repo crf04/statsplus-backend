@@ -14,7 +14,7 @@ from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.research_season import focal_game_rows
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_matchup_selection_service import _log_row
-from tests.support.pointer_history import pointer_history
+from tests.support.pointer_history import pointer_history, revoked_fences
 
 STREAM = "player_game_logs"
 CUTOFF = datetime(2026, 1, 15, tzinfo=timezone.utc)
@@ -73,9 +73,10 @@ def test_a_rollback_revokes_the_withdrawn_publication_and_restores_the_prior_one
         (second.publication_id, "2026-27", 2, True),
         (restored.publication_id, "2025-26", 3, False),
     ]
+    assert revoked_fences(engine, STREAM) == [3]
 
 
-def test_pruning_keeps_the_publication_each_season_retains(lifecycle):
+def test_pruning_keeps_each_seasons_publication_and_every_history_row(lifecycle):
     engine, publications = lifecycle
     first = _compose(publications, "2025-26")
     second = _compose(publications, "2026-27", expected_fence=first.fence)
@@ -103,11 +104,18 @@ def test_pruning_keeps_the_publication_each_season_retains(lifecycle):
     assert surviving == {
         first.publication_id, third.publication_id, fourth.publication_id
     }
+    # Pruned payloads leave their activation record behind.
     assert pointer_history(engine, STREAM) == [
         (first.publication_id, "2025-26", 1, False),
+        (second.publication_id, "2026-27", 2, False),
         (third.publication_id, "2026-27", 3, False),
         (fourth.publication_id, "2026-27", 4, False),
     ]
+    # The retained authority still reads; the pruned generation cannot.
+    assert [
+        row.points
+        for row in _repository(engine).retained_game_rows("2025-26", "0022500001")
+    ] == [10]
 
 
 def _repository(engine):

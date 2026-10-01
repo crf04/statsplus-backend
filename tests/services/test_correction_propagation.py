@@ -62,7 +62,7 @@ from app.services.team_matchup_repository import (
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
-from tests.support.pointer_history import pointer_history
+from tests.support.pointer_history import pointer_history, revoked_fences
 
 
 UTC = timezone.utc
@@ -3672,3 +3672,109 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
         assert pointer is not None
         assert pointer["active_publication_id"] is None
         assert "active" not in statuses.values()
+
+
+@pytest.mark.parametrize("rolled_back", [False, True], ids=("superseded", "rollback"))
+def test_correction_revokes_previously_activated_superseded_and_rollback_history(
+    tmp_path, rolled_back,
+):
+    """Corrected evidence stays unreachable through any activated publication."""
+
+    engine = _engine(tmp_path, f"history-{rolled_back}.sqlite3")
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "history_ledger"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=True,
+    )
+    sources = ("history-1", "history-2", "history-3", "history-corrected")
+    with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, (), AS_OF, "history-manifest",
+        )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="history-manifest",
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1000),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="history-manifest",
+            status="active",
+            created_at=AS_OF,
+            **catalog_binding,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": source_id,
+                "client_observation_id": source_id,
+                "collector_id": "test",
+                "manifest_id": "history-manifest",
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": "game-1",
+                    "surface": "canonical_game_ledger",
+                }),
+                "season": "2025-26",
+                "cutoff": AS_OF,
+                "schema_version": 1,
+                "checksum": str(index + 1) * 64,
+                "payload": json.dumps({"revision": index}),
+                "payload_bytes": 14,
+                "retrieved_at": AS_OF + timedelta(minutes=index),
+                "accepted_at": AS_OF + timedelta(minutes=index),
+            }
+            for index, source_id in enumerate(sources)
+        ])
+    activated = []
+    for index, source_id in enumerate(sources[:3]):
+        _bind_current_ledger_source(
+            engine, game_id="game-1", observation_id=source_id, cutoff=AS_OF,
+        )
+        activated.append(publications.recompose_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF,
+            payload={"value": 10 + index}, provenance={source_id: "game-1"},
+            reason="ledger refresh",
+        ))
+    if rolled_back:
+        restored = publications.rollback(
+            stream_key, reason="restore the prior ledger",
+            expected_fence=publications.current(stream_key).fence,
+        )
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+
+    publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+        provenance={sources[3]: "game-1"}, reason="correction",
+        corrected_provenance={sources[3]: "game-1"},
+    )
+
+    history = pointer_history(engine, stream_key)
+    assert [(row[0], row[3]) for row in history] == (
+        [(version.publication_id, True) for version in activated]
+        + ([(restored.publication_id, True)] if rolled_back else [])
+    )
+    # The active publication was cleared by the correction at a new fence, which
+    # the revoked active publication's row records.
+    with engine.connect() as connection:
+        cleared = connection.execute(select(PublicationPointer.__table__.c.fence).where(
+            PublicationPointer.stream_key == stream_key,
+        )).scalar_one()
+    assert revoked_fences(engine, stream_key)[-1] == cleared
+    assert cleared == (history[-1][2] + 1)
