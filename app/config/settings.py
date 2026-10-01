@@ -463,6 +463,17 @@ class NBASeasonSettings(BaseModel):
 
     current_season: str = Field(default_factory=current_nba_season)
 
+    @field_validator("current_season")
+    @classmethod
+    def validate_current_season(cls, value: str) -> str:
+        start, _, end = value.partition("-")
+        if not (
+            len(start) == 4 and start.isdigit() and len(end) == 2 and end.isdigit()
+            and f"{(int(start) + 1) % 100:02d}" == end
+        ):
+            raise ValueError("must be an NBA season such as 2025-26")
+        return value
+
 
 #: Every configured catalog window, with the unit it is stated in and the
 #: variable an operator writes it in.  Each one is a time window, so each one
@@ -907,7 +918,17 @@ def _build_settings(
             ),
             llm=llm,
             cors=cors,
-            nba=_validated_model(NBASeasonSettings),
+            # NBA_CURRENT_SEASON pins the season; unset, it follows the calendar
+            # (October starts the next one).  A pin is an explicit value, so
+            # published-season scoping (app/services/research_season.py) defers to it.
+            nba=_validated_model(
+                NBASeasonSettings,
+                **(
+                    {"current_season": season}
+                    if (season := reader.text("NBA_CURRENT_SEASON"))
+                    else {}
+                ),
+            ),
             matchup_scores=_validated_model(
                 MatchupScoreSettings,
                 min_games=reader.integer("MATCHUP_SCORE_MIN_GAMES", 5),

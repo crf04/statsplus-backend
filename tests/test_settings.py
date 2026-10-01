@@ -20,6 +20,25 @@ def test_current_nba_season_uses_october_boundary():
     assert current_nba_season(date(2026, 10, 1)) == "2026-27"
 
 
+def test_nba_current_season_pins_the_season_explicitly():
+    pinned = load_settings(
+        environ={"FLASK_ENV": "testing", "NBA_CURRENT_SEASON": "2025-26"}
+    )
+    calendar = load_settings(environ={"FLASK_ENV": "testing"})
+
+    assert pinned.nba.current_season == "2025-26"
+    # Explicit, so published-season scoping (research_season) leaves it alone.
+    assert "current_season" in pinned.nba.model_fields_set
+    assert "current_season" not in calendar.nba.model_fields_set
+    assert calendar.nba.current_season == current_nba_season()
+
+
+@pytest.mark.parametrize("value", ["2025", "2025-27", "25-26", "2025/26", "abcd-ef"])
+def test_nba_current_season_rejects_non_seasons(value):
+    with pytest.raises(ConfigurationError, match="current_season"):
+        load_settings(environ={"FLASK_ENV": "testing", "NBA_CURRENT_SEASON": value})
+
+
 def test_event_catalog_max_age_is_configurable(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "testing")
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "true")
