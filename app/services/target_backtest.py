@@ -402,7 +402,8 @@ class TargetBacktestService:
         value (``aggregate_cache_state``).
         """
 
-        season = research_season(self.settings, self.publication_reader)
+        # The response's season if the published one cannot be read either.
+        season = self.settings.nba.current_season
         with request_read_scope(self._engine) as (_connection, session):
             if session is not None:
                 listed = self.targets.list_targets_in_session(
@@ -411,6 +412,7 @@ class TargetBacktestService:
             else:
                 listed = self.targets.list_targets(firebase_uid)
             try:
+                season = research_season(self.settings, self.publication_reader)
                 generation = self._read_cache_generation(season, session)
             except Exception:
                 # Degrade like a disabled cache, as the single route's
@@ -475,6 +477,7 @@ class TargetBacktestService:
         publication_snapshot: Any = _OWN,
         connection: Connection | None = None,
         session: Session | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
         """Return one Target mapping with its season to date.
 
@@ -485,7 +488,8 @@ class TargetBacktestService:
         exist yet exactly as the detail evaluates one that does.
 
         A caller composing this read alongside another passes the generation
-        it already holds as ``publication_snapshot``; none is captured then.
+        it already holds as ``publication_snapshot``, and the ``season`` it
+        captured that generation for; none is captured then.
         """
 
         return self._backtest_stateful(
@@ -493,6 +497,7 @@ class TargetBacktestService:
             publication_snapshot=publication_snapshot,
             connection=connection,
             session=session,
+            season=season,
         )[0]
 
     def _backtest_stateful(
@@ -502,6 +507,7 @@ class TargetBacktestService:
         publication_snapshot: Any = _OWN,
         connection: Connection | None = None,
         session: Session | None = None,
+        season: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Compute the backtest and report its result-cache outcome.
 
@@ -512,7 +518,8 @@ class TargetBacktestService:
         """
 
         cache_state = "-"
-        season = research_season(self.settings, self.publication_reader)
+        if season is None:
+            season = research_season(self.settings, self.publication_reader)
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
         # A saved Target is the only caller whose response may be served from

@@ -143,13 +143,14 @@ class TargetResolutionService:
             or not callable(getattr(composer, "get_matchup_from_snapshot", None))
         ):
             return self.matchups
+        season = research_season(self.settings, self.publication_reader)
         snapshot = capture_publication_snapshot(
             self.publication_reader,
             MATCHUP_PUBLICATION_STREAM_KEYS,
             projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-            season=research_season(self.settings, self.publication_reader),
+            season=season,
         )
-        return SnapshotMatchups(composer, snapshot, self.injuries)
+        return SnapshotMatchups(composer, snapshot, self.injuries, season=season)
 
     def today(
         self,

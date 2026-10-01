@@ -68,7 +68,7 @@ PREVIEW_DECODED_ONLY_STREAM_KEYS = BACKTEST_DECODED_ONLY_STREAM_KEYS & frozenset
 
 class BacktestReader(Protocol):
     def backtest_target(
-        self, target: Mapping[str, Any], *, publication_snapshot: Any
+        self, target: Mapping[str, Any], *, publication_snapshot: Any, season: str
     ) -> dict[str, Any]: ...
 
 
@@ -105,19 +105,23 @@ class TargetPreviewService:
         returns; it is echoed as the response's ``target``.
         """
 
+        # One season, resolved once, for the capture and every read of it.
+        season = research_season(self.settings, self.publication_reader)
         snapshot = capture_publication_snapshot(
             self.publication_reader,
             PREVIEW_PUBLICATION_STREAM_KEYS,
             projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
             decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
-            season=research_season(self.settings, self.publication_reader),
+            season=season,
         )
         previewed = self.backtests.backtest_target(
-            draft, publication_snapshot=snapshot
+            draft, publication_snapshot=snapshot, season=season
         )
         today = self.resolutions.today(
             draft,
-            matchups=SnapshotMatchups(self.matchups, snapshot, self.injuries),
+            matchups=SnapshotMatchups(
+                self.matchups, snapshot, self.injuries, season=season
+            ),
         )
         return {**previewed, "today": today}
 

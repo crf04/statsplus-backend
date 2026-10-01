@@ -155,7 +155,7 @@ class PlayerGameLogRepository:
     """Publish season facts and observe one explicit current stats surface."""
 
     #: A Publication's projected rows never change once composed, so decoded
-    #: season rows are cached under the publication that produced them and
+    #: season rows are cached under the publication and season that produced them and
     #: bounded to the latest few generations -- an older one's rows are worth
     #: nothing once a newer one activates.
     _SUMMARY_PROJECTION_CACHE_PUBLICATIONS = 2
@@ -190,7 +190,7 @@ class PlayerGameLogRepository:
         self._serve_stale = bool(serve_stale)
         self._publication_reader = publication_reader
         # publication_id -> {player_id: decoded season rows}, oldest first.
-        self._summary_projection_cache: "OrderedDict[str, dict[int, tuple[PlayerGameLogRecord, ...]]]" = OrderedDict()
+        self._summary_projection_cache: "OrderedDict[tuple[str, str], dict[int, tuple[PlayerGameLogRecord, ...]]]" = OrderedDict()
         self._summary_projection_cache_lock = threading.Lock()
         # generation -> {(player_id, season, rate_season_type,
         # exclude_game_id): PlayerSeasonLogSummary}, oldest first.
@@ -563,12 +563,15 @@ class PlayerGameLogRepository:
         of publications kept live is bounded.
         """
 
+        # Rows decode per season, so a read naming another season than the
+        # publication's (a rollover race) must never fill this one's entry.
+        key = (publication_id, season)
         with self._summary_projection_cache_lock:
-            cache = self._summary_projection_cache.get(publication_id)
+            cache = self._summary_projection_cache.get(key)
             if cache is None:
                 cache = {}
-                self._summary_projection_cache[publication_id] = cache
-            self._summary_projection_cache.move_to_end(publication_id)
+                self._summary_projection_cache[key] = cache
+            self._summary_projection_cache.move_to_end(key)
             missing = tuple(
                 player_id for player_id in player_ids if player_id not in cache
             )
