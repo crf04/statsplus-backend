@@ -80,7 +80,7 @@ the most important variables:
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
 | `ATHLETE_CATALOG_FRESHNESS_DAYS` | No | `7`; TTL for the last successful explicit-season athlete catalog refresh |
-| `NBA_CURRENT_SEASON` | No | Unset follows the calendar (the next season starts October 1); `YYYY-YY` pins the season every read and collector uses, e.g. to hold `2025-26` until the new season's data exists |
+| `NBA_CURRENT_SEASON` | No | Unset, collectors follow the calendar (the next season starts October 1) while reads follow the published season and the Slate its date's season; `YYYY-YY` pins the season every read and collector uses |
 | `SLATE_SCHEDULE_MAX_AGE_HOURS` | No | `30`; freshness window for the nightly slate schedule surface |
 | `PLAYER_GAME_LOG_MAX_AGE_HOURS` | No | `30`; maximum age for configured-current-season durable player-log reads |
 | `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` | No | `5`; required positive-minute players for each team in a completed game |

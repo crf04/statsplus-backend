@@ -18,7 +18,7 @@ The model is intentionally grouped by responsibility:
 | `ProjectionCollectionSettings` | Board-wide scheduler cadence, governed pregame horizon, lease duration, and bounded provider backoff | `PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES` (`30`), `PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES` (`5`), `PROJECTION_COLLECTION_PREGAME_HORIZON_HOURS` (`24`), `PROJECTION_COLLECTION_FAST_WINDOW_HOURS` (`2`), `PROJECTION_COLLECTION_LEASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_BASE_SECONDS` (`60`), `PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS` (`1800`) |
 | `LLMSettings` | API key, model, temperature, token/time limits, retries, fallback, confidence threshold | `OPENAI_API_KEY`, `LLM_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT`, `LLM_MAX_RETRIES`, `ENABLE_LLM_FALLBACK`, `LLM_CONFIDENCE_THRESHOLD`, `LLM_SHADOW_SAMPLE_RATE` |
 | `CORSSettings` | Exact browser origins allowed to make cross-origin requests | `CORS_ALLOWED_ORIGINS` |
-| `NBASeasonSettings` | `current_season` | `NBA_CURRENT_SEASON` (e.g. `2025-26`) pins it; unset, derived by `current_nba_season()`, which starts the next season on October 1 |
+| `NBASeasonSettings` | `current_season` | `NBA_CURRENT_SEASON` (e.g. `2025-26`) pins it for every read and collector; unset, derived by `current_nba_season()`, which starts the next season on October 1, while request reads follow the published season or the Slate date (see Current season rule) |
 | `CatalogSettings` | Catalog/read thresholds: athlete freshness, player-log coverage and age, event matching/schedule age, and matchup-selection H2H/archetype thin sample minimums | `ATHLETE_CATALOG_FRESHNESS_DAYS` (default `7`), `PLAYER_GAME_LOG_MIN_ACTIVE_PLAYERS_PER_TEAM_GAME` (default `5`), `PLAYER_GAME_LOG_RECONCILIATION_DAYS` (default `3`), `EVENT_CATALOG_MAX_AGE_HOURS` (default `72`), `EVENT_MAPPING_MATCH_WINDOW_HOURS` (default `6`), `SLATE_SCHEDULE_MAX_AGE_HOURS` (default `30`), `PLAYER_GAME_LOG_MAX_AGE_HOURS` (default `30`), `MATCHUP_SELECTION_H2H_MIN_GAMES` (default `1`), `MATCHUP_SELECTION_ARCHETYPE_MIN_GAMES` (default `5`) |
 | `MatchupScoreSettings` | Season player-evidence floors for backend-owned score thin flags | `MATCHUP_SCORE_MIN_GAMES` (default `5`), `MATCHUP_SCORE_PLAY_TYPES_MIN_VOLUME_PER_GAME` (default `1`), `MATCHUP_SCORE_SHOT_ZONES_MIN_VOLUME_PER_GAME` (default `1`), `MATCHUP_SCORE_SHOT_TYPES_MIN_VOLUME_PER_GAME` (default `4`), `MATCHUP_SCORE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME` (default `1`) |
 | `PlayerDietBaselineSettings` | Population floors for the Diet Share league baseline (`league_average_share`, `sigma_deviation`) | `PLAYER_DIET_BASELINE_MIN_GAMES` (default `5`), `PLAYER_DIET_BASELINE_PLAY_TYPES_MIN_VOLUME_PER_GAME` (default `6.0`), `PLAYER_DIET_BASELINE_SHOT_ZONES_MIN_VOLUME_PER_GAME` (default `6.0`), `PLAYER_DIET_BASELINE_SHOT_TYPES_MIN_VOLUME_PER_GAME` (default `6.0`), `PLAYER_DIET_BASELINE_ASSIST_LOCATIONS_MIN_VOLUME_PER_GAME` (default `2.0`) |
@@ -308,8 +308,19 @@ CORS_ALLOWED_ORIGINS=https://stats.example.com,https://admin.example.com
 December belong to the season beginning in that calendar year; January through
 September belong to the season beginning in the previous calendar year. For
 example, September 30, 2026 is `2025-26`, while October 1, 2026 is `2026-27`.
-The same computed value is injected into game-log route defaults, the NL
-parser/mapper, cache freshness checks, and provider requests.
+The computed value is the collectors' and schedule ingestion's season, and the
+fallback for request reads when nothing better is known. Request reads do not
+use it directly (`app/services/research_season.py`):
+
+- Reads of published data (Search and NL, profiles, Matchups, Targets, Diet
+  baselines, default game logs) use the active player-game-log publication's
+  season, so the rollover never selects a season with nothing published.
+- The Slate and the next opponent's game read the season containing the date,
+  falling back to the previous season while the new one has no stored
+  schedule; an offseason date is then an empty Slate rather than a 503.
+
+`NBA_CURRENT_SEASON` is an explicit value, and every one of these reads defers
+to it, so a pinned deployment reads only the pinned season.
 
 Tests can pass an explicit date to `current_nba_season` or a mapping to
 `load_settings(environ=...)` without changing process environment state.
