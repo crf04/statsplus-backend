@@ -2855,7 +2855,7 @@ def test_central_reconciliation_refuses_evidence_the_collector_would_have():
 
 
 def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db):
-    """A superseded rehearsal candidate was never activated, so it is no authority."""
+    """The accepted 25-point publication is read; rehearsal candidates are not."""
 
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.research_season import focal_game_rows
@@ -2881,5 +2881,4 @@ def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db)
 
     rows = focal_game_rows(repository, "2025-26", "game-1", evidence_season="2026-27")
 
-    assert 40 not in [row.points for row in rows or ()]
-    assert 41 not in [row.points for row in rows or ()]
+    assert [row.points for row in rows] == [25]

@@ -26,6 +26,7 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.utc import assume_utc
+from app.models.collection_control import PublicationPointerHistory
 from app.models.player_game_log import (
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -458,6 +459,52 @@ class PlayerGameLogRepository:
                 .order_by(log_table.c.player_id.asc())
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
+
+    def retained_game_rows(
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[PlayerGameLogRecord, ...] | None:
+        """One game's rows from the season's retained activation, or ``None``.
+
+        The retained activation is the latest unrevoked pointer-history row for
+        the season.  A candidate that never activated has no row, and a
+        publication a rollback withdrew is revoked, so neither can be read.
+        ``None`` means no retained authority exists (or its projection is
+        absent), and the caller keeps the game unavailable.
+        """
+
+        canonical_season = validate_canonical_season(season)
+        history = PublicationPointerHistory.__table__
+        projection = PublicationPlayerGameLog.__table__
+        with read_connection(self.engine, connection) as connection:
+            publication_id = connection.execute(
+                select(history.c.publication_id)
+                .where(
+                    history.c.stream_key == "player_game_logs",
+                    history.c.season == canonical_season,
+                    history.c.revoked_at.is_(None),
+                )
+                .order_by(history.c.fence.desc())
+                .limit(1)
+            ).scalar()
+            if publication_id is None:
+                return None
+            projected = connection.execute(
+                select(projection.c.publication_id)
+                .where(projection.c.publication_id == publication_id)
+                .limit(1)
+            ).first()
+            if projected is None:
+                return None
+            return self._projected_game_rows(
+                publication_id,
+                canonical_season,
+                game_id,
+                connection=connection,
+            )
 
     def _projected_game_rows(
         self,

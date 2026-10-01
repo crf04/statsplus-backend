@@ -411,6 +411,20 @@ def test_an_opening_night_selection_reads_the_new_game_with_published_evidence(t
     assert '"game_date": "2026-01-02"' in json.dumps(card)
 
 
+def _reseed_history_from_the_migration(engine):
+    """Drop the lifecycle's own history and rebuild it as the migration would.
+
+    Production's 2025-26 pointer predates the history table, so its row can
+    only come from the migration seed.
+    """
+
+    from app.migrations import _create_publication_pointer_history
+
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM publication_pointer_history"))
+        _create_publication_pointer_history(connection)
+
+
 def _advance_to_next_season(engine, publication):
     """Seed last season's completed sync row, then publish 2026-27 logs."""
 
@@ -436,18 +450,14 @@ def _advance_to_next_season(engine, publication):
     )
 
 
-def test_a_past_season_historical_selection_fails_closed_after_the_publication_advances(
+def test_a_past_season_historical_selection_reads_the_retained_activation_after_the_publication_advances(
     tmp_path,
 ):
     """A completed April game with no closing projections, once logs publish 2026-27.
 
-    No retained record names 2025-26's last activated, unrevoked publication,
-    so its rows have no authority: the card is unavailable, never guessed.
+    The migration-seeded history names 2025-26's activated publication, so the
+    card still reads that game's focal record.
     """
-
-    import pytest
-
-    from app.errors import ProviderUnavailableError
 
     class PastEvents:
         def __init__(self):
@@ -473,6 +483,7 @@ def test_a_past_season_historical_selection_fails_closed_after_the_publication_a
     engine, service, _, publication = _published_selection_service(
         tmp_path, _default_rows()
     )
+    _reseed_history_from_the_migration(engine)
     _advance_to_next_season(engine, publication)
     service.event_catalog = PastEvents()
     service.player_pool = type(
@@ -483,12 +494,13 @@ def test_a_past_season_historical_selection_fails_closed_after_the_publication_a
         nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
     )
 
-    with pytest.raises(ProviderUnavailableError):
-        service.get_selection(game_id="0022500001", player_id=2544)
+    card = service.get_selection(game_id="0022500001", player_id=2544)
+
     assert service.event_catalog.seasons == ["2025-26"]
+    assert '"game_date": "2026-01-02"' in json.dumps(card)
 
 
-def test_a_past_season_historical_matchup_fails_closed_after_the_publication_advances(
+def test_a_past_season_historical_matchup_names_its_participants_after_the_publication_advances(
     tmp_path, monkeypatch
 ):
     from types import SimpleNamespace
@@ -500,6 +512,7 @@ def test_a_past_season_historical_matchup_fails_closed_after_the_publication_adv
     engine, _, reader, publication = _published_selection_service(
         tmp_path, _default_rows()
     )
+    _reseed_history_from_the_migration(engine)
     _advance_to_next_season(engine, publication)
     repository = PlayerGameLogRepository(
         engine,
@@ -559,10 +572,8 @@ def test_a_past_season_historical_matchup_fails_closed_after_the_publication_adv
 
     assert seasons == ["2025-26"]
     assert payload["experience"]["mode"] == "historical"
-    assert payload["players"] == []
-    assert payload["experience"]["sections"]["participants"]["unavailable_reason"] == (
-        "game_logs_incomplete"
-    )
+    assert [player["name"] for player in payload["players"]] == ["LeBron James"]
+    assert payload["experience"]["sections"]["participants"]["status"] != "unavailable"
 
 
 def test_a_selection_reads_one_season_when_the_next_activates_mid_request(tmp_path):
@@ -655,3 +666,22 @@ def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
     assert not rows
     with pytest.raises(ProviderUnavailableError):
         service.get_selection(game_id="0022600001", player_id=2544)
+    # The rollback restored 2025-26's authority, so its own game still reads.
+    from tests.support.pointer_history import pointer_history
+
+    assert pointer_history(engine, "player_game_logs") == [
+        (publication.publication_id, "2025-26", 1, False),
+        (rejected.publication_id, "2026-27", 2, True),
+        (restored.publication_id, "2025-26", 3, False),
+    ]
+    assert service.player_logs.retained_game_rows("2026-27", "0022600001") is None
+    assert [
+        row.points
+        for row in service.player_logs.retained_game_rows("2025-26", "0022500001")
+    ] == [25]
+    restored_rows = focal_game_rows(
+        service.player_logs, "2025-26", "0022500001", evidence_season="2025-26"
+    )
+    assert [row.points for row in restored_rows] == [
+        row["points"] for row in _default_rows() if row["game_id"] == "0022500001"
+    ]
