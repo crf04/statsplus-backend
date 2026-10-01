@@ -20,6 +20,7 @@ import requests
 from app.config.settings import (
     AuthenticationSettings,
     FeatureSettings,
+    NBASeasonSettings,
     ProviderSettings,
     RuntimeSettings,
 )
@@ -62,6 +63,7 @@ def assert_fixture(name: str, payload) -> None:
 def board_settings(*, enabled=True, providers=("dabble", "prizepicks")):
     return RuntimeSettings(
         environment="testing",
+        nba=NBASeasonSettings(current_season="2025-26"),
         auth=AuthenticationSettings(firebase_admin_disabled=False),
         features=FeatureSettings(dfs_board_enabled=enabled),
         providers=ProviderSettings(dfs_enabled_providers=providers),
