@@ -1648,6 +1648,17 @@ def _revoke_pointer_history(
     )
 
 
+def _lock_pointer(session: Session, stream_key: str) -> PublicationPointer | None:
+    """Take the stream pointer's row lock; every writer takes it before versions."""
+
+    return session.scalar(
+        select(PublicationPointer)
+        .where(PublicationPointer.stream_key == stream_key)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -4809,12 +4820,7 @@ class PublicationService(_SessionService):
         # correction commits (and then sees the corrected pointer).  Callers
         # hold the stream row, if any, first; the order is always stream, then
         # pointer, then versions.
-        pointer = session.scalar(
-            select(PublicationPointer)
-            .where(PublicationPointer.stream_key == stream_key)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
+        pointer = _lock_pointer(session, stream_key)
         versions = list(session.scalars(select(PublicationVersion).where(
             PublicationVersion.stream_key == stream_key,
             PublicationVersion.season == season,
@@ -4878,10 +4884,16 @@ class PublicationService(_SessionService):
         if not stale_ids:
             return
         if pointer is not None and pointer.active_publication_id in stale_ids:
-            pointer.previous_publication_id = pointer.active_publication_id
             pointer.active_publication_id = None
             pointer.fence = int(pointer.fence or 0) + 1
             pointer.updated_at = now
+        if pointer is not None and (
+            pointer.previous_publication_id in stale_ids
+            or pointer.active_publication_id is None
+        ):
+            # A rollback would clone this target into fresh, unrevoked
+            # authority, resurrecting the evidence the correction withdrew.
+            pointer.previous_publication_id = None
         _revoke_pointer_history(
             session, stream_key, stale_ids, now=now,
             fence=int(pointer.fence) if pointer is not None else 0,
@@ -5021,6 +5033,10 @@ class PublicationService(_SessionService):
             replaceable_statuses = (
                 ("candidate",) if stream.enabled else ("candidate", "active")
             )
+            # Lock the pointer before any version is touched: the first status
+            # change below would otherwise be flushed (holding version row
+            # locks) ahead of the lock a concurrent rollback already holds.
+            _lock_pointer(session, stream_key)
             replaceable = list(session.scalars(select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,

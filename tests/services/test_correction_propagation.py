@@ -3790,7 +3790,8 @@ def test_correction_revokes_previously_activated_superseded_and_rollback_history
     assert cleared == (history[-1][2] + 1)
 
 
-def test_a_concurrent_rollback_cannot_escape_a_correction_on_postgres():
+@pytest.mark.parametrize("window", ["first_version_write", "after_enumeration"])
+def test_a_concurrent_rollback_cannot_escape_a_correction_on_postgres(window):
     """The correction locks the pointer before it enumerates what is stale.
 
     A rollback that races the enumeration must either be seen by the
@@ -3841,14 +3842,17 @@ def test_a_concurrent_rollback_cannot_escape_a_correction_on_postgres():
 
         @event.listens_for(engine, "after_cursor_execute")
         def interleave(connection, cursor, statement, *_):
-            if (
-                racing["thread"] is None
-                and "JOIN collection_observations" in statement
+            earliest = statement.startswith("UPDATE publication_versions SET status=")
+            enumerated = (
+                "JOIN collection_observations" in statement
                 and "publication_observations.publication_id IN" in statement
+            )
+            if racing["thread"] is None and (
+                earliest if window == "first_version_write" else enumerated
             ):
                 racing["thread"] = threading.Thread(target=rollback_concurrently)
                 racing["thread"].start()
-                # Unfixed, the rollback commits here, after the enumeration.
+                # Unfixed, the rollback commits here or deadlocks the correction.
                 racing["thread"].join(timeout=3)
 
         publications.compose_inactive_ledger(
@@ -3872,6 +3876,41 @@ def test_a_concurrent_rollback_cannot_escape_a_correction_on_postgres():
             )).scalars().all()
         assert active is None
         assert unrevoked == []
+        # The rollback waited for the correction and found nothing to restore;
+        # neither side was aborted by a deadlock.
+        assert len(racing["outcome"]) == 1
+        assert isinstance(racing["outcome"][0], ControlPlaneError)
     finally:
         reset_schema()
         engine.dispose()
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=("active", "inactive"))
+def test_rollback_cannot_restore_a_target_a_correction_withdrew(tmp_path, enabled):
+    engine = _engine(tmp_path, f"withdrawn-{enabled}.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(engine)
+    publications.register_stream(
+        stream_key, provider="ledger", owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose", enabled=enabled,
+    )
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+    if enabled:
+        corrected = publications.recompose_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+            provenance={sources[3]: "game-1"}, reason="correction",
+        )
+    else:
+        corrected = publications.compose_inactive_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+            provenance={sources[3]: "game-1"}, reason="correction",
+            corrected_provenance={sources[3]: "game-1"},
+        )
+
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        publications.rollback(stream_key, reason="restore the withdrawn generation")
+
+    unrevoked = [row[0] for row in pointer_history(engine, stream_key) if not row[3]]
+    assert unrevoked == ([corrected.publication_id] if enabled else [])
