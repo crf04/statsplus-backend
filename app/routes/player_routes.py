@@ -7,7 +7,7 @@ from ..errors import (
     ResourceNotFoundError,
     route_error_boundary,
 )
-from ..utils.auth import require_admin, require_auth_optional
+from ..utils.auth import require_admin, require_auth, require_auth_optional
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
@@ -51,3 +51,13 @@ def get_player_profile():
 def fetch_players():
     job_state = player_jobs_service.start("fetch_players")
     return jsonify(job_state), 202
+
+
+@player_bp.route('/next-opponent', methods=['GET'])
+@require_auth
+@route_error_boundary("Failed to retrieve the next opponent.")
+def get_next_opponent():
+    names = request.args.getlist('player_name')
+    if set(request.args) != {'player_name'} or len(names) != 1 or not names[0].strip():
+        raise InvalidInputError("player_name is required.")
+    return jsonify(CurrentAppService("next_opponent").get_next_opponent(names[0]))

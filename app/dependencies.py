@@ -44,6 +44,7 @@ class ApplicationDependencies:
     provider_health_service: Any
     nl_service: Any
     user_service: Any
+    next_opponent_service: Any | None = None
     dfs_snapshot_cache: Any | None = None
     statistic_catalog: Any | None = None
     comparison_board_service: Any | None = None
@@ -673,6 +674,9 @@ def build_dependencies(
             else None
         ),
     )
+    from app.services.next_opponent import NextOpponentService
+
+    next_opponent_service = NextOpponentService(game_service, event_catalog_service, season_rankings)
     matchup_player_pool_reader = projection_player_pool_reader
     selection_player_pool_reader = (
         ProjectionSelectionPlayerPoolReader(projection_player_pool_reader)
@@ -771,6 +775,7 @@ def build_dependencies(
         matchup_selection_service=matchup_selection_service,
         player_service=player_service,
         team_service=team_service,
+        next_opponent_service=next_opponent_service,
         data_service=data_service,
         data_refresh_jobs_service=data_refresh_jobs_service,
         athlete_catalog_service=athlete_catalog_service,

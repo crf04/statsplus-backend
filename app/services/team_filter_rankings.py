@@ -246,6 +246,17 @@ class TeamFilterRankingService:
 
         return self._rows_by_base((base,), season)[base]
 
+    def season_rows_by_base(self, bases, season, *, publication_snapshot=None):
+        """Read several validated Season bases from one publication generation."""
+        return self._rows_by_base(
+            bases, season, publication_snapshot=publication_snapshot
+        )
+
+    @staticmethod
+    def rank_definition(label, definition, rows):
+        """Rank a profile column with the same ordering as named Team Filters."""
+        return TeamFilterRankingService._rank(label, definition, rows)
+
     def rank_all(
         self, team_filters, season: str, *, publication_snapshot=None
     ) -> dict[str, list[str]]:

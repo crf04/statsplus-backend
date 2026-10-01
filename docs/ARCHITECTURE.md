@@ -1082,6 +1082,24 @@ evidence.  Because the durable path therefore covers every public primitive,
 an ingestion-complete, valid publication is database-first with no separate
 cutover gate.
 
+### Player's next scheduled opponent
+
+`GET /api/players/next-opponent` is a separate authenticated read owned by
+`NextOpponentService`. It resolves the player with the game-log identity seam,
+uses the current Athlete Catalog team, and selects the earliest future
+scheduled, non-postponed stored event. No provider calls or writes occur; the
+game-log response's existing `next_game` field remains null.
+
+The next-opponent read captures all five Season publications in one snapshot,
+then uses the public `TeamFilterRankingService.season_rows_by_base` validation
+seam and `team_service.opponent_profile_metrics` projection shared by the
+existing profile serializers. Values and league comparisons come from the
+Defense Sheet's `publication_league_table`. Its `most_rank` comes directly from
+`TeamFilterRankingService.rank_definition`, using the named Team Filter's own
+definition where one exists: highest first, consecutive positions, alphabetical
+tricode ties, and no-rate play-type teams excluded. This rank must never be
+computed by reversing the profile's ascending competition rank.
+
 ### Team Profile categories
 
 `GET /api/teams/stats` (`app.services.team_service.TeamService`) serves the
