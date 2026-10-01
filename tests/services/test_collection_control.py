@@ -2085,7 +2085,8 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     third = publication.compose("provenance", season="2025-26", cutoff=now,
                                 payload={"published": 3}, expected_fence=second.fence,
                                 manifest_id="prov-manifest")
-    assert publication.prune_history(stream_key="provenance", season="2025-26") == 1
+    # Every replaced version still has unrevoked history, so none is pruned.
+    assert publication.prune_history(stream_key="provenance", season="2025-26") == 0
     assert third.publication_id != second.publication_id
     # The same accepted evidence backs every retained slice, so it remains
     # protected even after the oldest rendered publication is pruned.
@@ -2163,9 +2164,13 @@ def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_his
         assert connection.execute(select(CollectionObservation).where(
             CollectionObservation.observation_id == "rollback-obs"
         )).first() is not None
+        # The replaced first version keeps unrevoked history, so a later
+        # rollback can make it authoritative again: pruning leaves it alone.
         assert connection.execute(select(PublicationVersion).where(
             PublicationVersion.publication_id == first.publication_id
-        )).first() is None
+        )).first() is not None
+
+
 def test_event_catalog_rejects_caller_game_count_fallback(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     control = CollectionControlService(control_db, clock=lambda: now)
