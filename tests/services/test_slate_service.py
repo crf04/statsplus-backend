@@ -565,3 +565,115 @@ def test_slate_requires_an_event_catalog_dependency():
 
     with pytest.raises(ProviderUnavailableError):
         service.get_slate("2026-01-15")
+
+
+class SeasonCatalog:
+    """An Event Catalog holding rows for some seasons and none for others."""
+
+    def __init__(self, events_by_season, *, last_success_at="2026-09-30T10:00:00+00:00"):
+        self.events_by_season = events_by_season
+        self.last_success_at = last_success_at
+        self.seasons_read = []
+
+    def count_events(self, season):
+        return len(self.events_by_season.get(season, ()))
+
+    def get_freshness(self, season, *, now=None):
+        self.seasons_read.append(("freshness", season))
+        return {"last_success_at": self.last_success_at if self.count_events(season) else None}
+
+    def get_events_between(self, season, starts_at, ends_at):
+        self.seasons_read.append(("events", season))
+        return [
+            event
+            for event in self.events_by_season.get(season, ())
+            if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
+        ]
+
+
+def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):
+    """A Slate on 2026-10-01, the day the calendar starts 2026-27."""
+
+    return SlateService(
+        catalog,
+        settings=RuntimeSettings(environment="testing", nba=nba or NBASeasonSettings()),
+        clock=lambda: datetime(2026, 10, 1, 16, tzinfo=timezone.utc),
+        player_pool=player_pool,
+        injuries=injuries,
+    )
+
+
+def test_an_unpinned_slate_reads_a_past_date_from_its_own_season_after_rollover():
+    catalog = SeasonCatalog({
+        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+    })
+    pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
+    injuries = RecordedStoredInjuries(())
+    service = _rollover_service(catalog, player_pool=pool, injuries=injuries)
+
+    payload = service.get_slate("2026-04-10")
+
+    assert [game["game_id"] for game in payload["games"]] == ["0022501150"]
+    assert {season for _, season in catalog.seasons_read} == {"2025-26"}
+    assert pool.calls[0][0] == "2025-26"
+    assert injuries.calls[0][1] == "2025-26"
+
+
+def test_an_unpinned_slate_for_an_uncollected_season_is_empty_not_unavailable():
+    catalog = SeasonCatalog({
+        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+    })
+    pool = RecordedPlayerPool(PlayerPool(players=(), team_counts={}, freshness={}))
+    service = _rollover_service(catalog, player_pool=pool)
+
+    payload = service.get_slate()
+
+    assert payload["slate_date"] == "2026-10-01"
+    assert payload["games"] == []
+    # The previous season's schedule is the freshest one there is.
+    assert payload["freshness"]["schedule"]["retrieved_at"] == "2026-09-30T10:00:00+00:00"
+    assert {season for _, season in catalog.seasons_read} == {"2025-26"}
+    assert pool.calls[0][0] == "2025-26"
+
+
+def test_an_unpinned_slate_reads_the_new_season_once_it_is_collected():
+    catalog = SeasonCatalog({
+        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+        "2026-27": [_event("0022600001", "2026-10-01T23:30:00+00:00")],
+    })
+
+    payload = _rollover_service(catalog).get_slate()
+
+    assert [game["game_id"] for game in payload["games"]] == ["0022600001"]
+    assert {season for _, season in catalog.seasons_read} == {"2026-27"}
+
+
+def test_a_pinned_slate_keeps_the_pinned_season_for_every_date():
+    catalog = SeasonCatalog({
+        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+        "2026-27": [_event("0022600001", "2026-10-01T23:30:00+00:00")],
+    })
+    service = _rollover_service(catalog, nba=NBASeasonSettings(current_season="2025-26"))
+
+    assert service.get_slate()["games"] == []
+    assert [game["game_id"] for game in service.get_slate("2026-04-10")["games"]] == [
+        "0022501150"
+    ]
+    assert {season for _, season in catalog.seasons_read} == {"2025-26"}
+
+
+def test_a_pin_without_a_schedule_stays_unavailable():
+    catalog = SeasonCatalog({
+        "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
+    })
+    service = _rollover_service(catalog, nba=NBASeasonSettings(current_season="2026-27"))
+
+    with pytest.raises(ProviderUnavailableError):
+        service.get_slate("2026-04-10")
+
+
+def test_an_unpinned_slate_without_either_seasons_schedule_stays_unavailable():
+    service = _rollover_service(SeasonCatalog({"2024-25": [_event("1", "2025-04-10T23:00:00+00:00")]}))
+
+    with pytest.raises(ProviderUnavailableError):
+        service.get_slate()
