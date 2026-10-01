@@ -172,7 +172,7 @@ def get_unscheduled_matchup():
 
 def _default_season() -> str:
     """The season used when a request omits ``season_filter``."""
-    return game_service.settings.nba.current_season
+    return game_service.default_season()
 
 
 def _parse_game_log_filters() -> tuple[str, GameLogQuery]:

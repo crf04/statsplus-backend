@@ -41,6 +41,7 @@ from app.services.matchup_snapshot import (
     capture_publication_snapshot,
 )
 from app.services.target_conditions import date_is_kept, minutes_are_kept
+from app.services.research_season import research_season
 
 
 _WINDOW_NAMES = ("season", "last_15")
@@ -146,7 +147,7 @@ class TargetResolutionService:
             self.publication_reader,
             MATCHUP_PUBLICATION_STREAM_KEYS,
             projection_only_keys=MATCHUP_PROJECTION_ONLY_STREAM_KEYS,
-            season=self.settings.nba.current_season,
+            season=research_season(self.settings, self.publication_reader),
         )
         return SnapshotMatchups(composer, snapshot, self.injuries)
 

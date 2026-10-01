@@ -1004,6 +1004,19 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
     assert dependencies.settings.nba.current_season == "2026-27"
     assert dependencies.game_service.settings.nba.current_season == "2026-27"
     assert dependencies.slate_service.settings.nba.current_season == "2026-27"
+    # Every published read resolves through the same publication (crf04/statsplus rollover).
+    assert dependencies.game_service.default_season() == "2025-26"
+    for service in (
+        dependencies.matchup_service,
+        dependencies.matchup_selection_service,
+        dependencies.target_resolution_service,
+        dependencies.target_backtest_service,
+        dependencies.target_preview_service,
+        dependencies.target_season_minutes_service,
+        dependencies.diet_baselines_service,
+        dependencies.user_service,
+    ):
+        assert service.publication_reader is dependencies.player_service.publication_reader
 
     # Profile reads accompanying Search must use available data as well.
     from types import SimpleNamespace

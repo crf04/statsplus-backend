@@ -2,6 +2,7 @@
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.services.player_diet import PLAYER_DIET_PUBLICATION_STREAM_KEYS
 from app.services.publication_snapshot_calls import call_with_read_scope
+from app.services.research_season import research_season
 
 
 class DietBaselinesService:
@@ -11,7 +12,7 @@ class DietBaselinesService:
         self.publication_reader = publication_reader
 
     def get(self):
-        season = self.settings.nba.current_season
+        season = research_season(self.settings, self.publication_reader)
         snapshot = (
             self.publication_reader.snapshot(
                 tuple(sorted(PLAYER_DIET_PUBLICATION_STREAM_KEYS)),

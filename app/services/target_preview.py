@@ -40,6 +40,7 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
+from app.services.research_season import research_season
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -109,7 +110,7 @@ class TargetPreviewService:
             PREVIEW_PUBLICATION_STREAM_KEYS,
             projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
             decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
-            season=self.settings.nba.current_season,
+            season=research_season(self.settings, self.publication_reader),
         )
         previewed = self.backtests.backtest_target(
             draft, publication_snapshot=snapshot

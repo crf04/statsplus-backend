@@ -27,6 +27,7 @@ from app.services.publication_snapshot_calls import (
     accepts_keyword,
     call_with_read_scope,
 )
+from app.services.research_season import research_season
 from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
@@ -112,6 +113,16 @@ class GameService:
 
         logger.info(f"GameService initialized with cache {'enabled' if self.cache and self.cache.enabled else 'disabled'}")
 
+    def default_season(self):
+        """The season a read without an explicit season uses.
+
+        The active game-log publication's season, so the October calendar
+        rollover never selects an unpublished season; an explicit
+        ``NBA_CURRENT_SEASON`` pin wins.
+        """
+
+        return research_season(self.settings, self.publication_reader)
+
     def get_player_id(self, player_name, season):
         # The Athlete Catalog is the governed identity source game-log
         # ingest already joins on: any player with durable logs is
@@ -189,7 +200,7 @@ class GameService:
         self, player_name, season=None, *, publication_snapshot=None
     ):
         """Read player game logs directly from durable facts."""
-        season = season or self.settings.nba.current_season
+        season = season or self.default_season()
         if self.game_logs_source is None:
             raise RuntimeError(
                 "GameService needs an injected game-log source; there is no "
@@ -215,7 +226,7 @@ class GameService:
         publication_snapshot=None,
     ):
         """Find common games between players"""
-        season = season or self.settings.nba.current_season
+        season = season or self.default_season()
         primary_game_team_pairs = set(zip(primary_player_logs['GAME_ID'], primary_player_logs['TEAM_ABBREVIATION']))
 
         # Loop through other players and find intersections based on game IDs and team abbreviations
@@ -246,7 +257,7 @@ class GameService:
         publication_snapshot=None,
     ):
         """Find same-team games where any named player appeared."""
-        season = season or self.settings.nba.current_season
+        season = season or self.default_season()
         exclude_game_ids = set()
         primary_game_team_pairs = set(zip(
             player_logs['GAME_ID'], player_logs['TEAM_ABBREVIATION']

@@ -663,7 +663,10 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     )
     first_dependencies = SimpleNamespace(
         settings=first_settings,
-        game_service=SimpleNamespace(settings=first_settings),
+        game_service=SimpleNamespace(
+            settings=first_settings,
+            default_season=lambda: first_settings.nba.current_season,
+        ),
         user_service=SimpleNamespace(settings=first_settings),
         player_service=Mock(),
         team_service=Mock(),
@@ -676,7 +679,10 @@ def test_app_factory_isolates_request_settings_and_services(monkeypatch):
     )
     second_dependencies = SimpleNamespace(
         settings=second_settings,
-        game_service=SimpleNamespace(settings=second_settings),
+        game_service=SimpleNamespace(
+            settings=second_settings,
+            default_season=lambda: second_settings.nba.current_season,
+        ),
         user_service=SimpleNamespace(settings=second_settings),
         player_service=Mock(),
         team_service=Mock(),

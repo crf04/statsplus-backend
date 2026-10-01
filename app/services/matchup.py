@@ -84,6 +84,7 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
+from app.services.research_season import research_season
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -651,7 +652,7 @@ class MatchupService:
         connection: Connection | None,
         session: Session | None,
     ) -> dict[str, Any]:
-        season = self.settings.nba.current_season
+        season = research_season(self.settings, self.publication_reader)
         opponent_id = self._known_team_id(opponent)
         team_id = None if team is None else self._known_team_id(team)
         player_team_id = (
@@ -888,7 +889,7 @@ class MatchupService:
         injuries: Any = _OWN,
         compose_cache: MatchupComposeCache | None = None,
     ) -> dict[str, Any]:
-        season = self.settings.nba.current_season
+        season = research_season(self.settings, self.publication_reader)
         observed_at = assume_utc(self._clock())
         if publication_snapshot is _OWN:
             publication_snapshot = self._publication_snapshot(season, session=session)

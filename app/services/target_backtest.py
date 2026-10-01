@@ -89,6 +89,7 @@ from app.services.target_conditions import (
     player_minutes_are_kept,
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
+from app.services.research_season import research_season
 
 
 logger = getLogger(__name__)
@@ -401,7 +402,7 @@ class TargetBacktestService:
         value (``aggregate_cache_state``).
         """
 
-        season = self.settings.nba.current_season
+        season = research_season(self.settings, self.publication_reader)
         with request_read_scope(self._engine) as (_connection, session):
             if session is not None:
                 listed = self.targets.list_targets_in_session(
@@ -511,7 +512,7 @@ class TargetBacktestService:
         """
 
         cache_state = "-"
-        season = self.settings.nba.current_season
+        season = research_season(self.settings, self.publication_reader)
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
         # A saved Target is the only caller whose response may be served from

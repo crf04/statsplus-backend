@@ -37,6 +37,7 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
+from app.services.research_season import research_season
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -133,7 +134,7 @@ class MatchupSelectionService:
         connection: Connection | None,
         session: Session | None,
     ) -> dict[str, Any]:
-        season = self.settings.nba.current_season
+        season = research_season(self.settings, self.publication_reader)
         publication_snapshot = self._publication_snapshot(season, session=session)
         event = self._event(season, game_id, connection=connection)
         pool = (

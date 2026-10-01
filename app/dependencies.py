@@ -337,6 +337,8 @@ def build_dependencies(
         if publication_reader is not None
         else None
     )
+    # The reader every published read resolves its default season through
+    # (app/services/research_season.py), absent before the pointer schema exists.
     research_publications = (
         publication_reader
         if publication_reader is not None and inspect(engine).has_table("publication_pointers")
@@ -670,7 +672,7 @@ def build_dependencies(
         ),
         team_matchups=team_matchup_query_service,
         team_filter_rankings=season_rankings,
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
         # Read-only Catalog access bound to the engine directly: the full
         # service owns a provider-backed refresh, so injecting it -- or a
         # wrapper around it -- would leave that adapter reachable from here.
@@ -696,7 +698,7 @@ def build_dependencies(
         archetypes=PlayerArchetypeRepository(engine),
         statistic_catalog=statistic_catalog,
         settings=settings,
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
         engine=engine,
     )
     matchup_service = MatchupService(
@@ -710,7 +712,7 @@ def build_dependencies(
         statistic_catalog=statistic_catalog,
         injuries=matchup_injury_service,
         database_only=not demo_database,
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
         engine=engine,
         # Names an Unscheduled Matchup's players (crf04/statsplus#95) through
         # the same engine-bound reader, so no catalog refresh is reachable.
@@ -720,7 +722,12 @@ def build_dependencies(
             else None
         ),
     )
-    user_service = UserService(engine, settings=settings, player_logs=player_game_log_repository)
+    user_service = UserService(
+        engine,
+        settings=settings,
+        player_logs=player_game_log_repository,
+        publication_reader=research_publications,
+    )
     # Target resolution reads no provider: it composes the same Slate and
     # Matchup documents the slate and matchup routes already serve, so the
     # two surfaces cannot disagree about one game.
@@ -732,7 +739,7 @@ def build_dependencies(
         # whole resolve, the same two promises the preview (#253) already
         # makes: without these, a per-game ``get_matchup`` call may open its
         # own snapshot and reach the live injury provider from inside a GET.
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
     )
@@ -751,7 +758,7 @@ def build_dependencies(
         ),
         statistic_catalog=statistic_catalog,
         settings=settings,
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
         engine=engine,
         redis_client=redis_client,
     )
@@ -764,7 +771,7 @@ def build_dependencies(
         matchups=matchup_service,
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
-        publication_reader=publication_reader,
+        publication_reader=research_publications,
     )
 
     return ApplicationDependencies(
@@ -819,11 +826,11 @@ def build_dependencies(
         target_backtest_service=target_backtest_service,
         target_preview_service=target_preview_service,
         target_season_minutes_service=TargetSeasonMinutesService(
-            player_logs=player_game_log_repository, settings=settings, publication_reader=publication_reader,
+            player_logs=player_game_log_repository, settings=settings, publication_reader=research_publications,
         ),
         diet_baselines_service=DietBaselinesService(
             player_diets=(player_diet_service.repository if player_diet_service else None),
-            settings=settings, publication_reader=publication_reader,
+            settings=settings, publication_reader=research_publications,
         ),
     )
 
