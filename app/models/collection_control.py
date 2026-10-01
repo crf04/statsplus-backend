@@ -272,8 +272,8 @@ class PublicationPointerHistory(Base):
     invalidation stamps ``revoked_at`` on the rows it withdraws.  A row replaced
     by a later publication is *not* revoked; it stays the retained authority for
     its season, which is what a past season's reads need once a newer season is
-    active.  Rows outlive pruning of their publication, which keeps each season's
-    latest unrevoked publication so its reads stay served.  ``fence`` is the stream pointer's generation, so it orders the rows
+    active.  Rows outlive pruning of their publication, which keeps every
+    publication that still has an unrevoked row.  ``fence`` is the stream pointer's generation, so it orders the rows
     of one stream even when a test clock does not advance.
     """
 

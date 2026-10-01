@@ -3264,8 +3264,9 @@ one is not revoked, so a past season's last activation stays retained after a
 newer season activates. A candidate that never activated has no row. The
 migration seeds one row per current active pointer, so the authority already
 serving at deploy time is captured without inference, and it must deploy before
-the first publication of a new season. `prune_history` keeps each season's
-latest unrevoked publication so its reads stay served; history rows carry no
+the first publication of a new season. `prune_history` never deletes a
+publication that has an unrevoked history row, since a later rollback can make it
+the served authority again; history rows carry no
 foreign key and outlive any pruned payload, and a read whose projection is gone
 stays unavailable.
 

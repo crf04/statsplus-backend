@@ -5851,16 +5851,13 @@ class PublicationService(_SessionService):
                 PublicationVersion.status == "rollback"
             )))
             protected.update(session.scalars(select(PublicationActivation.publication_id)))
-            # The retained authority of each season: the latest unrevoked
-            # pointer history row, which a past season's reads still serve.
-            retained: dict[tuple[str, str], str] = {}
-            for history in session.scalars(
-                select(PublicationPointerHistory)
+            # A publication with an unrevoked history row can become the
+            # served authority again when a later rollback revokes the one
+            # above it, so its payload and projection must outlive pruning.
+            protected.update(session.scalars(
+                select(PublicationPointerHistory.publication_id)
                 .where(PublicationPointerHistory.revoked_at.is_(None))
-                .order_by(PublicationPointerHistory.fence.asc())
-            ):
-                retained[(history.stream_key, history.season)] = history.publication_id
-            protected.update(retained.values())
+            ))
             query = select(PublicationVersion).where(
                 PublicationVersion.status.in_(("superseded", "candidate")),
                 ~PublicationVersion.publication_id.in_(protected),

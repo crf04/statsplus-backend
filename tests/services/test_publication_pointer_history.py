@@ -76,23 +76,16 @@ def test_a_rollback_revokes_the_withdrawn_publication_and_restores_the_prior_one
     assert revoked_fences(engine, STREAM) == [3]
 
 
-def test_pruning_keeps_each_seasons_publication_and_every_history_row(lifecycle):
+def test_pruning_deletes_only_payloads_without_unrevoked_history(lifecycle):
     engine, publications = lifecycle
-    first = _compose(publications, "2025-26")
+    first = _compose(publications, "2025-26", points=10)
     second = _compose(publications, "2026-27", expected_fence=first.fence)
+    restored = publications.rollback(
+        STREAM, reason="reject 2026-27", expected_fence=second.fence
+    )
     third = _compose(
-        publications, "2026-27", points=11, expected_fence=second.fence
+        publications, "2026-27", points=11, expected_fence=restored.fence
     )
-    fourth = _compose(
-        publications, "2026-27", points=12, expected_fence=third.fence
-    )
-    # Activating a stream's candidate marks the publication it displaces
-    # superseded; 2025-26's retained publication carries that status.
-    with engine.begin() as connection:
-        connection.execute(text(
-            "UPDATE publication_versions SET status = 'superseded' "
-            "WHERE publication_id = :id"
-        ), {"id": first.publication_id})
 
     publications.prune_history(stream_key=STREAM)
 
@@ -101,17 +94,18 @@ def test_pruning_keeps_each_seasons_publication_and_every_history_row(lifecycle)
             row.publication_id
             for row in connection.execute(select(PublicationVersion))
         }
+    # The rolled-back (revoked) 2026-27 payload goes; every publication with an
+    # unrevoked history row stays, since a later rollback can make it authority.
     assert surviving == {
-        first.publication_id, third.publication_id, fourth.publication_id
+        first.publication_id, restored.publication_id, third.publication_id
     }
     # Pruned payloads leave their activation record behind.
     assert pointer_history(engine, STREAM) == [
         (first.publication_id, "2025-26", 1, False),
-        (second.publication_id, "2026-27", 2, False),
-        (third.publication_id, "2026-27", 3, False),
-        (fourth.publication_id, "2026-27", 4, False),
+        (second.publication_id, "2026-27", 2, True),
+        (restored.publication_id, "2025-26", 3, False),
+        (third.publication_id, "2026-27", 4, False),
     ]
-    # The retained authority still reads; the pruned generation cannot.
     assert [
         row.points
         for row in _repository(engine).retained_game_rows("2025-26", "0022500001")
@@ -164,3 +158,26 @@ def test_a_game_of_a_later_season_than_the_evidence_is_never_retained():
     assert focal_game_rows(
         Everything(), "2026-27", "0022600001", evidence_season="2025-26"
     ) is None
+
+
+def test_pruning_then_toggling_keeps_the_publication_that_becomes_authoritative(
+    lifecycle,
+):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", expected_fence=first.fence)
+    restored = publications.rollback(
+        STREAM, reason="restore 2025-26", expected_fence=second.fence
+    )
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE publication_versions SET status = 'superseded' "
+            "WHERE publication_id = :id"
+        ), {"id": first.publication_id})
+
+    publications.prune_history(stream_key=STREAM)
+    publications.rollback(STREAM, reason="toggle forward")  # revokes the restore
+
+    assert restored.publication_id != first.publication_id
+    rows = _repository(engine).retained_game_rows("2025-26", "0022500001")
+    assert [row.points for row in rows] == [25]
