@@ -84,7 +84,7 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
-from app.services.research_season import event_season, research_season
+from app.services.research_season import event_season, focal_game_rows, research_season
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -934,9 +934,10 @@ class MatchupService:
         historical = is_historical_matchup(event, pool_players)
         if historical:
             players, participants_section = self._historical_participants(
-                season,
+                schedule_season,
                 game_id,
                 team_ids,
+                evidence_season=season,
                 publication_snapshot=publication_snapshot,
                 connection=connection,
             )
@@ -1080,10 +1081,15 @@ class MatchupService:
         game_id: str,
         team_ids: Sequence[int],
         *,
+        evidence_season: str | None = None,
         publication_snapshot=None,
         connection: Connection | None = None,
     ) -> tuple[tuple[_Participant, ...], dict[str, Any]]:
-        """Name the players with a complete canonical row for this game."""
+        """Name the players with a complete canonical row for this game.
+
+        ``season`` is the game's own; ``evidence_season`` is the request's
+        published season, which a past season's game no longer matches.
+        """
 
         sync = call_with_read_scope(
             self.player_logs.get_sync_status,
@@ -1100,10 +1106,11 @@ class MatchupService:
                 "context": None,
                 "unavailable_reason": "game_logs_incomplete",
             }
-        rows = call_with_read_scope(
-            self.player_logs.list_game_rows,
+        rows = focal_game_rows(
+            self.player_logs,
             season,
             game_id,
+            evidence_season=evidence_season,
             publication_snapshot=publication_snapshot,
             connection=connection,
         )

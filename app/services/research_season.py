@@ -19,6 +19,7 @@ from datetime import date
 
 from app.config.settings import current_nba_season
 from app.domain.nba_events import season_for_game_id
+from app.services.publication_snapshot_calls import call_with_read_scope
 
 
 def season_is_pinned(settings) -> bool:
@@ -96,3 +97,31 @@ def event_season(settings, game_id: str, evidence_season: str) -> str:
     if season_is_pinned(settings):
         return settings.nba.current_season
     return season_for_game_id(str(game_id)) or evidence_season
+
+
+def focal_game_rows(
+    player_logs,
+    season: str,
+    game_id: str,
+    *,
+    evidence_season: str | None,
+    publication_snapshot=None,
+    connection=None,
+):
+    """One completed game's canonical rows, read in the game's own season.
+
+    A game of the published season reads the request's snapshot. A game of a
+    season the publication has moved past reads that season's last activated
+    publication instead, since the request's snapshot cannot hold it.
+    """
+
+    final_rows = getattr(player_logs, "list_final_game_rows", None)
+    if evidence_season not in (None, season) and callable(final_rows):
+        return call_with_read_scope(final_rows, season, game_id, connection=connection)
+    return call_with_read_scope(
+        player_logs.list_game_rows,
+        season,
+        game_id,
+        publication_snapshot=publication_snapshot,
+        connection=connection,
+    )

@@ -409,3 +409,147 @@ def test_an_opening_night_selection_reads_the_new_game_with_published_evidence(t
     assert events.seasons == ["2026-27"]
     # Last season's published games are the card's evidence.
     assert '"game_date": "2026-01-02"' in json.dumps(card)
+
+
+def _advance_to_next_season(engine, publication):
+    """Seed last season's completed sync row, then publish 2026-27 logs."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO player_game_log_sync (season, game_id, season_type, "
+                "status, checksum, row_count, source_provider, retrieved_at) "
+                "VALUES ('2025-26', '0022500001', 'Regular Season', 'complete', "
+                "'c', 1, 'ledger', '2026-01-03 00:00:00')"
+            )
+        )
+    later = RETRIEVED_AT + timedelta(days=280)
+    PublicationService(engine, clock=lambda: later).compose(
+        "player_game_logs",
+        season="2026-27",
+        cutoff=later,
+        payload={"rows": [{
+            **_log_row(game_id="0022600001", game_date="2026-10-21", points=12, minutes=30.0),
+            "season": "2026-27",
+        }]},
+        expected_fence=publication.fence,
+    )
+
+
+def test_a_past_season_historical_selection_reads_its_game_after_the_publication_advances(
+    tmp_path,
+):
+    """A completed April game with no closing projections, once logs publish 2026-27."""
+
+    class PastEvents:
+        def __init__(self):
+            self.seasons = []
+
+        def count_events(self, season):
+            return 1
+
+        def get_event(self, season, game_id):
+            self.seasons.append(season)
+            if season != "2025-26" or game_id != "0022500001":
+                return None
+            return {
+                "nba_game_id": "0022500001",
+                "classification": "Regular Season",
+                "status_code": 3,
+                "status_text": "Final",
+                "scheduled_at": "2026-01-03T00:30:00+00:00",
+                "home_team_id": BOS,
+                "away_team_id": LAL,
+            }
+
+    engine, service, _, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+    _advance_to_next_season(engine, publication)
+    service.event_catalog = PastEvents()
+    service.player_pool = type(
+        "NoClosingSet", (), {"get_pool_for_game": lambda self, *, season, game_id: PlayerPool((), {}, {})}
+    )()
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    card = service.get_selection(game_id="0022500001", player_id=2544)
+
+    assert card["experience"]["mode"] == "historical"
+    assert card["experience"]["focal_game"]["game_id"] == "0022500001"
+
+
+def test_a_past_season_historical_matchup_names_its_participants_after_the_publication_advances(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import tests.services.test_matchup_service as doubles
+    from app.services.matchup import MatchupService
+    from app.services.stats_freshness_repository import StatsFreshness
+
+    engine, _, reader, publication = _published_selection_service(
+        tmp_path, _default_rows()
+    )
+    _advance_to_next_season(engine, publication)
+    repository = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season="2026-27",
+        clock=lambda: NOW,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    # Evidence doubles serve, and assert, only the published 2026-27 season.
+    monkeypatch.setattr(doubles, "SEASON", "2026-27")
+    past = {
+        **doubles._event(),
+        "nba_game_id": "0022500001",
+        "season": "2025-26",
+        "scheduled_at": "2026-01-03T00:30:00+00:00",
+        "status_code": 3,
+        "status_text": "Final",
+    }
+    seasons = []
+
+    class PastEvents(doubles.RecordedEvents):
+        def count_events(self, season):
+            return 1
+
+        def get_event(self, season, game_id):
+            seasons.append(season)
+            return past if (season, game_id) == ("2025-26", "0022500001") else None
+
+        def latest_final_scheduled_at(self, season):
+            return None
+
+        def get_freshness(self, season, *, now):
+            return {"last_success_at": None, "fresh": False}
+
+    service = MatchupService(
+        event_catalog=PastEvents(),
+        player_pool=doubles.RecordedPool(PlayerPool((), {}, {})),
+        player_logs=repository,
+        player_diets=doubles.RecordedDiets(),
+        team_matchups=doubles.RecordedTeamWindows(
+            doubles._window(), doubles._window(last_15=True)
+        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(RETRIEVED_AT)),
+        injuries=None,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings.model_construct(
+                _fields_set=set(), current_season="2026-27"
+            ),
+        ),
+        publication_reader=reader,
+        clock=lambda: NOW + timedelta(days=280),
+    )
+
+    payload = service.get_matchup(game_id="0022500001")
+
+    assert seasons == ["2025-26"]
+    assert payload["experience"]["mode"] == "historical"
+    assert [player["canonical_id"] for player in payload["players"]] == [2544]
