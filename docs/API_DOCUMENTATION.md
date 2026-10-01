@@ -3821,7 +3821,10 @@ The response is `{next_game, opponent_ranks}`. `next_game` is null when the play
 has no scheduled game (including unavailable team identity or schedule), otherwise
 it contains `game_id`, ET `date` (`YYYY-MM-DD`), opponent `opponent` tricode,
 `opponent_name`, and boolean `home`. The earliest future scheduled, non-postponed
-stored event for the player's current team wins. No provider calls or writes occur.
+stored event for the player's current team wins. Preseason and exhibition games
+are included; a non-NBA opponent keeps its stored identity and has an empty
+`opponent_ranks` list because it has no NBA Season ranking. No provider calls
+or writes occur.
 
 `opponent_ranks` is empty with no next game. Otherwise it carries every available
 stat in the Opposing Team Profile's five Season categories (excluding Playtype

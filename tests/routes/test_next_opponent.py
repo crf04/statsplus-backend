@@ -278,7 +278,11 @@ def test_next_game_ignores_past_finished_and_postponed_events(setup):
                 "nba_game_id": "0022500402",
                 "postponement_evidence": {"source": "NBA"},
             },
-            {**original, "nba_game_id": "0032500403"},
+            {
+                **original,
+                "nba_game_id": "0032500403",
+                "scheduled_at": "2026-01-19T12:00:00+00:00",
+            },
             {
                 **original,
                 "nba_game_id": "0022500600",
@@ -296,3 +300,56 @@ def test_home_game(setup):
         events[0]["away_team"],
     )
     assert get(client).get_json()["next_game"]["home"] is True
+
+
+def test_exhibition_opponent_preserves_next_game_without_nba_ranks(setup):
+    client, _, events = setup
+    events[0]["nba_game_id"] = "0012500500"
+    events[0]["home_team"] = dict(
+        id=1610619999, tricode="INT", name="International Select"
+    )
+    response = get(client)
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "next_game": dict(
+            game_id="0012500500",
+            date="2026-01-19",
+            opponent="INT",
+            opponent_name="International Select",
+            home=False,
+        ),
+        "opponent_ranks": [],
+    }
+
+
+def test_profile_ratios_percentages_and_units(setup):
+    client, reads, _ = setup
+    key = "synergy_play_types_opponent_season"
+    reads[key] = replace(
+        reads[key],
+        decoded=tuple(
+            replace(row, per48={**row.per48, "Transition_PTS": 9.0})
+            if row.team_tricode == "LAL"
+            else row
+            for row in reads[key].decoded
+        ),
+    )
+    response = get(client)
+    assert response.status_code == 200
+    rows = {
+        row["team_filter"]: row
+        for row in response.get_json()["opponent_ranks"]
+        if row["team_filter"]
+    }
+    assert rows["Transition"]["value"] == pytest.approx(1.935483870967742)
+    assert rows["Transition"]["vs_league_pct"] == pytest.approx(93.54838709677419)
+    assert rows["Transition"]["unit"] == "league_ratio"
+    assert rows["AtRimAssists"]["value"] == pytest.approx(1.4754098360655739)
+    assert rows["AtRimAssists"]["vs_league_pct"] == pytest.approx(47.54098360655738)
+    assert rows["AtRimAssists"]["unit"] == "league_ratio"
+    assert rows["OPP_PTS"]["unit"] == "count"
+    fg_pct = next(
+        row for row in response.get_json()["opponent_ranks"] if row["label"] == "FG%"
+    )
+    assert fg_pct["value"] == pytest.approx(0.4772727272727273)
+    assert fg_pct["unit"] == "percent"

@@ -71,7 +71,7 @@ class NextOpponentService:
         opponent = event["away_team" if home else "home_team"]
         ranks = []
         reader = self.rankings.publication_reader
-        if reader is not None:
+        if reader is not None and opponent["id"] in NBA_TEAM_ID_TO_TRICODE:
             snapshot = reader.snapshot(
                 tuple(TEAM_FILTER_PUBLICATION_STREAM_KEYS), season=season
             )
