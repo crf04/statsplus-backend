@@ -7,6 +7,9 @@ Two rules, both deferring to an explicit ``current_season`` (the
   an October rollover never selects a season with no published evidence.
 * Schedule reads for a date follow the season containing that date, falling
   back to the previous season while the new one has no stored schedule.
+* Schedule reads for one game (its event, Player Pool, and injuries) follow
+  the season its game ID names, so a game the Slate shows is always readable
+  while its evidence still comes from the published season.
 
 Collectors and schedule ingestion keep the calendar default in settings.
 """
@@ -15,6 +18,7 @@ from copy import copy
 from datetime import date
 
 from app.config.settings import current_nba_season
+from app.domain.nba_events import season_for_game_id
 
 
 def season_is_pinned(settings) -> bool:
@@ -79,3 +83,16 @@ def schedule_season(settings, event_catalog, on_date: date) -> str:
         return season
     previous = previous_nba_season(season)
     return previous if event_catalog.count_events(previous) > 0 else season
+
+
+def event_season(settings, game_id: str, evidence_season: str) -> str:
+    """The season holding one game's schedule facts.
+
+    The season the game ID names, so opening night's games resolve while the
+    published evidence is still last season's; ``evidence_season`` for an ID
+    that names none.
+    """
+
+    if season_is_pinned(settings):
+        return settings.nba.current_season
+    return season_for_game_id(str(game_id)) or evidence_season

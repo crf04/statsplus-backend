@@ -370,3 +370,42 @@ def test_projection_and_payload_reads_render_the_same_card(tmp_path):
     via_payload = service.get_selection(game_id=GAME_ID, player_id=2544)
 
     assert via_projection == via_payload
+
+
+def test_an_opening_night_selection_reads_the_new_game_with_published_evidence(tmp_path):
+    """The 2026-27 opener resolves while player logs still publish 2025-26."""
+
+    opener = "0022600001"
+
+    class SeasonEvents:
+        def __init__(self):
+            self.seasons = []
+
+        def count_events(self, season):
+            return 1 if season == "2026-27" else 0
+
+        def get_event(self, season, game_id):
+            self.seasons.append(season)
+            if season != "2026-27" or game_id != opener:
+                return None
+            return {
+                "nba_game_id": opener,
+                "classification": "Regular Season",
+                "home_team_id": BOS,
+                "away_team_id": LAL,
+            }
+
+    _, service, _, _ = _published_selection_service(tmp_path, _default_rows())
+    events = SeasonEvents()
+    service.event_catalog = events
+    # Unpinned: the calendar default on 2026-10-01.
+    service.settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+
+    card = service.get_selection(game_id=opener, player_id=2544)
+
+    assert events.seasons == ["2026-27"]
+    # Last season's published games are the card's evidence.
+    assert '"game_date": "2026-01-02"' in json.dumps(card)

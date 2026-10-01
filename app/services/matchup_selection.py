@@ -37,7 +37,7 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
-from app.services.research_season import research_season
+from app.services.research_season import event_season, research_season
 from app.services.statistic_catalog import StatisticCatalog
 
 
@@ -135,14 +135,16 @@ class MatchupSelectionService:
         session: Session | None,
     ) -> dict[str, Any]:
         season = research_season(self.settings, self.publication_reader)
+        # The game's schedule facts are its own season's; evidence is published.
+        schedule_season = event_season(self.settings, game_id, season)
         publication_snapshot = self._publication_snapshot(season, session=session)
-        event = self._event(season, game_id, connection=connection)
+        event = self._event(schedule_season, game_id, connection=connection)
         pool = (
             None
             if self.player_pool is None
             else call_with_read_scope(
                 self.player_pool.get_pool_for_game,
-                season=season,
+                season=schedule_season,
                 game_id=game_id,
                 connection=connection,
             )

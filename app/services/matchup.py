@@ -84,7 +84,7 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.request_reads import request_read_scope
-from app.services.research_season import research_season
+from app.services.research_season import event_season, research_season
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -586,6 +586,7 @@ class MatchupService:
         publication_snapshot: Any | None,
         injuries: MatchupInjuryReader | None,
         compose_cache: MatchupComposeCache | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
         """Compose one Matchup over a generation the caller already holds.
 
@@ -598,7 +599,8 @@ class MatchupService:
         caller composing many games from the same snapshot may hand in one
         instance so the identical league-wide team window and Diet baseline
         reads are not repeated per game; omitting it keeps today's per-call
-        behavior.
+        behavior. ``season`` is the evidence season the caller captured the
+        snapshot for, so the two cannot disagree; omitted, it is resolved here.
         """
 
         with request_read_scope(self._engine) as (connection, session):
@@ -609,6 +611,7 @@ class MatchupService:
                 publication_snapshot=publication_snapshot,
                 injuries=injuries,
                 compose_cache=compose_cache,
+                season=season,
             )
 
     def get_unscheduled_matchup(
@@ -888,14 +891,20 @@ class MatchupService:
         publication_snapshot: Any = _OWN,
         injuries: Any = _OWN,
         compose_cache: MatchupComposeCache | None = None,
+        season: str | None = None,
     ) -> dict[str, Any]:
-        season = research_season(self.settings, self.publication_reader)
+        # Evidence (logs, Diets, windows) is the published season's; the
+        # game's own schedule facts (event, pool, injuries) are its season's,
+        # so opening night composes before the new season publishes.
+        if season is None:
+            season = research_season(self.settings, self.publication_reader)
+        schedule_season = event_season(self.settings, game_id, season)
         observed_at = assume_utc(self._clock())
         if publication_snapshot is _OWN:
             publication_snapshot = self._publication_snapshot(season, session=session)
-        event = self._event(season, game_id, connection=connection)
+        event = self._event(schedule_season, game_id, connection=connection)
         schedule_freshness = self._schedule_freshness(
-            season, observed_at=observed_at, connection=connection
+            schedule_season, observed_at=observed_at, connection=connection
         )
 
         pool = (
@@ -903,7 +912,7 @@ class MatchupService:
             if self.player_pool is None
             else call_with_read_scope(
                 self.player_pool.get_pool_for_game,
-                season=season,
+                season=schedule_season,
                 game_id=game_id,
                 connection=connection,
             )
@@ -916,7 +925,7 @@ class MatchupService:
         )
         injury_result = self._injuries(
             event,
-            season,
+            schedule_season,
             pool_players,
             reader=self.injuries if injuries is _OWN else injuries,
         )

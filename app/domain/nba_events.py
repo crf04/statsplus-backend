@@ -157,6 +157,20 @@ def validate_player_game_log_season_type(value: object) -> str:
     return str(value)
 
 
+def season_for_game_id(game_id: str) -> str | None:
+    """Return the season a real NBA game ID names, else ``None``.
+
+    A real ID is ``00`` + game type + the season's two-digit start year + a
+    five-digit sequence, e.g. ``0022600001`` is a 2026-27 Regular Season game.
+    """
+
+    if len(game_id) == 10 and game_id.isdigit() and game_id[:3] in _GAME_TYPE_BY_ID_PREFIX:
+        year = int(game_id[3:5])
+        start = (1900 if year >= 46 else 2000) + year
+        return f"{start}-{(start + 1) % 100:02d}"
+    return None
+
+
 def canonical_event_kind(game_id: str, provider_classification: str = "") -> str:
     """Return canonical event kind, with a real game ID as authority."""
 

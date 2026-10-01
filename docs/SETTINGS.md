@@ -318,6 +318,11 @@ use it directly (`app/services/research_season.py`):
 - The Slate and the next opponent's game read the season containing the date,
   falling back to the previous season while the new one has no stored
   schedule; an offseason date is then an empty Slate rather than a 503.
+- A Matchup's or Matchup Selection's own game (event, Player Pool, injuries)
+  is read in the season its game ID names, while its evidence stays on the
+  published season.
+- The Player Pool reader is scoped to the calendar season projection
+  collection records under, and reads whatever season a request names.
 
 `NBA_CURRENT_SEASON` is an explicit value, and every one of these reads defers
 to it, so a pinned deployment reads only the pinned season.

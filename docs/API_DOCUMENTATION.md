@@ -134,10 +134,16 @@ an unpublished season. Every read that serves published data uses the same
 default: player and team profiles, Matchups (scheduled and Unscheduled),
 Matchup Selection, Target resolution, preview, Backtests, season minutes and
 defender validation, Diet baselines, the next opponent's ranks, and game logs
-requested without `season_filter`. The Slate (and the next opponent's game)
-instead reads the season containing its date, falling back to the previous
-season while the new one has no stored schedule. Collectors and schedule
-ingestion retain their calendar-season defaults. An explicit
+requested without `season_filter`. One request resolves that season once and
+reads every seam of its Publication snapshot in it. The Slate (and the next
+opponent's game) instead reads the season containing its date, falling back to
+the previous season while the new one has no stored schedule, and its Player
+Pool is read in that same season. A Matchup and a Matchup Selection read their
+game's own schedule facts (event, Player Pool, injuries) in the season its game
+ID names, and only their evidence in the published season, so every game a
+Slate shows is readable: on opening night the new season's game composes from
+last season's published evidence. Collectors and schedule ingestion retain
+their calendar-season defaults. An explicit
 `NBA_CURRENT_SEASON` pin overrides every one of these defaults, and a new
 publication takes effect on the next request without restarting the
 application.
