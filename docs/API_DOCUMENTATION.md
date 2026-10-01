@@ -144,9 +144,11 @@ Pool is read in that same season. A Matchup and a Matchup Selection read their
 game's own schedule facts (event, Player Pool, injuries) in the season its game
 ID names, and only their evidence in the published season, so every game a
 Slate shows is readable: on opening night the new season's game composes from
-last season's published evidence. A completed game of a season the
-publications have moved past names its participants from that season's sync
-record and its last activated player-log publication. Collectors and schedule ingestion retain
+last season's published evidence. A completed Historical game of any season
+other than the published one reports its participants unavailable
+(`game_logs_incomplete`; Matchup Selection `503 provider_unavailable`): no
+retained record names which of that season's publication versions was
+activated and never revoked, so its rows are never guessed. Collectors and schedule ingestion retain
 their calendar-season defaults. An explicit
 `NBA_CURRENT_SEASON` pin overrides every one of these defaults, and a new
 publication takes effect on the next request without restarting the

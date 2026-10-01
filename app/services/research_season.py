@@ -109,16 +109,18 @@ def focal_game_rows(
     publication_snapshot=None,
     connection=None,
 ):
-    """One completed game's canonical rows, read in the game's own season.
+    """One completed game's canonical rows, or ``None`` with no authority.
 
-    A game of the published season reads the request's snapshot. A game of a
-    season the publication has moved past reads that season's last activated
-    publication instead, since the request's snapshot cannot hold it.
+    A game of the published season reads the request's snapshot. A game of any
+    other season has no publication authority to read: the active pointer
+    names only the evidence season, and no retained record says which of that
+    season's other versions was activated and never revoked (``superseded``
+    covers replaced candidates and rolled-back publications alike). Such a
+    game's rows are therefore unavailable rather than guessed.
     """
 
-    final_rows = getattr(player_logs, "list_final_game_rows", None)
-    if evidence_season not in (None, season) and callable(final_rows):
-        return call_with_read_scope(final_rows, season, game_id, connection=connection)
+    if evidence_season is not None and season != evidence_season:
+        return None
     return call_with_read_scope(
         player_logs.list_game_rows,
         season,
@@ -126,6 +128,7 @@ def focal_game_rows(
         publication_snapshot=publication_snapshot,
         connection=connection,
     )
+
 
 
 def published_capture(settings, publication_reader, capture):

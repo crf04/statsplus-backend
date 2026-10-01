@@ -1127,6 +1127,14 @@ class MatchupService:
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
+        if rows is None:
+            # A season other than the published one holds no row authority.
+            return (), {
+                "status": "unavailable",
+                "source": "player_game_logs",
+                "context": None,
+                "unavailable_reason": "game_logs_incomplete",
+            }
         participants = tuple(
             _Participant(
                 canonical_player_id=int(record.player_id),

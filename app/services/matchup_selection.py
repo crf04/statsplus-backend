@@ -316,6 +316,11 @@ class MatchupSelectionService:
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
+        if rows is None:
+            # A season other than the published one holds no row authority.
+            raise ProviderUnavailableError(
+                "The stored canonical game logs for this matchup are incomplete."
+            )
         record = next(
             (row for row in rows if int(row.player_id) == player_id), None
         )

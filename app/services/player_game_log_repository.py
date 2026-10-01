@@ -26,7 +26,6 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.utc import assume_utc
-from app.models.collection_control import PublicationVersion
 from app.models.player_game_log import (
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -459,38 +458,6 @@ class PlayerGameLogRepository:
                 .order_by(log_table.c.player_id.asc())
             ).mappings()
             return tuple(PlayerGameLogRecord(**dict(row)) for row in rows)
-
-    def list_final_game_rows(
-        self,
-        season: str,
-        game_id: str,
-        *,
-        connection: Connection | None = None,
-    ) -> tuple[PlayerGameLogRecord, ...]:
-        """Return one game's rows from its season's last activated publication.
-
-        For a season the active pointer has moved past: once player logs
-        publish the next season, a completed game of the previous one is read
-        from the immutable publication that was last activated for its season
-        (a rollback is itself a newer version), never from a candidate.
-        """
-
-        canonical_season = validate_canonical_season(season)
-        versions = PublicationVersion.__table__
-        with read_connection(self.engine, connection) as bound:
-            publication_id = bound.execute(
-                select(versions.c.publication_id)
-                .where(
-                    versions.c.stream_key == "player_game_logs",
-                    versions.c.season == canonical_season,
-                    versions.c.status.in_(("active", "rollback", "superseded")),
-                )
-                .order_by(versions.c.version.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-        return self._projected_game_rows(
-            publication_id, canonical_season, game_id, connection=connection
-        )
 
     def _projected_game_rows(
         self,
