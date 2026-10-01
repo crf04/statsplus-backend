@@ -106,9 +106,57 @@ def test_next_game_and_all_categories(setup):
     assert points["value"] == 168
     assert points["most_rank"] == 1
     assert points["ranked_teams"] == 30
-    assert {"C&S PTS", "PU PTS", "C&S 3s", "Less Than 10 ft"} <= {
-        row["team_filter"] for row in body["opponent_ranks"]
+    assert {
+        row["team_filter"]
+        for row in body["opponent_ranks"]
+        if row["team_filter"] is not None
+    } == {
+        "OPP_PTS",
+        "OPP_REB",
+        "OPP_AST",
+        "OPP_STOCKS",
+        "OPP_FTA",
+        "OPP_TOV",
+        "OPP_BLK",
+        "OPP_STL",
+        "OPP_FG3M",
+        "OPP_FG3A",
+        "C&S 3s",
+        "C&S PTS",
+        "C&S 3A",
+        "PU 2s",
+        "PU 3s",
+        "PU PTS",
+        "Less Than 10 ft",
+        "PRBallHandler",
+        "PRRollMan",
+        "Transition",
+        "Isolation",
+        "Spotup",
+        "Cut",
+        "Handoff",
+        "OffScreen",
+        "Postup",
+        "OffRebound",
+        "Misc",
+        "TwoPtAssists",
+        "ThreePtAssists",
+        "Arc3Assists",
+        "Corner3Assists",
+        "AtRimAssists",
+        "ShortMidRangeAssists",
+        "LongMidRangeAssists",
     }
+    labels = {
+        row["team_filter"]: row["label"]
+        for row in body["opponent_ranks"]
+        if row["team_filter"] is not None
+    }
+    assert labels["C&S PTS"] == "C&S points"
+    assert labels["PU PTS"] == "Pull-up points"
+    assert labels["PRBallHandler"] == "P&R ball-handler (per poss.)"
+    assert labels["Corner3Assists"] == "Corner-3 assists"
+    assert labels["C&S 3s"] == "C&S 3s"
 
 
 @pytest.mark.parametrize("direction", ["most", "fewest", "tie", "short"])
