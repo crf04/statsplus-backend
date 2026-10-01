@@ -523,3 +523,29 @@ def test_a_pinned_matchup_reads_its_event_in_the_pinned_season(monkeypatch):
     with pytest.raises(ResourceNotFoundError):
         night.matchups.get_matchup(game_id=OPENING_GAME)
     assert night.catalog.event_reads == [PUBLISHED]
+
+
+@pytest.mark.parametrize(
+    ("settings", "season"), [(_settings(), PUBLISHED), (_settings(pinned=CALENDAR), CALENDAR)]
+)
+def test_a_saved_backtest_reads_the_published_season(settings, season):
+    from app.services.statistic_catalog import StatisticCatalog
+    from app.services.target_backtest import TargetBacktestService
+
+    seams = bt._two_games()
+    reader = PublishedReader()
+    service = TargetBacktestService(
+        targets=SimpleNamespace(
+            get_target=lambda uid, target_id: {**preview_tests.DRAFT, "id": target_id}
+        ),
+        player_logs=seams["logs"],
+        player_diets=seams["diets"],
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=settings,
+        publication_reader=reader,
+    )
+
+    body, _ = service.backtest("owner", 3)
+
+    assert reader.captures == [season]
+    assert body["season"] == season
