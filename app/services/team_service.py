@@ -15,6 +15,7 @@ from collections.abc import Callable
 from nba_api.stats.static import teams
 
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.services.research_season import research_service
 from app.domain.nba_teams import (
     NBA_TEAM_TRICODE_TO_ID,
     canonical_nba_team_abbreviation,
@@ -82,8 +83,10 @@ class TeamService:
         self,
         settings: RuntimeSettings | None = None,
         season_publications=None,
+        publication_reader=None,
     ):
         self.settings = settings or get_runtime_settings()
+        self.publication_reader = publication_reader
         # The publication read seam of #198: it owns a publication reader and
         # a governance resolver, so no provider client is reachable from here.
         self.publications = season_publications
@@ -94,6 +97,11 @@ class TeamService:
         return team_names
 
     def get_team_stats(self, category, team, date=None):
+        return research_service(self, self.publication_reader)._get_team_stats(
+            category, team, date
+        )
+
+    def _get_team_stats(self, category, team, date=None):
         """Serve one opponent's Season profile for one panel category.
 
         ``date`` is accepted and ignored: the panel's rankings are always

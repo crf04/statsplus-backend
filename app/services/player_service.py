@@ -15,6 +15,7 @@ from ..errors import (
     ResourceNotFoundError,
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
+from app.services.research_season import research_service
 from app.domain.nba_events import REGULAR_SEASON_TYPE
 from app.domain.play_type_matchup import complete_play_type_shares
 from app.domain.team_matchup_taxonomy import SHOT_TYPE_STORED_TO_DISPLAY
@@ -168,6 +169,9 @@ class PlayerService:
         self._zone_profile_cache_lock = Lock()
 
     def get_all_players(self):
+        return research_service(self, self.publication_reader)._get_all_players()
+
+    def _get_all_players(self):
         """Fetch list of all players from database"""
         season = self.settings.nba.current_season
         catalog = self.profile_reader.get_catalog(season, active_only=False)
@@ -185,6 +189,11 @@ class PlayerService:
         ]
 
     def get_player_profile(self, player_name, category, opp_team=None):
+        return research_service(self, self.publication_reader)._get_player_profile(
+            player_name, category, opp_team
+        )
+
+    def _get_player_profile(self, player_name, category, opp_team=None):
         """
         Get player profile data based on category.
         Categories: Playtypes, assists, Archetype
