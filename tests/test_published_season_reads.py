@@ -234,9 +234,10 @@ def test_a_pinned_next_opponent_reads_the_pinned_schedule():
         "2026-27": [_scheduled("0022600010", "2026-10-22T23:30:00+00:00")],
     }
 
-    body, _ = _next_opponent(_settings(pinned="2025-26"), events, (2026, 4, 1, 16))
+    # The pinned schedule has no game left, though 2026-27's does.
+    body, _ = _next_opponent(_settings(pinned="2025-26"), events, (2026, 10, 21, 16))
 
-    assert body["next_game"]["game_id"] == "0022501200"
+    assert body["next_game"] is None
 
 
 @pytest.mark.parametrize(
