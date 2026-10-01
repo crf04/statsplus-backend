@@ -4827,6 +4827,10 @@ class PublicationService(_SessionService):
             PublicationVersion.publication_id != keep_publication_id,
             or_(
                 PublicationVersion.status.in_(("active", "candidate")),
+                # The rollback target, whatever its status or revocation: a
+                # rollback would clone it into fresh authority.
+                PublicationVersion.publication_id
+                == (pointer.previous_publication_id if pointer is not None else None),
                 # A publication that once served stays reachable through the
                 # retained history whatever its status became afterwards.
                 PublicationVersion.publication_id.in_(

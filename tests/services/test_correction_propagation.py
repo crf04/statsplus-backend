@@ -3914,3 +3914,48 @@ def test_rollback_cannot_restore_a_target_a_correction_withdrew(tmp_path, enable
 
     unrevoked = [row[0] for row in pointer_history(engine, stream_key) if not row[3]]
     assert unrevoked == ([corrected.publication_id] if enabled else [])
+
+
+@pytest.mark.parametrize("family", [False, True], ids=("ordinary", "family"))
+def test_a_correction_clears_a_revoked_rollback_target(tmp_path, family):
+    """A target an earlier rollback revoked can still be corrected away."""
+
+    engine = _engine(tmp_path, f"revoked-target-{family}.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(engine)
+
+    def register(strategy, enabled):
+        publications.register_stream(
+            stream_key, provider="ledger", owner="railway",
+            required_observations=(
+                ("canonical_game_ledger",) if strategy == "ledger_compose" else ()
+            ),
+            publication_strategy=strategy, enabled=enabled,
+        )
+
+    def rollback(reason):
+        if family:
+            return publications.rollback_publication_family(
+                (stream_key,), reason=reason
+            )[0]
+        return publications.rollback(stream_key, reason=reason)
+
+    register("replace", True)
+    publications.compose(
+        stream_key, season="2026-27", cutoff=AS_OF, payload={"value": 20},
+        expected_fence=activated[-1].fence,
+    )
+    rollback("restore the previous season")
+    rollback("toggle forward")  # legitimate: the 2025-26 restore is now revoked
+    register("ledger_compose", False)
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+
+    publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+        provenance={sources[3]: "game-1"}, reason="correction",
+        corrected_provenance={sources[3]: "game-1"},
+    )
+
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        rollback("restore the corrected-away evidence")
