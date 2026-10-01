@@ -63,36 +63,6 @@ class PublishedReader:
         return res._FakeSnapshot(f"generation-{len(self.captures)}")
 
 
-def _resolution(reader, settings):
-    return TargetResolutionService(
-        targets=SimpleNamespace(list_targets=lambda uid: []),
-        slates=res.FakeSlate(),
-        matchups=res._RecordedSnapshotMatchups({}),
-        publication_reader=reader,
-        injuries=object(),
-        settings=settings,
-    )
-
-
-def test_an_unpinned_resolve_captures_the_published_season():
-    reader = PublishedReader()
-
-    _resolution(reader, _settings()).resolve("owner", requested_date=res.SLATE_DATE)
-
-    assert reader.captures == [PUBLISHED]
-
-
-def test_a_pinned_resolve_captures_the_pinned_season():
-    reader = PublishedReader()
-
-    _resolution(reader, _settings(pinned=CALENDAR)).resolve(
-        "owner", requested_date=res.SLATE_DATE
-    )
-
-    assert reader.captures == [CALENDAR]
-    assert reader.lookups == 0
-
-
 @pytest.fixture
 def preview_settings(monkeypatch):
     def use(settings):
@@ -131,35 +101,6 @@ def test_a_pinned_preview_reads_the_pinned_season(preview_settings):
     assert reader.captures == [CALENDAR]
     assert payload["season"] == CALENDAR
     assert reader.lookups == 0
-
-
-def _game_service(reader, settings, monkeypatch):
-    from app.services import game_service as game_service_module
-
-    monkeypatch.setattr(game_service_module, "get_redis_client", lambda *a, **k: None)
-    return game_service_module.GameService(
-        object(), settings=settings, publication_reader=reader
-    )
-
-
-def test_unpinned_game_logs_default_to_the_published_season(monkeypatch):
-    service = _game_service(PublishedReader(), _settings(), monkeypatch)
-
-    assert service.default_season() == PUBLISHED
-
-
-def test_pinned_game_logs_default_to_the_pinned_season(monkeypatch):
-    reader = PublishedReader()
-    service = _game_service(reader, _settings(pinned=CALENDAR), monkeypatch)
-
-    assert service.default_season() == CALENDAR
-    assert reader.lookups == 0
-
-
-def test_game_logs_without_a_publication_default_to_settings(monkeypatch):
-    service = _game_service(None, _settings(), monkeypatch)
-
-    assert service.default_season() == CALENDAR
 
 
 class SeasonEvents:
@@ -264,3 +205,321 @@ def test_a_target_defender_is_validated_against_the_published_season(settings, e
 
     assert conditions["defender"]["player_id"] == 1628983
     assert seasons == [expected]
+
+
+def test_a_wrong_season_read_does_not_poison_the_publication_row_cache(tmp_path):
+    """Reading a 2025-26 publication as 2026-27 must not cache empty rows."""
+
+    from datetime import timedelta
+
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.statistic_catalog import StatisticCatalog
+    from tests.services.test_database_first_activation import (
+        _seed_player_game_log_publication,
+    )
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'logs.sqlite3'}")
+    run_migrations(engine)
+    _seed_player_game_log_publication(engine)
+    reader = DatabaseFirstPublicationReader(engine)
+    logs = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season=CALENDAR,
+        stats_surface_max_age=timedelta(hours=30),
+    )
+
+    def summaries(season):
+        snapshot = reader.snapshot(
+            ("player_game_logs",),
+            season=PUBLISHED,
+            projection_only_keys=frozenset({"player_game_logs"}),
+        )
+        return logs.get_player_summaries(season, (2544,), publication_snapshot=snapshot)
+
+    wrong = summaries(CALENDAR).get(2544)
+    assert wrong is None or wrong.rate_rows == ()
+    right = summaries(PUBLISHED)[2544]
+    assert right.season_rate.game_count == 1
+    assert [row.game_id for row in right.rate_rows] == ["0022500001"]
+    engine.dispose()
+
+
+class AdvancingSeasonReader(PublishedReader):
+    """The publication advances to 2026-27 after the request's first lookup."""
+
+    def snapshot(self, stream_keys, *, season=None, **kwargs):
+        if season is None:
+            self.season = PUBLISHED if self.lookups == 0 else CALENDAR
+        return super().snapshot(stream_keys, season=season, **kwargs)
+
+
+def test_a_preview_reads_every_seam_in_its_captured_season(preview_settings):
+    preview_settings(_settings())
+    reader = AdvancingSeasonReader()
+
+    payload = _preview(reader)
+
+    assert reader.captures == [PUBLISHED]
+    assert payload["season"] == PUBLISHED
+
+
+def test_backtest_all_degrades_to_uncached_when_the_season_lookup_fails():
+    from app.services.statistic_catalog import StatisticCatalog
+    from app.services.target_backtest import TargetBacktestService
+
+    class FailingReader:
+        def snapshot(self, *args, **kwargs):
+            raise RuntimeError("publication pointers unavailable")
+
+        def generation(self, *args, **kwargs):
+            raise RuntimeError("publication pointers unavailable")
+
+    service = TargetBacktestService(
+        targets=SimpleNamespace(list_targets=lambda uid: [{"id": 7}]),
+        player_logs=object(),
+        player_diets=None,
+        statistic_catalog=StatisticCatalog.load_default(),
+        settings=_settings(),
+        publication_reader=FailingReader(),
+    )
+
+    body, cache_state = service.backtest_all("owner")
+
+    assert body == {
+        "season": CALENDAR,
+        "backtests": [{"target_id": 7, "status": "uncached"}],
+    }
+
+
+# --- opening night: the 2026-27 schedule exists, logs still publish 2025-26 --
+
+OPENING_GAME = "0022600001"
+OPENING_DATE = "2026-10-21"
+TRANSITION_15 = {
+    "base": "play_types",
+    "slice_key": "Transition",
+    "comparator": "at_or_above",
+    "threshold": 0.15,
+}
+
+
+class ScheduleCatalog:
+    """One Event Catalog serving both the Slate and the Matchup, by season."""
+
+    def __init__(self, events_by_season):
+        self.events_by_season = events_by_season
+        self.event_reads = []
+
+    def count_events(self, season):
+        return len(self.events_by_season.get(season, ()))
+
+    def get_freshness(self, season, *, now=None):
+        return {"last_success_at": "2026-10-21T10:00:00+00:00", "fresh": True}
+
+    def get_events_between(self, season, starts_at, ends_at):
+        from app.domain.utc import parse_utc_iso
+
+        return [
+            event
+            for event in self.events_by_season.get(season, ())
+            if starts_at <= parse_utc_iso(event["scheduled_at"]) < ends_at
+        ]
+
+    def get_event(self, season, game_id):
+        self.event_reads.append(season)
+        return next(
+            (e for e in self.events_by_season.get(season, ()) if e["nba_game_id"] == game_id),
+            None,
+        )
+
+    def latest_final_scheduled_at(self, season):
+        return None
+
+
+def _opening_night(settings, reader, *, evidence_season, monkeypatch):
+    """Real Slate, Matchup and Target resolution over season-keyed doubles.
+
+    The Diet, log and Defense Sheet doubles serve, and assert, only
+    ``evidence_season``; the schedule holds the opener only in 2026-27.
+    """
+
+    from datetime import datetime, timezone
+
+    from app.services.matchup import MatchupService
+    from app.services.slate_service import SlateService
+    from app.services.stats_freshness_repository import StatsFreshness
+    import tests.services.test_matchup_service as doubles
+
+    monkeypatch.setattr(doubles, "SEASON", evidence_season)
+    opener = {
+        **doubles._event(),
+        "nba_game_id": OPENING_GAME,
+        "season": "2026-27",
+        "scheduled_at": "2026-10-21T23:30:00+00:00",
+    }
+    last_april = {
+        **doubles._event(),
+        "nba_game_id": "0022501190",
+        "scheduled_at": "2026-04-10T23:30:00+00:00",
+    }
+    catalog = ScheduleCatalog({"2025-26": [last_april], "2026-27": [opener]})
+    now = datetime(2026, 10, 21, 16, tzinfo=timezone.utc)
+    pool = doubles.RecordedPool(doubles._service().player_pool.pool)
+    matchups = MatchupService(
+        event_catalog=catalog,
+        player_pool=pool,
+        player_logs=doubles.RecordedLogs(),
+        player_diets=doubles.RecordedDiets(),
+        team_matchups=doubles.RecordedTeamWindows(
+            doubles._window(), doubles._window(last_15=True)
+        ),
+        stats_freshness=SimpleNamespace(get=lambda: StatsFreshness(doubles.RETRIEVED_AT)),
+        injuries=None,
+        settings=settings,
+        publication_reader=reader,
+        clock=lambda: now,
+    )
+    slates = SlateService(catalog, settings=settings, clock=lambda: now)
+    targets = SimpleNamespace(list_targets=lambda uid: [{
+        "id": 1, "opponent": "BOS", "title": "BOS transition", "note": None,
+        "qualifiers": [TRANSITION_15], "conditions": None,
+    }])
+    resolution = TargetResolutionService(
+        targets=targets,
+        slates=slates,
+        matchups=matchups,
+        publication_reader=reader,
+        injuries=res._StoredNoInjuries(),
+        settings=settings,
+    )
+    return SimpleNamespace(
+        slates=slates, matchups=matchups, resolution=resolution,
+        catalog=catalog, pool=pool,
+    )
+
+
+def test_opening_night_slate_matchup_and_targets_read_across_both_seasons(monkeypatch):
+    night = _opening_night(
+        _settings(), PublishedReader(), evidence_season=PUBLISHED, monkeypatch=monkeypatch
+    )
+
+    slate = night.slates.get_slate(OPENING_DATE)
+    assert [game["game_id"] for game in slate["games"]] == [OPENING_GAME]
+
+    matchup = night.matchups.get_matchup(game_id=OPENING_GAME)
+    assert matchup["game"]["game_id"] == OPENING_GAME
+    # Last season's published evidence scores the opener's players.
+    assert [player["canonical_id"] for player in matchup["players"]] == [2544]
+    assert matchup["players"][0]["season_scoring"] == 25.4
+    assert night.catalog.event_reads == ["2026-27"]
+    assert night.pool.calls == [("2026-27", OPENING_GAME)]
+
+    resolved = night.resolution.resolve("owner", requested_date=OPENING_DATE)
+    [target] = resolved["targets"]
+    assert target["game"]["game_id"] == OPENING_GAME
+    assert [(p["canonical_id"], p["shares"][0]["share"]) for p in target["players"]] == [
+        (2544, 0.19)
+    ]
+
+
+def test_a_pinned_opening_night_reads_only_the_pin(monkeypatch):
+    night = _opening_night(
+        _settings(pinned=CALENDAR), PublishedReader(),
+        evidence_season=CALENDAR, monkeypatch=monkeypatch,
+    )
+
+    resolved = night.resolution.resolve("owner", requested_date=OPENING_DATE)
+
+    [target] = resolved["targets"]
+    assert [(p["canonical_id"], p["shares"][0]["share"]) for p in target["players"]] == [
+        (2544, 0.19)
+    ]
+    assert night.catalog.event_reads == [CALENDAR]
+
+
+def test_a_resolve_composes_every_matchup_in_its_captured_season(monkeypatch):
+    """The publication advancing mid-request must not split the evidence."""
+
+    night = _opening_night(
+        _settings(), AdvancingSeasonReader(),
+        evidence_season=PUBLISHED, monkeypatch=monkeypatch,
+    )
+
+    resolved = night.resolution.resolve("owner", requested_date=OPENING_DATE)
+
+    [target] = resolved["targets"]
+    assert [(p["canonical_id"], p["shares"][0]["share"]) for p in target["players"]] == [
+        (2544, 0.19)
+    ]
+
+
+def test_a_past_slate_game_still_reads_after_the_publication_advances(monkeypatch):
+    night = _opening_night(
+        _settings(), PublishedReader(season=CALENDAR),
+        evidence_season=CALENDAR, monkeypatch=monkeypatch,
+    )
+
+    slate = night.slates.get_slate("2026-04-10")
+    assert [game["game_id"] for game in slate["games"]] == ["0022501190"]
+    matchup = night.matchups.get_matchup(game_id="0022501190")
+    assert matchup["game"]["game_id"] == "0022501190"
+    assert night.catalog.event_reads == [PUBLISHED]
+
+
+@pytest.mark.parametrize(
+    ("settings", "games"),
+    [(_settings(), 1), (_settings(pinned=CALENDAR), 2), (_settings(pinned=PUBLISHED), 1)],
+)
+def test_game_logs_without_a_season_read_the_published_season(
+    settings, games, dependencies, client, mock_db_engine
+):
+    """The route's default reaches the real GameService's log read."""
+
+    from app.services.game_service import GameService
+    from tests.test_game_logs import _game_logs_frame
+
+    class Logs:
+        """2025-26 holds one game for the player, 2026-27 two."""
+
+        def get_player_logs(self, player_id, season, **kwargs):
+            frame = _game_logs_frame()
+            return frame.head({PUBLISHED: 1, CALENDAR: 2}.get(season, 0)).copy()
+
+    class Catalog:
+        def get_catalog(self, season, *, active_only=False):
+            return [dict(player_id=2544, display_name="LeBron James",
+                         is_active_for_season=True, team_id=1610612747)]
+
+    dependencies.game_service = GameService(
+        mock_db_engine,
+        redis_client=SimpleNamespace(),
+        settings=settings,
+        athlete_catalog=Catalog(),
+        game_logs_source=Logs(),
+        publication_reader=PublishedReader(),
+    )
+
+    response = client.get("/api/games/game_logs?player_name=LeBron+James")
+
+    assert response.status_code == 200
+    assert len(response.get_json()["game_logs"]) == games
+
+
+def test_a_pinned_matchup_reads_its_event_in_the_pinned_season(monkeypatch):
+    """A pin keeps today's lookup even for a game ID naming another season."""
+
+    from app.errors import ResourceNotFoundError
+
+    night = _opening_night(
+        _settings(pinned=PUBLISHED), PublishedReader(),
+        evidence_season=PUBLISHED, monkeypatch=monkeypatch,
+    )
+
+    with pytest.raises(ResourceNotFoundError):
+        night.matchups.get_matchup(game_id=OPENING_GAME)
+    assert night.catalog.event_reads == [PUBLISHED]
