@@ -1701,6 +1701,23 @@ def _record_rollback_history(
     _record_pointer_activation(session, pointer, restored, now=now)
 
 
+def _lock_streams(session: Session, stream_keys: Iterable[str]) -> None:
+    """Lock stream rows in sorted key order, before any pointer or version.
+
+    Every multi-stream writer, and ``prune_history``, takes stream locks in this
+    one order, so two of them can only queue behind each other.
+    """
+
+    keys = sorted(set(stream_keys))
+    if keys:
+        session.execute(
+            select(PublicationStream.stream_key)
+            .where(PublicationStream.stream_key.in_(keys))
+            .order_by(PublicationStream.stream_key)
+            .with_for_update()
+        ).all()
+
+
 def _lock_pointer(session: Session, stream_key: str) -> PublicationPointer | None:
     """Take the stream pointer's row lock; every writer takes it before versions."""
 
@@ -3923,6 +3940,7 @@ class PublicationService(_SessionService):
         now = self.clock()
         with self.session() as session, session.begin():
             rows = []
+            _lock_streams(session, (item["stream_key"] for item in SURFACE_REGISTRY))
             for definition in SURFACE_REGISTRY:
                 row = session.scalar(select(PublicationStream).where(
                     PublicationStream.stream_key == definition["stream_key"]
@@ -5026,6 +5044,9 @@ class PublicationService(_SessionService):
         now = self.clock()
         with self._session_scope(session) as session:
             results = []
+            # Every stream first, then each stream's pointer and versions, so
+            # the batch orders against a prune (streams, then pointers).
+            _lock_streams(session, (item.stream_key for item in items))
             for item in sorted(items, key=lambda value: value.stream_key):
                 stream = session.scalar(
                     select(PublicationStream)
@@ -5499,6 +5520,9 @@ class PublicationService(_SessionService):
             # Members are ordered by stream key so concurrent operators take
             # the same locks in the same order.
             prepared: list[tuple[Any, _PublicationCandidate]] = []
+            # Stream locks for every member first: the advance below locks a
+            # stream after its pointer otherwise, the inverse of a prune.
+            _lock_streams(session, (member.stream_key for member in members))
             for member in members:
                 pointer = session.scalar(
                     select(PublicationPointer)
@@ -6386,15 +6410,17 @@ class CollectionOperationsService(_SessionService):
         self.alert_adapter.send(code="recovery", severity="warning", cycle_id=cycle_id)
         return True
 
-    def run_maintenance(self, *, season: str, cutoff: datetime, now: datetime | None = None) -> dict[str, int]:
+    def run_maintenance(self, *, season: str, cutoff: datetime, now: datetime | None = None) -> dict[str, Any]:
         """Run deterministic reconciliation, GC, validation and stale alerts."""
         current = _aware(now or self.clock())
         enqueued = self.publication_service.reconcile_pending(season=season, cutoff=cutoff) if self.publication_service else 0
         deleted = self.gc_observations(now=current)
-        publications_pruned = (
-            self.publication_service.prune_history(season=season).deleted
-            if self.publication_service is not None else 0
+        pruned = (
+            self.publication_service.prune_history(season=season)
+            if self.publication_service is not None else None
         )
+        publications_pruned = pruned.deleted if pruned is not None else 0
+        publications_kept = dict(pruned.kept) if pruned is not None else {}
         attention = 0
         with self.session() as session, session.begin():
             cycles = session.scalars(select(CollectionCycle).where(CollectionCycle.status.in_(
@@ -6453,6 +6479,7 @@ class CollectionOperationsService(_SessionService):
             "jobs_enqueued": enqueued,
             "observations_deleted": deleted,
             "publications_pruned": publications_pruned,
+            "publications_kept": publications_kept,
             "cycles_attention": attention,
         }
 

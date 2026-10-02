@@ -3285,11 +3285,12 @@ when it is one of: the latest eligible version of its season (per stream); the
 pointer's active publication; the pointer's previous publication (the rollback
 target); or a candidate still awaiting activation. Everything else is deleted,
 about three versions per stream and season in steady state, so a nightly refresh
-no longer grows storage. Activation records (`publication_activations`) have
-no foreign key to the version (migration 059), so they outlive pruned payloads
-and never pin retention. The keep set is computed per stream across all seasons even
+no longer grows storage. Activation records (`publication_activations`, migration 059) and repair-group
+members (migration 060) have no foreign key to the version, so they outlive
+pruned payloads and never pin retention. The keep set is computed per stream across all seasons even
 when a `season` argument narrows what may be deleted. The method returns a
-`PruneResult` with `deleted` and `kept`, where `kept` counts survivors by the
+`PruneResult` with `deleted` and `kept` (the maintenance command prints both as
+`publications_pruned` and `publications_kept`), where `kept` counts survivors by the
 first matching reason (`active`, `previous`, `candidate`, `season_latest`). Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
@@ -3305,9 +3306,11 @@ A history row whose publication has been pruned is ineligible on its own terms: 
 historical read and the keep set's season-latest computation consider only rows
 whose publication still exists, so a payload-less row never shadows the season's
 latest surviving version. A correction therefore revokes only the publications it
-can prove stale (those that still have lineage). Pruning locks the stream row,
-then the pointer, and every pointer-creating writer holds the stream lock, so a
-first composition cannot interleave; a stream with no pointer yet keeps only its
+can prove stale (those that still have lineage). Pruning locks the stream rows (sorted by key), then the pointers, and every
+pointer-creating or multi-stream writer (composition, repair-group promotion,
+the ledger batch, default registration) takes stream locks first, in the same
+sorted order, so none of them can deadlock with it or interleave a first
+composition; a stream with no pointer yet keeps only its
 candidates.
 
 Migration 058 reclassifies #324's rows once and acts only on proof, because #324
@@ -3316,7 +3319,11 @@ they share a fence and instant. A rollback is recognised when the restore's
 publication still has status `rollback` (an ordinary activation never does), an
 earlier row of the same season holds a version with the same checksum and cutoff
 (its source), and the restore's predecessor was revoked at exactly the restore's
-fence and instant. A proven cross-season withdrawal is un-revoked and the source
+fence and instant. A proven cross-season withdrawal is un-revoked only if its lineage is also
+provably current (every game it cites still has that observation as the
+canonical ledger's current source, the test a correction applies), because a
+later correction could not re-stamp the already revoked row; a withdrawal that is
+stale, or whose lineage is pruned or missing, stays revoked. The source is
 retired. A restore a later activation already superseded cannot be proven and is
 left alone, so a correction's revocation is never cleared; a rerun finds nothing
 left to change. From #325 on a restore stamps its source's `retired_by`, so

@@ -2229,6 +2229,49 @@ def _create_publication_pointer_history(connection: Connection) -> None:
         ))
 
 
+def _lineage_is_current(connection: Connection, publication_id: str) -> bool:
+    """Whether every game a publication cites still has its current source.
+
+    The same test a correction applies: the publication's recorded source
+    observation for each game must be the canonical ledger's current source for
+    that game.  A publication with no surviving lineage (pruned, or never
+    recorded), or whose ledger is unavailable, cannot be evaluated and is
+    treated as stale.
+    """
+
+    inspector = inspect(connection)
+    if not (
+        inspector.has_table("publication_observations")
+        and inspector.has_table("collection_observations")
+        and inspector.has_table("canonical_game_ledger_games")
+    ):
+        return False
+    rows = connection.execute(text(
+        "SELECT po.observation_id, co.scope FROM publication_observations po "
+        "JOIN collection_observations co ON co.observation_id = po.observation_id "
+        "WHERE po.publication_id = :publication_id"
+    ), {"publication_id": publication_id}).all()
+    cited: dict[str, str] = {}
+    for observation_id, raw_scope in rows:
+        try:
+            scope = json.loads(raw_scope)
+        except (TypeError, ValueError):
+            continue
+        game_id = str(scope.get("game_id") or "") if isinstance(scope, dict) else ""
+        if game_id:
+            cited[game_id] = str(observation_id)
+    if not cited:
+        return False
+    for game_id, observation_id in cited.items():
+        current = connection.execute(text(
+            "SELECT source_observation_id FROM canonical_game_ledger_games "
+            "WHERE game_id = :game_id"
+        ), {"game_id": game_id}).scalar()
+        if current != observation_id:
+            return False
+    return True
+
+
 def _reclassify_publication_pointer_history(connection: Connection) -> None:
     """Add ``retired_at``/``retired_by`` and reclassify rollback history once.
 
@@ -2311,8 +2354,13 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
             ), None)
             if source is None:
                 continue
-            # A proven rollback.  A cross-season one only moved the pointer.
-            if withdrawn.season != restore.season:
+            # A proven rollback.  A cross-season one only moved the pointer, but
+            # a correction that came later could not stamp the already revoked
+            # row, so the withdrawal is cleared only if its lineage is provably
+            # still current (the correction's own staleness test).
+            if withdrawn.season != restore.season and _lineage_is_current(
+                connection, withdrawn.publication_id
+            ):
                 connection.execute(
                     history.update()
                     .where(history.c.history_id == withdrawn.history_id)
@@ -2388,6 +2436,49 @@ def _drop_publication_activation_foreign_key(connection: Connection) -> None:
         if key.get("name"):
             connection.execute(text(
                 f"ALTER TABLE {old} DROP CONSTRAINT {preparer.quote(key['name'])}"
+            ))
+
+
+def _drop_repair_group_member_publication_foreign_key(connection: Connection) -> None:
+    """Let a repair declaration outlive the publication it was declared against.
+
+    A promoted group's displaced publication is deletable by pruning, so the
+    RESTRICT foreign key from ``expected_publication_id`` would make pruning
+    fail.  Rerun-safe: acts only while the foreign key exists.  The table has no
+    inbound references, so SQLite rebuilds it from the current model.
+    """
+
+    from app.models.collection_control import PublicationRepairGroupMember
+
+    table = PublicationRepairGroupMember.__table__
+    inspector = inspect(connection)
+    if not inspector.has_table(table.name):
+        return
+    keys = [
+        key for key in inspector.get_foreign_keys(table.name)
+        if key.get("referred_table") == "publication_versions"
+    ]
+    if not keys:
+        return
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    if connection.dialect.name == "sqlite":
+        legacy = preparer.quote(f"{table.name}__060")
+        connection.execute(text(f"DROP TABLE IF EXISTS {legacy}"))
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_repair_group_members_stream"))
+        table.create(connection)
+        connection.execute(text(
+            f"INSERT INTO {quoted} (group_id, stream_key, expected_publication_id, "
+            "expected_fence, created_at) SELECT group_id, stream_key, "
+            f"expected_publication_id, expected_fence, created_at FROM {legacy}"
+        ))
+        connection.execute(text(f"DROP TABLE {legacy}"))
+        return
+    for key in keys:
+        if key.get("name"):
+            connection.execute(text(
+                f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"
             ))
 
 
@@ -2570,6 +2661,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         59,
         "059_publication_activation_outlives_payload",
         _drop_publication_activation_foreign_key,
+    ),
+    Migration(
+        60,
+        "060_repair_group_member_outlives_payload",
+        _drop_repair_group_member_publication_foreign_key,
     ),
 )
 

@@ -10,6 +10,7 @@ never be dropped by a test run.
 """
 
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -1941,3 +1942,148 @@ def test_a_failed_promotion_rolls_back_and_can_be_retried_on_postgres(
     for stream_key in (SEASON_ZONES, L15_ZONES):
         assert after[stream_key][0] != before[stream_key][0]
         assert after[stream_key][1] is None
+
+
+def _short_deadlock_timeouts(engine):
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _short_deadlock_wait(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("SET SESSION deadlock_timeout = '100ms'")
+        cursor.execute("SET SESSION lock_timeout = '20s'")
+        cursor.close()
+        dbapi_connection.commit()
+
+
+def test_prune_and_repair_group_promotion_do_not_deadlock_on_postgres(
+    promotion, postgres_url,
+):
+    """Promotion takes every member stream lock before any pointer, as prune does."""
+    import threading
+
+    from sqlalchemy import event
+
+    from app.services.collection_control import (
+        CollectionOperationsService,
+        PublicationService,
+    )
+
+    source = promotion["publications"]
+    promote_engine = create_engine(postgres_url)
+    prune_engine = create_engine(postgres_url)
+    for engine in (promote_engine, prune_engine):
+        _short_deadlock_timeouts(engine)
+    publications = PublicationService(
+        promote_engine, clock=source.clock,
+        l15_expectation_resolver=source.l15_expectation_resolver,
+    )
+    operations = CollectionOperationsService(
+        promote_engine, publication_service=publications, clock=source.clock,
+    )
+    pruner = PublicationService(prune_engine, clock=source.clock)
+    promotion_reached_stream = threading.Event()
+    prune_reached_pointer = threading.Event()
+    outcomes = []
+
+    @event.listens_for(promote_engine, "before_cursor_execute")
+    def _pause_before_stream(_connection, _cursor, statement, *_):
+        if (
+            "FROM publication_streams" in statement
+            and "FOR UPDATE" in statement
+            and not promotion_reached_stream.is_set()
+        ):
+            promotion_reached_stream.set()
+            prune_reached_pointer.wait(3)
+
+    @event.listens_for(prune_engine, "before_cursor_execute")
+    def _note_pointer_wait(_connection, _cursor, statement, *_):
+        if "FROM publication_pointers" in statement and "FOR UPDATE" in statement:
+            prune_reached_pointer.set()
+
+    def run(name, call):
+        try:
+            call()
+            outcomes.append((name, None))
+        except Exception as error:  # noqa: BLE001 - reported below
+            outcomes.append((name, error))
+
+    promoting = threading.Thread(target=run, args=("promote", lambda: operations.promote_repair_group(
+        promotion["manifest"].manifest_id, actor="reviewer", reason="no deadlock",
+    )))
+    promoting.start()
+    assert promotion_reached_stream.wait(10)
+    pruning = threading.Thread(target=run, args=("prune", pruner.prune_history))
+    pruning.start()
+    promoting.join(30)
+    pruning.join(30)
+
+    assert not promoting.is_alive() and not pruning.is_alive()
+    assert sorted(outcomes, key=lambda item: item[0]) == [("promote", None), ("prune", None)]
+    promote_engine.dispose()
+    prune_engine.dispose()
+
+
+def test_registering_default_streams_and_pruning_lock_streams_in_one_order_on_postgres(
+    postgres_url,
+):
+    import threading
+
+    from sqlalchemy import event
+
+    from app.migrations import run_migrations
+    from app.services.collection_control import PublicationService
+
+    setup = create_engine(postgres_url)
+    Base.metadata.drop_all(setup)
+    with setup.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+    run_migrations(setup)
+    PublicationService(setup).register_default_streams()
+    setup.dispose()
+
+    register_engine = create_engine(postgres_url)
+    prune_engine = create_engine(postgres_url)
+    for engine in (register_engine, prune_engine):
+        _short_deadlock_timeouts(engine)
+    registering = PublicationService(register_engine)
+    pruner = PublicationService(prune_engine)
+    register_locked = threading.Event()
+    prune_started = threading.Event()
+    outcomes = []
+
+    @event.listens_for(register_engine, "after_cursor_execute")
+    def _hold_after_first_stream_lock(_connection, _cursor, statement, *_):
+        if (
+            "FROM publication_streams" in statement
+            and "FOR UPDATE" in statement
+            and not register_locked.is_set()
+        ):
+            register_locked.set()
+            prune_started.wait(5)
+            time.sleep(1)  # prune is now queued behind (or deadlocked with) us
+
+    @event.listens_for(prune_engine, "before_cursor_execute")
+    def _note_prune(_connection, _cursor, statement, *_):
+        if "FROM publication_streams" in statement and "FOR UPDATE" in statement:
+            prune_started.set()
+
+    def run(name, call):
+        try:
+            call()
+            outcomes.append((name, None))
+        except Exception as error:  # noqa: BLE001 - reported below
+            outcomes.append((name, error))
+
+    first = threading.Thread(target=run, args=("register", registering.register_default_streams))
+    first.start()
+    assert register_locked.wait(10)
+    second = threading.Thread(target=run, args=("prune", pruner.prune_history))
+    second.start()
+    first.join(30)
+    second.join(30)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert sorted(outcomes, key=lambda item: item[0]) == [("prune", None), ("register", None)]
+    register_engine.dispose()
+    prune_engine.dispose()

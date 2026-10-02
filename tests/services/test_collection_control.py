@@ -2286,6 +2286,98 @@ def test_bound_nba_stream_still_requires_a_candidate_to_activate(control_db):
         )
 
 
+def test_a_real_candidate_survives_pruning_until_it_activates_and_stays_readable(control_db):
+    """A candidate awaiting activation is never pruned, before or after it serves."""
+
+    now = datetime(2026, 8, 12, tzinfo=UTC)
+    publications = PublicationService(control_db, clock=lambda: now)
+    publications.register_default_streams()
+    catalog_payload = "{}"
+    catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
+    with control_db.begin() as connection:
+        connection.execute(CatalogPublication.__table__.insert().values(
+            publication_id="assist-diet-event-catalog", season="2025-26",
+            catalog_type="event", cutoff=now, version="v1",
+            checksum=catalog_checksum, payload=catalog_payload,
+            complete=True, published_at=now,
+        ))
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="assist-diet-manifest", season="2025-26", cutoff=now,
+            collect_before=now + timedelta(hours=1), accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]', checksum="assist-diet-manifest",
+            event_catalog_publication_id="assist-diet-event-catalog",
+            event_catalog_checksum=catalog_checksum,
+            status="active", created_at=now,
+        ))
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:assist-diet-game",
+            client_observation_id="pbp:assist-diet-game",
+            collector_id="test",
+            manifest_id="assist-diet-manifest",
+            environment="testing",
+            provider="pbp",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({
+                "game_id": "assist-diet-game",
+                "surface": "canonical_game_ledger",
+            }),
+            season="2025-26",
+            cutoff=now,
+            schema_version=1,
+            checksum="assist-diet-observation",
+            payload="{}",
+            payload_bytes=2,
+            retrieved_at=now,
+            accepted_at=now,
+        ))
+    _bind_current_ledger_source(
+        control_db,
+        game_id="assist-diet-game",
+        observation_id="pbp:assist-diet-game",
+        cutoff=now,
+    )
+
+    candidate = publications.compose_inactive_ledger(
+        "player_assist_locations",
+        season="2025-26",
+        cutoff=now,
+        payload={
+            "base": "assist_locations",
+            "rows": [{
+                "player_id": 2544, "slice_key": "Arc3Assists", "share": 0.5,
+                "volume": 2.0, "games_played": 10, "volume_unit": "assists",
+                "provider": "pbp_stats",
+            }],
+        },
+        provenance={"pbp:assist-diet-game": "assist-diet-game"},
+    )
+
+    before = publications.prune_history(stream_key="player_assist_locations")
+    assert before.deleted == 0 and before.kept["candidate"] == 1
+
+    publications.activate_stream(
+        "player_assist_locations",
+        reason="activate ledger-composed assist diet",
+        candidate_publication_id=candidate.publication_id,
+        require_candidate=True,
+    )
+    after = publications.prune_history(stream_key="player_assist_locations")
+
+    assert after.deleted == 0 and after.kept["active"] == 1
+    with control_db.connect() as connection:
+        pointer = connection.execute(select(PublicationPointer).where(
+            PublicationPointer.stream_key == "player_assist_locations",
+        )).mappings().one()
+        payload = connection.scalar(select(PublicationVersion.payload).where(
+            PublicationVersion.publication_id == candidate.publication_id
+        ))
+    assert pointer["active_publication_id"] == candidate.publication_id
+    decoded = decode_player_diet(
+        json.loads(payload), base="assist_locations", retrieved_at=now,
+    )
+    assert (decoded[0].player_id, decoded[0].slice_key) == (2544, "Arc3Assists")
+
+
 def test_player_assist_locations_ledger_candidate_activates_without_parity_evidence(control_db):
     """#280: the Diet stream has no ledger-parity artifact (it is not in
 

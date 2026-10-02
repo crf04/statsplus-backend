@@ -14,7 +14,9 @@ from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.research_season import focal_game_rows
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_matchup_selection_service import _log_row
-from tests.support.pointer_history import pointer_history, retirements, revoked_fences
+from tests.support.pointer_history import (
+    cite_ledger_source, pointer_history, retirements, revoked_fences,
+)
 
 STREAM = "player_game_logs"
 CUTOFF = datetime(2026, 1, 15, tzinfo=timezone.utc)
@@ -548,6 +550,50 @@ def _points(engine, season):
     return None if rows is None else [row.points for row in rows]
 
 
+def test_migration_lifts_a_cross_season_withdrawal_whose_lineage_is_current(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
+    restored = publications.rollback(STREAM, reason="restore 2025-26")
+    cite_ledger_source(engine, second.publication_id, game_id="g1", observation_id="obs-2")
+    _rewind_to_324(engine, withdrawn=second, restore=restored)
+    assert _points(engine, "2026-27") is None
+
+    _reclassify(engine)
+
+    assert _points(engine, "2026-27") == [26]
+    assert _points(engine, "2025-26") == [25]
+    assert retirements(engine, STREAM) == [
+        (first.publication_id, restored.publication_id)
+    ]
+
+
+@pytest.mark.parametrize("lineage", ["corrected_later", "unrecorded"])
+def test_migration_keeps_a_withdrawal_it_cannot_prove_current(lifecycle, lineage):
+    """A later correction could not re-stamp the rollback-revoked row, so the
+    migration proves it is not stale before clearing it."""
+
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=99, expected_fence=first.fence)
+    restored = publications.rollback(STREAM, reason="restore 2025-26")
+    if lineage == "corrected_later":
+        # The ledger's source for the game moved on after B was published.
+        cite_ledger_source(
+            engine, second.publication_id, game_id="g1", observation_id="obs-2",
+            current=False,
+        )
+    _rewind_to_324(engine, withdrawn=second, restore=restored)
+
+    _reclassify(engine)
+
+    assert _points(engine, "2026-27") is None
+    future = _compose(publications, "2027-28", points=30, expected_fence=restored.fence)
+    assert not focal_game_rows(
+        _repository(engine), "2026-27", "0022500001", evidence_season=future.season
+    )
+
+
 def test_migration_leaves_a_restore_it_cannot_prove_alone(lifecycle):
     """A restore a later activation superseded looks like an ordinary activation.
 
@@ -831,3 +877,35 @@ def test_prune_applies_the_keep_set_to_a_stream_with_no_pointer(lifecycle):
         "active": 0, "previous": 0, "candidate": 1, "season_latest": 0,
     }
     assert _surviving(engine) == {"awaiting"}
+
+
+def test_the_maintenance_command_prints_what_pruning_deleted_and_kept(
+    tmp_path, capsys,
+):
+    from scripts.collection_maintenance import main
+
+    path = tmp_path / "maintenance.sqlite3"
+    engine = create_engine(f"sqlite:///{path}")
+    run_migrations(engine)
+    publications = PublicationService(engine, clock=lambda: CUTOFF)
+    publications.register_stream(
+        STREAM, provider="ledger", owner="railway", required_observations=(),
+        publication_strategy="replace", enabled=True,
+        freshness_rule="cutoff_current",
+    )
+    fence = None
+    for points in (10, 11, 12, 13):
+        fence = _compose(publications, "2025-26", points=points, expected_fence=fence).fence
+    engine.dispose()
+
+    assert main([
+        "--database-url", f"sqlite:///{path}", "--season", "2025-26",
+        "--cutoff", "2026-01-15T00:00:00Z",
+    ]) == 0
+
+    printed = capsys.readouterr().out
+    assert "'publications_pruned': 2" in printed
+    assert (
+        "'publications_kept': {'active': 1, 'previous': 1, 'candidate': 0, "
+        "'season_latest': 0}" in printed
+    )

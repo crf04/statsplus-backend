@@ -400,11 +400,9 @@ class PublicationRepairGroupMember(Base):
         primary_key=True,
     )
     stream_key = Column(String(96), primary_key=True)
-    expected_publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # No foreign key (migration 060): the declaration outlives the displaced
+    # publication's pruned payload, as pointer history and activations do.
+    expected_publication_id = Column(String(36), nullable=False)
     expected_fence = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
 
