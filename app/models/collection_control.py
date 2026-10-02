@@ -329,11 +329,9 @@ class PublicationActivation(Base):
 
     activation_id = Column(String(36), primary_key=True)
     stream_key = Column(String(96), nullable=False)
-    publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # No foreign key (migration 059): the evidence outlives the pruned payload,
+    # as pointer history does, so activations never pin retention.
+    publication_id = Column(String(36), nullable=False)
     actor = Column(String(128), nullable=False)
     reason = Column(String(255), nullable=False)
     fence = Column(Integer, nullable=False)

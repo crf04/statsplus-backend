@@ -2235,12 +2235,17 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
     #324 revoked the version every rollback moved away from and kept the
     rollback's source live.  Under the bounded-retention rules a rollback to
     another season is a move, not a rejection, and a restore retires its source.
-    A rollback is recognised by its signature: a restore row whose immediate
+    A rollback is recognised only when all of the following hold: the restore
+    row's publication still exists with status ``rollback`` (what a rollback
+    creates); an earlier row of the same stream and season holds a version with
+    the same checksum (the source it cloned); and the restore's immediate
     predecessor was revoked at exactly the restore's fence and instant.  A
-    correction's revocation never matches (its instant differs, or it was
-    stamped before the rollback), and ``revoked_at`` is only cleared on the
-    signature, so a correction-revoked version is never resurrected.  State based
-    and rerun-safe: a second run finds no signature left and no unretired source.
+    correction's revocation lacks at least one of these (an ordinary activation
+    is never ``rollback``), and ``revoked_at`` is only cleared on a proven
+    rollback, so a correction-revoked version is never resurrected.  A restore
+    already replaced by another rollback shows ``superseded`` and is left
+    unclassified, which is the safe direction.  State based and rerun-safe: a
+    second run finds no signature left and no unretired source.
     """
 
     from app.models.collection_control import PublicationPointerHistory
@@ -2263,9 +2268,12 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
 
     history = PublicationPointerHistory.__table__
     versions = PublicationVersion.__table__
-    checksums = dict(connection.execute(
-        select(versions.c.publication_id, versions.c.checksum)
-    ).all())
+    checksums = {
+        publication_id: (checksum, status)
+        for publication_id, checksum, status in connection.execute(
+            select(versions.c.publication_id, versions.c.checksum, versions.c.status)
+        )
+    }
     rows = connection.execute(
         select(
             history.c.history_id, history.c.stream_key, history.c.publication_id,
@@ -2287,22 +2295,25 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
                 and withdrawn.revoked_at == restore.activated_at
             ):
                 continue
-            # A rollback.  A cross-season one only moved the pointer.
+            restored = checksums.get(restore.publication_id)
+            if restored is None or restored[1] != "rollback":
+                continue
+            source = next((
+                candidate for candidate in reversed(stream_rows[:index - 1])
+                if candidate.season == restore.season
+                and (checksums.get(candidate.publication_id) or (None,))[0]
+                == restored[0]
+            ), None)
+            if source is None:
+                continue
+            # A proven rollback.  A cross-season one only moved the pointer.
             if withdrawn.season != restore.season:
                 connection.execute(
                     history.update()
                     .where(history.c.history_id == withdrawn.history_id)
                     .values(revoked_at=None, revoked_fence=None)
                 )
-            restored_checksum = checksums.get(restore.publication_id)
-            if restored_checksum is None:
-                continue
-            source = next((
-                candidate for candidate in reversed(stream_rows[:index - 1])
-                if candidate.season == restore.season
-                and checksums.get(candidate.publication_id) == restored_checksum
-            ), None)
-            if source is not None and source.retired_at is None:
+            if source.retired_at is None:
                 connection.execute(
                     history.update()
                     .where(
@@ -2314,6 +2325,65 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
                         retired_by=restore.publication_id,
                     )
                 )
+
+
+def _drop_publication_activation_foreign_key(connection: Connection) -> None:
+    """Let activation evidence outlive the publication payload it names.
+
+    Pruning deletes payloads that can no longer serve; the RESTRICT foreign key
+    would pin every version an explicit activation or family promotion named.
+    Rerun-safe: acts only while the foreign key exists.  The table has no
+    inbound references, so SQLite rebuilds it, as migration 030 did to add it.
+    """
+
+    inspector = inspect(connection)
+    table_name = "publication_activations"
+    if not inspector.has_table(table_name):
+        return
+    keys = [
+        key for key in inspector.get_foreign_keys(table_name)
+        if key.get("referred_table") == "publication_versions"
+    ]
+    if not keys:
+        return
+    preparer = connection.dialect.identifier_preparer
+    old = preparer.quote(table_name)
+    if connection.dialect.name == "sqlite":
+        rebuilt_name = f"{table_name}__059"
+        rebuilt = preparer.quote(rebuilt_name)
+        connection.execute(text(f"DROP TABLE IF EXISTS {rebuilt}"))
+        connection.execute(text(
+            f"CREATE TABLE {rebuilt} ("
+            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, "
+            "publication_id VARCHAR(36) NOT NULL, "
+            "actor VARCHAR(128) NOT NULL, "
+            "reason VARCHAR(255) NOT NULL, "
+            "fence INTEGER NOT NULL, "
+            "created_at DATETIME NOT NULL)"
+        ))
+        connection.execute(text(
+            f"INSERT INTO {rebuilt} "
+            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+            "SELECT activation_id, stream_key, publication_id, actor, reason, fence, "
+            f"created_at FROM {old}"
+        ))
+        connection.execute(text(f"DROP TABLE {old}"))
+        connection.execute(text(f"ALTER TABLE {rebuilt} RENAME TO {old}"))
+        connection.execute(text(
+            f"CREATE INDEX ix_publication_activations_stream_created "
+            f"ON {old} (stream_key, created_at)"
+        ))
+        connection.execute(text(
+            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+            f"ON {old} (stream_key, publication_id)"
+        ))
+        return
+    for key in keys:
+        if key.get("name"):
+            connection.execute(text(
+                f"ALTER TABLE {old} DROP CONSTRAINT {preparer.quote(key['name'])}"
+            ))
 
 
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
@@ -2490,6 +2560,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         58,
         "058_publication_pointer_history_retirement",
         _reclassify_publication_pointer_history,
+    ),
+    Migration(
+        59,
+        "059_publication_activation_outlives_payload",
+        _drop_publication_activation_foreign_key,
     ),
 )
 

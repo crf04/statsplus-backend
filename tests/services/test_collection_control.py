@@ -2160,15 +2160,15 @@ def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_his
         assert [(row.observation_id, row.role) for row in refs] == [("rollback-obs", "completeness_evidence")]
     operations = CollectionOperationsService(control_db, publication_service=publication, clock=lambda: now)
     result = operations.run_maintenance(season="2025-26", cutoff=now)
-    assert result["publications_pruned"] == 1
+    assert result["publications_pruned"] == 2
     with control_db.connect() as connection:
         assert connection.execute(select(CollectionObservation).where(
             CollectionObservation.observation_id == "rollback-obs"
         )).first() is not None
-        # The restore replaced its source, so only the first version goes; the
-        # restored clone and the withdrawn second (the rollback target) stay.
+        # The restore replaced its source and the same-season rejection left no
+        # rollback target, so only the restored clone stays.
         survivors = set(connection.execute(select(PublicationVersion.publication_id)).scalars())
-    assert survivors == {second.publication_id, rollback.publication_id}
+    assert survivors == {rollback.publication_id}
 
 
 def test_event_catalog_rejects_caller_game_count_fallback(control_db):

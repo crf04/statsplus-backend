@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, select, text
 
 from app.migrations import run_migrations
 from app.models.collection_control import PublicationVersion
-from app.services.collection_control import PublicationService
+from app.services.collection_control import ControlPlaneError, PublicationService
 from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.research_season import focal_game_rows
 from app.services.statistic_catalog import StatisticCatalog
@@ -89,6 +89,80 @@ def test_a_same_season_rollback_revokes_the_withdrawn_publication(lifecycle):
         (restored.publication_id, "2025-26", 3, False),
     ]
     assert revoked_fences(engine, STREAM) == [3]
+    # The withdrawn content cannot serve: a later season publishes, and the
+    # past season reads the restored points, not the rejected ones.
+    _compose(publications, "2026-27", points=12, expected_fence=restored.fence)
+    assert [
+        row.points
+        for row in focal_game_rows(
+            _repository(engine), "2025-26", "0022500001", evidence_season="2026-27"
+        )
+    ] == [10]
+
+
+@pytest.mark.parametrize("family", [False, True], ids=("ordinary", "family"))
+def test_a_second_same_season_rollback_cannot_restore_rejected_content(
+    lifecycle, family,
+):
+    engine, publications = lifecycle
+    good = _compose(publications, "2025-26", points=10)
+    _compose(publications, "2025-26", points=99, expected_fence=good.fence)
+
+    def rollback(reason):
+        if family:
+            return publications.rollback_publication_family((STREAM,), reason=reason)[0]
+        return publications.rollback(STREAM, reason=reason)
+
+    restored = rollback("reject the bad refresh")
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        rollback("toggle back to the rejected refresh")
+
+    # Neither the published nor the retained read ever returns the rejected 99.
+    assert [
+        row.points
+        for row in _repository(engine).retained_game_rows("2025-26", "0022500001")
+    ] == [10]
+    _compose(publications, "2026-27", points=12, expected_fence=restored.fence)
+    assert [
+        row.points
+        for row in focal_game_rows(
+            _repository(engine), "2025-26", "0022500001", evidence_season="2026-27"
+        )
+    ] == [10]
+
+
+def test_pruning_does_not_pin_versions_named_by_activation_evidence(lifecycle):
+    """Activation records (family promotions, explicit activations) outlive payloads."""
+
+    engine, publications = lifecycle
+    versions = []
+    fence = None
+    for points in range(10, 16):
+        version = _compose(publications, "2025-26", points=points, expected_fence=fence)
+        fence = version.fence
+        versions.append(version)
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO publication_activations (activation_id, stream_key, "
+                "publication_id, actor, reason, fence, created_at) VALUES "
+                "(:id, :stream, :pub, 'operator', 'promote', :fence, "
+                "'2026-01-15 00:00:00.000000')"
+            ), {"id": f"activation-{points}", "stream": STREAM,
+                "pub": version.publication_id, "fence": version.fence})
+
+    result = publications.prune_history(stream_key=STREAM)
+
+    assert _surviving(engine) == {
+        versions[-1].publication_id, versions[-2].publication_id
+    }
+    assert result.deleted == 4
+    assert dict(result.kept) == {
+        "active": 1, "previous": 1, "candidate": 0, "season_latest": 0,
+    }
+    with engine.connect() as connection:
+        assert connection.scalar(text(
+            "SELECT count(*) FROM publication_activations"
+        )) == 6
 
 
 def test_a_restore_retires_its_source_and_a_toggle_retires_the_next(lifecycle):
@@ -139,7 +213,7 @@ def test_pruning_keeps_only_the_versions_that_can_still_serve(lifecycle):
     assert result.deleted == 2
     assert dict(result.kept) == {
         "active": 1, "previous": 1, "candidate": 0,
-        "season_latest": 0, "activation_evidence": 0,
+        "season_latest": 0,
     }
     # Pruned payloads leave their activation record behind.
     assert pointer_history(engine, STREAM) == [
@@ -197,7 +271,7 @@ def test_each_season_keeps_the_version_that_serves_its_past_games(lifecycle):
     }
     assert dict(result.kept) == {
         "active": 1, "previous": 1, "candidate": 0,
-        "season_latest": 1, "activation_evidence": 0,
+        "season_latest": 1,
     }
     assert [
         row.points
@@ -426,12 +500,12 @@ def test_a_concurrent_prune_and_rollback_serialize_on_postgres(first):
             assert result.deleted == 1
         else:
             result = outcome
-            # Prune saw the post-rollback pointer: active clone, previous v3,
-            # and the retired source v2 and revoked v1 are no longer needed.
-            assert result.deleted == 2
+            # Prune saw the post-rollback pointer: only the clone is active, the
+            # rejected v3 is no rollback target, and v1 and v2 are not needed.
+            assert result.deleted == 3
         surviving = _surviving(engine)
         assert rolled.publication_id in surviving
-        assert v3.publication_id in surviving
+        assert (v3.publication_id in surviving) == (first == "prune")
         assert [
             row.points
             for row in _repository(engine).retained_game_rows("2025-26", "0022500001")

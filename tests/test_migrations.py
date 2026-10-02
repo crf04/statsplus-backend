@@ -270,8 +270,9 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -550,6 +551,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -638,6 +640,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -859,6 +862,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     with engine.connect() as connection:
         rows = {
@@ -1111,6 +1115,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (56, "056_publication_player_game_log_game_index"),
             (57, "057_publication_pointer_history"),
             (58, "058_publication_pointer_history_retirement"),
+            (59, "059_publication_activation_outlives_payload"),
         ]
 
 
@@ -1181,6 +1186,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1276,6 +1282,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1355,6 +1362,7 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1415,7 +1423,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 58
+    assert repaired.current_version == 59
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1473,8 +1481,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1565,8 +1574,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1658,6 +1668,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1731,8 +1742,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1843,6 +1855,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
 
 
@@ -1885,16 +1898,13 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 58
+    assert result.current_version == 59
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
         foreign_keys = inspect(engine).get_foreign_keys("publication_activations")
-        assert any(
-            item["referred_table"] == "publication_versions"
-            and item["constrained_columns"] == ["publication_id"]
-            for item in foreign_keys
-        )
+        # 030 bound the evidence to its publication; 059 lets it outlive pruning.
+        assert foreign_keys == []
         assert connection.execute(text(
             "SELECT actor FROM publication_activations WHERE activation_id = 'legacy-activation'"
         )).scalar() == "operator"
@@ -2217,6 +2227,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -2296,10 +2307,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
     assert repeated.applied == ()
-    assert repeated.current_version == 58
+    assert repeated.current_version == 59
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2388,6 +2400,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -2470,8 +2483,9 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
 
     for table_name in (
         "team_matchup_facts",
@@ -2540,6 +2554,7 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
@@ -2547,7 +2562,6 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
     assert history[-18:] == [
-        (41, "041_projection_archive_transitions"),
         (42, "042_team_matchup_provider_provenance"),
         (43, "043_projection_collection_control"),
         (44, "044_projection_closing_sets"),
@@ -2565,6 +2579,7 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (56, "056_publication_player_game_log_game_index"),
         (57, "057_publication_pointer_history"),
         (58, "058_publication_pointer_history_retirement"),
+        (59, "059_publication_activation_outlives_payload"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2574,7 +2589,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 58
+    assert result.current_version == 59
     inspector = inspect(engine)
     columns = {
         column["name"]
@@ -2689,8 +2704,9 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert applied.current_version == 58
+    assert applied.current_version == 59
     assert repeated.applied == ()
     with engine.connect() as connection:
         row = connection.execute(
@@ -2749,6 +2765,7 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -2842,6 +2859,7 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -2895,6 +2913,7 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert repeated.applied == ()
 
@@ -2961,6 +2980,7 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3028,8 +3048,9 @@ def test_shooting_detail_migration_upgrades_production_054_preserving_targets(tm
         "056_publication_player_game_log_game_index",
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
-    assert upgraded.current_version == 58
+    assert upgraded.current_version == 59
     assert run_migrations(engine).applied == ()
     assert "shooting_detail" in {
         column["name"] for column in inspect(engine).get_columns("player_diet_facts")
@@ -3079,6 +3100,7 @@ def test_pointer_history_migration_seeds_each_active_pointer_and_is_idempotent(t
     assert run_migrations(engine).applied == (
         "057_publication_pointer_history",
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
 
     query = text(
@@ -3117,9 +3139,9 @@ def _seed_057_history(engine):
         ("pub-a", "2025-26", 1, "ca", None, None),
         ("pub-b", "2026-27", 2, "cb", "2026-05-02 12:00:00.000000", 3),
         ("pub-c", "2025-26", 3, "ca", None, None),
-        # d was revoked by a correction after e became active (same fence as
-        # e, but not e's instant).
-        ("pub-d", "2026-27", 4, "cd", "2026-05-04 12:00:00.000000", 5),
+        # d was revoked by a correction at e's fence and e's very instant, and e
+        # is an ordinary activation (not a restore of anything).
+        ("pub-d", "2026-27", 4, "cd", "2026-05-03 18:00:00.000000", 5),
         ("pub-e", "2025-26", 5, "ce", None, None),
     )
     with engine.begin() as connection:
@@ -3127,10 +3149,11 @@ def _seed_057_history(engine):
             connection.execute(text(
                 "INSERT INTO publication_versions (publication_id, stream_key, season, "
                 "cutoff, version, status, checksum, payload, created_at, fence) "
-                "VALUES (:id, 'player_game_logs', :season, :stamp, :fence, 'superseded', "
+                "VALUES (:id, 'player_game_logs', :season, :stamp, :fence, :status, "
                 ":checksum, '{}', :stamp, :fence)"
             ), {"id": publication_id, "season": season, "stamp": stamp,
-                "fence": fence, "checksum": checksum})
+                "fence": fence, "checksum": checksum,
+                "status": "rollback" if publication_id == "pub-c" else "superseded"})
             activated_at = {
                 3: "2026-05-02 12:00:00.000000",
                 4: "2026-05-03 12:00:00.000000",
@@ -3160,12 +3183,13 @@ def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurr
         assert run_migrations(engine).current_version == 57
     # History: a(2025-26) -> b(2026-27) -> c(2025-26, restore of a) -> d(2026-27) -> e(2025-26).
     # b was revoked by the cross-season rollback to c (same fence and instant);
-    # d carries a revocation at e's fence but not e's instant, as a correction
-    # stamps it.
+    # d carries a correction's revocation at e's fence and instant, but e is an
+    # ordinary activation, not a restore.
     _seed_057_history(engine)
 
     assert run_migrations(engine).applied == (
         "058_publication_pointer_history_retirement",
+        "059_publication_activation_outlives_payload",
     )
 
     query = text(
@@ -3214,8 +3238,9 @@ def test_pointer_history_retirement_migration_keeps_a_same_season_rollback_revoc
                 "INSERT INTO publication_versions (publication_id, stream_key, season, "
                 "cutoff, version, status, checksum, payload, created_at, fence) "
                 "VALUES (:id, 'player_game_logs', '2025-26', :stamp, :fence, "
-                "'superseded', :checksum, '{}', :stamp, :fence)"
-            ), {"id": publication_id, "stamp": stamp, "fence": fence, "checksum": checksum})
+                ":status, :checksum, '{}', :stamp, :fence)"
+            ), {"id": publication_id, "stamp": stamp, "fence": fence, "checksum": checksum,
+                "status": "rollback" if publication_id == "pub-c" else "superseded"})
             connection.execute(text(
                 "INSERT INTO publication_pointer_history (history_id, stream_key, "
                 "publication_id, season, fence, activated_at, revoked_at, revoked_fence) "
@@ -3240,3 +3265,32 @@ def test_pointer_history_retirement_migration_keeps_a_same_season_rollback_revoc
         ("pub-b", True, None),
         ("pub-c", False, None),
     ]
+
+
+def test_activation_evidence_outlives_a_deleted_publication_and_the_migration_reruns(
+    tmp_path,
+):
+    from app.migrations import _drop_publication_activation_foreign_key
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'activations.sqlite3'}")
+    run_migrations(engine)
+    stamp = "2026-08-13 00:00:00"
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO publication_versions (publication_id, stream_key, season, "
+            "cutoff, version, status, checksum, payload, created_at, reason, fence) "
+            "VALUES ('promoted', 'player_game_logs', '2025-26', :stamp, 1, "
+            "'superseded', 'c', '{}', :stamp, 'x', 1)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO publication_activations (activation_id, stream_key, "
+            "publication_id, actor, reason, fence, created_at) VALUES "
+            "('a1', 'player_game_logs', 'promoted', 'op', 'promote', 1, :stamp)"
+        ), {"stamp": stamp})
+        connection.execute(text("DELETE FROM publication_versions WHERE publication_id = 'promoted'"))
+        _drop_publication_activation_foreign_key(connection)
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT publication_id FROM publication_activations"
+        )).all() == [("promoted",)]
+    assert inspect(engine).get_foreign_keys("publication_activations") == []

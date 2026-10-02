@@ -1648,6 +1648,21 @@ def _revoke_pointer_history(
     )
 
 
+def _assert_rollback_target_not_revoked(
+    session: Session, stream_key: str, target: PublicationVersion,
+) -> None:
+    """Refuse a rollback target whose every activation was withdrawn."""
+
+    rows = session.execute(
+        select(PublicationPointerHistory.revoked_at).where(
+            PublicationPointerHistory.stream_key == stream_key,
+            PublicationPointerHistory.publication_id == target.publication_id,
+        )
+    ).all()
+    if rows and all(revoked_at is not None for (revoked_at,) in rows):
+        raise ControlPlaneError("rollback_unavailable")
+
+
 def _record_rollback_history(
     session: Session,
     pointer: PublicationPointer,
@@ -1670,6 +1685,9 @@ def _record_rollback_history(
             session, pointer.stream_key, (withdrawn.publication_id,), now=now,
             fence=pointer.fence,
         )
+        # A rejected version must not be the next rollback target: a second
+        # rollback would clone it into fresh, unrevoked authority.
+        pointer.previous_publication_id = None
     session.flush()
     session.execute(
         update(PublicationPointerHistory)
@@ -3826,7 +3844,7 @@ class ObservationIngestionService(_SessionService):
 
 
 PRUNE_KEEP_REASONS: Final[tuple[str, ...]] = (
-    "active", "previous", "candidate", "season_latest", "activation_evidence",
+    "active", "previous", "candidate", "season_latest",
 )
 
 
@@ -3835,8 +3853,7 @@ class PruneResult:
     """What one ``prune_history`` run deleted and kept, by reason.
 
     A kept version is counted under the first matching reason, in the order of
-    ``PRUNE_KEEP_REASONS``.  ``activation_evidence`` is a foreign-key guard for
-    versions an explicit stream activation recorded, not a retention policy.
+    ``PRUNE_KEEP_REASONS``.
     """
 
     deleted: int
@@ -4894,7 +4911,22 @@ class PublicationService(_SessionService):
                 ),
             ),
         )))
-        if not versions:
+        # A pruned publication's lineage went with its payload, so staleness
+        # cannot be proved.  Its payload is gone and it can never serve, so
+        # revoke its history conservatively instead of leaving it eligible.
+        pruned_ids = set(session.scalars(
+            select(PublicationPointerHistory.publication_id).where(
+                PublicationPointerHistory.stream_key == stream_key,
+                PublicationPointerHistory.season == season,
+                PublicationPointerHistory.revoked_at.is_(None),
+                PublicationPointerHistory.publication_id != keep_publication_id,
+                ~select(PublicationVersion.publication_id).where(
+                    PublicationVersion.publication_id
+                    == PublicationPointerHistory.publication_id
+                ).exists(),
+            )
+        ))
+        if not versions and not pruned_ids:
             return
         version_ids = {version.publication_id for version in versions}
         lineage_by_publication: dict[str, dict[str, str]] = {
@@ -4938,6 +4970,7 @@ class PublicationService(_SessionService):
                 "active", "candidate",
             ):
                 version.status = "superseded"
+        stale_ids |= pruned_ids
         if not stale_ids:
             return
         if pointer is not None and pointer.active_publication_id in stale_ids:
@@ -5606,6 +5639,7 @@ class PublicationService(_SessionService):
             current = session.get(PublicationVersion, pointer.active_publication_id)
             if prior is None or current is None:
                 raise ControlPlaneError("rollback_unavailable")
+            _assert_rollback_target_not_revoked(session, stream_key, prior)
             if not publication_payload_matches_checksum(prior.payload, prior.checksum):
                 raise ControlPlaneError("publication_checksum_mismatch")
             if stream_key in NBA_PUBLICATION_STREAM_KEYS:
@@ -5816,6 +5850,7 @@ class PublicationService(_SessionService):
                 )
                 if prior is None or current is None:
                     raise ControlPlaneError("rollback_unavailable")
+                _assert_rollback_target_not_revoked(session, stream_key, prior)
                 if not publication_payload_matches_checksum(
                     prior.payload, prior.checksum
                 ):
@@ -5920,8 +5955,6 @@ class PublicationService(_SessionService):
                 )
             ):
                 season_latest.setdefault(stream, set()).add(publication_id)
-            # Activation evidence references its version with RESTRICT.
-            evidenced = set(session.scalars(select(PublicationActivation.publication_id)))
             version_query = select(
                 PublicationVersion.publication_id, PublicationVersion.stream_key,
                 PublicationVersion.status,
@@ -5941,8 +5974,6 @@ class PublicationService(_SessionService):
                     reason = "candidate"
                 elif publication_id in season_latest.get(stream, ()):
                     reason = "season_latest"
-                elif publication_id in evidenced:
-                    reason = "activation_evidence"
                 else:
                     doomed.append(publication_id)
                     continue

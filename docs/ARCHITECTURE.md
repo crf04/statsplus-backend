@@ -3269,7 +3269,10 @@ Two marks keep a row from serving, and they mean different things.
   the new fence of a pointer the correction cleared. A pointer moving to a
   different season is a move, not a rejection: a rollback or family rollback
   across seasons records the move without revoking, as composing a new season
-  does not revoke the old one.
+  does not revoke the old one. A same-season rollback also leaves the pointer
+  with no rollback target, and a rollback refuses a target whose activations
+  were all revoked, so a second rollback cannot clone rejected content back
+  into fresh authority.
 - **Retired** means a restore superseded the row. A rollback restores a clone C
   of version A; C carries A's content and is the season's authority for it, so
   A's row is stamped `retired_at` with `retired_by = C`. Retired is not
@@ -3282,13 +3285,12 @@ when it is one of: the latest eligible version of its season (per stream); the
 pointer's active publication; the pointer's previous publication (the rollback
 target); or a candidate still awaiting activation. Everything else is deleted,
 about three versions per stream and season in steady state, so a nightly refresh
-no longer grows storage. (Publications referenced by a `publication_activations`
-row are also kept, because that foreign key is RESTRICT; this is a guard, not a
-retention policy.) The keep set is computed per stream across all seasons even
+no longer grows storage. Activation records (`publication_activations`) have
+no foreign key to the version (migration 059), so they outlive pruned payloads
+and never pin retention. The keep set is computed per stream across all seasons even
 when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept`, where `kept` counts survivors by the
-first matching reason (`active`, `previous`, `candidate`, `season_latest`,
-`activation_evidence`). Pruning takes the pointer row locks first, in stream
+first matching reason (`active`, `previous`, `candidate`, `season_latest`). Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
 cannot delete a target the rollback is reading. History rows carry no foreign
@@ -3299,12 +3301,17 @@ source (one copy of a content pins storage, not two) and why a cross-season move
 does not revoke (the old season's latest version stays eligible, so the read for
 its past games keeps working after the pointer returns to it).
 
-Migration 058 reclassifies #324's rows once: a rollback is recognised by a
-restore row whose immediate predecessor was revoked at exactly the restore's
-fence and instant. A cross-season withdrawal is un-revoked, and the source the
-restore cloned (same season and checksum) is retired. It never clears any other
-revocation, so a version a correction revoked stays revoked, and a rerun finds
-nothing left to change.
+A correction also revokes history rows whose publication was already pruned: their
+lineage went with the payload, staleness cannot be proved, and they can never
+serve, so revoking them is the fail-closed choice.
+
+Migration 058 reclassifies #324's rows once. A rollback is recognised only when
+the restore's publication still exists with status `rollback`, an earlier row of
+the same season holds a version with the same checksum (its source), and the
+restore's predecessor was revoked at exactly the restore's fence and instant. A
+proven cross-season withdrawal is un-revoked and the source is retired. It never
+clears any other revocation, so a version a correction revoked stays revoked,
+and a rerun finds nothing left to change.
 
 A completed game of a season before the published season reads its focal rows
 (`focal_game_rows`) from the latest eligible (unrevoked, unretired)
