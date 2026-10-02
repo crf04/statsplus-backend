@@ -22,13 +22,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import (
-    AbstractSet, Any, Callable, Iterable, Mapping, NamedTuple, Sequence,
+    AbstractSet, Any, Callable, Final, Iterable, Mapping, NamedTuple, Sequence,
 )
 
 from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 from cryptography.fernet import Fernet, InvalidToken as FernetInvalidToken
 
 from app.domain.nba_events import (
@@ -1646,6 +1646,41 @@ def _revoke_pointer_history(
         )
         .values(revoked_at=now, revoked_fence=int(fence))
     )
+
+
+def _record_rollback_history(
+    session: Session,
+    pointer: PublicationPointer,
+    restored: PublicationVersion,
+    *,
+    withdrawn: PublicationVersion,
+    source: PublicationVersion,
+    now: datetime,
+) -> None:
+    """Record a rollback's pointer move in the history.
+
+    Only a same-season rollback withdraws (revokes) the version it moves away
+    from; moving to another season is a move, not a rejection.  The restored
+    clone replaces its source as the season's authority, so the source's row is
+    retired and no longer pins retention or serves reads.
+    """
+
+    if withdrawn.season == source.season:
+        _revoke_pointer_history(
+            session, pointer.stream_key, (withdrawn.publication_id,), now=now,
+            fence=pointer.fence,
+        )
+    session.flush()
+    session.execute(
+        update(PublicationPointerHistory)
+        .where(
+            PublicationPointerHistory.stream_key == pointer.stream_key,
+            PublicationPointerHistory.publication_id == source.publication_id,
+            PublicationPointerHistory.retired_at.is_(None),
+        )
+        .values(retired_at=now, retired_by=restored.publication_id)
+    )
+    _record_pointer_activation(session, pointer, restored, now=now)
 
 
 def _lock_pointer(session: Session, stream_key: str) -> PublicationPointer | None:
@@ -3790,6 +3825,24 @@ class ObservationIngestionService(_SessionService):
         return None
 
 
+PRUNE_KEEP_REASONS: Final[tuple[str, ...]] = (
+    "active", "previous", "candidate", "season_latest", "activation_evidence",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PruneResult:
+    """What one ``prune_history`` run deleted and kept, by reason.
+
+    A kept version is counted under the first matching reason, in the order of
+    ``PRUNE_KEEP_REASONS``.  ``activation_evidence`` is a foreign-key guard for
+    versions an explicit stream activation recorded, not a retention policy.
+    """
+
+    deleted: int
+    kept: Mapping[str, int]
+
+
 class PublicationService(_SessionService):
     """Register streams and atomically advance or roll back publications."""
 
@@ -5586,11 +5639,9 @@ class PublicationService(_SessionService):
             current.status = "superseded"
             prior.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
-            _revoke_pointer_history(
-                session, stream_key, (current.publication_id,), now=now,
-                fence=pointer.fence,
+            _record_rollback_history(
+                session, pointer, version, withdrawn=current, source=prior, now=now,
             )
-            _record_pointer_activation(session, pointer, version, now=now)
         return version
 
     def promote_publication_family(
@@ -5817,59 +5868,91 @@ class PublicationService(_SessionService):
                 pointer.previous_publication_id = current.publication_id
                 pointer.active_publication_id = version.publication_id
                 pointer.updated_at = now
-                _revoke_pointer_history(
-                    session, stream_key, (current.publication_id,), now=now,
-                    fence=pointer.fence,
+                _record_rollback_history(
+                    session, pointer, version, withdrawn=current, source=prior,
+                    now=now,
                 )
-                _record_pointer_activation(session, pointer, version, now=now)
                 rolled_back.append(version)
             session.flush()
         return tuple(rolled_back)
 
     def prune_history(self, *, stream_key: str | None = None,
                       season: str | None = None,
-                      session: Session | None = None) -> int:
-        """Prune rendered facts while retaining active/previous/rollback provenance.
+                      session: Session | None = None) -> "PruneResult":
+        """Delete rendered facts for every publication that can no longer serve.
 
-        The normalized ``PublicationObservation`` rows are immutable compact
-        history and are deliberately left intact even when an old rendered
-        publication is removed; active, immediate-previous, and rollback
-        versions retain both their facts and references.
+        A publication keeps its payload and projection only while it is the
+        pointer's active or previous (rollback target) publication, a candidate
+        awaiting activation, or the latest eligible (activated, unrevoked,
+        unretired) version of its season.  The keep set is computed per stream
+        across all seasons even when ``season`` narrows what may be deleted.
+        The pointer lock is taken first, as every writer does, so a concurrent
+        rollback finishes before the keep set is read (or waits for this prune)
+        and its target cannot be deleted from under it.  History rows and the
+        normalized ``PublicationObservation`` rows are never deleted.
         """
 
+        deleted = 0
+        kept = {reason: 0 for reason in PRUNE_KEEP_REASONS}
         with self._session_scope(session) as session:
-            pointer_query = select(PublicationPointer)
+            pointer_query = select(PublicationPointer).order_by(
+                PublicationPointer.stream_key
+            ).with_for_update().execution_options(populate_existing=True)
             if stream_key is not None:
                 pointer_query = pointer_query.where(PublicationPointer.stream_key == stream_key)
-            protected: set[str] = set()
-            for pointer in session.scalars(pointer_query):
-                if pointer.active_publication_id:
-                    protected.add(pointer.active_publication_id)
-                if pointer.previous_publication_id:
-                    protected.add(pointer.previous_publication_id)
-            protected.update(session.scalars(select(PublicationVersion.publication_id).where(
-                PublicationVersion.status == "rollback"
-            )))
-            protected.update(session.scalars(select(PublicationActivation.publication_id)))
-            # A publication with an unrevoked history row can become the
-            # served authority again when a later rollback revokes the one
-            # above it, so its payload and projection must outlive pruning.
-            protected.update(session.scalars(
-                select(PublicationPointerHistory.publication_id)
-                .where(PublicationPointerHistory.revoked_at.is_(None))
-            ))
-            query = select(PublicationVersion).where(
-                PublicationVersion.status.in_(("superseded", "candidate")),
-                ~PublicationVersion.publication_id.in_(protected),
+            pointers = {pointer.stream_key: pointer for pointer in session.scalars(pointer_query)}
+            history = PublicationPointerHistory
+            newer = aliased(PublicationPointerHistory)
+            eligible = (
+                history.revoked_at.is_(None), history.retired_at.is_(None),
+            )
+            season_latest: dict[str, set[str]] = {}
+            for stream, publication_id in session.execute(
+                select(history.stream_key, history.publication_id).where(
+                    *eligible,
+                    ~select(newer.history_id).where(
+                        newer.stream_key == history.stream_key,
+                        newer.season == history.season,
+                        newer.fence > history.fence,
+                        newer.revoked_at.is_(None),
+                        newer.retired_at.is_(None),
+                    ).exists(),
+                )
+            ):
+                season_latest.setdefault(stream, set()).add(publication_id)
+            # Activation evidence references its version with RESTRICT.
+            evidenced = set(session.scalars(select(PublicationActivation.publication_id)))
+            version_query = select(
+                PublicationVersion.publication_id, PublicationVersion.stream_key,
+                PublicationVersion.status,
             )
             if stream_key is not None:
-                query = query.where(PublicationVersion.stream_key == stream_key)
+                version_query = version_query.where(PublicationVersion.stream_key == stream_key)
             if season is not None:
-                query = query.where(PublicationVersion.season == season)
-            rows = list(session.scalars(query))
-            for row in rows:
+                version_query = version_query.where(PublicationVersion.season == season)
+            doomed: list[str] = []
+            for publication_id, stream, status in session.execute(version_query).all():
+                pointer = pointers.get(stream)
+                if pointer is not None and pointer.active_publication_id == publication_id:
+                    reason = "active"
+                elif pointer is not None and pointer.previous_publication_id == publication_id:
+                    reason = "previous"
+                elif status == "candidate":
+                    reason = "candidate"
+                elif publication_id in season_latest.get(stream, ()):
+                    reason = "season_latest"
+                elif publication_id in evidenced:
+                    reason = "activation_evidence"
+                else:
+                    doomed.append(publication_id)
+                    continue
+                kept[reason] += 1
+            for row in session.scalars(select(PublicationVersion).where(
+                PublicationVersion.publication_id.in_(doomed)
+            )) if doomed else ():
                 session.delete(row)
-            return len(rows)
+                deleted += 1
+        return PruneResult(deleted=deleted, kept=kept)
 
 
 class CollectionOperationsService(_SessionService):
@@ -6274,7 +6357,7 @@ class CollectionOperationsService(_SessionService):
         enqueued = self.publication_service.reconcile_pending(season=season, cutoff=cutoff) if self.publication_service else 0
         deleted = self.gc_observations(now=current)
         publications_pruned = (
-            self.publication_service.prune_history(season=season)
+            self.publication_service.prune_history(season=season).deleted
             if self.publication_service is not None else 0
         )
         attention = 0

@@ -671,10 +671,9 @@ def test_a_rolled_back_seasons_game_never_serves_its_rejected_rows(tmp_path):
 
     assert pointer_history(engine, "player_game_logs") == [
         (publication.publication_id, "2025-26", 1, False),
-        (rejected.publication_id, "2026-27", 2, True),
+        (rejected.publication_id, "2026-27", 2, False),
         (restored.publication_id, "2025-26", 3, False),
     ]
-    assert service.player_logs.retained_game_rows("2026-27", "0022600001") is None
     assert [
         row.points
         for row in service.player_logs.retained_game_rows("2025-26", "0022500001")

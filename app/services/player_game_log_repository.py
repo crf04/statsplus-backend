@@ -469,8 +469,8 @@ class PlayerGameLogRepository:
     ) -> tuple[PlayerGameLogRecord, ...] | None:
         """One game's rows from the season's retained activation, or ``None``.
 
-        The retained activation is the latest unrevoked pointer-history row for
-        the season.  A candidate that never activated has no row, and a
+        The retained activation is the latest unrevoked, unretired pointer-history
+        row for the season.  A candidate that never activated has no row, and a
         publication a rollback withdrew is revoked, so neither can be read.
         ``None`` means no retained authority exists (or its projection is
         absent), and the caller keeps the game unavailable.
@@ -486,6 +486,7 @@ class PlayerGameLogRepository:
                     history.c.stream_key == "player_game_logs",
                     history.c.season == canonical_season,
                     history.c.revoked_at.is_(None),
+                    history.c.retired_at.is_(None),
                 )
                 .order_by(history.c.fence.desc())
                 .limit(1)

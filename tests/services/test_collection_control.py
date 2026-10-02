@@ -2085,8 +2085,9 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     third = publication.compose("provenance", season="2025-26", cutoff=now,
                                 payload={"published": 3}, expected_fence=second.fence,
                                 manifest_id="prov-manifest")
-    # Every replaced version still has unrevoked history, so none is pruned.
-    assert publication.prune_history(stream_key="provenance", season="2025-26") == 0
+    # Only the active third and its rollback target (second) can still serve;
+    # the oldest rendered publication is pruned.
+    assert publication.prune_history(stream_key="provenance", season="2025-26").deleted == 1
     assert third.publication_id != second.publication_id
     # The same accepted evidence backs every retained slice, so it remains
     # protected even after the oldest rendered publication is pruned.
@@ -2159,16 +2160,15 @@ def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_his
         assert [(row.observation_id, row.role) for row in refs] == [("rollback-obs", "completeness_evidence")]
     operations = CollectionOperationsService(control_db, publication_service=publication, clock=lambda: now)
     result = operations.run_maintenance(season="2025-26", cutoff=now)
-    assert result["publications_pruned"] >= 0
+    assert result["publications_pruned"] == 1
     with control_db.connect() as connection:
         assert connection.execute(select(CollectionObservation).where(
             CollectionObservation.observation_id == "rollback-obs"
         )).first() is not None
-        # The replaced first version keeps unrevoked history, so a later
-        # rollback can make it authoritative again: pruning leaves it alone.
-        assert connection.execute(select(PublicationVersion).where(
-            PublicationVersion.publication_id == first.publication_id
-        )).first() is not None
+        # The restore replaced its source, so only the first version goes; the
+        # restored clone and the withdrawn second (the rollback target) stay.
+        survivors = set(connection.execute(select(PublicationVersion.publication_id)).scalars())
+    assert survivors == {second.publication_id, rollback.publication_id}
 
 
 def test_event_catalog_rejects_caller_game_count_fallback(control_db):

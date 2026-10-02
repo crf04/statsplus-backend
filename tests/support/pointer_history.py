@@ -41,3 +41,18 @@ def revoked_fences(engine, stream_key):
                 .order_by(table.c.fence)
             )
         ]
+
+
+def retirements(engine, stream_key):
+    """``(publication_id, retired_by)`` of each retired row, oldest pointer move first."""
+
+    table = PublicationPointerHistory.__table__
+    with engine.connect() as connection:
+        return [
+            (row.publication_id, row.retired_by)
+            for row in connection.execute(
+                select(table.c.publication_id, table.c.retired_by)
+                .where(table.c.stream_key == stream_key, table.c.retired_at.is_not(None))
+                .order_by(table.c.fence)
+            )
+        ]

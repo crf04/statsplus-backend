@@ -2229,6 +2229,93 @@ def _create_publication_pointer_history(connection: Connection) -> None:
         ))
 
 
+def _reclassify_publication_pointer_history(connection: Connection) -> None:
+    """Add ``retired_at``/``retired_by`` and reclassify rollback history once.
+
+    #324 revoked the version every rollback moved away from and kept the
+    rollback's source live.  Under the bounded-retention rules a rollback to
+    another season is a move, not a rejection, and a restore retires its source.
+    A rollback is recognised by its signature: a restore row whose immediate
+    predecessor was revoked at exactly the restore's fence and instant.  A
+    correction's revocation never matches (its instant differs, or it was
+    stamped before the rollback), and ``revoked_at`` is only cleared on the
+    signature, so a correction-revoked version is never resurrected.  State based
+    and rerun-safe: a second run finds no signature left and no unretired source.
+    """
+
+    from app.models.collection_control import PublicationPointerHistory
+
+    inspector = inspect(connection)
+    if not inspector.has_table("publication_pointer_history"):
+        return
+    existing = {column["name"] for column in inspector.get_columns("publication_pointer_history")}
+    timestamp = (
+        "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
+    )
+    for name, type_sql in (("retired_at", timestamp), ("retired_by", "VARCHAR(36)")):
+        if name not in existing:
+            connection.execute(text(
+                f"ALTER TABLE publication_pointer_history ADD COLUMN {name} {type_sql}"
+            ))
+    if not inspector.has_table("publication_versions"):
+        return
+    from app.models.collection_control import PublicationVersion
+
+    history = PublicationPointerHistory.__table__
+    versions = PublicationVersion.__table__
+    checksums = dict(connection.execute(
+        select(versions.c.publication_id, versions.c.checksum)
+    ).all())
+    rows = connection.execute(
+        select(
+            history.c.history_id, history.c.stream_key, history.c.publication_id,
+            history.c.season, history.c.fence, history.c.activated_at,
+            history.c.revoked_at, history.c.revoked_fence, history.c.retired_at,
+        ).order_by(history.c.stream_key, history.c.fence)
+    ).all()
+    by_stream: dict[str, list] = {}
+    for row in rows:
+        by_stream.setdefault(row.stream_key, []).append(row)
+    for stream_rows in by_stream.values():
+        for index, restore in enumerate(stream_rows):
+            if index == 0:
+                continue
+            withdrawn = stream_rows[index - 1]
+            if not (
+                withdrawn.revoked_at is not None
+                and withdrawn.revoked_fence == restore.fence
+                and withdrawn.revoked_at == restore.activated_at
+            ):
+                continue
+            # A rollback.  A cross-season one only moved the pointer.
+            if withdrawn.season != restore.season:
+                connection.execute(
+                    history.update()
+                    .where(history.c.history_id == withdrawn.history_id)
+                    .values(revoked_at=None, revoked_fence=None)
+                )
+            restored_checksum = checksums.get(restore.publication_id)
+            if restored_checksum is None:
+                continue
+            source = next((
+                candidate for candidate in reversed(stream_rows[:index - 1])
+                if candidate.season == restore.season
+                and checksums.get(candidate.publication_id) == restored_checksum
+            ), None)
+            if source is not None and source.retired_at is None:
+                connection.execute(
+                    history.update()
+                    .where(
+                        history.c.history_id == source.history_id,
+                        history.c.retired_at.is_(None),
+                    )
+                    .values(
+                        retired_at=restore.activated_at,
+                        retired_by=restore.publication_id,
+                    )
+                )
+
+
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
     """Index the projection's ``(publication_id, game_id)`` filter.
 
@@ -2398,6 +2485,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         57,
         "057_publication_pointer_history",
         _create_publication_pointer_history,
+    ),
+    Migration(
+        58,
+        "058_publication_pointer_history_retirement",
+        _reclassify_publication_pointer_history,
     ),
 )
 

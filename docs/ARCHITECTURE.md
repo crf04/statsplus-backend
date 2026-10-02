@@ -3248,33 +3248,69 @@ silently restored.
 `publication_versions.status = superseded` cannot say whether a version ever
 served: it marks a normally replaced active, a candidate that never activated,
 and both sides of a rollback. `publication_pointers` keeps only the current
-publication and one previous id. `publication_pointer_history` (migration 057)
-is the append-only record of what each stream pointer actually named: stream,
-publication, season, the pointer fence the move produced, `activated_at`, and a
-nullable `revoked_at`. Every path that moves a pointer writes its row in the
-same transaction: composition (including repair-group promotion), explicit
-stream activation, family promotion, rollback, and family rollback. A rollback
-stamps `revoked_at` on the publication it withdraws and appends a row for the
-version it restores; corrected-ledger invalidation stamps `revoked_at` on every
-invalidated publication that had activated, whatever its status has become
-(superseded and rollback versions included). `revoked_fence` records the
-pointer generation at the revocation, including the new fence of a pointer the
-correction cleared. A publication replaced by a later
-one is not revoked, so a past season's last activation stays retained after a
-newer season activates. A candidate that never activated has no row. The
-migration seeds one row per current active pointer, so the authority already
-serving at deploy time is captured without inference, and it must deploy before
-the first publication of a new season. `prune_history` never deletes a
-publication that has an unrevoked history row, since a later rollback can make it
-the served authority again; history rows carry no
-foreign key and outlive any pruned payload, and a read whose projection is gone
-stays unavailable.
+publication and one previous id. `publication_pointer_history` (migration 057,
+extended by 058) is the append-only record of what each stream pointer actually
+named: stream, publication, season, the pointer fence the move produced,
+`activated_at`, a nullable `revoked_at`, and a nullable `retired_at` with the
+restoring publication in `retired_by`. Every path that moves a pointer writes
+its row in the same transaction: composition (including repair-group
+promotion), explicit stream activation, family promotion, rollback, and family
+rollback. A candidate that never activated has no row. The migration seeds one
+row per current active pointer, so the authority already serving at deploy time
+is captured without inference.
+
+Two marks keep a row from serving, and they mean different things.
+
+- **Revoked** means the content was withdrawn. A same-season rollback (ordinary
+  or family) stamps `revoked_at` on the publication it moves away from, and
+  corrected-ledger invalidation stamps it on every invalidated publication that
+  had activated, whatever its status has become and including a retired one.
+  `revoked_fence` records the pointer generation at the revocation, including
+  the new fence of a pointer the correction cleared. A pointer moving to a
+  different season is a move, not a rejection: a rollback or family rollback
+  across seasons records the move without revoking, as composing a new season
+  does not revoke the old one.
+- **Retired** means a restore superseded the row. A rollback restores a clone C
+  of version A; C carries A's content and is the season's authority for it, so
+  A's row is stamped `retired_at` with `retired_by = C`. Retired is not
+  rejected, and it exempts nothing from a correction.
+
+A row is eligible when it is activated (every row is), unrevoked, and unretired.
+
+**Retention.** `prune_history` keeps a publication's payload and projection only
+when it is one of: the latest eligible version of its season (per stream); the
+pointer's active publication; the pointer's previous publication (the rollback
+target); or a candidate still awaiting activation. Everything else is deleted,
+about three versions per stream and season in steady state, so a nightly refresh
+no longer grows storage. (Publications referenced by a `publication_activations`
+row are also kept, because that foreign key is RESTRICT; this is a guard, not a
+retention policy.) The keep set is computed per stream across all seasons even
+when a `season` argument narrows what may be deleted. The method returns a
+`PruneResult` with `deleted` and `kept`, where `kept` counts survivors by the
+first matching reason (`active`, `previous`, `candidate`, `season_latest`,
+`activation_evidence`). Pruning takes the pointer row locks first, in stream
+order, then touches versions, the same stream, pointer, version order as every
+other writer, so it waits for a concurrent rollback (or makes it wait) and
+cannot delete a target the rollback is reading. History rows carry no foreign
+key and are never deleted; a read whose projection is gone stays unavailable.
+A change to rollback or pruning must keep one invariant: every version that can
+become the served authority is in the keep set. That is why a restore retires its
+source (one copy of a content pins storage, not two) and why a cross-season move
+does not revoke (the old season's latest version stays eligible, so the read for
+its past games keeps working after the pointer returns to it).
+
+Migration 058 reclassifies #324's rows once: a rollback is recognised by a
+restore row whose immediate predecessor was revoked at exactly the restore's
+fence and instant. A cross-season withdrawal is un-revoked, and the source the
+restore cloned (same season and checksum) is retired. It never clears any other
+revocation, so a version a correction revoked stays revoked, and a rerun finds
+nothing left to change.
 
 A completed game of a season before the published season reads its focal rows
-(`focal_game_rows`) from the latest unrevoked `player_game_logs` history row for
-the game's season, through that publication's indexed projection. A later
+(`focal_game_rows`) from the latest eligible (unrevoked, unretired)
+`player_game_logs` history row for the game's season, through that publication's indexed projection. A later
 season than the published one (a rolled-back newer season), a season with no
-unrevoked row, or a retained publication without a projection stays
+eligible row, or a retained publication without a projection stays
 unavailable. An explicit `NBA_CURRENT_SEASON` pin keeps its precedence, and
 scoring evidence still comes from the published season.
 

@@ -3790,6 +3790,51 @@ def test_correction_revokes_previously_activated_superseded_and_rollback_history
     assert cleared == (history[-1][2] + 1)
 
 
+def test_correction_revokes_a_source_retired_by_toggling_rollbacks(tmp_path):
+    """Retiring a restore's source never exempts it from a later correction."""
+
+    engine = _engine(tmp_path, "history-toggled.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(
+        engine
+    )
+    # activated[1] is the rollback target.  The first restore retires it; the
+    # toggle forward restores activated[2]'s content and retires that source.
+    publications.rollback(
+        stream_key, reason="restore the prior ledger",
+        expected_fence=publications.current(stream_key).fence,
+    )
+    publications.rollback(stream_key, reason="toggle forward")
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+
+    publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+        provenance={sources[3]: "game-1"}, reason="correction",
+        corrected_provenance={sources[3]: "game-1"},
+    )
+
+    history = pointer_history(engine, stream_key)
+    assert len(history) == 5
+    assert all(revoked for *_rest, revoked in history)
+    with engine.connect() as connection:
+        pointer = connection.execute(select(
+            PublicationPointer.__table__.c.active_publication_id,
+            PublicationPointer.__table__.c.previous_publication_id,
+        ).where(PublicationPointer.stream_key == stream_key)).one()
+    assert (pointer.active_publication_id, pointer.previous_publication_id) == (None, None)
+    with pytest.raises(ControlPlaneError):
+        publications.rollback(stream_key, reason="restore corrected evidence")
+
+
 @pytest.mark.parametrize("window", ["first_version_write", "after_enumeration"])
 def test_a_concurrent_rollback_cannot_escape_a_correction_on_postgres(window):
     """The correction locks the pointer before it enumerates what is stale.

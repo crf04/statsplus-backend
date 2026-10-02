@@ -268,13 +268,17 @@ class PublicationPointerHistory(Base):
     ``publication_versions.status`` cannot say whether a version was ever the
     served authority: ``superseded`` covers a replaced active, a candidate that
     never activated, and both sides of a rollback.  Every pointer move writes
-    one row here in its own transaction, and a rollback or corrected-evidence
-    invalidation stamps ``revoked_at`` on the rows it withdraws.  A row replaced
-    by a later publication is *not* revoked; it stays the retained authority for
-    its season, which is what a past season's reads need once a newer season is
-    active.  Rows outlive pruning of their publication, which keeps every
-    publication that still has an unrevoked row.  ``fence`` is the stream pointer's generation, so it orders the rows
-    of one stream even when a test clock does not advance.
+    one row here in its own transaction.  ``revoked_at`` means the content was
+    withdrawn: a same-season rollback or a corrected-evidence invalidation stamps
+    it.  A pointer moving to another season is a move, not a rejection, and a row
+    replaced by a later publication is *not* revoked; it stays the retained
+    authority for its season, which is what a past season's reads need once a
+    newer season is active.  ``retired_at`` means a restore superseded the row:
+    the rollback's clone carries identical content and is the season's authority
+    for it, so the source is no longer eligible.  Rows outlive pruning of their
+    publication, which keeps only the versions that can still serve.  ``fence``
+    is the stream pointer's generation, so it orders the rows of one stream even
+    when a test clock does not advance.
     """
 
     __tablename__ = "publication_pointer_history"
@@ -291,6 +295,9 @@ class PublicationPointerHistory(Base):
     # The pointer generation at the revocation: the cleared pointer's new fence
     # when the revoked publication was active, else the unchanged fence.
     revoked_fence = Column(Integer, nullable=True)
+    # Set when a rollback restored a clone of this publication; the clone's id.
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    retired_by = Column(String(36), nullable=True)
 
     __table_args__ = (
         Index(
