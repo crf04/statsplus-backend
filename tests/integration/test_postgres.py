@@ -1680,35 +1680,71 @@ def test_postgres_rejects_an_empty_reason_and_a_negative_expected_fence(
             ))
 
 
-def test_postgres_refuses_to_drop_a_publication_a_repair_group_guards(
+def test_pruning_keeps_the_publication_a_pending_repair_group_guards_while_it_is_active(
     repair_group_engine,
 ):
-    """The declared rollback target must survive until the group is resolved."""
+    """A pending group's expected publication is the active pointer's, so it is
+    kept as active; once the pointer moves the group can no longer promote (the
+    guard is stale), so the payload is deletable and the declaration remains."""
     from app.models.collection_control import (
+        PublicationPointer,
         PublicationRepairGroup,
         PublicationRepairGroupMember,
         PublicationVersion,
     )
+    from app.services.collection_control import PublicationService
 
     moment = _seed_group_prerequisites(repair_group_engine)
+    stream = "exact_shot_zones_opponent_season"
+    publications = PublicationService(repair_group_engine, clock=lambda: moment)
+    publications.register_stream(
+        stream, provider="nba", owner="residential_collector",
+        required_observations=[], publication_strategy="snapshot_replace",
+    )
     with repair_group_engine.begin() as connection:
+        connection.execute(PublicationPointer.__table__.insert().values(
+            stream_key=stream, active_publication_id="publication-1",
+            previous_publication_id=None, fence=1, updated_at=moment,
+        ))
         connection.execute(PublicationRepairGroup.__table__.insert().values(
             group_id="group-1", manifest_id="manifest-1", season="2025-26",
             cutoff=moment, reason="broken per48", checksum="d" * 64,
             created_at=moment,
         ))
         connection.execute(PublicationRepairGroupMember.__table__.insert().values(
-            group_id="group-1",
-            stream_key="exact_shot_zones_opponent_season",
+            group_id="group-1", stream_key=stream,
             expected_publication_id="publication-1",
             expected_fence=1, created_at=moment,
         ))
 
-    with pytest.raises(IntegrityError):
-        with repair_group_engine.begin() as connection:
-            connection.execute(PublicationVersion.__table__.delete().where(
-                PublicationVersion.publication_id == "publication-1"
-            ))
+    pending = publications.prune_history(stream_key=stream)
+
+    assert pending.deleted == 0
+    assert dict(pending.kept) == {
+        "active": 1, "previous": 0, "candidate": 0, "season_latest": 0,
+    }
+
+    # The pointer moves on: the group's guard is stale, so promotion would
+    # refuse and the declared payload is no longer needed.
+    with repair_group_engine.begin() as connection:
+        connection.execute(PublicationVersion.__table__.insert().values(
+            publication_id="publication-2", stream_key=stream, season="2025-26",
+            cutoff=moment, version=2, status="active", checksum="b" * 64,
+            payload="{}", created_at=moment, fence=2,
+        ))
+        connection.execute(PublicationPointer.__table__.update().where(
+            PublicationPointer.stream_key == stream
+        ).values(active_publication_id="publication-2", fence=2))
+    moved = publications.prune_history(stream_key=stream)
+
+    assert moved.deleted == 1
+    with repair_group_engine.connect() as connection:
+        assert connection.execute(
+            select(PublicationVersion.publication_id)
+        ).scalars().all() == ["publication-2"]
+        assert connection.execute(
+            select(PublicationRepairGroupMember.expected_publication_id)
+        ).scalars().all() == ["publication-1"]
 
     # Removing the group releases its members with it.
     with repair_group_engine.begin() as connection:
