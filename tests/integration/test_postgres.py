@@ -2123,3 +2123,70 @@ def test_registering_default_streams_and_pruning_lock_streams_in_one_order_on_po
     assert sorted(outcomes, key=lambda item: item[0]) == [("prune", None), ("register", None)]
     register_engine.dispose()
     prune_engine.dispose()
+
+
+def test_parity_migration_preserves_activated_publication_audit_after_pruning(
+    repair_group_engine,
+):
+    from sqlalchemy import inspect
+    from sqlalchemy.orm import Session
+
+    from app.migrations import run_migrations
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+    from app.models.collection_control import PublicationActivation, PublicationVersion
+    from app.services.collection_control import PublicationService
+    from app.services.ledger_parity import LedgerParityArtifactRepository
+    from tests.services.test_publication_pointer_history import CUTOFF, STREAM, _compose
+
+    engine = repair_group_engine
+    publications = PublicationService(engine, clock=lambda: CUTOFF)
+    publications.register_stream(
+        STREAM, provider="ledger", owner="railway", required_observations=(),
+        publication_strategy="replace", enabled=True, freshness_rule="cutoff_current",
+    )
+    first = _compose(publications, "2025-26", points=10)
+    expected = {
+        "artifact_id": "postgres-audit", "publication_id": first.publication_id,
+        "payload_checksum": "a" * 64, "stream_key": STREAM, "season": "2025-26",
+        "cutoff": CUTOFF, "status": "pending_adjudication",
+        "report": '{"difference": 1}', "created_at": CUTOFF,
+        "decision": "approved", "adjudicated_by": "operator",
+        "adjudicated_at": CUTOFF, "adjudication_reason": "source evidence reviewed",
+    }
+    table = LedgerParityArtifact.__table__
+    with engine.begin() as connection:
+        # Historical model-driven migrations use today's model. Restore the
+        # deployed named CASCADE constraint and migration head to prove upgrade.
+        connection.execute(text(
+            "ALTER TABLE canonical_game_ledger_parity_artifacts ADD CONSTRAINT "
+            "canonical_game_ledger_parity_artifacts_publication_id_fkey "
+            "FOREIGN KEY (publication_id) REFERENCES publication_versions "
+            "(publication_id) ON DELETE CASCADE"
+        ))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 61"))
+        connection.execute(table.insert().values(**expected))
+        connection.execute(PublicationActivation.__table__.insert().values(
+            activation_id="postgres-activation", stream_key=STREAM,
+            publication_id=first.publication_id, actor="operator", reason="approved",
+            fence=first.fence, created_at=CUTOFF,
+        ))
+    assert inspect(engine).get_foreign_keys(table.name)[0]["options"]["ondelete"] == "CASCADE"
+
+    assert run_migrations(engine).applied == ("061_parity_artifact_outlives_payload",)
+    assert run_migrations(engine).applied == ()
+    second = _compose(publications, "2025-26", points=11, expected_fence=first.fence)
+    third = _compose(publications, "2025-26", points=12, expected_fence=second.fence)
+
+    assert publications.prune_history(stream_key=STREAM).deleted == 1
+    with engine.connect() as connection:
+        assert set(connection.execute(select(PublicationVersion.publication_id)).scalars()) == {
+            second.publication_id, third.publication_id,
+        }
+    artifact = LedgerParityArtifactRepository(engine).latest(STREAM, "2025-26")
+    assert artifact is not None
+    assert {column.name: getattr(artifact, column.name) for column in table.columns} == expected
+    with Session(engine) as session:
+        assert session.get(PublicationActivation, "postgres-activation").publication_id == (
+            artifact.publication_id
+        )
+    assert publications.prune_history(stream_key=STREAM).deleted == 0
