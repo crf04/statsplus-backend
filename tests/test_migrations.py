@@ -272,8 +272,9 @@ def test_projection_transition_migration_upgrades_authentic_v40_sqlite(tmp_path)
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
     assert repeated.applied == ()
     inspector = inspect(engine)
     poll_columns = {
@@ -554,6 +555,7 @@ def test_v40_snapshot_replay_keeps_its_historical_poll_identity_after_upgrade(
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert replay == first
     assert repeated_migration.applied == ()
@@ -644,6 +646,7 @@ def test_run_migrations_creates_current_schema_from_empty_database(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert second.applied == ()
     assert sorted(inspect(engine).get_table_names()) == sorted(
@@ -867,6 +870,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     with engine.connect() as connection:
         rows = {
@@ -1121,6 +1125,7 @@ def test_publication_authority_migration_backfills_only_unambiguous_manifest(tmp
             (58, "058_publication_pointer_history_retirement"),
             (59, "059_publication_activation_outlives_payload"),
             (60, "060_repair_group_member_outlives_payload"),
+            (61, "061_parity_artifact_outlives_payload"),
         ]
 
 
@@ -1193,6 +1198,7 @@ def test_governed_catalog_freshness_migration_backfills_complete_publications(tm
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     with engine.connect() as connection:
         freshness = connection.execute(
@@ -1290,6 +1296,7 @@ def test_player_log_projection_migration_backfills_immutable_publications(tmp_pa
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     with engine.connect() as connection:
         projected = connection.execute(
@@ -1371,6 +1378,7 @@ def test_old_036_correction_columns_backfill_legacy_lineage_before_coalescing(tm
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     with engine.connect() as connection:
         row = connection.execute(text(
@@ -1431,7 +1439,7 @@ def test_repair_migration_recreates_ledger_tables_when_024_is_recorded(tmp_path)
     repaired = run_migrations(engine)
 
     assert repaired.applied == ("031_repair_canonical_game_ledger_tables",)
-    assert repaired.current_version == 60
+    assert repaired.current_version == 61
     assert all(inspect(engine).has_table(table) for table in ledger_tables)
 
 
@@ -1491,8 +1499,9 @@ def test_ledger_raw_row_evidence_migration_preserves_pre_032_games_as_unarchived
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
     assert inspect(engine).has_table("canonical_game_ledger_raw_rows")
     with engine.connect() as connection:
         raw_checksum = connection.execute(text(
@@ -1585,8 +1594,9 @@ def test_ledger_observation_evidence_migration_backfills_existing_accepted_games
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
     with engine.connect() as connection:
         references = connection.execute(text(
             "SELECT observation_id, game_id FROM canonical_game_ledger_observation_evidence "
@@ -1680,6 +1690,7 @@ def test_run_migrations_upgrades_existing_app_database(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert inspect(engine).has_table("users")
     assert inspect(engine).has_table("data_refresh_jobs")
@@ -1755,8 +1766,9 @@ def test_collector_release_status_migration_upgrades_database_stopped_at_022(tmp
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
     columns = {column["name"] for column in inspect(engine).get_columns("collector_identities")}
     assert {"release_version", "release_checksum"} <= columns
 
@@ -1799,12 +1811,7 @@ def test_publication_provenance_foreign_keys_have_no_version_self_reference(tmp_
         for column in inspector.get_columns("canonical_game_ledger_parity_artifacts")
     }
     assert {"publication_id", "payload_checksum"} <= parity_columns
-    assert any(
-        item["constrained_columns"] == ["publication_id"]
-        and item["referred_table"] == "publication_versions"
-        and item["options"].get("ondelete") == "CASCADE"
-        for item in inspector.get_foreign_keys("canonical_game_ledger_parity_artifacts")
-    )
+    assert inspector.get_foreign_keys("canonical_game_ledger_parity_artifacts") == []
 
 
 def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
@@ -1869,6 +1876,7 @@ def test_parity_binding_migration_retires_unbound_legacy_evidence(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
 
 
@@ -1911,7 +1919,7 @@ def test_publication_activation_030_rebuild_preserves_sqlite_fk_enforcement(tmp_
 
     result = run_migrations(engine)
 
-    assert result.current_version == 60
+    assert result.current_version == 61
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert connection.execute(text("PRAGMA foreign_key_check")).fetchall() == []
@@ -2242,6 +2250,7 @@ def test_contradiction_migration_upgrades_a_database_stopped_at_006(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert second.applied == ()
     assert inspect(engine).has_table("athlete_mapping_decision_contradictions")
@@ -2323,10 +2332,11 @@ def test_player_pool_snapshot_migration_upgrades_database_stopped_at_009(tmp_pat
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
     assert repeated.applied == ()
-    assert repeated.current_version == 60
+    assert repeated.current_version == 61
     assert inspect(engine).has_table("stats_refreshes")
     assert inspect(engine).has_table("player_pool_snapshots")
     assert inspect(engine).has_table("player_game_logs")
@@ -2417,6 +2427,7 @@ def test_shared_injury_source_migration_preserves_legacy_014_rows(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert stored is not None
     assert stored.unresolved_team_entry_count == 0
@@ -2501,8 +2512,9 @@ def test_provider_provenance_migration_adds_columns_without_backfilling_rows(tmp
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
 
     for table_name in (
         "team_matchup_facts",
@@ -2573,13 +2585,14 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert repeated.applied == ()
     with engine.connect() as connection:
         history = connection.execute(
             text("SELECT version, name FROM schema_migrations ORDER BY version")
         ).all()
-    assert history[-18:] == [
+    assert history[-19:] == [
         (43, "043_projection_collection_control"),
         (44, "044_projection_closing_sets"),
         (45, "045_projection_mapping_replay"),
@@ -2598,6 +2611,7 @@ def test_migrations_repair_former_provider_version_040_history_idempotently(tmp_
         (58, "058_publication_pointer_history_retirement"),
         (59, "059_publication_activation_outlives_payload"),
         (60, "060_repair_group_member_outlives_payload"),
+        (61, "061_parity_artifact_outlives_payload"),
     ]
     assert inspect(engine).has_table("projection_provider_snapshots")
 
@@ -2607,7 +2621,7 @@ def test_projection_collection_migration_omits_derived_next_poll_state(tmp_path)
 
     result = run_migrations(engine)
 
-    assert result.current_version == 60
+    assert result.current_version == 61
     inspector = inspect(engine)
     columns = {
         column["name"]
@@ -2724,8 +2738,9 @@ def test_projection_price_migration_is_additive_and_idempotent(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert applied.current_version == 60
+    assert applied.current_version == 61
     assert repeated.applied == ()
     with engine.connect() as connection:
         row = connection.execute(
@@ -2786,6 +2801,7 @@ def test_saved_filter_set_migration_upgrades_a_database_stopped_at_046(tmp_path)
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -2881,6 +2897,7 @@ def test_legacy_ranking_drop_migration_removes_the_six_tables(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     inspector = inspect(engine)
     for table in _DROPPED_LEGACY_RANKING_TABLES:
@@ -2936,6 +2953,7 @@ def test_targets_migration_upgrades_a_database_stopped_at_049(tmp_path):
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert repeated.applied == ()
 
@@ -3004,6 +3022,7 @@ def test_publication_rebuild_migration_upgrades_a_database_stopped_at_048(tmp_pa
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
     assert repeated.applied == ()
     inspector = inspect(engine)
@@ -3073,8 +3092,9 @@ def test_shooting_detail_migration_upgrades_production_054_preserving_targets(tm
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
-    assert upgraded.current_version == 60
+    assert upgraded.current_version == 61
     assert run_migrations(engine).applied == ()
     assert "shooting_detail" in {
         column["name"] for column in inspect(engine).get_columns("player_diet_facts")
@@ -3126,6 +3146,7 @@ def test_pointer_history_migration_seeds_each_active_pointer_and_is_idempotent(t
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
 
     query = text(
@@ -3220,6 +3241,7 @@ def test_pointer_history_retirement_migration_reclassifies_once_and_never_resurr
         "058_publication_pointer_history_retirement",
         "059_publication_activation_outlives_payload",
         "060_repair_group_member_outlives_payload",
+        "061_parity_artifact_outlives_payload",
     )
 
     query = text(
@@ -3377,3 +3399,70 @@ def test_repair_group_declarations_outlive_the_publication_they_name(tmp_path):
         assert connection.execute(text(
             "SELECT group_id, stream_key, expected_publication_id FROM publication_repair_group_members"
         )).all() == [("g", "s", "displaced")]
+
+
+def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_path):
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.orm import Session
+    from sqlalchemy.schema import CreateTable
+
+    from app.migrations import _drop_parity_artifact_publication_foreign_key
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'parity.sqlite3'}")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("app.migrations.MIGRATIONS", tuple(
+            migration for migration in MIGRATIONS if migration.version <= 60
+        ))
+        run_migrations(engine)
+    stamp = "2026-08-13 00:00:00"
+    table = LedgerParityArtifact.__table__
+    with engine.begin() as connection:
+        # Model-driven historical migrations already use today's model. Restore
+        # the actual deployed schema so this exercises the upgrade, not a no-op.
+        connection.execute(text(f"DROP TABLE {table.name}"))
+        ddl = str(CreateTable(table).compile(dialect=engine.dialect))
+        end = ddl.rfind(")")
+        ddl = ddl[:end] + (
+            ", FOREIGN KEY(publication_id) REFERENCES publication_versions "
+            "(publication_id) ON DELETE CASCADE"
+        ) + ddl[end:]
+        connection.execute(text(ddl))
+        for index in table.indexes:
+            index.create(connection)
+        connection.execute(text(
+            "INSERT INTO publication_versions (publication_id, stream_key, season, "
+            "cutoff, version, status, checksum, payload, created_at, fence) VALUES "
+            "('old-publication', 'player_game_logs', '2025-26', :stamp, 1, "
+            "'superseded', 'c', '{}', :stamp, 1)"
+        ), {"stamp": stamp})
+        connection.execute(text(
+            "INSERT INTO canonical_game_ledger_parity_artifacts "
+            "(artifact_id, publication_id, payload_checksum, stream_key, season, cutoff, "
+            "status, report, created_at, decision, adjudicated_by, adjudicated_at, "
+            "adjudication_reason) VALUES "
+            "('audit', 'old-publication', :checksum, 'player_game_logs', '2025-26', :stamp, "
+            "'pending_adjudication', '{\"difference\": 1}', :stamp, 'approve', "
+            "'operator', :stamp, 'source checked')"
+        ), {"stamp": stamp, "checksum": "a" * 64})
+        before = connection.execute(table.select()).all()
+    assert run_migrations(engine).applied == ("061_parity_artifact_outlives_payload",)
+    assert run_migrations(engine).applied == ()
+    with engine.begin() as connection:
+        _drop_parity_artifact_publication_foreign_key(connection)
+        assert connection.execute(table.select()).all() == before
+        connection.execute(text(
+            "DELETE FROM publication_versions WHERE publication_id = 'old-publication'"
+        ))
+        assert connection.execute(table.select()).all() == before
+    assert inspect(engine).get_foreign_keys(table.name) == []
+    assert inspect(engine).get_indexes(table.name) == [{
+        "name": "ix_ledger_parity_activation", "column_names": [
+            "stream_key", "season", "cutoff", "publication_id"
+        ], "unique": 0, "dialect_options": {},
+    }]
+    with Session(engine) as session:
+        row = session.get(LedgerParityArtifact, "audit")
+        row.status = "invalid"
+        with pytest.raises(IntegrityError):
+            session.flush()

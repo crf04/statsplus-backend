@@ -3286,7 +3286,8 @@ pointer's active publication; the pointer's previous publication (the rollback
 target); or a candidate still awaiting activation. Everything else is deleted,
 about three versions per stream and season in steady state, so a nightly refresh
 no longer grows storage. Activation records (`publication_activations`, migration 059) and repair-group
-members (migration 060) have no foreign key to the version, so they outlive
+members (migration 060), and parity artifacts (migration 061) have no foreign key
+to the version, so their adjudication evidence outlives
 pruned payloads and never pin retention. The keep set is computed per stream across all seasons even
 when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept` (the maintenance command prints both as

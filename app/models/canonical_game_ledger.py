@@ -256,11 +256,8 @@ class LedgerParityArtifact(Base):
     __tablename__ = "canonical_game_ledger_parity_artifacts"
 
     artifact_id = Column(String(36), primary_key=True)
-    publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    # Activation evidence survives retention of the publication payload.
+    publication_id = Column(String(36), nullable=False)
     payload_checksum = Column(String(64), nullable=False)
     stream_key = Column(String(96), nullable=False)
     season = Column(String(7), nullable=False)

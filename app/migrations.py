@@ -2483,6 +2483,42 @@ def _drop_repair_group_member_publication_foreign_key(connection: Connection) ->
             ))
 
 
+
+def _drop_parity_artifact_publication_foreign_key(connection: Connection) -> None:
+    """Keep adjudication evidence after its publication payload is pruned."""
+
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+
+    table = LedgerParityArtifact.__table__
+    inspector = inspect(connection)
+    if not inspector.has_table(table.name):
+        return
+    keys = [
+        key for key in inspector.get_foreign_keys(table.name)
+        if key.get("referred_table") == "publication_versions"
+    ]
+    if not keys:
+        return
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    if connection.dialect.name == "sqlite":
+        legacy = preparer.quote(f"{table.name}__061")
+        connection.execute(text(f"DROP TABLE IF EXISTS {legacy}"))
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_ledger_parity_activation"))
+        table.create(connection)
+        columns = ", ".join(preparer.quote(column.name) for column in table.columns)
+        connection.execute(text(
+            f"INSERT INTO {quoted} ({columns}) SELECT {columns} FROM {legacy}"
+        ))
+        connection.execute(text(f"DROP TABLE {legacy}"))
+        return
+    for key in keys:
+        if key.get("name"):
+            connection.execute(text(
+                f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"
+            ))
+
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
     """Index the projection's ``(publication_id, game_id)`` filter.
 
@@ -2667,6 +2703,11 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         60,
         "060_repair_group_member_outlives_payload",
         _drop_repair_group_member_publication_foreign_key,
+    ),
+    Migration(
+        61,
+        "061_parity_artifact_outlives_payload",
+        _drop_parity_artifact_publication_foreign_key,
     ),
 )
 

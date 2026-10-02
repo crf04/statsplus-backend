@@ -914,3 +914,42 @@ def test_the_maintenance_command_prints_what_pruning_deleted_and_kept(
         "'publications_kept': {'active': 1, 'previous': 1, 'candidate': 0, "
         "'season_latest': 0}" in printed
     )
+
+
+def test_pruning_an_activated_publication_preserves_its_parity_adjudication(lifecycle):
+    from sqlalchemy.orm import Session
+
+    from app.models.canonical_game_ledger import LedgerParityArtifact
+    from app.models.collection_control import PublicationActivation
+    from app.services.ledger_parity import LedgerParityArtifactRepository
+
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=10)
+    with Session(engine) as session, session.begin():
+        session.add(PublicationActivation(
+            activation_id="activation", stream_key=STREAM,
+            publication_id=first.publication_id, actor="operator", reason="approved",
+            fence=first.fence, created_at=CUTOFF,
+        ))
+        session.add(LedgerParityArtifact(
+            artifact_id="artifact", publication_id=first.publication_id,
+            payload_checksum="a" * 64, stream_key=STREAM, season="2025-26",
+            cutoff=CUTOFF, status="pending_adjudication", report='{"difference": 1}',
+            created_at=CUTOFF, decision="approve", adjudicated_by="operator",
+            adjudicated_at=CUTOFF, adjudication_reason="reviewed source evidence",
+        ))
+    second = _compose(publications, "2025-26", points=11, expected_fence=first.fence)
+    third = _compose(publications, "2025-26", points=12, expected_fence=second.fence)
+
+    assert publications.prune_history(stream_key=STREAM).deleted == 1
+    assert _surviving(engine) == {second.publication_id, third.publication_id}
+    artifact = LedgerParityArtifactRepository(engine).latest(STREAM, "2025-26")
+    assert artifact is not None
+    assert (artifact.artifact_id, artifact.publication_id, artifact.report,
+            artifact.decision, artifact.adjudicated_by, artifact.adjudication_reason) == (
+        "artifact", first.publication_id, '{"difference": 1}', "approve", "operator",
+        "reviewed source evidence",
+    )
+    with Session(engine) as session:
+        assert session.get(PublicationActivation, "activation").publication_id == artifact.publication_id
+    assert publications.prune_history(stream_key=STREAM).deleted == 0
