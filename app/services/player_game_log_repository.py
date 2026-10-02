@@ -26,7 +26,7 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.utc import assume_utc
-from app.models.collection_control import PublicationPointerHistory
+from app.models.collection_control import PublicationPointerHistory, PublicationVersion
 from app.models.player_game_log import (
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -479,6 +479,7 @@ class PlayerGameLogRepository:
         canonical_season = validate_canonical_season(season)
         history = PublicationPointerHistory.__table__
         projection = PublicationPlayerGameLog.__table__
+        versions = PublicationVersion.__table__
         with read_connection(self.engine, connection) as connection:
             publication_id = connection.execute(
                 select(history.c.publication_id)
@@ -487,6 +488,11 @@ class PlayerGameLogRepository:
                     history.c.season == canonical_season,
                     history.c.revoked_at.is_(None),
                     history.c.retired_at.is_(None),
+                    # A pruned publication can never serve; it must not shadow
+                    # the season's latest version that still exists.
+                    select(versions.c.publication_id)
+                    .where(versions.c.publication_id == history.c.publication_id)
+                    .exists(),
                 )
                 .order_by(history.c.fence.desc())
                 .limit(1)

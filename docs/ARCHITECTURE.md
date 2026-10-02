@@ -3301,17 +3301,21 @@ source (one copy of a content pins storage, not two) and why a cross-season move
 does not revoke (the old season's latest version stays eligible, so the read for
 its past games keeps working after the pointer returns to it).
 
-A correction also revokes history rows whose publication was already pruned: their
-lineage went with the payload, staleness cannot be proved, and they can never
-serve, so revoking them is the fail-closed choice.
+A history row whose publication has been pruned is ineligible on its own terms: the
+historical read and the keep set's season-latest computation consider only rows
+whose publication still exists, so a payload-less row never shadows the season's
+latest surviving version. A correction therefore revokes only the publications it
+can prove stale (those that still have lineage). A stream with no pointer row yet
+cannot be locked, so pruning leaves it untouched.
 
 Migration 058 reclassifies #324's rows once. A rollback is recognised only when
-the restore's publication still exists with status `rollback`, an earlier row of
-the same season holds a version with the same checksum (its source), and the
-restore's predecessor was revoked at exactly the restore's fence and instant. A
-proven cross-season withdrawal is un-revoked and the source is retired. It never
-clears any other revocation, so a version a correction revoked stays revoked,
-and a rerun finds nothing left to change.
+an earlier row of the same season holds a version with the same checksum and
+cutoff as the restore's (a rollback clones both; an ordinary refresh that reverts
+to old content carries its own cutoff) and the restore's predecessor was revoked
+at exactly the restore's fence and instant. Nothing mutable (such as the
+version's status) is consulted. A proven cross-season withdrawal is un-revoked and
+the source is retired. It never clears any other revocation, so a version a
+correction revoked stays revoked, and a rerun finds nothing left to change.
 
 A completed game of a season before the published season reads its focal rows
 (`focal_game_rows`) from the latest eligible (unrevoked, unretired)

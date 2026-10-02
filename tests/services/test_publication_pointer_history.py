@@ -37,10 +37,10 @@ def lifecycle(tmp_path):
     return engine, publications
 
 
-def _compose(publications, season, *, points=10, **kwargs):
+def _compose(publications, season, *, points=10, cutoff=CUTOFF, **kwargs):
     row = {**_log_row(game_id="0022500001", game_date="2026-01-02", minutes=30.0, points=points), "season": season}
     return publications.compose(
-        STREAM, season=season, cutoff=CUTOFF, payload={"rows": [row]}, **kwargs
+        STREAM, season=season, cutoff=cutoff, payload={"rows": [row]}, **kwargs
     )
 
 
@@ -510,6 +510,250 @@ def test_a_concurrent_prune_and_rollback_serialize_on_postgres(first):
             row.points
             for row in _repository(engine).retained_game_rows("2025-26", "0022500001")
         ] == [11]
+    finally:
+        reset_schema()
+        engine.dispose()
+
+
+# --- Migration 058 against a lifecycle rewound to what #324 recorded ---------
+
+
+def _rewind_to_324(engine, *, withdrawn, restore, revoked_at_of=None):
+    """Rewrite the history as #324 wrote it: the withdrawn row revoked at the
+    restore's fence and instant, and no row retired."""
+
+    with engine.begin() as connection:
+        activated_at, fence = connection.execute(text(
+            "SELECT activated_at, fence FROM publication_pointer_history "
+            "WHERE publication_id = :id"
+        ), {"id": (revoked_at_of or restore).publication_id}).one()
+        connection.execute(text(
+            "UPDATE publication_pointer_history SET revoked_at = :at, "
+            "revoked_fence = :fence WHERE publication_id = :id"
+        ), {"at": activated_at, "fence": fence, "id": withdrawn.publication_id})
+        connection.execute(text(
+            "UPDATE publication_pointer_history SET retired_at = NULL, retired_by = NULL"
+        ))
+
+
+def _reclassify(engine):
+    from app.migrations import _reclassify_publication_pointer_history
+
+    with engine.begin() as connection:
+        _reclassify_publication_pointer_history(connection)
+
+
+def _points(engine, season):
+    rows = _repository(engine).retained_game_rows(season, "0022500001")
+    return None if rows is None else [row.points for row in rows]
+
+
+def test_migration_recognises_a_restore_that_a_later_activation_superseded(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
+    restored = publications.rollback(STREAM, reason="restore 2025-26")
+    _compose(publications, "2027-28", points=27, expected_fence=restored.fence)
+    _rewind_to_324(engine, withdrawn=second, restore=restored)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE publication_versions SET status = 'superseded' "
+            "WHERE publication_id = :id"
+        ), {"id": restored.publication_id})
+    assert _points(engine, "2026-27") is None  # revoked, as #324 left it
+
+    _reclassify(engine)
+
+    assert _points(engine, "2026-27") == [26]
+    assert _points(engine, "2025-26") == [25]
+    assert retirements(engine, STREAM) == [
+        (first.publication_id, restored.publication_id)
+    ]
+
+
+def test_migration_leaves_a_withdrawal_whose_payload_was_already_pruned(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
+    restored = publications.rollback(STREAM, reason="restore 2025-26")
+    _rewind_to_324(engine, withdrawn=second, restore=restored)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM publication_player_game_logs WHERE publication_id = :id"
+        ), {"id": second.publication_id})
+        connection.execute(text(
+            "DELETE FROM publication_versions WHERE publication_id = :id"
+        ), {"id": second.publication_id})
+
+    _reclassify(engine)
+
+    # The payload-less row is un-revoked but can never serve or pin anything.
+    assert _points(engine, "2026-27") is None
+    assert _points(engine, "2025-26") == [25]
+    assert publications.prune_history(stream_key=STREAM).deleted == 1  # the retired source
+
+
+def test_migration_never_clears_a_correction_revocation_beside_an_ordinary_activation(
+    lifecycle,
+):
+    """An ordinary refresh whose content equals an older version is no restore."""
+
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
+    ordinary = _compose(
+        publications, "2025-26", points=25, expected_fence=second.fence,
+        cutoff=CUTOFF + timedelta(days=1),
+    )
+    # A correction revoked 2026-27 at the ordinary activation's fence and instant.
+    _rewind_to_324(engine, withdrawn=second, restore=ordinary)
+
+    _reclassify(engine)
+
+    assert _points(engine, "2026-27") is None
+    assert retirements(engine, STREAM) == []
+
+
+def test_migration_needs_a_matching_source_to_call_a_row_a_restore(lifecycle):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
+    restored = publications.rollback(STREAM, reason="restore 2025-26")
+    _rewind_to_324(engine, withdrawn=second, restore=restored)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE publication_versions SET checksum = 'different' WHERE publication_id = :id"
+        ), {"id": first.publication_id})
+
+    _reclassify(engine)
+
+    assert _points(engine, "2026-27") is None
+    assert retirements(engine, STREAM) == []
+
+
+def test_a_pruned_history_row_never_shadows_the_season_latest_that_still_exists(
+    lifecycle,
+):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=10)
+    second = _compose(publications, "2025-26", points=11, expected_fence=first.fence)
+    third = _compose(publications, "2025-26", points=12, expected_fence=second.fence)
+    fourth = _compose(publications, "2026-27", points=13, expected_fence=third.fence)
+    fifth = _compose(publications, "2026-27", points=14, expected_fence=fourth.fence)
+    with engine.begin() as connection:  # #324 or an operator removed the payload
+        for table in ("publication_player_game_logs", "publication_versions"):
+            connection.execute(text(
+                f"DELETE FROM {table} WHERE publication_id = :id"
+            ), {"id": third.publication_id})
+
+    assert _points(engine, "2025-26") == [11]
+    publications.prune_history(stream_key=STREAM)
+    assert _surviving(engine) == {
+        second.publication_id, fourth.publication_id, fifth.publication_id
+    }
+
+
+@pytest.mark.parametrize("family", [False, True], ids=("ordinary", "family"))
+def test_rollback_refuses_a_target_every_activation_of_which_was_revoked(
+    lifecycle, family,
+):
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=10)
+    _compose(publications, "2025-26", points=11, expected_fence=first.fence)
+    # The rollback target (first) is still the pointer's previous publication,
+    # but its only activation was withdrawn.
+    with engine.begin() as connection:
+        connection.execute(text(
+            "UPDATE publication_pointer_history SET revoked_at = '2026-05-01 00:00:00.000000', "
+            "revoked_fence = 2 WHERE publication_id = :id"
+        ), {"id": first.publication_id})
+
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        if family:
+            publications.rollback_publication_family((STREAM,), reason="restore withdrawn")
+        else:
+            publications.rollback(STREAM, reason="restore withdrawn")
+
+    assert [row.points for row in _repository(engine).retained_game_rows("2025-26", "0022500001")] == [11]
+
+
+@pytest.mark.parametrize("family", [False, True], ids=("ordinary", "family"))
+def test_a_same_season_rollback_leaves_only_the_restored_version_after_pruning(
+    lifecycle, family,
+):
+    engine, publications = lifecycle
+    good = _compose(publications, "2025-26", points=10)
+    _compose(publications, "2025-26", points=99, expected_fence=good.fence)
+    if family:
+        restored = publications.rollback_publication_family((STREAM,), reason="reject")[0]
+    else:
+        restored = publications.rollback(STREAM, reason="reject")
+
+    result = publications.prune_history(stream_key=STREAM)
+
+    # The rejected 99 is no rollback target, and the source is retired.
+    assert _surviving(engine) == {restored.publication_id}
+    assert result.deleted == 2
+
+
+def test_prune_leaves_a_stream_whose_pointer_does_not_exist_yet_on_postgres():
+    """Pruning cannot lock a pointer that is not there, so it must not decide
+    for that stream; a composition racing it keeps its rollback target."""
+
+    import os
+    import threading
+
+    from sqlalchemy import event
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration test")
+    engine = create_engine(url)
+
+    def reset_schema():
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+
+    reset_schema()
+    run_migrations(engine)
+    try:
+        publications = PublicationService(engine, clock=lambda: CUTOFF)
+        publications.register_stream(
+            STREAM, provider="ledger", owner="railway", required_observations=(),
+            publication_strategy="replace", enabled=True,
+            freshness_rule="cutoff_current",
+        )
+        main = threading.current_thread()
+        racing = {"thread": None}
+
+        def compose_twice():
+            service = PublicationService(engine, clock=lambda: CUTOFF)
+            first = _compose(service, "2025-26", points=10)
+            _compose(service, "2025-26", points=11, expected_fence=first.fence)
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def interleave(connection, cursor, statement, *_):
+            if (
+                "FROM publication_pointers" in statement
+                and threading.current_thread() is main
+                and racing["thread"] is None
+            ):
+                # The pointer query found no row; the stream now publishes twice.
+                racing["thread"] = threading.Thread(target=compose_twice)
+                racing["thread"].start()
+                racing["thread"].join(timeout=30)
+
+        result = publications.prune_history(stream_key=STREAM)
+
+        assert racing["thread"] is not None and not racing["thread"].is_alive()
+        assert result.deleted == 0
+        restored = publications.rollback(STREAM, reason="previous target survived")
+        assert restored.season == "2025-26"
+        assert [
+            row.points
+            for row in _repository(engine).retained_game_rows("2025-26", "0022500001")
+        ] == [10]
     finally:
         reset_schema()
         engine.dispose()

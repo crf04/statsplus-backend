@@ -2235,17 +2235,19 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
     #324 revoked the version every rollback moved away from and kept the
     rollback's source live.  Under the bounded-retention rules a rollback to
     another season is a move, not a rejection, and a restore retires its source.
-    A rollback is recognised only when all of the following hold: the restore
-    row's publication still exists with status ``rollback`` (what a rollback
-    creates); an earlier row of the same stream and season holds a version with
-    the same checksum (the source it cloned); and the restore's immediate
-    predecessor was revoked at exactly the restore's fence and instant.  A
-    correction's revocation lacks at least one of these (an ordinary activation
-    is never ``rollback``), and ``revoked_at`` is only cleared on a proven
-    rollback, so a correction-revoked version is never resurrected.  A restore
-    already replaced by another rollback shows ``superseded`` and is left
-    unclassified, which is the safe direction.  State based and rerun-safe: a
-    second run finds no signature left and no unretired source.
+    A rollback is recognised only when all of the following hold: an earlier row
+    of the same stream and season holds a version with the same checksum *and*
+    the same cutoff as the restore's version (a rollback clones both; an ordinary
+    refresh that reverts to old content carries its own, newer cutoff), and the
+    restore's immediate predecessor was revoked at exactly the restore's fence
+    and instant.  Nothing mutable is consulted: a clone later superseded by
+    another activation is still recognised.  A correction's revocation lacks at
+    least one of these, and ``revoked_at`` is only cleared on a proven rollback,
+    so a correction-revoked version is never resurrected.  A withdrawn version
+    whose payload #324 already pruned is un-revoked too; the historical read
+    ignores payload-less rows, so it cannot become the authority.  State based
+    and rerun-safe: a second run finds no signature left and no unretired
+    source.
     """
 
     from app.models.collection_control import PublicationPointerHistory
@@ -2268,10 +2270,10 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
 
     history = PublicationPointerHistory.__table__
     versions = PublicationVersion.__table__
-    checksums = {
-        publication_id: (checksum, status)
-        for publication_id, checksum, status in connection.execute(
-            select(versions.c.publication_id, versions.c.checksum, versions.c.status)
+    lineage = {
+        publication_id: (checksum, cutoff)
+        for publication_id, checksum, cutoff in connection.execute(
+            select(versions.c.publication_id, versions.c.checksum, versions.c.cutoff)
         )
     }
     rows = connection.execute(
@@ -2295,14 +2297,13 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
                 and withdrawn.revoked_at == restore.activated_at
             ):
                 continue
-            restored = checksums.get(restore.publication_id)
-            if restored is None or restored[1] != "rollback":
+            restored = lineage.get(restore.publication_id)
+            if restored is None:
                 continue
             source = next((
                 candidate for candidate in reversed(stream_rows[:index - 1])
                 if candidate.season == restore.season
-                and (checksums.get(candidate.publication_id) or (None,))[0]
-                == restored[0]
+                and lineage.get(candidate.publication_id) == restored
             ), None)
             if source is None:
                 continue

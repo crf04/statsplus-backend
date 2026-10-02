@@ -63,7 +63,7 @@ from app.services.team_matchup_repository import (
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
-from tests.support.pointer_history import pointer_history, revoked_fences
+from tests.support.pointer_history import pointer_history, retirements, revoked_fences
 
 
 UTC = timezone.utc
@@ -3822,7 +3822,9 @@ def test_correction_revokes_a_retired_source_even_after_it_was_pruned(tmp_path, 
         stream_key, reason="restore the prior ledger",
         expected_fence=publications.current(stream_key).fence,
     )
-    assert pointer_history(engine, stream_key)[1][3] is False
+    assert retirements(engine, stream_key) == [
+        (activated[1].publication_id, restored.publication_id)
+    ]
     if pruned:
         # Only the restore survives; the pruned payloads took their lineage along.
         assert publications.prune_history(stream_key=stream_key).deleted == 3
@@ -3833,7 +3835,13 @@ def test_correction_revokes_a_retired_source_even_after_it_was_pruned(tmp_path, 
     assert [row[0] for row in history] == [
         *(version.publication_id for version in activated), restored.publication_id,
     ]
-    assert all(revoked for *_rest, revoked in history)
+    if pruned:
+        # A pruned row cannot serve (its payload is gone) and its lineage is
+        # gone too, so only the surviving restore is provably stale.
+        assert [revoked for *_rest, revoked in history][-1] is True
+    else:
+        # Every row, including the retired source, carried the stale evidence.
+        assert all(revoked for *_rest, revoked in history)
     with engine.connect() as connection:
         pointer = connection.execute(select(
             PublicationPointer.__table__.c.active_publication_id,

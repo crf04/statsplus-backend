@@ -4911,22 +4911,7 @@ class PublicationService(_SessionService):
                 ),
             ),
         )))
-        # A pruned publication's lineage went with its payload, so staleness
-        # cannot be proved.  Its payload is gone and it can never serve, so
-        # revoke its history conservatively instead of leaving it eligible.
-        pruned_ids = set(session.scalars(
-            select(PublicationPointerHistory.publication_id).where(
-                PublicationPointerHistory.stream_key == stream_key,
-                PublicationPointerHistory.season == season,
-                PublicationPointerHistory.revoked_at.is_(None),
-                PublicationPointerHistory.publication_id != keep_publication_id,
-                ~select(PublicationVersion.publication_id).where(
-                    PublicationVersion.publication_id
-                    == PublicationPointerHistory.publication_id
-                ).exists(),
-            )
-        ))
-        if not versions and not pruned_ids:
+        if not versions:
             return
         version_ids = {version.publication_id for version in versions}
         lineage_by_publication: dict[str, dict[str, str]] = {
@@ -4970,7 +4955,6 @@ class PublicationService(_SessionService):
                 "active", "candidate",
             ):
                 version.status = "superseded"
-        stale_ids |= pruned_ids
         if not stale_ids:
             return
         if pointer is not None and pointer.active_publication_id in stale_ids:
@@ -5921,10 +5905,13 @@ class PublicationService(_SessionService):
         awaiting activation, or the latest eligible (activated, unrevoked,
         unretired) version of its season.  The keep set is computed per stream
         across all seasons even when ``season`` narrows what may be deleted.
-        The pointer lock is taken first, as every writer does, so a concurrent
-        rollback finishes before the keep set is read (or waits for this prune)
-        and its target cannot be deleted from under it.  History rows and the
-        normalized ``PublicationObservation`` rows are never deleted.
+        A history row whose publication is already gone never shadows an older
+        row that still exists.  The pointer lock is taken first, as every writer
+        does, so a concurrent rollback finishes before the keep set is read (or
+        waits for this prune) and its target cannot be deleted from under it.  A
+        stream with no pointer row yet cannot be locked and is left untouched.
+        History rows and raw collection observations are never deleted; the
+        normalized ``PublicationObservation`` lineage goes with its publication.
         """
 
         deleted = 0
@@ -5951,6 +5938,9 @@ class PublicationService(_SessionService):
                         newer.fence > history.fence,
                         newer.revoked_at.is_(None),
                         newer.retired_at.is_(None),
+                        select(PublicationVersion.publication_id).where(
+                            PublicationVersion.publication_id == newer.publication_id
+                        ).exists(),
                     ).exists(),
                 )
             ):
@@ -5958,9 +5948,7 @@ class PublicationService(_SessionService):
             version_query = select(
                 PublicationVersion.publication_id, PublicationVersion.stream_key,
                 PublicationVersion.status,
-            )
-            if stream_key is not None:
-                version_query = version_query.where(PublicationVersion.stream_key == stream_key)
+            ).where(PublicationVersion.stream_key.in_(sorted(pointers)))
             if season is not None:
                 version_query = version_query.where(PublicationVersion.season == season)
             doomed: list[str] = []
