@@ -2288,8 +2288,9 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
     fence and instant.  A restore a later activation already turned ``superseded``
     cannot be proven and is left alone: its withdrawal stays revoked and its
     source unretired, the safe direction, since a correction's revocation is
-    never cleared.  A withdrawn version whose payload #324 already pruned is
-    un-revoked too; the historical read ignores payload-less rows.  Rows written
+    never cleared.  A cross-season withdrawal is un-revoked only when its lineage
+    is provably current; a withdrawn version whose payload #324 already pruned
+    (missing lineage) stays revoked.  Rows written
     from #325 on need no inference: the restore stamps its source's
     ``retired_by``.  State based and rerun-safe.
     """

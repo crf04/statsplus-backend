@@ -657,8 +657,13 @@ def test_migration_leaves_a_withdrawal_whose_payload_was_already_pruned(lifecycl
 
     _reclassify(engine)
 
-    # The payload-less row is un-revoked but ignored: 2026-27 falls back to its
-    # older version that still exists instead of reading nothing.
+    # Pruned lineage cannot be proven current, so the row stays revoked, and the
+    # read falls back to the older 2026-27 version that still exists.
+    with engine.connect() as connection:
+        assert connection.execute(text(
+            "SELECT revoked_at IS NOT NULL, revoked_fence FROM publication_pointer_history "
+            "WHERE publication_id = :id"
+        ), {"id": second.publication_id}).one() == (True, 3)
     assert _points(engine, "2026-27") == [20]
     assert _points(engine, "2025-26") == [25]
 
