@@ -2235,19 +2235,20 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
     #324 revoked the version every rollback moved away from and kept the
     rollback's source live.  Under the bounded-retention rules a rollback to
     another season is a move, not a rejection, and a restore retires its source.
-    A rollback is recognised only when all of the following hold: an earlier row
-    of the same stream and season holds a version with the same checksum *and*
-    the same cutoff as the restore's version (a rollback clones both; an ordinary
-    refresh that reverts to old content carries its own, newer cutoff), and the
-    restore's immediate predecessor was revoked at exactly the restore's fence
-    and instant.  Nothing mutable is consulted: a clone later superseded by
-    another activation is still recognised.  A correction's revocation lacks at
-    least one of these, and ``revoked_at`` is only cleared on a proven rollback,
-    so a correction-revoked version is never resurrected.  A withdrawn version
-    whose payload #324 already pruned is un-revoked too; the historical read
-    ignores payload-less rows, so it cannot become the authority.  State based
-    and rerun-safe: a second run finds no signature left and no unretired
-    source.
+    #324 wrote nothing durable that tells a rollback's revocation from a
+    correction's when both share a fence and an instant (a correction activating
+    a publication stamps the same ``now``), so this migration only acts on proof:
+    the restore's publication is still the ``rollback`` version a rollback
+    created (an ordinary activation never has that status), an earlier row of the
+    same season holds a version with the same checksum and cutoff (the source it
+    cloned), and the restore's predecessor was revoked at exactly the restore's
+    fence and instant.  A restore a later activation already turned ``superseded``
+    cannot be proven and is left alone: its withdrawal stays revoked and its
+    source unretired, the safe direction, since a correction's revocation is
+    never cleared.  A withdrawn version whose payload #324 already pruned is
+    un-revoked too; the historical read ignores payload-less rows.  Rows written
+    from #325 on need no inference: the restore stamps its source's
+    ``retired_by``.  State based and rerun-safe.
     """
 
     from app.models.collection_control import PublicationPointerHistory
@@ -2276,6 +2277,9 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
             select(versions.c.publication_id, versions.c.checksum, versions.c.cutoff)
         )
     }
+    rollback_versions = set(connection.execute(
+        select(versions.c.publication_id).where(versions.c.status == "rollback")
+    ).scalars())
     rows = connection.execute(
         select(
             history.c.history_id, history.c.stream_key, history.c.publication_id,
@@ -2298,7 +2302,7 @@ def _reclassify_publication_pointer_history(connection: Connection) -> None:
             ):
                 continue
             restored = lineage.get(restore.publication_id)
-            if restored is None:
+            if restored is None or restore.publication_id not in rollback_versions:
                 continue
             source = next((
                 candidate for candidate in reversed(stream_rows[:index - 1])

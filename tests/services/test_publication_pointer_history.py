@@ -548,7 +548,13 @@ def _points(engine, season):
     return None if rows is None else [row.points for row in rows]
 
 
-def test_migration_recognises_a_restore_that_a_later_activation_superseded(lifecycle):
+def test_migration_leaves_a_restore_it_cannot_prove_alone(lifecycle):
+    """A restore a later activation superseded looks like an ordinary activation.
+
+    #324 recorded nothing durable that tells it from a correction's revocation,
+    so the safe direction is to change nothing.
+    """
+
     engine, publications = lifecycle
     first = _compose(publications, "2025-26", points=25)
     second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
@@ -560,20 +566,38 @@ def test_migration_recognises_a_restore_that_a_later_activation_superseded(lifec
             "UPDATE publication_versions SET status = 'superseded' "
             "WHERE publication_id = :id"
         ), {"id": restored.publication_id})
-    assert _points(engine, "2026-27") is None  # revoked, as #324 left it
 
     _reclassify(engine)
 
-    assert _points(engine, "2026-27") == [26]
-    assert _points(engine, "2025-26") == [25]
-    assert retirements(engine, STREAM) == [
-        (first.publication_id, restored.publication_id)
-    ]
+    assert _points(engine, "2026-27") is None
+    assert retirements(engine, STREAM) == []
+
+
+def test_migration_never_clears_a_correction_revocation_beside_an_identical_activation(
+    lifecycle,
+):
+    """An ordinary activation with the same content and cutoff as an older
+    version is not a restore, even when a correction revoked a withdrawn row at
+    its fence and instant."""
+
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=25)
+    second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
+    ordinary = _compose(
+        publications, "2025-26", points=25, expected_fence=second.fence
+    )
+    _rewind_to_324(engine, withdrawn=second, restore=ordinary)
+
+    _reclassify(engine)
+
+    assert _points(engine, "2026-27") is None
+    assert retirements(engine, STREAM) == []
 
 
 def test_migration_leaves_a_withdrawal_whose_payload_was_already_pruned(lifecycle):
     engine, publications = lifecycle
-    first = _compose(publications, "2025-26", points=25)
+    older = _compose(publications, "2026-27", points=20)
+    first = _compose(publications, "2025-26", points=25, expected_fence=older.fence)
     second = _compose(publications, "2026-27", points=26, expected_fence=first.fence)
     restored = publications.rollback(STREAM, reason="restore 2025-26")
     _rewind_to_324(engine, withdrawn=second, restore=restored)
@@ -587,10 +611,10 @@ def test_migration_leaves_a_withdrawal_whose_payload_was_already_pruned(lifecycl
 
     _reclassify(engine)
 
-    # The payload-less row is un-revoked but can never serve or pin anything.
-    assert _points(engine, "2026-27") is None
+    # The payload-less row is un-revoked but ignored: 2026-27 falls back to its
+    # older version that still exists instead of reading nothing.
+    assert _points(engine, "2026-27") == [20]
     assert _points(engine, "2025-26") == [25]
-    assert publications.prune_history(stream_key=STREAM).deleted == 1  # the retired source
 
 
 def test_migration_never_clears_a_correction_revocation_beside_an_ordinary_activation(
@@ -696,9 +720,9 @@ def test_a_same_season_rollback_leaves_only_the_restored_version_after_pruning(
     assert result.deleted == 2
 
 
-def test_prune_leaves_a_stream_whose_pointer_does_not_exist_yet_on_postgres():
-    """Pruning cannot lock a pointer that is not there, so it must not decide
-    for that stream; a composition racing it keeps its rollback target."""
+def test_a_first_composition_waits_for_a_prune_of_its_pointerless_stream_on_postgres():
+    """Prune finds no pointer to lock, so the stream row is what orders it
+    against the first composition; the new previous target must survive."""
 
     import os
     import threading
@@ -725,7 +749,7 @@ def test_prune_leaves_a_stream_whose_pointer_does_not_exist_yet_on_postgres():
             freshness_rule="cutoff_current",
         )
         main = threading.current_thread()
-        racing = {"thread": None}
+        racing = {"thread": None, "blocked": None}
 
         def compose_twice():
             service = PublicationService(engine, clock=lambda: CUTOFF)
@@ -742,11 +766,14 @@ def test_prune_leaves_a_stream_whose_pointer_does_not_exist_yet_on_postgres():
                 # The pointer query found no row; the stream now publishes twice.
                 racing["thread"] = threading.Thread(target=compose_twice)
                 racing["thread"].start()
-                racing["thread"].join(timeout=30)
+                racing["thread"].join(timeout=2)
+                racing["blocked"] = racing["thread"].is_alive()
 
         result = publications.prune_history(stream_key=STREAM)
 
-        assert racing["thread"] is not None and not racing["thread"].is_alive()
+        racing["thread"].join(timeout=30)
+        assert not racing["thread"].is_alive()
+        assert racing["blocked"] is True  # waited on the stream lock
         assert result.deleted == 0
         restored = publications.rollback(STREAM, reason="previous target survived")
         assert restored.season == "2025-26"
@@ -757,3 +784,50 @@ def test_prune_leaves_a_stream_whose_pointer_does_not_exist_yet_on_postgres():
     finally:
         reset_schema()
         engine.dispose()
+
+
+@pytest.mark.parametrize("withdrawal", ["revoked_at", "retired_at"])
+def test_a_revoked_or_retired_latest_row_never_serves_without_pruning(
+    lifecycle, withdrawal,
+):
+    """The read's own eligibility filters, with the withdrawn payload still stored."""
+
+    engine, publications = lifecycle
+    first = _compose(publications, "2025-26", points=10)
+    second = _compose(publications, "2025-26", points=11, expected_fence=first.fence)
+    with engine.begin() as connection:
+        connection.execute(text(
+            f"UPDATE publication_pointer_history SET {withdrawal} = '2026-05-01 00:00:00.000000' "
+            "WHERE publication_id = :id"
+        ), {"id": second.publication_id})
+
+    assert _points(engine, "2025-26") == [10]
+
+
+def test_prune_applies_the_keep_set_to_a_stream_with_no_pointer(lifecycle):
+    engine, publications = lifecycle
+    publications.register_stream(
+        "inactive_ledger", provider="ledger", owner="railway",
+        required_observations=(), publication_strategy="replace", enabled=False,
+        freshness_rule="cutoff_current",
+    )
+    stamp = "2026-01-15 00:00:00.000000"
+    with engine.begin() as connection:
+        for publication_id, status, version in (
+            ("old-1", "superseded", 1), ("old-2", "superseded", 2),
+            ("awaiting", "candidate", 3),
+        ):
+            connection.execute(text(
+                "INSERT INTO publication_versions (publication_id, stream_key, season, "
+                "cutoff, version, status, checksum, payload, created_at, fence) "
+                "VALUES (:id, 'inactive_ledger', '2025-26', :stamp, :version, :status, "
+                "'c', '{}', :stamp, 0)"
+            ), {"id": publication_id, "stamp": stamp, "version": version, "status": status})
+
+    result = publications.prune_history(stream_key="inactive_ledger")
+
+    assert result.deleted == 2
+    assert dict(result.kept) == {
+        "active": 0, "previous": 0, "candidate": 1, "season_latest": 0,
+    }
+    assert _surviving(engine) == {"awaiting"}

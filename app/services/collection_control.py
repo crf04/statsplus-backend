@@ -4740,7 +4740,14 @@ class PublicationService(_SessionService):
         target and an identical payload must not short-circuit the advance.
         """
 
-        stream = session.get(PublicationStream, stream_key)
+        # Stream, then pointer, then versions: the stream lock is what orders a
+        # first composition (which creates the pointer) against a prune.
+        stream = session.scalar(
+            select(PublicationStream)
+            .where(PublicationStream.stream_key == stream_key)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if stream is None or not stream.enabled:
             raise ControlPlaneError("stream_unavailable")
         pointer = session.scalar(
@@ -5906,10 +5913,12 @@ class PublicationService(_SessionService):
         unretired) version of its season.  The keep set is computed per stream
         across all seasons even when ``season`` narrows what may be deleted.
         A history row whose publication is already gone never shadows an older
-        row that still exists.  The pointer lock is taken first, as every writer
-        does, so a concurrent rollback finishes before the keep set is read (or
-        waits for this prune) and its target cannot be deleted from under it.  A
-        stream with no pointer row yet cannot be locked and is left untouched.
+        row that still exists.  The stream row, then the pointer, are locked first
+        in the order every writer uses, so a concurrent rollback finishes before
+        the keep set is read (or waits for this prune) and its target cannot be
+        deleted from under it.  Every pointer-creating writer holds the stream
+        lock, so a first composition cannot interleave either; a stream with no
+        pointer yet keeps only its candidates.
         History rows and raw collection observations are never deleted; the
         normalized ``PublicationObservation`` lineage goes with its publication.
         """
@@ -5917,11 +5926,18 @@ class PublicationService(_SessionService):
         deleted = 0
         kept = {reason: 0 for reason in PRUNE_KEEP_REASONS}
         with self._session_scope(session) as session:
+            # Stream rows first (a first composition creates the pointer under
+            # the stream lock), then the pointers, as every writer orders them.
+            stream_query = select(PublicationStream.stream_key).order_by(
+                PublicationStream.stream_key
+            ).with_for_update()
             pointer_query = select(PublicationPointer).order_by(
                 PublicationPointer.stream_key
             ).with_for_update().execution_options(populate_existing=True)
             if stream_key is not None:
+                stream_query = stream_query.where(PublicationStream.stream_key == stream_key)
                 pointer_query = pointer_query.where(PublicationPointer.stream_key == stream_key)
+            locked_streams = sorted(session.scalars(stream_query))
             pointers = {pointer.stream_key: pointer for pointer in session.scalars(pointer_query)}
             history = PublicationPointerHistory
             newer = aliased(PublicationPointerHistory)
@@ -5948,7 +5964,7 @@ class PublicationService(_SessionService):
             version_query = select(
                 PublicationVersion.publication_id, PublicationVersion.stream_key,
                 PublicationVersion.status,
-            ).where(PublicationVersion.stream_key.in_(sorted(pointers)))
+            ).where(PublicationVersion.stream_key.in_(locked_streams))
             if season is not None:
                 version_query = version_query.where(PublicationVersion.season == season)
             doomed: list[str] = []

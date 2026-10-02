@@ -3810,8 +3810,9 @@ def _correct_game_one(publications, engine, stream_key, sources):
 
 
 @pytest.mark.parametrize("pruned", [False, True], ids=("kept", "pruned"))
-def test_correction_revokes_a_retired_source_even_after_it_was_pruned(tmp_path, pruned):
-    """Retiring a restore's source never exempts it from a later correction."""
+def test_correction_revokes_a_retired_source_and_leaves_pruned_rows_alone(tmp_path, pruned):
+    """Retiring a restore's source never exempts it from a later correction; a
+    pruned row has no lineage left to prove stale, and cannot serve anyway."""
 
     engine = _engine(tmp_path, f"history-retired-{pruned}.sqlite3")
     publications, stream_key, sources, activated = _three_activated_refreshes(
@@ -3835,13 +3836,14 @@ def test_correction_revokes_a_retired_source_even_after_it_was_pruned(tmp_path, 
     assert [row[0] for row in history] == [
         *(version.publication_id for version in activated), restored.publication_id,
     ]
+    revoked_vector = [revoked for *_rest, revoked in history]
     if pruned:
-        # A pruned row cannot serve (its payload is gone) and its lineage is
-        # gone too, so only the surviving restore is provably stale.
-        assert [revoked for *_rest, revoked in history][-1] is True
+        # r1 and the retired r2 were pruned and are left unrevoked; r3 was
+        # revoked by the rollback and the restore by the correction.
+        assert revoked_vector == [False, False, True, True]
     else:
         # Every row, including the retired source, carried the stale evidence.
-        assert all(revoked for *_rest, revoked in history)
+        assert revoked_vector == [True, True, True, True]
     with engine.connect() as connection:
         pointer = connection.execute(select(
             PublicationPointer.__table__.c.active_publication_id,

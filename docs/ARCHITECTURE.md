@@ -3305,17 +3305,22 @@ A history row whose publication has been pruned is ineligible on its own terms: 
 historical read and the keep set's season-latest computation consider only rows
 whose publication still exists, so a payload-less row never shadows the season's
 latest surviving version. A correction therefore revokes only the publications it
-can prove stale (those that still have lineage). A stream with no pointer row yet
-cannot be locked, so pruning leaves it untouched.
+can prove stale (those that still have lineage). Pruning locks the stream row,
+then the pointer, and every pointer-creating writer holds the stream lock, so a
+first composition cannot interleave; a stream with no pointer yet keeps only its
+candidates.
 
-Migration 058 reclassifies #324's rows once. A rollback is recognised only when
-an earlier row of the same season holds a version with the same checksum and
-cutoff as the restore's (a rollback clones both; an ordinary refresh that reverts
-to old content carries its own cutoff) and the restore's predecessor was revoked
-at exactly the restore's fence and instant. Nothing mutable (such as the
-version's status) is consulted. A proven cross-season withdrawal is un-revoked and
-the source is retired. It never clears any other revocation, so a version a
-correction revoked stays revoked, and a rerun finds nothing left to change.
+Migration 058 reclassifies #324's rows once and acts only on proof, because #324
+wrote nothing durable that tells a rollback's revocation from a correction's when
+they share a fence and instant. A rollback is recognised when the restore's
+publication still has status `rollback` (an ordinary activation never does), an
+earlier row of the same season holds a version with the same checksum and cutoff
+(its source), and the restore's predecessor was revoked at exactly the restore's
+fence and instant. A proven cross-season withdrawal is un-revoked and the source
+retired. A restore a later activation already superseded cannot be proven and is
+left alone, so a correction's revocation is never cleared; a rerun finds nothing
+left to change. From #325 on a restore stamps its source's `retired_by`, so
+history needs no inference.
 
 A completed game of a season before the published season reads its focal rows
 (`focal_game_rows`) from the latest eligible (unrevoked, unretired)
