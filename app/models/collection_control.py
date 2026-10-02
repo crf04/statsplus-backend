@@ -268,13 +268,17 @@ class PublicationPointerHistory(Base):
     ``publication_versions.status`` cannot say whether a version was ever the
     served authority: ``superseded`` covers a replaced active, a candidate that
     never activated, and both sides of a rollback.  Every pointer move writes
-    one row here in its own transaction, and a rollback or corrected-evidence
-    invalidation stamps ``revoked_at`` on the rows it withdraws.  A row replaced
-    by a later publication is *not* revoked; it stays the retained authority for
-    its season, which is what a past season's reads need once a newer season is
-    active.  Rows outlive pruning of their publication, which keeps every
-    publication that still has an unrevoked row.  ``fence`` is the stream pointer's generation, so it orders the rows
-    of one stream even when a test clock does not advance.
+    one row here in its own transaction.  ``revoked_at`` means the content was
+    withdrawn: a same-season rollback or a corrected-evidence invalidation stamps
+    it.  A pointer moving to another season is a move, not a rejection, and a row
+    replaced by a later publication is *not* revoked; it stays the retained
+    authority for its season, which is what a past season's reads need once a
+    newer season is active.  ``retired_at`` means a restore superseded the row:
+    the rollback's clone carries identical content and is the season's authority
+    for it, so the source is no longer eligible.  Rows outlive pruning of their
+    publication, which keeps only the versions that can still serve.  ``fence``
+    is the stream pointer's generation, so it orders the rows of one stream even
+    when a test clock does not advance.
     """
 
     __tablename__ = "publication_pointer_history"
@@ -291,6 +295,9 @@ class PublicationPointerHistory(Base):
     # The pointer generation at the revocation: the cleared pointer's new fence
     # when the revoked publication was active, else the unchanged fence.
     revoked_fence = Column(Integer, nullable=True)
+    # Set when a rollback restored a clone of this publication; the clone's id.
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    retired_by = Column(String(36), nullable=True)
 
     __table_args__ = (
         Index(
@@ -322,11 +329,9 @@ class PublicationActivation(Base):
 
     activation_id = Column(String(36), primary_key=True)
     stream_key = Column(String(96), nullable=False)
-    publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # No foreign key (migration 059): the evidence outlives the pruned payload,
+    # as pointer history does, so activations never pin retention.
+    publication_id = Column(String(36), nullable=False)
     actor = Column(String(128), nullable=False)
     reason = Column(String(255), nullable=False)
     fence = Column(Integer, nullable=False)
@@ -395,11 +400,9 @@ class PublicationRepairGroupMember(Base):
         primary_key=True,
     )
     stream_key = Column(String(96), primary_key=True)
-    expected_publication_id = Column(
-        String(36),
-        ForeignKey("publication_versions.publication_id", ondelete="RESTRICT"),
-        nullable=False,
-    )
+    # No foreign key (migration 060): the declaration outlives the displaced
+    # publication's pruned payload, as pointer history and activations do.
+    expected_publication_id = Column(String(36), nullable=False)
     expected_fence = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False)
 

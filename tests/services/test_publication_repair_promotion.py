@@ -14,7 +14,7 @@ import json
 import uuid
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 
 import app.services.collection_control as collection_control_module
 from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
@@ -396,6 +396,29 @@ def test_grouped_promotion_advances_both_pointers_and_records_one_audit(repair):
         assert {
             row.status for row in connection.execute(select(CompositionJob))
         } == {"succeeded"}
+
+
+def test_pruning_after_a_promotion_deletes_the_displaced_pair_and_keeps_the_declaration(
+    repair,
+):
+    engine, displaced = repair["engine"], repair["displaced"]
+    repair["operations"].promote_repair_group(
+        repair["manifest"].manifest_id, actor="operator", reason="repair the pair",
+    )
+
+    result = repair["publications"].prune_history()
+
+    assert result.deleted == 2
+    assert dict(result.kept) == {
+        "active": 2, "previous": 0, "candidate": 0, "season_latest": 0,
+    }
+    statuses = read_statuses(engine)
+    for stream_key in (SEASON_ZONES, L15_ZONES):
+        assert displaced[stream_key].publication_id not in statuses
+    with engine.connect() as connection:
+        assert connection.scalar(text(
+            "SELECT count(*) FROM publication_repair_group_members"
+        )) == 2
 
 
 def test_rollback_is_unavailable_until_a_later_publication_is_trustworthy(repair):

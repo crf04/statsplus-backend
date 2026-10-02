@@ -2229,6 +2229,260 @@ def _create_publication_pointer_history(connection: Connection) -> None:
         ))
 
 
+def _lineage_is_current(connection: Connection, publication_id: str) -> bool:
+    """Whether every game a publication cites still has its current source.
+
+    The same test a correction applies: the publication's recorded source
+    observation for each game must be the canonical ledger's current source for
+    that game.  A publication with no surviving lineage (pruned, or never
+    recorded), or whose ledger is unavailable, cannot be evaluated and is
+    treated as stale.
+    """
+
+    inspector = inspect(connection)
+    if not (
+        inspector.has_table("publication_observations")
+        and inspector.has_table("collection_observations")
+        and inspector.has_table("canonical_game_ledger_games")
+    ):
+        return False
+    rows = connection.execute(text(
+        "SELECT po.observation_id, co.scope FROM publication_observations po "
+        "JOIN collection_observations co ON co.observation_id = po.observation_id "
+        "WHERE po.publication_id = :publication_id"
+    ), {"publication_id": publication_id}).all()
+    cited: dict[str, str] = {}
+    for observation_id, raw_scope in rows:
+        try:
+            scope = json.loads(raw_scope)
+        except (TypeError, ValueError):
+            continue
+        game_id = str(scope.get("game_id") or "") if isinstance(scope, dict) else ""
+        if game_id:
+            cited[game_id] = str(observation_id)
+    if not cited:
+        return False
+    for game_id, observation_id in cited.items():
+        current = connection.execute(text(
+            "SELECT source_observation_id FROM canonical_game_ledger_games "
+            "WHERE game_id = :game_id"
+        ), {"game_id": game_id}).scalar()
+        if current != observation_id:
+            return False
+    return True
+
+
+def _reclassify_publication_pointer_history(connection: Connection) -> None:
+    """Add ``retired_at``/``retired_by`` and reclassify rollback history once.
+
+    #324 revoked the version every rollback moved away from and kept the
+    rollback's source live.  Under the bounded-retention rules a rollback to
+    another season is a move, not a rejection, and a restore retires its source.
+    #324 wrote nothing durable that tells a rollback's revocation from a
+    correction's when both share a fence and an instant (a correction activating
+    a publication stamps the same ``now``), so this migration only acts on proof:
+    the restore's publication is still the ``rollback`` version a rollback
+    created (an ordinary activation never has that status), an earlier row of the
+    same season holds a version with the same checksum and cutoff (the source it
+    cloned), and the restore's predecessor was revoked at exactly the restore's
+    fence and instant.  A restore a later activation already turned ``superseded``
+    cannot be proven and is left alone: its withdrawal stays revoked and its
+    source unretired, the safe direction, since a correction's revocation is
+    never cleared.  A cross-season withdrawal is un-revoked only when its lineage
+    is provably current; a withdrawn version whose payload #324 already pruned
+    (missing lineage) stays revoked.  Rows written
+    from #325 on need no inference: the restore stamps its source's
+    ``retired_by``.  State based and rerun-safe.
+    """
+
+    from app.models.collection_control import PublicationPointerHistory
+
+    inspector = inspect(connection)
+    if not inspector.has_table("publication_pointer_history"):
+        return
+    existing = {column["name"] for column in inspector.get_columns("publication_pointer_history")}
+    timestamp = (
+        "TIMESTAMP WITH TIME ZONE" if connection.dialect.name == "postgresql" else "DATETIME"
+    )
+    for name, type_sql in (("retired_at", timestamp), ("retired_by", "VARCHAR(36)")):
+        if name not in existing:
+            connection.execute(text(
+                f"ALTER TABLE publication_pointer_history ADD COLUMN {name} {type_sql}"
+            ))
+    if not inspector.has_table("publication_versions"):
+        return
+    from app.models.collection_control import PublicationVersion
+
+    history = PublicationPointerHistory.__table__
+    versions = PublicationVersion.__table__
+    lineage = {
+        publication_id: (checksum, cutoff)
+        for publication_id, checksum, cutoff in connection.execute(
+            select(versions.c.publication_id, versions.c.checksum, versions.c.cutoff)
+        )
+    }
+    rollback_versions = set(connection.execute(
+        select(versions.c.publication_id).where(versions.c.status == "rollback")
+    ).scalars())
+    rows = connection.execute(
+        select(
+            history.c.history_id, history.c.stream_key, history.c.publication_id,
+            history.c.season, history.c.fence, history.c.activated_at,
+            history.c.revoked_at, history.c.revoked_fence, history.c.retired_at,
+        ).order_by(history.c.stream_key, history.c.fence)
+    ).all()
+    by_stream: dict[str, list] = {}
+    for row in rows:
+        by_stream.setdefault(row.stream_key, []).append(row)
+    for stream_rows in by_stream.values():
+        for index, restore in enumerate(stream_rows):
+            if index == 0:
+                continue
+            withdrawn = stream_rows[index - 1]
+            if not (
+                withdrawn.revoked_at is not None
+                and withdrawn.revoked_fence == restore.fence
+                and withdrawn.revoked_at == restore.activated_at
+            ):
+                continue
+            restored = lineage.get(restore.publication_id)
+            if restored is None or restore.publication_id not in rollback_versions:
+                continue
+            source = next((
+                candidate for candidate in reversed(stream_rows[:index - 1])
+                if candidate.season == restore.season
+                and lineage.get(candidate.publication_id) == restored
+            ), None)
+            if source is None:
+                continue
+            # A proven rollback.  A cross-season one only moved the pointer, but
+            # a correction that came later could not stamp the already revoked
+            # row, so the withdrawal is cleared only if its lineage is provably
+            # still current (the correction's own staleness test).
+            if withdrawn.season != restore.season and _lineage_is_current(
+                connection, withdrawn.publication_id
+            ):
+                connection.execute(
+                    history.update()
+                    .where(history.c.history_id == withdrawn.history_id)
+                    .values(revoked_at=None, revoked_fence=None)
+                )
+            if source.retired_at is None:
+                connection.execute(
+                    history.update()
+                    .where(
+                        history.c.history_id == source.history_id,
+                        history.c.retired_at.is_(None),
+                    )
+                    .values(
+                        retired_at=restore.activated_at,
+                        retired_by=restore.publication_id,
+                    )
+                )
+
+
+def _drop_publication_activation_foreign_key(connection: Connection) -> None:
+    """Let activation evidence outlive the publication payload it names.
+
+    Pruning deletes payloads that can no longer serve; the RESTRICT foreign key
+    would pin every version an explicit activation or family promotion named.
+    Rerun-safe: acts only while the foreign key exists.  The table has no
+    inbound references, so SQLite rebuilds it, as migration 030 did to add it.
+    """
+
+    inspector = inspect(connection)
+    table_name = "publication_activations"
+    if not inspector.has_table(table_name):
+        return
+    keys = [
+        key for key in inspector.get_foreign_keys(table_name)
+        if key.get("referred_table") == "publication_versions"
+    ]
+    if not keys:
+        return
+    preparer = connection.dialect.identifier_preparer
+    old = preparer.quote(table_name)
+    if connection.dialect.name == "sqlite":
+        rebuilt_name = f"{table_name}__059"
+        rebuilt = preparer.quote(rebuilt_name)
+        connection.execute(text(f"DROP TABLE IF EXISTS {rebuilt}"))
+        connection.execute(text(
+            f"CREATE TABLE {rebuilt} ("
+            "activation_id VARCHAR(36) NOT NULL PRIMARY KEY, "
+            "stream_key VARCHAR(96) NOT NULL, "
+            "publication_id VARCHAR(36) NOT NULL, "
+            "actor VARCHAR(128) NOT NULL, "
+            "reason VARCHAR(255) NOT NULL, "
+            "fence INTEGER NOT NULL, "
+            "created_at DATETIME NOT NULL)"
+        ))
+        connection.execute(text(
+            f"INSERT INTO {rebuilt} "
+            "(activation_id, stream_key, publication_id, actor, reason, fence, created_at) "
+            "SELECT activation_id, stream_key, publication_id, actor, reason, fence, "
+            f"created_at FROM {old}"
+        ))
+        connection.execute(text(f"DROP TABLE {old}"))
+        connection.execute(text(f"ALTER TABLE {rebuilt} RENAME TO {old}"))
+        connection.execute(text(
+            f"CREATE INDEX ix_publication_activations_stream_created "
+            f"ON {old} (stream_key, created_at)"
+        ))
+        connection.execute(text(
+            f"CREATE UNIQUE INDEX uq_publication_activations_stream_publication "
+            f"ON {old} (stream_key, publication_id)"
+        ))
+        return
+    for key in keys:
+        if key.get("name"):
+            connection.execute(text(
+                f"ALTER TABLE {old} DROP CONSTRAINT {preparer.quote(key['name'])}"
+            ))
+
+
+def _drop_repair_group_member_publication_foreign_key(connection: Connection) -> None:
+    """Let a repair declaration outlive the publication it was declared against.
+
+    A promoted group's displaced publication is deletable by pruning, so the
+    RESTRICT foreign key from ``expected_publication_id`` would make pruning
+    fail.  Rerun-safe: acts only while the foreign key exists.  The table has no
+    inbound references, so SQLite rebuilds it from the current model.
+    """
+
+    from app.models.collection_control import PublicationRepairGroupMember
+
+    table = PublicationRepairGroupMember.__table__
+    inspector = inspect(connection)
+    if not inspector.has_table(table.name):
+        return
+    keys = [
+        key for key in inspector.get_foreign_keys(table.name)
+        if key.get("referred_table") == "publication_versions"
+    ]
+    if not keys:
+        return
+    preparer = connection.dialect.identifier_preparer
+    quoted = preparer.quote(table.name)
+    if connection.dialect.name == "sqlite":
+        legacy = preparer.quote(f"{table.name}__060")
+        connection.execute(text(f"DROP TABLE IF EXISTS {legacy}"))
+        connection.execute(text(f"ALTER TABLE {quoted} RENAME TO {legacy}"))
+        connection.execute(text("DROP INDEX IF EXISTS ix_repair_group_members_stream"))
+        table.create(connection)
+        connection.execute(text(
+            f"INSERT INTO {quoted} (group_id, stream_key, expected_publication_id, "
+            "expected_fence, created_at) SELECT group_id, stream_key, "
+            f"expected_publication_id, expected_fence, created_at FROM {legacy}"
+        ))
+        connection.execute(text(f"DROP TABLE {legacy}"))
+        return
+    for key in keys:
+        if key.get("name"):
+            connection.execute(text(
+                f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"
+            ))
+
+
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
     """Index the projection's ``(publication_id, game_id)`` filter.
 
@@ -2398,6 +2652,21 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         57,
         "057_publication_pointer_history",
         _create_publication_pointer_history,
+    ),
+    Migration(
+        58,
+        "058_publication_pointer_history_retirement",
+        _reclassify_publication_pointer_history,
+    ),
+    Migration(
+        59,
+        "059_publication_activation_outlives_payload",
+        _drop_publication_activation_foreign_key,
+    ),
+    Migration(
+        60,
+        "060_repair_group_member_outlives_payload",
+        _drop_repair_group_member_publication_foreign_key,
     ),
 )
 

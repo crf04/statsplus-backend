@@ -63,7 +63,7 @@ from app.services.team_matchup_repository import (
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
-from tests.support.pointer_history import pointer_history, revoked_fences
+from tests.support.pointer_history import pointer_history, retirements, revoked_fences
 
 
 UTC = timezone.utc
@@ -3788,6 +3788,70 @@ def test_correction_revokes_previously_activated_superseded_and_rollback_history
         )).scalar_one()
     assert revoked_fences(engine, stream_key)[-1] == cleared
     assert cleared == (history[-1][2] + 1)
+
+
+def _correct_game_one(publications, engine, stream_key, sources):
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+    publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+        provenance={sources[3]: "game-1"}, reason="correction",
+        corrected_provenance={sources[3]: "game-1"},
+    )
+
+
+@pytest.mark.parametrize("pruned", [False, True], ids=("kept", "pruned"))
+def test_correction_revokes_a_retired_source_and_leaves_pruned_rows_alone(tmp_path, pruned):
+    """Retiring a restore's source never exempts it from a later correction; a
+    pruned row has no lineage left to prove stale, and cannot serve anyway."""
+
+    engine = _engine(tmp_path, f"history-retired-{pruned}.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(
+        engine
+    )
+    # activated[1] is the rollback target: the restore retires it.
+    restored = publications.rollback(
+        stream_key, reason="restore the prior ledger",
+        expected_fence=publications.current(stream_key).fence,
+    )
+    assert retirements(engine, stream_key) == [
+        (activated[1].publication_id, restored.publication_id)
+    ]
+    if pruned:
+        # Only the restore survives; the pruned payloads took their lineage along.
+        assert publications.prune_history(stream_key=stream_key).deleted == 3
+
+    _correct_game_one(publications, engine, stream_key, sources)
+
+    history = pointer_history(engine, stream_key)
+    assert [row[0] for row in history] == [
+        *(version.publication_id for version in activated), restored.publication_id,
+    ]
+    revoked_vector = [revoked for *_rest, revoked in history]
+    if pruned:
+        # r1 and the retired r2 were pruned and are left unrevoked; r3 was
+        # revoked by the rollback and the restore by the correction.
+        assert revoked_vector == [False, False, True, True]
+    else:
+        # Every row, including the retired source, carried the stale evidence.
+        assert revoked_vector == [True, True, True, True]
+    with engine.connect() as connection:
+        pointer = connection.execute(select(
+            PublicationPointer.__table__.c.active_publication_id,
+            PublicationPointer.__table__.c.previous_publication_id,
+        ).where(PublicationPointer.stream_key == stream_key)).one()
+    assert (pointer.active_publication_id, pointer.previous_publication_id) == (None, None)
+    with pytest.raises(ControlPlaneError):
+        publications.rollback(stream_key, reason="restore corrected evidence")
 
 
 @pytest.mark.parametrize("window", ["first_version_write", "after_enumeration"])
