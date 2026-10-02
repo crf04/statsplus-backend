@@ -581,6 +581,90 @@ def test_family_rollback_moves_both_windows_together(family):
         assert after[stream_key][1] == promoted[stream_key][1] + 1
 
 
+def test_family_promotion_and_rollback_each_write_history_with_the_pointer_move(
+    family,
+):
+    engine, publications = family
+    from tests.support.pointer_history import pointer_history
+
+    initial = _pointers(engine)
+    service = _service(engine)
+    rebuild = service.start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    service.run(rebuild.rebuild_id, owner="worker-1")
+    promoted = _pointers(engine)
+
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        assert pointer_history(engine, stream_key) == [
+            (initial[stream_key][0], SEASON, 1, False),
+            (promoted[stream_key][0], SEASON, 2, False),
+        ]
+
+    service.rollback(actor=ACTOR, reason="restore the previous format")
+    restored = _pointers(engine)
+
+    for stream_key in (SEASON_STREAM, L15_STREAM):
+        assert pointer_history(engine, stream_key) == [
+            (initial[stream_key][0], SEASON, 1, False),
+            (promoted[stream_key][0], SEASON, 2, True),
+            (restored[stream_key][0], SEASON, 3, False),
+        ]
+
+
+def test_family_rollback_cannot_restore_a_target_a_correction_withdrew(family):
+    import json
+
+    from app.models.collection_control import CollectionObservation
+    from app.services.collection_control import ControlPlaneError
+    from tests.services.test_correction_propagation import _bind_current_ledger_source
+    from tests.support.pointer_history import pointer_history
+    from tests.support.traditional_opponent_family import (
+        CUTOFF, provenance, payload, TRADITIONAL_OPPONENT_V2,
+    )
+
+    engine, publications = family
+    # Promote a second generation so both windows hold a rollback target.
+    rebuild = _service(engine).start(
+        actor=ACTOR, reason=REASON, expected=active_expectation(publications)
+    )
+    _service(engine).run(rebuild.rebuild_id, owner="worker-1")
+    before = _pointers(engine)
+    with engine.begin() as connection:
+        connection.execute(CollectionObservation.__table__.insert().values(
+            observation_id="pbp:game-0-fix", client_observation_id="pbp:game-0-fix",
+            collector_id="test", manifest_id="ledger-manifest",
+            environment="testing", provider="pbp+nba_live_data",
+            observation_type="canonical_game_ledger",
+            scope=json.dumps({"game_id": "game-0", "surface": "canonical_game_ledger"}),
+            season=SEASON, cutoff=CUTOFF, schema_version=1, checksum="f" * 64,
+            payload="{}", payload_bytes=2, retrieved_at=NOW, accepted_at=NOW,
+        ))
+    _bind_current_ledger_source(
+        engine, game_id="game-0", observation_id="pbp:game-0-fix",
+        cutoff=CUTOFF, season=SEASON,
+    )
+    corrected_provenance = {
+        **{key: value for key, value in provenance().items() if value != "game-0"},
+        "pbp:game-0-fix": "game-0",
+    }
+    corrected = publications.recompose_ledger(
+        SEASON_STREAM, season=SEASON, cutoff=CUTOFF,
+        payload=payload(TRADITIONAL_OPPONENT_V2),
+        provenance=corrected_provenance, reason="correction",
+    )
+
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        publications.rollback_publication_family(
+            (SEASON_STREAM, L15_STREAM), reason="restore the withdrawn generation",
+        )
+
+    history = pointer_history(engine, SEASON_STREAM)
+    assert [row[3] for row in history[:-1]] == [True, True]
+    assert history[-1] == (corrected.publication_id, SEASON, 3, False)
+    assert _pointers(engine)[L15_STREAM] == before[L15_STREAM]
+
+
 def test_rollback_refuses_a_target_this_deployment_cannot_read(tmp_path):
     """Production's exact shape: v2 active, v1 retained as previous.
 

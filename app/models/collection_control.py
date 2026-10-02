@@ -262,6 +262,53 @@ class PublicationPointer(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class PublicationPointerHistory(Base):
+    """Append-only record of every publication a stream pointer ever named.
+
+    ``publication_versions.status`` cannot say whether a version was ever the
+    served authority: ``superseded`` covers a replaced active, a candidate that
+    never activated, and both sides of a rollback.  Every pointer move writes
+    one row here in its own transaction, and a rollback or corrected-evidence
+    invalidation stamps ``revoked_at`` on the rows it withdraws.  A row replaced
+    by a later publication is *not* revoked; it stays the retained authority for
+    its season, which is what a past season's reads need once a newer season is
+    active.  Rows outlive pruning of their publication, which keeps every
+    publication that still has an unrevoked row.  ``fence`` is the stream pointer's generation, so it orders the rows
+    of one stream even when a test clock does not advance.
+    """
+
+    __tablename__ = "publication_pointer_history"
+
+    history_id = Column(String(36), primary_key=True)
+    stream_key = Column(String(96), nullable=False)
+    # No foreign key: pruning a publication's payload and projection must not
+    # delete the record that it once served.  Reads verify the projection exists.
+    publication_id = Column(String(36), nullable=False)
+    season = Column(String(16), nullable=False)
+    fence = Column(Integer, nullable=False)
+    activated_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    # The pointer generation at the revocation: the cleared pointer's new fence
+    # when the revoked publication was active, else the unchanged fence.
+    revoked_fence = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_publication_pointer_history_stream_fence",
+            "stream_key",
+            "fence",
+            unique=True,
+        ),
+        Index(
+            "ix_publication_pointer_history_stream_season",
+            "stream_key",
+            "season",
+            "fence",
+        ),
+        Index("ix_publication_pointer_history_publication", "publication_id"),
+    )
+
+
 class PublicationActivation(Base):
     """Immutable evidence for one explicit publication-stream activation.
 
@@ -638,7 +685,7 @@ class CredentialDelivery(Base):
 __all__ = [
     "ActiveSeason", "BootstrapRequest", "CatalogPublication", "CollectionManifest",
     "CollectorIdentity", "CollectorStatusTransition", "CollectionObservation", "PublicationStream",
-    "PublicationVersion", "PublicationObservation", "PublicationPointer", "PublicationActivation", "CompositionJob", "CollectorTokenReplay",
+    "PublicationVersion", "PublicationObservation", "PublicationPointer", "PublicationPointerHistory", "PublicationActivation", "CompositionJob", "CollectorTokenReplay",
     "PublicationRepairGroup", "PublicationRepairGroupMember",
     "CollectorLease",
     "CollectionCycle", "AuditEvent", "ReconciliationItem", "CollectionAlert",

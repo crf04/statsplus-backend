@@ -59,6 +59,7 @@ DOMAIN_TABLES = frozenset({
     "composition_jobs",
     "publication_activations",
     "publication_observations",
+    "publication_pointer_history",
     "publication_pointers",
     "publication_streams",
     "publication_versions",

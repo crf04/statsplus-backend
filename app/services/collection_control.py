@@ -77,6 +77,7 @@ from app.models.collection_control import (
     CollectorTokenReplay,
     CollectorLease,
     PublicationPointer,
+    PublicationPointerHistory,
     PublicationActivation,
     PublicationStream,
     PublicationVersion,
@@ -1597,6 +1598,65 @@ def decompress_gzip_limited(raw: bytes, *, max_output_bytes: int,
     if len(output) > max_output_bytes or not decoder.eof or decoder.unused_data:
         raise ControlPlaneError("invalid_compression")
     return bytes(output)
+
+
+def _record_pointer_activation(
+    session: Session,
+    pointer: PublicationPointer,
+    version: PublicationVersion,
+    *,
+    now: datetime,
+) -> None:
+    """Append the history row for the pointer move that just named ``version``.
+
+    Called in the same transaction, after ``pointer.fence`` advanced, by every
+    path that makes a pointer name a publication.
+    """
+
+    session.add(PublicationPointerHistory(
+        history_id=_uuid(),
+        stream_key=pointer.stream_key,
+        publication_id=version.publication_id,
+        season=version.season,
+        fence=int(pointer.fence),
+        activated_at=now,
+    ))
+
+
+def _revoke_pointer_history(
+    session: Session,
+    stream_key: str,
+    publication_ids: Iterable[str],
+    *,
+    now: datetime,
+    fence: int,
+) -> None:
+    """Stamp ``revoked_at`` on the unrevoked history of withdrawn publications."""
+
+    ids = {publication_id for publication_id in publication_ids if publication_id}
+    if not ids:
+        return
+    session.flush()
+    session.execute(
+        update(PublicationPointerHistory)
+        .where(
+            PublicationPointerHistory.stream_key == stream_key,
+            PublicationPointerHistory.publication_id.in_(sorted(ids)),
+            PublicationPointerHistory.revoked_at.is_(None),
+        )
+        .values(revoked_at=now, revoked_fence=int(fence))
+    )
+
+
+def _lock_pointer(session: Session, stream_key: str) -> PublicationPointer | None:
+    """Take the stream pointer's row lock; every writer takes it before versions."""
+
+    return session.scalar(
+        select(PublicationPointer)
+        .where(PublicationPointer.stream_key == stream_key)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
 
 
 def _uuid() -> str:
@@ -4074,6 +4134,7 @@ class PublicationService(_SessionService):
                     if old is not None:
                         old.status = "superseded"
                 publication_id = candidate.publication_id
+                _record_pointer_activation(session, pointer, candidate, now=now)
                 session.add(PublicationActivation(
                     activation_id=_uuid(),
                     stream_key=stream_key,
@@ -4722,6 +4783,7 @@ class PublicationService(_SessionService):
         pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = (
             None if discard_rollback_target else old, publication.publication_id, now
         )
+        _record_pointer_activation(session, pointer, publication, now=now)
         self._invalidate_corrected_ledger_versions(
             session,
             stream_key=stream_key,
@@ -4752,11 +4814,32 @@ class PublicationService(_SessionService):
         }
         if not corrected_sources_by_game:
             return
+        # Lock the pointer before enumerating anything.  A concurrent rollback
+        # or composition also takes this lock first, so it either committed
+        # before the enumeration below (and is seen) or waits until this
+        # correction commits (and then sees the corrected pointer).  Callers
+        # hold the stream row, if any, first; the order is always stream, then
+        # pointer, then versions.
+        pointer = _lock_pointer(session, stream_key)
         versions = list(session.scalars(select(PublicationVersion).where(
             PublicationVersion.stream_key == stream_key,
             PublicationVersion.season == season,
             PublicationVersion.publication_id != keep_publication_id,
-            PublicationVersion.status.in_(("active", "candidate")),
+            or_(
+                PublicationVersion.status.in_(("active", "candidate")),
+                # The rollback target, whatever its status or revocation: a
+                # rollback would clone it into fresh authority.
+                PublicationVersion.publication_id
+                == (pointer.previous_publication_id if pointer is not None else None),
+                # A publication that once served stays reachable through the
+                # retained history whatever its status became afterwards.
+                PublicationVersion.publication_id.in_(
+                    select(PublicationPointerHistory.publication_id).where(
+                        PublicationPointerHistory.stream_key == stream_key,
+                        PublicationPointerHistory.revoked_at.is_(None),
+                    )
+                ),
+            ),
         )))
         if not versions:
             return
@@ -4798,21 +4881,27 @@ class PublicationService(_SessionService):
             )
         }
         for version in versions:
-            if version.publication_id in stale_ids:
+            if version.publication_id in stale_ids and version.status in (
+                "active", "candidate",
+            ):
                 version.status = "superseded"
         if not stale_ids:
             return
-        pointer = session.scalar(
-            select(PublicationPointer)
-            .where(PublicationPointer.stream_key == stream_key)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
         if pointer is not None and pointer.active_publication_id in stale_ids:
-            pointer.previous_publication_id = pointer.active_publication_id
             pointer.active_publication_id = None
             pointer.fence = int(pointer.fence or 0) + 1
             pointer.updated_at = now
+        if pointer is not None and (
+            pointer.previous_publication_id in stale_ids
+            or pointer.active_publication_id is None
+        ):
+            # A rollback would clone this target into fresh, unrevoked
+            # authority, resurrecting the evidence the correction withdrew.
+            pointer.previous_publication_id = None
+        _revoke_pointer_history(
+            session, stream_key, stale_ids, now=now,
+            fence=int(pointer.fence) if pointer is not None else 0,
+        )
 
     def recompose_ledger(
         self,
@@ -4948,6 +5037,10 @@ class PublicationService(_SessionService):
             replaceable_statuses = (
                 ("candidate",) if stream.enabled else ("candidate", "active")
             )
+            # Lock the pointer before any version is touched: the first status
+            # change below would otherwise be flushed (holding version row
+            # locks) ahead of the lock a concurrent rollback already holds.
+            _lock_pointer(session, stream_key)
             replaceable = list(session.scalars(select(PublicationVersion).where(
                 PublicationVersion.stream_key == stream_key,
                 PublicationVersion.season == season,
@@ -5493,6 +5586,11 @@ class PublicationService(_SessionService):
             current.status = "superseded"
             prior.status = "superseded"
             pointer.previous_publication_id, pointer.active_publication_id, pointer.updated_at = current.publication_id, version.publication_id, now
+            _revoke_pointer_history(
+                session, stream_key, (current.publication_id,), now=now,
+                fence=pointer.fence,
+            )
+            _record_pointer_activation(session, pointer, version, now=now)
         return version
 
     def promote_publication_family(
@@ -5605,6 +5703,7 @@ class PublicationService(_SessionService):
                 pointer.previous_publication_id = current.publication_id
                 pointer.active_publication_id = candidate.publication_id
                 pointer.updated_at = now
+                _record_pointer_activation(session, pointer, candidate, now=now)
                 session.add(PublicationActivation(
                     activation_id=_uuid(),
                     stream_key=item.stream_key,
@@ -5718,6 +5817,11 @@ class PublicationService(_SessionService):
                 pointer.previous_publication_id = current.publication_id
                 pointer.active_publication_id = version.publication_id
                 pointer.updated_at = now
+                _revoke_pointer_history(
+                    session, stream_key, (current.publication_id,), now=now,
+                    fence=pointer.fence,
+                )
+                _record_pointer_activation(session, pointer, version, now=now)
                 rolled_back.append(version)
             session.flush()
         return tuple(rolled_back)
@@ -5747,6 +5851,13 @@ class PublicationService(_SessionService):
                 PublicationVersion.status == "rollback"
             )))
             protected.update(session.scalars(select(PublicationActivation.publication_id)))
+            # A publication with an unrevoked history row can become the
+            # served authority again when a later rollback revokes the one
+            # above it, so its payload and projection must outlive pruning.
+            protected.update(session.scalars(
+                select(PublicationPointerHistory.publication_id)
+                .where(PublicationPointerHistory.revoked_at.is_(None))
+            ))
             query = select(PublicationVersion).where(
                 PublicationVersion.status.in_(("superseded", "candidate")),
                 ~PublicationVersion.publication_id.in_(protected),

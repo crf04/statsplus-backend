@@ -49,6 +49,7 @@ from app.services.collection_control import (
 )
 from app.services.database_first_activation import decode_player_diet
 from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
+from tests.support.pointer_history import pointer_history
 
 
 UTC = timezone.utc
@@ -2084,7 +2085,8 @@ def test_publication_provenance_is_normalized_and_gc_protects_active_previous_on
     third = publication.compose("provenance", season="2025-26", cutoff=now,
                                 payload={"published": 3}, expected_fence=second.fence,
                                 manifest_id="prov-manifest")
-    assert publication.prune_history(stream_key="provenance", season="2025-26") == 1
+    # Every replaced version still has unrevoked history, so none is pruned.
+    assert publication.prune_history(stream_key="provenance", season="2025-26") == 0
     assert third.publication_id != second.publication_id
     # The same accepted evidence backs every retained slice, so it remains
     # protected even after the oldest rendered publication is pruned.
@@ -2162,9 +2164,13 @@ def test_rollback_copies_exact_observation_provenance_and_maintenance_prunes_his
         assert connection.execute(select(CollectionObservation).where(
             CollectionObservation.observation_id == "rollback-obs"
         )).first() is not None
+        # The replaced first version keeps unrevoked history, so a later
+        # rollback can make it authoritative again: pruning leaves it alone.
         assert connection.execute(select(PublicationVersion).where(
             PublicationVersion.publication_id == first.publication_id
-        )).first() is None
+        )).first() is not None
+
+
 def test_event_catalog_rejects_caller_game_count_fallback(control_db):
     now = datetime(2026, 8, 12, tzinfo=UTC)
     control = CollectionControlService(control_db, clock=lambda: now)
@@ -2366,6 +2372,9 @@ def test_player_assist_locations_ledger_candidate_activates_without_parity_evide
             PublicationPointer.stream_key == "player_assist_locations",
         )).mappings().one()
     assert pointer["active_publication_id"] == candidate.publication_id
+    assert pointer_history(control_db, "player_assist_locations") == [
+        (candidate.publication_id, "2025-26", 1, False),
+    ]
     decoded = decode_player_diet(
         json.loads(candidate.payload), base="assist_locations", retrieved_at=now,
     )
@@ -2851,7 +2860,7 @@ def test_central_reconciliation_refuses_evidence_the_collector_would_have():
 
 
 def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db):
-    """A superseded rehearsal candidate was never activated, so it is no authority."""
+    """The accepted 25-point publication is read; rehearsal candidates are not."""
 
     from app.services.player_game_log_repository import PlayerGameLogRepository
     from app.services.research_season import focal_game_rows
@@ -2877,5 +2886,4 @@ def test_a_replaced_candidate_never_serves_a_past_seasons_focal_game(control_db)
 
     rows = focal_game_rows(repository, "2025-26", "game-1", evidence_season="2026-27")
 
-    assert 40 not in [row.points for row in rows or ()]
-    assert 41 not in [row.points for row in rows or ()]
+    assert [row.points for row in rows] == [25]

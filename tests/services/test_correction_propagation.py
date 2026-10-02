@@ -22,6 +22,7 @@ from app.models.collection_control import (
     CollectionObservation,
     CompositionJob,
     PublicationPointer,
+    PublicationPointerHistory,
     PublicationObservation,
     PublicationStream,
     PublicationVersion,
@@ -62,6 +63,7 @@ from app.services.team_matchup_repository import (
 )
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
+from tests.support.pointer_history import pointer_history, revoked_fences
 
 
 UTC = timezone.utc
@@ -3649,6 +3651,17 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
     assert statuses[corrected.publication_id] == (
         "active" if enabled else "candidate"
     )
+    # The activated candidate the correction invalidated is revoked; one that
+    # never activated has no history, and the corrected version has a row
+    # only when it was composed active.
+    assert pointer_history(engine, stream_key) == (
+        [
+            (stale_two.publication_id, "2025-26", 1, True),
+            (corrected.publication_id, "2025-26", 2, False),
+        ]
+        if enabled
+        else [(stale_two.publication_id, "2025-26", 1, True)]
+    )
     if enabled:
         assert pointer is not None
         assert pointer["active_publication_id"] == corrected.publication_id
@@ -3660,3 +3673,289 @@ def test_correction_invalidates_same_game_candidates_across_cutoffs(
         assert pointer is not None
         assert pointer["active_publication_id"] is None
         assert "active" not in statuses.values()
+
+
+def _three_activated_refreshes(engine):
+    """Three activated refreshes of one game, with a fourth, corrected, source."""
+
+    publications = PublicationService(engine, clock=lambda: AS_OF)
+    stream_key = "history_ledger"
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=True,
+    )
+    sources = ("history-1", "history-2", "history-3", "history-corrected")
+    with engine.begin() as connection:
+        catalog_binding = _bind_manifest_catalog(
+            connection, (), AS_OF, "history-manifest",
+        )
+        connection.execute(CollectionManifest.__table__.insert().values(
+            manifest_id="history-manifest",
+            season="2025-26",
+            cutoff=AS_OF,
+            collect_before=AS_OF + timedelta(days=1000),
+            accepted_versions="[1]",
+            scopes='["canonical_game_ledger"]',
+            checksum="history-manifest",
+            status="active",
+            created_at=AS_OF,
+            **catalog_binding,
+        ))
+        connection.execute(CollectionObservation.__table__.insert(), [
+            {
+                "observation_id": source_id,
+                "client_observation_id": source_id,
+                "collector_id": "test",
+                "manifest_id": "history-manifest",
+                "environment": "testing",
+                "provider": "pbp",
+                "observation_type": "canonical_game_ledger",
+                "scope": json.dumps({
+                    "game_id": "game-1",
+                    "surface": "canonical_game_ledger",
+                }),
+                "season": "2025-26",
+                "cutoff": AS_OF,
+                "schema_version": 1,
+                "checksum": str(index + 1) * 64,
+                "payload": json.dumps({"revision": index}),
+                "payload_bytes": 14,
+                "retrieved_at": AS_OF + timedelta(minutes=index),
+                "accepted_at": AS_OF + timedelta(minutes=index),
+            }
+            for index, source_id in enumerate(sources)
+        ])
+    activated = []
+    for index, source_id in enumerate(sources[:3]):
+        _bind_current_ledger_source(
+            engine, game_id="game-1", observation_id=source_id, cutoff=AS_OF,
+        )
+        activated.append(publications.recompose_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF,
+            payload={"value": 10 + index}, provenance={source_id: "game-1"},
+            reason="ledger refresh",
+        ))
+    return publications, stream_key, sources, activated
+
+
+@pytest.mark.parametrize("rolled_back", [False, True], ids=("superseded", "rollback"))
+def test_correction_revokes_previously_activated_superseded_and_rollback_history(
+    tmp_path, rolled_back,
+):
+    """Corrected evidence stays unreachable through any activated publication."""
+
+    engine = _engine(tmp_path, f"history-{rolled_back}.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(
+        engine
+    )
+    if rolled_back:
+        restored = publications.rollback(
+            stream_key, reason="restore the prior ledger",
+            expected_fence=publications.current(stream_key).fence,
+        )
+    publications.register_stream(
+        stream_key,
+        provider="ledger",
+        owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose",
+        enabled=False,
+    )
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+
+    publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+        provenance={sources[3]: "game-1"}, reason="correction",
+        corrected_provenance={sources[3]: "game-1"},
+    )
+
+    history = pointer_history(engine, stream_key)
+    assert [(row[0], row[3]) for row in history] == (
+        [(version.publication_id, True) for version in activated]
+        + ([(restored.publication_id, True)] if rolled_back else [])
+    )
+    # The active publication was cleared by the correction at a new fence, which
+    # the revoked active publication's row records.
+    with engine.connect() as connection:
+        cleared = connection.execute(select(PublicationPointer.__table__.c.fence).where(
+            PublicationPointer.stream_key == stream_key,
+        )).scalar_one()
+    assert revoked_fences(engine, stream_key)[-1] == cleared
+    assert cleared == (history[-1][2] + 1)
+
+
+@pytest.mark.parametrize("window", ["first_version_write", "after_enumeration"])
+def test_a_concurrent_rollback_cannot_escape_a_correction_on_postgres(window):
+    """The correction locks the pointer before it enumerates what is stale.
+
+    A rollback that races the enumeration must either be seen by the
+    correction or wait for it; it can never leave a stale publication active.
+    """
+
+    import os
+    import threading
+
+    from sqlalchemy import event, text
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL is not set; skipping Postgres integration test")
+    engine = create_engine(url)
+
+    def reset_schema():
+        with engine.begin() as connection:
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+
+    reset_schema()
+    run_migrations(engine)
+    try:
+        publications, stream_key, sources, activated = _three_activated_refreshes(
+            engine
+        )
+        publications.register_stream(
+            stream_key,
+            provider="ledger",
+            owner="railway",
+            required_observations=("canonical_game_ledger",),
+            publication_strategy="ledger_compose",
+            enabled=False,
+        )
+        _bind_current_ledger_source(
+            engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+        )
+        racing = {"thread": None, "outcome": []}
+
+        def rollback_concurrently():
+            try:
+                racing["outcome"].append(PublicationService(
+                    engine, clock=lambda: AS_OF
+                ).rollback(stream_key, reason="concurrent restore"))
+            except ControlPlaneError as error:
+                racing["outcome"].append(error)
+
+        @event.listens_for(engine, "after_cursor_execute")
+        def interleave(connection, cursor, statement, *_):
+            earliest = statement.startswith("UPDATE publication_versions SET status=")
+            enumerated = (
+                "JOIN collection_observations" in statement
+                and "publication_observations.publication_id IN" in statement
+            )
+            if racing["thread"] is None and (
+                earliest if window == "first_version_write" else enumerated
+            ):
+                racing["thread"] = threading.Thread(target=rollback_concurrently)
+                racing["thread"].start()
+                # Unfixed, the rollback commits here or deadlocks the correction.
+                racing["thread"].join(timeout=3)
+
+        publications.compose_inactive_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+            provenance={sources[3]: "game-1"}, reason="correction",
+            corrected_provenance={sources[3]: "game-1"},
+        )
+        assert racing["thread"] is not None
+        racing["thread"].join(timeout=30)
+        assert not racing["thread"].is_alive()
+
+        with engine.connect() as connection:
+            active = connection.execute(select(
+                PublicationPointer.__table__.c.active_publication_id
+            ).where(PublicationPointer.stream_key == stream_key)).scalar_one()
+            unrevoked = connection.execute(select(
+                PublicationPointerHistory.__table__.c.publication_id
+            ).where(
+                PublicationPointerHistory.stream_key == stream_key,
+                PublicationPointerHistory.revoked_at.is_(None),
+            )).scalars().all()
+        assert active is None
+        assert unrevoked == []
+        # The rollback waited for the correction and found nothing to restore;
+        # neither side was aborted by a deadlock.
+        assert len(racing["outcome"]) == 1
+        assert isinstance(racing["outcome"][0], ControlPlaneError)
+    finally:
+        reset_schema()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=("active", "inactive"))
+def test_rollback_cannot_restore_a_target_a_correction_withdrew(tmp_path, enabled):
+    engine = _engine(tmp_path, f"withdrawn-{enabled}.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(engine)
+    publications.register_stream(
+        stream_key, provider="ledger", owner="railway",
+        required_observations=("canonical_game_ledger",),
+        publication_strategy="ledger_compose", enabled=enabled,
+    )
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+    if enabled:
+        corrected = publications.recompose_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+            provenance={sources[3]: "game-1"}, reason="correction",
+        )
+    else:
+        corrected = publications.compose_inactive_ledger(
+            stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+            provenance={sources[3]: "game-1"}, reason="correction",
+            corrected_provenance={sources[3]: "game-1"},
+        )
+
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        publications.rollback(stream_key, reason="restore the withdrawn generation")
+
+    unrevoked = [row[0] for row in pointer_history(engine, stream_key) if not row[3]]
+    assert unrevoked == ([corrected.publication_id] if enabled else [])
+
+
+@pytest.mark.parametrize("family", [False, True], ids=("ordinary", "family"))
+def test_a_correction_clears_a_revoked_rollback_target(tmp_path, family):
+    """A target an earlier rollback revoked can still be corrected away."""
+
+    engine = _engine(tmp_path, f"revoked-target-{family}.sqlite3")
+    publications, stream_key, sources, activated = _three_activated_refreshes(engine)
+
+    def register(strategy, enabled):
+        publications.register_stream(
+            stream_key, provider="ledger", owner="railway",
+            required_observations=(
+                ("canonical_game_ledger",) if strategy == "ledger_compose" else ()
+            ),
+            publication_strategy=strategy, enabled=enabled,
+        )
+
+    def rollback(reason):
+        if family:
+            return publications.rollback_publication_family(
+                (stream_key,), reason=reason
+            )[0]
+        return publications.rollback(stream_key, reason=reason)
+
+    register("replace", True)
+    publications.compose(
+        stream_key, season="2026-27", cutoff=AS_OF, payload={"value": 20},
+        expected_fence=activated[-1].fence,
+    )
+    rollback("restore the previous season")
+    rollback("toggle forward")  # legitimate: the 2025-26 restore is now revoked
+    register("ledger_compose", False)
+    _bind_current_ledger_source(
+        engine, game_id="game-1", observation_id=sources[3], cutoff=AS_OF,
+    )
+
+    publications.compose_inactive_ledger(
+        stream_key, season="2025-26", cutoff=AS_OF, payload={"value": 30},
+        provenance={sources[3]: "game-1"}, reason="correction",
+        corrected_provenance={sources[3]: "game-1"},
+    )
+
+    with pytest.raises(ControlPlaneError, match="rollback_unavailable"):
+        rollback("restore the corrected-away evidence")

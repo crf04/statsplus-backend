@@ -3243,6 +3243,41 @@ or ledger fact. Activation and rollback both move the fenced pointer atomically
 and preserve the last-good Publication, so no competing source of truth is ever
 silently restored.
 
+#### Retained pointer history
+
+`publication_versions.status = superseded` cannot say whether a version ever
+served: it marks a normally replaced active, a candidate that never activated,
+and both sides of a rollback. `publication_pointers` keeps only the current
+publication and one previous id. `publication_pointer_history` (migration 057)
+is the append-only record of what each stream pointer actually named: stream,
+publication, season, the pointer fence the move produced, `activated_at`, and a
+nullable `revoked_at`. Every path that moves a pointer writes its row in the
+same transaction: composition (including repair-group promotion), explicit
+stream activation, family promotion, rollback, and family rollback. A rollback
+stamps `revoked_at` on the publication it withdraws and appends a row for the
+version it restores; corrected-ledger invalidation stamps `revoked_at` on every
+invalidated publication that had activated, whatever its status has become
+(superseded and rollback versions included). `revoked_fence` records the
+pointer generation at the revocation, including the new fence of a pointer the
+correction cleared. A publication replaced by a later
+one is not revoked, so a past season's last activation stays retained after a
+newer season activates. A candidate that never activated has no row. The
+migration seeds one row per current active pointer, so the authority already
+serving at deploy time is captured without inference, and it must deploy before
+the first publication of a new season. `prune_history` never deletes a
+publication that has an unrevoked history row, since a later rollback can make it
+the served authority again; history rows carry no
+foreign key and outlive any pruned payload, and a read whose projection is gone
+stays unavailable.
+
+A completed game of a season before the published season reads its focal rows
+(`focal_game_rows`) from the latest unrevoked `player_game_logs` history row for
+the game's season, through that publication's indexed projection. A later
+season than the published one (a rolled-back newer season), a season with no
+unrevoked row, or a retained publication without a projection stays
+unavailable. An explicit `NBA_CURRENT_SEASON` pin keeps its precedence, and
+scoring evidence still comes from the published season.
+
 ### Canonical athlete catalog
 
 `AthleteCatalogService` owns the application tables `athlete_catalog` and

@@ -111,16 +111,21 @@ def focal_game_rows(
 ):
     """One completed game's canonical rows, or ``None`` with no authority.
 
-    A game of the published season reads the request's snapshot. A game of any
-    other season has no publication authority to read: the active pointer
-    names only the evidence season, and no retained record says which of that
-    season's other versions was activated and never revoked (``superseded``
-    covers replaced candidates and rolled-back publications alike). Such a
-    game's rows are therefore unavailable rather than guessed.
+    A game of the published season reads the request's snapshot. A game of an
+    earlier season reads the publication the pointer history retains for that
+    season: the latest activation a rollback or corrected evidence has not
+    revoked, never a candidate that never activated. A game of a later season
+    (a rolled-back newer season), or of an earlier one with no retained
+    activation, has no authority and is unavailable rather than guessed.
     """
 
     if evidence_season is not None and season != evidence_season:
-        return None
+        if season > evidence_season:
+            return None
+        retained = getattr(player_logs, "retained_game_rows", None)
+        if retained is None:
+            return None
+        return retained(season, game_id, connection=connection)
     return call_with_read_scope(
         player_logs.list_game_rows,
         season,
