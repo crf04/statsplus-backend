@@ -935,7 +935,7 @@ def test_pruning_an_activated_publication_preserves_its_parity_adjudication(life
             artifact_id="artifact", publication_id=first.publication_id,
             payload_checksum="a" * 64, stream_key=STREAM, season="2025-26",
             cutoff=CUTOFF, status="pending_adjudication", report='{"difference": 1}',
-            created_at=CUTOFF, decision="approve", adjudicated_by="operator",
+            created_at=CUTOFF, decision="approved", adjudicated_by="operator",
             adjudicated_at=CUTOFF, adjudication_reason="reviewed source evidence",
         ))
     second = _compose(publications, "2025-26", points=11, expected_fence=first.fence)
@@ -947,7 +947,7 @@ def test_pruning_an_activated_publication_preserves_its_parity_adjudication(life
     assert artifact is not None
     assert (artifact.artifact_id, artifact.publication_id, artifact.report,
             artifact.decision, artifact.adjudicated_by, artifact.adjudication_reason) == (
-        "artifact", first.publication_id, '{"difference": 1}', "approve", "operator",
+        "artifact", first.publication_id, '{"difference": 1}', "approved", "operator",
         "reviewed source evidence",
     )
     with Session(engine) as session:

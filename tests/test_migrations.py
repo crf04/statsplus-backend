@@ -3442,7 +3442,7 @@ def test_parity_artifact_migration_preserves_legacy_adjudication_and_reruns(tmp_
             "status, report, created_at, decision, adjudicated_by, adjudicated_at, "
             "adjudication_reason) VALUES "
             "('audit', 'old-publication', :checksum, 'player_game_logs', '2025-26', :stamp, "
-            "'pending_adjudication', '{\"difference\": 1}', :stamp, 'approve', "
+            "'pending_adjudication', '{\"difference\": 1}', :stamp, 'approved', "
             "'operator', :stamp, 'source checked')"
         ), {"stamp": stamp, "checksum": "a" * 64})
         before = connection.execute(table.select()).all()

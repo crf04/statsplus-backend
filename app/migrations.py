@@ -2483,9 +2483,12 @@ def _drop_repair_group_member_publication_foreign_key(connection: Connection) ->
             ))
 
 
-
 def _drop_parity_artifact_publication_foreign_key(connection: Connection) -> None:
-    """Keep adjudication evidence after its publication payload is pruned."""
+    """Keep adjudication evidence after its publication payload is pruned.
+
+    Rerun-safe: acts only while the foreign key exists. The table has no
+    inbound references, so SQLite rebuilds it from the current model.
+    """
 
     from app.models.canonical_game_ledger import LedgerParityArtifact
 
@@ -2518,6 +2521,7 @@ def _drop_parity_artifact_publication_foreign_key(connection: Connection) -> Non
             connection.execute(text(
                 f"ALTER TABLE {quoted} DROP CONSTRAINT {preparer.quote(key['name'])}"
             ))
+
 
 def _add_publication_player_game_log_game_index(connection: Connection) -> None:
     """Index the projection's ``(publication_id, game_id)`` filter.
