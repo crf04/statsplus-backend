@@ -114,7 +114,7 @@ class NBADateParser:
         # Pattern: "since/after/until/before [month] [day] [year]". A stated
         # year wins; the current year is only the fallback.
         suffix = (
-            r'\b\.?(?:\s+(\d{1,2})(?:st|nd|rd|th)?\b)?'
+            r'\b\.?(?:\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\b)?'
             r'(?:(?:\s*,\s*|\s+)(\d{4})\b)?'
         )
         month_patterns = [

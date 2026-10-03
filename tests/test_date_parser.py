@@ -75,6 +75,8 @@ def _parser_on_2026_10_03(monkeypatch, runtime_settings):
         ("games until Mar. 15, 2024", "2024-03-15"),
         ("games before Mar. 15, 2024", "2024-03-14"),
         ("games until March 1,2024", "2024-03-01"),
+        ("games until March the 15th, 2024", "2024-03-15"),
+        ("games before March the 15th, 2024", "2024-03-14"),
         ("games since March 2nd 2024", "2024-03-02"),
         # Month shortcuts, full and abbreviated.
         ("games since March 5", "2026-03-05"),
