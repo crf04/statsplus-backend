@@ -1,9 +1,17 @@
-"""The game_logs schema advertises the filters the NL path can now emit."""
+"""The game_logs schema advertises filters the game-log query actually accepts."""
+
+from datetime import date
+
+import pytest
 
 from app.config.query_schemas import ENDPOINT_SCHEMAS
+from app.models.game_logs import GameLogQuery
 
 
-def test_game_logs_schema_accepts_an_inclusive_end_date():
-    params = ENDPOINT_SCHEMAS["game_logs"]["optional_params"]
+@pytest.mark.parametrize("name", ["date_filter", "date_to"])
+def test_game_logs_schema_date_examples_parse_as_query_dates(name):
+    example = ENDPOINT_SCHEMAS["game_logs"]["optional_params"][name]["example"]
 
-    assert params["date_to"]["description"] == "Inclusive end date filter in YYYY-MM-DD format"
+    query = GameLogQuery(season_filter="2025-26", **{name: example})
+
+    assert getattr(query, name) == date.fromisoformat(example)
