@@ -47,7 +47,8 @@ class QueryComponents:
     # Time-related filters
     time_period: Optional[str] = None  # "recent", "season", "month", etc.
     game_count: Optional[int] = None   # Number of games for "last X games"
-    date_range: Optional[str] = None   # Start date for filtering
+    date_range: Optional[str] = None   # Start date for filtering ("since"/"after")
+    date_to: Optional[str] = None      # Inclusive end date for filtering ("until"/"before")
     
     # Filtering criteria
     opponent_filters: List[Tuple[str, int]] = field(default_factory=list)  # [(filter_type, rank), ...]
@@ -1108,7 +1109,11 @@ class BaseQueryParser:
         # Extract other components with position tracking
         components.team_name = self._extract_team_name(query, doc)
         components.time_period, components.game_count = self._extract_time_period_with_coverage(query, coverage)
-        components.date_range = self._extract_date_filter_with_coverage(query, coverage)
+        parsed_date = self._extract_date_filter_with_coverage(query, coverage)
+        if parsed_date and self._is_end_date(query):
+            components.date_to = parsed_date
+        else:
+            components.date_range = parsed_date
         components.location = self._extract_location_with_coverage(query, coverage)
         components.opponent_filters = self._extract_opponent_filters_with_coverage(query, coverage)
         components.minutes_filter = self._extract_minutes_filter_with_coverage(query, coverage)
@@ -1371,6 +1376,14 @@ class BaseQueryParser:
             logger.warning("Date parsing failed for %r: %s", query, e)
             return None
     
+    def _is_end_date(self, query: str) -> bool:
+        """True when the query's date is an "until"/"before" end date."""
+        try:
+            return self.date_parser.get_date_components(query)['date_type'] == 'end_date'
+        except Exception as e:
+            logger.warning("Date type detection failed for %r: %s", query, e)
+            return False
+
     def _extract_location(self, query: str) -> Optional[str]:
         """
         Extract the location filter (home/away) from the query.

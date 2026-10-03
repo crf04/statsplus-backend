@@ -37,6 +37,7 @@ COMPARED_FIELDS = (
     "minutes_filter",
     "self_filters",
     "date_filter",
+    "date_to",
     "season",
 )
 
@@ -88,6 +89,7 @@ def comparable_view(result: dict) -> dict:
         "minutes_filter": [int(bound) for bound in minutes] if minutes else None,
         "self_filters": sorted(_self_filter(entry) for entry in result.get("self_filters") or []),
         "date_filter": _text(result.get("date_filter")),
+        "date_to": _text(result.get("date_to")),
         "season": _text(result.get("season")),
     }
 

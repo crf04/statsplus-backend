@@ -176,6 +176,7 @@ class NLService:
             'teams_against': teams_against,
             'minutes_filter': minutes_filter,
             'date_filter': llm_query.date_range,
+            'date_to': None,
             'self_filters': self_filters,
             'rank_filter': rank_filter,
             'season': llm_query.season or self.settings.nba.current_season,
@@ -229,6 +230,7 @@ class NLService:
             'teams_against': teams_against,
             'minutes_filter': parsed_components.minutes_filter,
             'date_filter': parsed_components.date_range,
+            'date_to': parsed_components.date_to,
             'self_filters': parsed_components.self_filters,
             'rank_filter': rank_filter,
             'season': getattr(

@@ -107,18 +107,19 @@ class NBADateParser:
             
             return date_obj.strftime("%Y-%m-%d")
         
-        # Pattern: "since/after [month]"
+        # Pattern: "since/after/until/before [month] [day]"
         month_patterns = [
-            r'(?:since|after|from)\s+(january|february|march|april|may|june|july|august|september|october|november|december)',
-            r'(?:since|after|from)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'
+            r'(?:since|after|from|before|until)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{1,2})(?!\d))?',
+            r'(?:since|after|from|before|until)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\s+(\d{1,2})(?!\d))?'
         ]
         
         for pattern in month_patterns:
             match = re.search(pattern, query)
             if match:
                 month_name = match.group(1)
+                day = match.group(2) or "1"
                 # Use dateparser to get the date
-                date_str = f"{month_name} 1, {self.current_year}"
+                date_str = f"{month_name} {day}, {self.current_year}"
                 parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
                     return parsed.strftime("%Y-%m-%d")

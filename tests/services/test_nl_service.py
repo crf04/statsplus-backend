@@ -590,3 +590,50 @@ def test_nl_query_route_rejects_malformed_bodies(make_client, seeded_db_url,
 
     assert response.status_code == 400
     assert response.get_json()["error"]["code"] == "invalid_input"
+
+
+# --- end dates: "until"/"before" are date_to, "since"/"after" are date_filter --
+
+
+@pytest.mark.parametrize(
+    ("query", "date_filter", "date_to"),
+    [
+        ("LeBron games until March 1", None, "2026-03-01"),
+        ("LeBron games before March 15", None, "2026-03-15"),
+        ("LeBron games since March 1", "2026-03-01", None),
+        ("LeBron games after March 1", "2026-03-01", None),
+    ],
+)
+def test_nl_query_route_maps_start_and_end_dates(make_client, seeded_db_url,
+                                                 authenticate, query, date_filter,
+                                                 date_to):
+    headers = authenticate()
+    client = make_client(seeded_db_url)
+    # Pin the year the parser assumes for a month and day without one.
+    client.application.extensions["dependencies"].nl_service.nl_parser.date_parser.current_year = 2026
+
+    response = client.post("/api/nl-query", headers=headers, json={"query": query})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["date_filter"] == date_filter
+    assert payload["date_to"] == date_to
+
+
+def test_an_nlp_end_date_phrase_fills_only_date_to():
+    parsed = components(player_name="LeBron James", date_to="2026-03-01")
+
+    result = make_service(parser=StubParser(parsed)).process_query("LeBron until March 1")
+
+    assert result["date_filter"] is None
+    assert result["date_to"] == "2026-03-01"
+
+
+def test_llm_start_dates_stay_on_date_filter_with_no_end_date():
+    llm = StubLLM(llm_parse(date_range="2026-03-01"))
+    parser = RosterParser(components(confidence=0.2, should_use_llm=True))
+
+    result = make_service(llm_service=llm, parser=parser).process_query("q")
+
+    assert result["date_filter"] == "2026-03-01"
+    assert result["date_to"] is None

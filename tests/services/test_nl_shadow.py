@@ -328,3 +328,15 @@ def test_the_summary_reads_prefixed_log_lines_and_ignores_the_rest():
     assert summary["disagreements_by_field"] == {"opponent_filters": 1, "location": 1}
     assert summary["median_latency_ms"] == 900
     assert [example["query"] for example in summary["examples"]] == ["q"]
+
+
+def test_an_end_date_difference_is_a_disagreement():
+    nlp = nl_result(date_to="2026-03-01")
+    llm = nl_result(date_filter="2026-03-01")
+
+    assert nl_shadow.differences(
+        nl_shadow.comparable_view(nlp), nl_shadow.comparable_view(llm)
+    ) == {
+        "date_filter": {"nlp": None, "llm": "2026-03-01"},
+        "date_to": {"nlp": "2026-03-01", "llm": None},
+    }
