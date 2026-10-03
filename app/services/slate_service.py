@@ -7,6 +7,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from nba_api.stats.static import teams as nba_teams
+
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.domain.freshness import (
     exact_age_seconds,
@@ -242,9 +244,22 @@ class SlateService:
         return {
             "team_id": int(team["id"]),
             "tricode": str(team["tricode"]),
-            "name": str(team["name"]),
+            "name": SlateService.team_name(team),
             "targetable_player_count": 0,
         }
+
+    @staticmethod
+    def team_name(team: Mapping[str, Any]) -> str | None:
+        """The stored team name, else the NBA's name for the team id, else null.
+
+        A catalog row can carry a null name; it must never become ``"None"``.
+        """
+
+        name = team.get("name")
+        if name is not None and str(name).strip():
+            return str(name)
+        known = nba_teams.find_team_name_by_id(int(team["id"]))
+        return known["full_name"] if known else None
 
 
 __all__ = ["SlateService"]

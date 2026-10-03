@@ -2713,3 +2713,20 @@ def test_current_matchup_declares_its_mode_and_keeps_its_existing_fields():
         "coverage",
         "experience",
     }
+
+
+def test_matchup_never_serialises_a_null_team_name_as_the_string_none():
+    event = _event()
+    event["home_team"] = {"id": BOS, "name": None, "tricode": "BOS"}
+    event["away_team"] = {"id": LAL, "name": None, "tricode": "LAL"}
+
+    payload = _service(events=RecordedEvents(events=[event])).get_matchup(
+        game_id=GAME_ID
+    )
+
+    assert payload["game"]["away_team"]["name"] == "Los Angeles Lakers"
+    assert payload["game"]["home_team"]["name"] == "Boston Celtics"
+    assert [team["name"] for team in payload["teams"]] == [
+        "Los Angeles Lakers",
+        "Boston Celtics",
+    ]
