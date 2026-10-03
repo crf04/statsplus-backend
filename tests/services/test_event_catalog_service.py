@@ -589,6 +589,7 @@ def test_null_team_names_ingested_into_the_catalog_serialise_without_the_string_
         datetime(2026, 4, 10, tzinfo=timezone.utc),
         datetime(2026, 4, 12, tzinfo=timezone.utc),
     )
+    assert (event["away_team_name"], event["home_team_name"]) == ("", "")
     game = SlateService._game(event, classification="Regular Season", canonical_kind="regular_season")
 
     assert game["away_team"]["name"] == "Detroit Pistons"
