@@ -554,3 +554,44 @@ def test_a_configured_catalog_ttl_is_the_exact_duration_it_gates_on(tmp_path):
     assert service.get_freshness("2025-26", now=now + timedelta(seconds=1800))[
         "max_age_seconds"
     ] == Decimal(1800)
+
+
+def test_null_team_names_ingested_into_the_catalog_serialise_without_the_string_none(
+    tmp_path,
+):
+    from sqlalchemy.orm import Session
+
+    from app.services.collection_control import CollectionControlService
+
+    engine = _engine(tmp_path)
+    now = datetime(2026, 4, 9, tzinfo=timezone.utc)
+    with Session(engine) as session:
+        CollectionControlService._upsert_event_catalog_row(
+            session,
+            "2025-26",
+            {
+                "nba_game_id": "0022501000",
+                "home_team_id": 1610612766,
+                "home_team_name": None,
+                "home_team_tricode": "CHA",
+                "away_team_id": 1610612765,
+                "away_team_name": None,
+                "away_team_tricode": "DET",
+                "scheduled_at": "2026-04-10T23:00:00+00:00",
+                "status_text": "Final",
+            },
+            now,
+        )
+        session.commit()
+
+    (event,) = EventCatalogRepository(engine).list_events_between(
+        "2025-26",
+        datetime(2026, 4, 10, tzinfo=timezone.utc),
+        datetime(2026, 4, 12, tzinfo=timezone.utc),
+    )
+    game = SlateService._game(event, classification="Regular Season", canonical_kind="regular_season")
+
+    assert game["away_team"]["name"] == "Detroit Pistons"
+    # Ingestion accepts only real NBA team ids, so both resolve; the unknown-id
+    # null is covered by the serialiser tests.
+    assert game["home_team"]["name"] == "Charlotte Hornets"

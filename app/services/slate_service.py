@@ -250,14 +250,14 @@ class SlateService:
 
     @staticmethod
     def team_name(team: Mapping[str, Any]) -> str | None:
-        """The stored team name, else the NBA's name for the team id, else null.
+        """The stored team name (blank or "None" is missing), else the NBA's name for the team id, else null.
 
         A catalog row can carry a null name; it must never become ``"None"``.
         """
 
         name = team.get("name")
-        if name is not None and str(name).strip():
-            return str(name)
+        if name is not None and str(name).strip() not in {"", "None"}:
+            return str(name).strip()
         known = nba_teams.find_team_name_by_id(int(team["id"]))
         return known["full_name"] if known else None
 
