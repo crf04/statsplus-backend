@@ -1629,7 +1629,7 @@ class MatchupService:
         return {
             "team_id": team_id,
             "tricode": str(team["tricode"]),
-            "name": str(team["name"]),
+            "name": SlateService.team_name(team),
             "defense_sheet": sheets,
             "defensive_columns": {
                 key: {

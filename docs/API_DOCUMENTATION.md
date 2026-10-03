@@ -229,6 +229,10 @@ midnights to a half-open UTC query window, including across DST transitions,
 so it does not read the whole season per request. Games are ordered by tip
 time, then `game_id`.
 
+A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
+`teams[]`) is a string or `null`. It is the stored catalog name, else the NBA's
+name for `team_id`, else `null`; it is never the string `"None"`.
+
 ```json
 {
   "slate_date": "2026-01-02",
