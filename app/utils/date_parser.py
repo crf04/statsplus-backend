@@ -109,19 +109,21 @@ class NBADateParser:
         
         # Pattern: "since/after/until/before [month] [day]"
         month_patterns = [
-            r'(?:since|after|from|before|until)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{1,2})(?!\d))?',
-            r'(?:since|after|from|before|until)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\s+(\d{1,2})(?!\d))?'
+            r'(since|after|from|before|until)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{1,2})(?!\d))?',
+            r'(since|after|from|before|until)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\s+(\d{1,2})(?!\d))?'
         ]
         
         for pattern in month_patterns:
             match = re.search(pattern, query)
             if match:
-                month_name = match.group(1)
-                day = match.group(2) or "1"
+                prefix, month_name = match.group(1), match.group(2)
+                day = match.group(3) or "1"
                 # Use dateparser to get the date
                 date_str = f"{month_name} {day}, {self.current_year}"
                 parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
+                    if prefix == "before":
+                        parsed -= timedelta(days=1)
                     return parsed.strftime("%Y-%m-%d")
         
         # Pattern: "last month", "this month"
@@ -153,9 +155,20 @@ class NBADateParser:
                 date_str = match.group(1)
                 parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
+                    # "before X" excludes X; the date is an inclusive end date.
+                    if self._is_before(query):
+                        parsed -= timedelta(days=1)
                     return parsed.strftime("%Y-%m-%d")
         
         return None
+    
+    @staticmethod
+    def _is_before(query: str) -> bool:
+        """True for "before" phrasing, with the same precedence as date_type."""
+        query = query.lower()
+        if any(word in query for word in ['since', 'after', 'from']):
+            return False
+        return 'before' in query
     
     def _parse_with_dateparser(self, query: str) -> Optional[str]:
         """Use dateparser library for general date parsing."""
