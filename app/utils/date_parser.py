@@ -111,10 +111,12 @@ class NBADateParser:
             
             return date_obj.strftime("%Y-%m-%d")
         
-        # Pattern: "since/after/until/before [month] [day]"
+        # Pattern: "since/after/until/before [month] [day] [year]". A stated
+        # year wins; the current year is only the fallback.
+        suffix = r'\b(?:\s+(\d{1,2})(?:st|nd|rd|th)?\b)?(?:,?\s+(\d{4})\b)?'
         month_patterns = [
-            r'(since|after|from|before|until)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{1,2})(?!\d))?',
-            r'(since|after|from|before|until)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b(?:\s+(\d{1,2})(?!\d))?'
+            r'(since|after|from|before|until)\s+(january|february|march|april|may|june|july|august|september|october|november|december)' + suffix,
+            r'(since|after|from|before|until)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)' + suffix,
         ]
         
         for pattern in month_patterns:
@@ -122,8 +124,9 @@ class NBADateParser:
             if match:
                 month_name = match.group(2)
                 day = match.group(3) or "1"
+                year = match.group(4) or self.current_year
                 # Use dateparser to get the date
-                date_str = f"{month_name} {day}, {self.current_year}"
+                date_str = f"{month_name} {day}, {year}"
                 parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
                     return parsed.strftime("%Y-%m-%d")

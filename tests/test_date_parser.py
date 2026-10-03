@@ -68,6 +68,11 @@ def _parser_on_2026_10_03(monkeypatch, runtime_settings):
         ("games before February 29, 2024", "2024-02-28"),
         ("games before 2026-03-01", "2026-02-28"),
         ("games before 03/01/2026", "2026-02-28"),
+        ("games until Mar 1, 2024", "2024-03-01"),
+        ("games until March 2025", "2025-03-01"),
+        ("games before March 1st, 2024", "2024-02-29"),
+        ("games since Mar 5, 2024", "2024-03-05"),
+        ("games since March 2nd 2024", "2024-03-02"),
         # Month shortcuts, full and abbreviated.
         ("games since March 5", "2026-03-05"),
         ("games until March 15", "2026-03-15"),
@@ -92,3 +97,12 @@ def test_dates_resolve_to_literal_start_and_end_days(
     parser = _parser_on_2026_10_03(monkeypatch, runtime_settings)
 
     assert parser.parse_date_from_query(query) == expected
+
+
+@pytest.mark.parametrize(
+    "query", ["games since Marchetti returned", "games until Mayday", "games before Aprilia"]
+)
+def test_month_names_only_match_whole_words(monkeypatch, runtime_settings, query):
+    parser = _parser_on_2026_10_03(monkeypatch, runtime_settings)
+
+    assert parser.parse_date_from_query(query) is None
