@@ -2372,6 +2372,11 @@ class CollectionControlService(_SessionService):
                 completed.add(identity)
         return completed
 
+    @staticmethod
+    def _catalog_team_name(value: Any) -> str:
+        # The column is NOT NULL: a missing name is stored blank, never "None".
+        return "" if value is None else str(value).strip()[:128]
+
     @classmethod
     def _upsert_event_catalog_row(cls, session: Session, season: str,
                                    row: Mapping[str, Any], now: datetime) -> str:
@@ -2413,10 +2418,10 @@ class CollectionControlService(_SessionService):
         existing = session.get(EventCatalogEntry, game_id)
         values = {
             "season": season, "home_team_id": home_id,
-            "home_team_name": str(row.get("home_team_name", home_value)).strip()[:128],
+            "home_team_name": cls._catalog_team_name(row.get("home_team_name", home_value)),
             "home_team_tricode": cls._catalog_team_tricode(home_value, team_id=home_id),
             "away_team_id": away_id,
-            "away_team_name": str(row.get("away_team_name", away_value)).strip()[:128],
+            "away_team_name": cls._catalog_team_name(row.get("away_team_name", away_value)),
             "away_team_tricode": cls._catalog_team_tricode(away_value, team_id=away_id),
             "scheduled_at": scheduled_at, "status_text": status[:128],
             "status_code": status_code, "postponed_status": postponed_status,

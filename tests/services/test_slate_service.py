@@ -708,3 +708,41 @@ def test_an_offseason_slate_reads_the_production_projection_pool_for_the_fallbac
     past = service.get_slate("2026-04-10")
     assert [game["game_id"] for game in past["games"]] == ["0022501150"]
     engine.dispose()
+
+
+def test_slate_never_serialises_a_null_team_name_as_the_string_none():
+    service = _service(
+        [
+            _event(
+                "001",
+                "2026-01-03T00:00:00+00:00",
+                away_team={"id": 1610612765, "name": None, "tricode": "DET"},
+                home_team={"id": 99, "name": None, "tricode": "XYZ"},
+            )
+        ]
+    )
+
+    game = service.get_slate("2026-01-02")["games"][0]
+
+    # A known NBA team id resolves to its real name; an unknown id is null.
+    assert game["away_team"]["name"] == "Detroit Pistons"
+    assert game["home_team"]["name"] is None
+
+
+@pytest.mark.parametrize("stored", ["None", " None ", "", "  "])
+def test_slate_treats_a_stored_none_string_or_blank_as_a_missing_name(stored):
+    service = _service(
+        [
+            _event(
+                "001",
+                "2026-01-03T00:00:00+00:00",
+                away_team={"id": 1610612765, "name": stored, "tricode": "DET"},
+                home_team={"id": 99, "name": stored, "tricode": "XYZ"},
+            )
+        ]
+    )
+
+    game = service.get_slate("2026-01-02")["games"][0]
+
+    assert game["away_team"]["name"] == "Detroit Pistons"
+    assert game["home_team"]["name"] is None
