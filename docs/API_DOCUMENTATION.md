@@ -180,6 +180,7 @@ Response shape:
   "teams_against": ["OPP_PTS"],
   "minutes_filter": null,
   "date_filter": null,
+  "date_to": null,
   "self_filters": [
     {
       "stat_column": "PTS",

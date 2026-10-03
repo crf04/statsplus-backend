@@ -48,6 +48,11 @@ ENDPOINT_SCHEMAS = {
                 "description": "Start date filter in YYYY-MM-DD format",
                 "example": "2024-01-01"
             },
+            "date_to": {
+                "type": "str",
+                "description": "Inclusive end date filter in YYYY-MM-DD format",
+                "example": "2024-03-01"
+            },
             "season_filter": {
                 "type": "str",
                 "default": CURRENT_SEASON,

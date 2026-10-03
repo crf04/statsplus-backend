@@ -46,6 +46,17 @@ class NBADateParser:
         Returns:
             Optional[str]: Date in YYYY-MM-DD format, or None if no date found
         """
+        resolved = self._resolve_date(query)
+        if resolved and self._is_before(query):
+            # "before X" excludes X, and every date here is inclusive. Applied
+            # once, after resolution, so no strategy subtracts for itself.
+            resolved = (
+                datetime.strptime(resolved, "%Y-%m-%d") - timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+        return resolved
+
+    def _resolve_date(self, query: str) -> Optional[str]:
+        """The date a query names, before any "before" adjustment."""
         query_lower = query.lower()
         
         # Step 1: Check for NBA-specific dates
@@ -53,15 +64,16 @@ class NBADateParser:
         if nba_date:
             return nba_date
         
-        # Step 2: Check for relative date expressions
-        relative_date = self._parse_relative_dates(query_lower)
-        if relative_date:
-            return relative_date
-        
-        # Step 3: Check for explicit date patterns
+        # Step 2: Check for explicit date patterns; a stated year must beat
+        # the month shortcut below, which assumes the current year.
         explicit_date = self._parse_explicit_dates(query)
         if explicit_date:
             return explicit_date
+        
+        # Step 3: Check for relative date expressions
+        relative_date = self._parse_relative_dates(query_lower)
+        if relative_date:
+            return relative_date
         
         # Step 4: Use dateparser library for general parsing
         general_date = self._parse_with_dateparser(query)
@@ -74,15 +86,7 @@ class NBADateParser:
         """Parse NBA-specific date expressions."""
         for phrase, date in self.nba_dates.items():
             if phrase in query:
-                # Handle "since", "after", "before" prefixes
-                if any(prefix in query for prefix in ["since", "after", "from"]):
-                    return date
-                elif "before" in query:
-                    # Return day before for "before" queries
-                    date_obj = datetime.strptime(date, "%Y-%m-%d")
-                    return (date_obj - timedelta(days=1)).strftime("%Y-%m-%d")
-                else:
-                    return date
+                return date
         return None
     
     def _parse_relative_dates(self, query: str) -> Optional[str]:
@@ -107,18 +111,25 @@ class NBADateParser:
             
             return date_obj.strftime("%Y-%m-%d")
         
-        # Pattern: "since/after [month]"
+        # Pattern: "since/after/until/before [month] [day] [year]". A stated
+        # year wins; the current year is only the fallback.
+        suffix = (
+            r'\b\.?(?:\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\b)?'
+            r'(?:(?:\s*,\s*|\s+)(\d{4})\b)?'
+        )
         month_patterns = [
-            r'(?:since|after|from)\s+(january|february|march|april|may|june|july|august|september|october|november|december)',
-            r'(?:since|after|from)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)'
+            r'(since|after|from|before|until)\s+(january|february|march|april|may|june|july|august|september|october|november|december)' + suffix,
+            r'(since|after|from|before|until)\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)' + suffix,
         ]
         
         for pattern in month_patterns:
             match = re.search(pattern, query)
             if match:
-                month_name = match.group(1)
+                month_name = match.group(2)
+                day = match.group(3) or "1"
+                year = match.group(4) or self.current_year
                 # Use dateparser to get the date
-                date_str = f"{month_name} 1, {self.current_year}"
+                date_str = f"{month_name} {day}, {year}"
                 parsed = dateparser.parse(date_str, languages=["en"])
                 if parsed:
                     return parsed.strftime("%Y-%m-%d")
@@ -155,6 +166,14 @@ class NBADateParser:
                     return parsed.strftime("%Y-%m-%d")
         
         return None
+    
+    @staticmethod
+    def _is_before(query: str) -> bool:
+        """True for "before" phrasing, with the same precedence as date_type."""
+        query = query.lower()
+        if any(word in query for word in ['since', 'after', 'from']):
+            return False
+        return 'before' in query
     
     def _parse_with_dateparser(self, query: str) -> Optional[str]:
         """Use dateparser library for general date parsing."""
