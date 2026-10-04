@@ -81,6 +81,98 @@ for local requests. The bypass is rejected when `FLASK_ENV=production`; never
 enable it in a deployed environment. It is accepted only in an explicit
 development or test environment.
 
+## Response provenance
+
+Every route the StatsPlus MCP reads returns one top-level `provenance` block
+(crf04/statsplus#107): [Get Slate](#get-slate), [Get Matchup](#get-matchup),
+[Get Unscheduled Matchup](#get-unscheduled-matchup),
+[Get Game Logs](#get-game-logs),
+[Resolve every Target](#resolve-every-target-against-one-slate-date), and
+[Preview a Draft Target](#preview-a-draft-target). Player search
+(`GET /api/players`) returns names only and carries none. Error responses are
+unchanged and carry no block. The block is additive: no existing field changes.
+
+```json
+"provenance": {
+  "generation": [
+    {
+      "stream_key": "player_game_logs",
+      "publication_id": "535c64bb-f7ff-451b-99bb-afa554a02fae",
+      "season": "2025-26",
+      "coverage_cutoff": "2026-01-15T10:00:00+00:00",
+      "version": 1,
+      "status": "active",
+      "freshness": "stale",
+      "age_seconds": 7200,
+      "source": "database",
+      "legacy_fallback_allowed": false,
+      "payload_checksum": "be9334f6...",
+      "retrieved_at": "2026-01-15T10:00:00+00:00",
+      "fence": 1,
+      "unavailable_reason": null,
+      "manifest_id": null,
+      "event_catalog_publication_id": null,
+      "event_catalog_checksum": null
+    }
+  ],
+  "sources": {
+    "schedule": {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+    "pool": {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+    "injuries": {"status": "unavailable", "retrieved_at": null}
+  }
+}
+```
+
+`generation` lists, sorted by `stream_key`, one entry per Publication stream
+the read depended on, taken from the request's own Publication snapshot -- the
+same capture its facts were read from, never a second one. Each entry is the
+per-stream shape the Matchup's stream-keyed `provenance` map already uses,
+with no new fields, and every field except `freshness` passes through
+unchanged. `freshness` is normalised to exactly one of:
+
+- `fresh` or `stale` when the stream was served. The label is the age of the
+  stored Publication against the stream's registered freshness rule, the same
+  rule the operations diagnostics use (`cutoff_current` 1 hour,
+  `daily_recheck` 24 hours, `seven_day` 7 days).
+- `unavailable` for every read that could not be served: a missing pointer, an
+  unregistered or disabled stream, an inactive stream on its legacy fallback, a
+  season mismatch, or a checksum, payload, projection, or authority refusal.
+  This holds even when the reader computed an age-based label for the refused
+  row (the stream-keyed Matchup map keeps that raw label).
+
+A stream the registry can never serve (`unavailable_reason`
+`provider_window_unsupported`, for example `synergy:l15`, Synergy opponent
+L15) is not a dependency and is omitted.
+
+Which streams each route lists:
+
+| Route | `generation` | `sources` |
+| --- | --- | --- |
+| Slate | `[]` (reads no Publication) | `schedule`, `pool` |
+| Matchup | the Matchup snapshot's streams | `schedule`, `pool`, `injuries` |
+| Unscheduled Matchup | the Matchup snapshot's streams | `{}` |
+| Game logs | `player_game_logs`, the four Player Diet streams, and the five Season Defense Sheet streams | `{}` |
+| Targets resolve | the one snapshot every composed Matchup shared; `[]` when no Target composed a Matchup | `schedule`, `pool` of the Slate it read |
+| Draft Target preview | the preview's single union capture (Backtest and Matchup), idle or not | `schedule`, `pool` of the Slate it read |
+
+Game logs list the Season Defense Sheet streams whether or not the query has
+`teams_against` filters: every row's `PLAYTYPE_RTG` crosses the player's
+play-type Diet with that Season window, and Team Filters rank from it.
+Without a configured Publication reader, or when a read captured no snapshot,
+`generation` is `[]`.
+
+`sources` names the dependencies that are not Publications, each as
+`{status, retrieved_at}` copied from the response's own `freshness` surface
+with its status unchanged (`fresh`, `stale`, `missing`, `unavailable`, ...).
+
+**Matchup reconciliation.** Get Matchup and Get Unscheduled Matchup already
+return a top-level `provenance` object keyed by `stream_key`. Those entries
+stay byte-for-byte; `generation` and `sources` are two more keys inside the
+same object (no stream is named either). `coverage` and `freshness` are
+unchanged. Every other route's `provenance` holds only those two keys. Targets
+resolve and preview carry one block for the whole response, not one per
+Target.
+
 ## Health Endpoints
 
 ### Database Health
@@ -232,6 +324,9 @@ time, then `game_id`.
 A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
 `teams[]`) is a string or `null`. It is the stored catalog name, else the NBA's
 name for `team_id`, else `null`; it is never the string `"None"`.
+
+The response also carries the shared [`provenance`](#response-provenance)
+block: an empty `generation` and the `schedule` and `pool` sources.
 
 ```json
 {
@@ -1009,6 +1104,8 @@ between equivalent legacy and ledger sources preserves the established public
 matchup freshness timestamp byte-for-byte where the compatibility contract
 requires it. Source-specific publication timestamps and lineage remain in the
 additive provenance envelope.
+The same `provenance` object also carries the shared
+[`generation` and `sources`](#response-provenance) keys.
 ### Historical Matchup participants
 
 In historical mode `players` is not a Player Pool. It is populated from the
@@ -1287,6 +1384,8 @@ documented above.
 `freshness` carries `stats`, `team_matchups`, `player_diets`, and
 `player_game_logs`, shaped as in the game Matchup. `provenance` and `coverage`
 are the same additive publication envelope.
+Its `provenance` also carries the shared
+[`generation`](#response-provenance) and an empty `sources`.
 
 ### Get Matchup Selection
 
@@ -1462,6 +1561,9 @@ which are exactly the games `season_averages` averages, so no filter changes it.
 It is `0` when the season has no games (and `season_averages` is then `[]`).
 The filtered count is the length of `game_logs`. Together they let a caller
 state a sample as "12 of 71 games".
+
+Every successful response also carries the shared
+[`provenance`](#response-provenance) block naming the Publications it read.
 
 ```json
 {
@@ -2982,6 +3084,8 @@ Returns every Target the account holds, evaluated against one ET Slate Date.
 [Get Slate](#get-slate): absent is the current ET Slate Date, and a value that
 is not `YYYY-MM-DD` is `400 invalid_input` with that route's message. The
 response echoes the resolved `slate_date`.
+It also carries one shared [`provenance`](#response-provenance) block for
+the whole response.
 
 The request makes no NBA, PBP, or DFS call. It composes the Slate for the date
 and, for each game one of the caller's opponents plays, the same stored Matchup
@@ -3505,7 +3609,8 @@ between a write and the rows already held, and a preview is not a write. The
 account's Targets are unchanged after any number of previews.
 
 The response is the [Backtest](#backtest-one-target-over-the-season-to-date)
-shape for the draft plus `today`:
+shape for the draft plus `today` and one shared
+[`provenance`](#response-provenance) block (omitted from the example below):
 
 ```json
 {

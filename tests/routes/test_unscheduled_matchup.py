@@ -364,7 +364,7 @@ def test_unscheduled_matchup_reads_one_publication_snapshot(tmp_path):
         "publication_season_is_complete",
     ]
     assert all(snapshot is generation for _name, snapshot in seen)
-    assert response.get_json()["provenance"] == {}
+    assert response.get_json()["provenance"] == {"generation": [], "sources": {}}
 
 
 def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):

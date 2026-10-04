@@ -90,6 +90,7 @@ from app.services.research_season import (
     published_capture,
     research_season,
 )
+from app.services.response_provenance import provenance_block
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -1085,6 +1086,11 @@ class MatchupService:
             **self._publication_metadata(
                 season,
                 publication_snapshot,
+                {
+                    "schedule": schedule_freshness,
+                    "pool": pool.freshness,
+                    "injuries": injury_freshness,
+                },
             ),
         }
 
@@ -1338,8 +1344,14 @@ class MatchupService:
         self,
         season: str,
         publication_snapshot=None,
+        sources: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Add the immutable reader's truthful, additive provenance."""
+        """Add the immutable reader's truthful, additive provenance.
+
+        The stream-keyed map is the existing contract; the shared
+        ``generation``/``sources`` block (crf04/statsplus#107) rides in the
+        same object, built from the same snapshot.
+        """
 
         if publication_snapshot is not None:
             metadata = publication_snapshot.metadata()
@@ -1358,7 +1370,10 @@ class MatchupService:
                 "coverage_cutoffs": [],
             }
         return {
-            "provenance": metadata["streams"],
+            "provenance": {
+                **metadata["streams"],
+                **provenance_block(publication_snapshot, sources),
+            },
             "coverage": {
                 "mixed_cutoff": bool(metadata["mixed_cutoff"]),
                 "mixed_freshness": bool(metadata["mixed_freshness"]),

@@ -42,6 +42,7 @@ from app.services.matchup_snapshot import (
 )
 from app.services.target_conditions import date_is_kept, minutes_are_kept
 from app.services.research_season import published_capture
+from app.services.response_provenance import provenance_block, slate_sources
 
 
 _WINDOW_NAMES = ("season", "last_15")
@@ -119,7 +120,18 @@ class TargetResolutionService:
                 target, games, read_matchups, matchups=matchups, slate_date=slate["slate_date"]
             )
             (idle if resolved["game"] is None else live).append(resolved)
-        return {"slate_date": slate["slate_date"], "targets": live + idle}
+        return {
+            "slate_date": slate["slate_date"],
+            "targets": live + idle,
+            # The one generation every composed Matchup read; none when no
+            # Target composed one, or when each Matchup captured its own.
+            "provenance": provenance_block(
+                matchups.snapshot
+                if read_matchups and isinstance(matchups, SnapshotMatchups)
+                else None,
+                slate_sources(slate),
+            ),
+        }
 
     def _request_matchups(self) -> MatchupReader:
         """One reader for this whole resolve, reading no provider.
@@ -175,6 +187,20 @@ class TargetResolutionService:
         service's own reader is not consulted then.
         """
 
+        return self.today_on_slate(target, matchups=matchups)[0]
+
+    def today_on_slate(
+        self,
+        target: Mapping[str, Any],
+        *,
+        matchups: MatchupReader | None = None,
+    ) -> tuple[dict[str, Any] | None, Mapping[str, Any]]:
+        """``today``, paired with the Slate it was resolved against.
+
+        A caller reporting where its answer came from states that one Slate's
+        freshness instead of reading the Slate a second time.
+        """
+
         slate = self.slates.get_slate(None)
         resolved = self._resolve_target(
             target,
@@ -184,8 +210,11 @@ class TargetResolutionService:
             slate_date=slate["slate_date"],
         )
         if resolved["game"] is None:
-            return None
-        return {"game": resolved["game"], "fit_count": len(resolved["players"])}
+            return None, slate
+        return (
+            {"game": resolved["game"], "fit_count": len(resolved["players"])},
+            slate,
+        )
 
     def _resolve_target(
         self,

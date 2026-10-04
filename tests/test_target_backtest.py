@@ -2656,7 +2656,12 @@ def test_the_lab_preview_never_touches_the_result_cache(
             redis_client=client,
             cache_clock=lambda: 0.0,
         ),
-        resolutions=SimpleNamespace(today=lambda _target, *, matchups: None),
+        resolutions=SimpleNamespace(
+            today_on_slate=lambda _target, *, matchups: (
+                None,
+                {"freshness": {"schedule": {"status": "fresh"}, "pool": {}}},
+            )
+        ),
         matchups=object(),
         injuries=object(),
         settings=RuntimeSettings(

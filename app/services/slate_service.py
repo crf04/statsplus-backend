@@ -30,6 +30,7 @@ from app.errors import InvalidInputError, ProviderUnavailableError
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
+from app.services.response_provenance import provenance_block
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -163,22 +164,25 @@ class SlateService:
                         team["team_id"], 0
                     )
 
+        schedule_freshness = {
+            "status": (
+                self._schedule_freshness(retrieved_at, observed_at=observed_at)
+                if retrieved_at
+                else "missing"
+            ),
+            "retrieved_at": retrieved_at,
+        }
         return {
             "slate_date": slate_date.isoformat(),
             "freshness": {
-                "schedule": {
-                    "status": (
-                        self._schedule_freshness(
-                            retrieved_at, observed_at=observed_at
-                        )
-                        if retrieved_at
-                        else "missing"
-                    ),
-                    "retrieved_at": retrieved_at,
-                },
+                "schedule": schedule_freshness,
                 "pool": pool_freshness,
             },
             "games": games,
+            # A Slate reads no Publication; its sources are its own freshness.
+            "provenance": provenance_block(
+                None, {"schedule": schedule_freshness, "pool": pool_freshness}
+            ),
         }
 
     def _parse_slate_date(self, value: str | None) -> date:

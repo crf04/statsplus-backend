@@ -684,6 +684,8 @@ class GameLogResponse(BaseModel):
     arrays; ``next_game`` remains ``null`` under the existing game-log
     contract. ``season_game_count`` is how many games the unfiltered season
     holds: exactly the games ``season_averages`` averages (crf04/statsplus#88).
+    ``provenance`` is the shared ``generation``/``sources`` block naming the
+    Publications the read used (crf04/statsplus#107).
     """
 
     game_logs: list[dict[str, Any]]
@@ -691,6 +693,7 @@ class GameLogResponse(BaseModel):
     season_averages: list[dict[str, Any]]
     season_game_count: int = Field(ge=0)
     next_game: str | None = None
+    provenance: dict[str, Any]
 
 
 __all__ = [
