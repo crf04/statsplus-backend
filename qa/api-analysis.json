@@ -1,0 +1,835 @@
+{
+ "r1-slate-2026-04-10.json": {
+  "status": 200,
+  "generation": [],
+  "seasons": {},
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": null,
+  "sources": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [],
+  "generationTriplesEqualR2": true
+ },
+ "r2-matchup-0022501174.json": {
+  "status": 200,
+  "generation": [
+   [
+    "assist_locations_l15",
+    "2025-26",
+    "bcbaacc2-5172-43f6-83ed-dbfd40ca6340",
+    "stale"
+   ],
+   [
+    "assist_locations_season",
+    "2025-26",
+    "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+    "stale"
+   ],
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_l15",
+    "2025-26",
+    "312b0e45-0aee-47c8-a35b-047a532c8930",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_season",
+    "2025-26",
+    "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_l15",
+    "2025-26",
+    "bd7d6f40-07bd-40ad-951f-c124f19e3e17",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_season",
+    "2025-26",
+    "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "player_per36",
+    "2025-26",
+    "09a07a9e-b08c-4016-962b-a079f9ee248b",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ],
+   [
+    "synergy_play_types_opponent_season",
+    "2025-26",
+    "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+    "stale"
+   ],
+   [
+    "traditional_opponent_l15",
+    "2025-26",
+    "37f3a1bc-e8d9-4ff7-a59e-ae842415aa1d",
+    "stale"
+   ],
+   [
+    "traditional_opponent_season",
+    "2025-26",
+    "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 14,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [
+   "/assist_locations_l15/age_seconds: 3686138 -> 3688263",
+   "/assist_locations_season/age_seconds: 3683803 -> 3685928",
+   "/exact_shot_zones/age_seconds: 2199206 -> 2201330",
+   "/exact_shot_zones_opponent_l15/age_seconds: 2412748 -> 2414872",
+   "/exact_shot_zones_opponent_season/age_seconds: 2412748 -> 2414872",
+   "/grouped_shot_types/age_seconds: 2199521 -> 2201646",
+   "/grouped_shot_types_opponent_l15/age_seconds: 3524044 -> 3526169",
+   "/grouped_shot_types_opponent_season/age_seconds: 3527346 -> 3529471",
+   "/player_game_logs/age_seconds: 3635215 -> 3637340",
+   "/player_per36/age_seconds: 3683832 -> 3685957",
+   "/synergy_play_types/age_seconds: 2199521 -> 2201646",
+   "/synergy_play_types_opponent_season/age_seconds: 3549222 -> 3551347",
+   "/traditional_opponent_l15/age_seconds: 2589960 -> 2592084",
+   "/traditional_opponent_season/age_seconds: 2590002 -> 2592127"
+  ],
+  "generationTriplesEqualR2": true
+ },
+ "r2b-matchup-0022501171.json": {
+  "status": 200,
+  "generation": [
+   [
+    "assist_locations_l15",
+    "2025-26",
+    "bcbaacc2-5172-43f6-83ed-dbfd40ca6340",
+    "stale"
+   ],
+   [
+    "assist_locations_season",
+    "2025-26",
+    "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+    "stale"
+   ],
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_l15",
+    "2025-26",
+    "312b0e45-0aee-47c8-a35b-047a532c8930",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_season",
+    "2025-26",
+    "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_l15",
+    "2025-26",
+    "bd7d6f40-07bd-40ad-951f-c124f19e3e17",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_season",
+    "2025-26",
+    "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "player_per36",
+    "2025-26",
+    "09a07a9e-b08c-4016-962b-a079f9ee248b",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ],
+   [
+    "synergy_play_types_opponent_season",
+    "2025-26",
+    "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+    "stale"
+   ],
+   [
+    "traditional_opponent_l15",
+    "2025-26",
+    "37f3a1bc-e8d9-4ff7-a59e-ae842415aa1d",
+    "stale"
+   ],
+   [
+    "traditional_opponent_season",
+    "2025-26",
+    "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 14,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "hasProvenance": true
+ },
+ "r3-unscheduled-cade-cha.json": {
+  "status": 200,
+  "generation": [
+   [
+    "assist_locations_l15",
+    "2025-26",
+    "bcbaacc2-5172-43f6-83ed-dbfd40ca6340",
+    "stale"
+   ],
+   [
+    "assist_locations_season",
+    "2025-26",
+    "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+    "stale"
+   ],
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_l15",
+    "2025-26",
+    "312b0e45-0aee-47c8-a35b-047a532c8930",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_season",
+    "2025-26",
+    "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_l15",
+    "2025-26",
+    "bd7d6f40-07bd-40ad-951f-c124f19e3e17",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_season",
+    "2025-26",
+    "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "player_per36",
+    "2025-26",
+    "09a07a9e-b08c-4016-962b-a079f9ee248b",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ],
+   [
+    "synergy_play_types_opponent_season",
+    "2025-26",
+    "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+    "stale"
+   ],
+   [
+    "traditional_opponent_l15",
+    "2025-26",
+    "37f3a1bc-e8d9-4ff7-a59e-ae842415aa1d",
+    "stale"
+   ],
+   [
+    "traditional_opponent_season",
+    "2025-26",
+    "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 14,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {},
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [
+   "/assist_locations_l15/age_seconds: 3686139 -> 3688268",
+   "/assist_locations_season/age_seconds: 3683804 -> 3685933",
+   "/exact_shot_zones/age_seconds: 2199206 -> 2201336",
+   "/exact_shot_zones_opponent_l15/age_seconds: 2412748 -> 2414878",
+   "/exact_shot_zones_opponent_season/age_seconds: 2412748 -> 2414878",
+   "/grouped_shot_types/age_seconds: 2199522 -> 2201652",
+   "/grouped_shot_types_opponent_l15/age_seconds: 3524045 -> 3526174",
+   "/grouped_shot_types_opponent_season/age_seconds: 3527346 -> 3529476",
+   "/player_game_logs/age_seconds: 3635216 -> 3637346",
+   "/player_per36/age_seconds: 3683833 -> 3685963",
+   "/synergy_play_types/age_seconds: 2199522 -> 2201652",
+   "/synergy_play_types_opponent_season/age_seconds: 3549222 -> 3551352",
+   "/traditional_opponent_l15/age_seconds: 2589960 -> 2592090",
+   "/traditional_opponent_season/age_seconds: 2590003 -> 2592132"
+  ],
+  "generationTriplesEqualR2": true
+ },
+ "r4-game-logs-lebron-last5.json": {
+  "status": 200,
+  "generation": [
+   [
+    "assist_locations_season",
+    "2025-26",
+    "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+    "stale"
+   ],
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_season",
+    "2025-26",
+    "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_season",
+    "2025-26",
+    "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ],
+   [
+    "synergy_play_types_opponent_season",
+    "2025-26",
+    "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+    "stale"
+   ],
+   [
+    "traditional_opponent_season",
+    "2025-26",
+    "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 9,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {},
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [],
+  "generationTriplesEqualR2": true
+ },
+ "r4b-game-logs-lebron-teams-against.json": {
+  "status": 200,
+  "generation": [
+   [
+    "assist_locations_season",
+    "2025-26",
+    "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+    "stale"
+   ],
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_season",
+    "2025-26",
+    "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_season",
+    "2025-26",
+    "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ],
+   [
+    "synergy_play_types_opponent_season",
+    "2025-26",
+    "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+    "stale"
+   ],
+   [
+    "traditional_opponent_season",
+    "2025-26",
+    "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 9,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {},
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [],
+  "generationTriplesEqualR2": true
+ },
+ "r5-targets-resolve-2026-04-10.json": {
+  "status": 200,
+  "generation": [
+   [
+    "assist_locations_l15",
+    "2025-26",
+    "bcbaacc2-5172-43f6-83ed-dbfd40ca6340",
+    "stale"
+   ],
+   [
+    "assist_locations_season",
+    "2025-26",
+    "ce6454d8-523d-4d3c-b8e7-b4b48b9015d1",
+    "stale"
+   ],
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_l15",
+    "2025-26",
+    "312b0e45-0aee-47c8-a35b-047a532c8930",
+    "stale"
+   ],
+   [
+    "exact_shot_zones_opponent_season",
+    "2025-26",
+    "96ade3d4-ffff-4a50-afb8-b03af236cf18",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_l15",
+    "2025-26",
+    "bd7d6f40-07bd-40ad-951f-c124f19e3e17",
+    "stale"
+   ],
+   [
+    "grouped_shot_types_opponent_season",
+    "2025-26",
+    "7344bb54-fbcd-4c19-a2e5-0ce967149dff",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "player_per36",
+    "2025-26",
+    "09a07a9e-b08c-4016-962b-a079f9ee248b",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ],
+   [
+    "synergy_play_types_opponent_season",
+    "2025-26",
+    "6a7a95e6-dc8a-43a3-bea7-f3328436e921",
+    "stale"
+   ],
+   [
+    "traditional_opponent_l15",
+    "2025-26",
+    "37f3a1bc-e8d9-4ff7-a59e-ae842415aa1d",
+    "stale"
+   ],
+   [
+    "traditional_opponent_season",
+    "2025-26",
+    "2bbaba13-ff2f-402b-9b8a-ef21f6390aef",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 14,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [
+   "/targets[0]/target/created_at: \"2026-10-04T20:59:15.365197+00:00\" -> \"2026-10-04T21:34:39.955887+00:00\"",
+   "/targets[0]/target/updated_at: \"2026-10-04T20:59:15.365197+00:00\" -> \"2026-10-04T21:34:39.955887+00:00\"",
+   "/targets[1]/target/created_at: \"2026-10-04T20:59:14.473861+00:00\" -> \"2026-10-04T21:34:39.087687+00:00\"",
+   "/targets[1]/target/updated_at: \"2026-10-04T20:59:14.473861+00:00\" -> \"2026-10-04T21:34:39.087687+00:00\""
+  ],
+  "legacyStreamKeyedDiffVsR2": [],
+  "generationTriplesEqualR2": true
+ },
+ "r6-targets-preview-orl.json": {
+  "status": 200,
+  "generation": [
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 4,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [],
+  "generationTriplesEqualR2": true
+ },
+ "r6b-targets-preview-bos.json": {
+  "status": 200,
+  "generation": [
+   [
+    "exact_shot_zones",
+    "2025-26",
+    "b38d49db-8685-426c-966f-a8c737722cbb",
+    "stale"
+   ],
+   [
+    "grouped_shot_types",
+    "2025-26",
+    "1c4bfb21-0038-433f-b3e9-eae7a7300965",
+    "stale"
+   ],
+   [
+    "player_assist_locations",
+    null,
+    null,
+    "unavailable"
+   ],
+   [
+    "player_game_logs",
+    "2025-26",
+    "1bf3a07a-741a-4f7c-9bef-977a22066b15",
+    "stale"
+   ],
+   [
+    "synergy_play_types",
+    "2025-26",
+    "f66ec097-0d08-4f00-8c3f-9e9fa05bffd3",
+    "stale"
+   ]
+  ],
+  "seasons": {
+   "2025-26": 4,
+   "null": 1
+  },
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": true,
+  "sources": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "hasProvenance": true,
+  "nonProvenanceDiffVsR2": [],
+  "legacyStreamKeyedDiffVsR2": [],
+  "generationTriplesEqualR2": true
+ },
+ "target-create-bos.json": {
+  "status": 201,
+  "generation": null,
+  "seasons": {},
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": null,
+  "sources": null,
+  "hasProvenance": false,
+  "nonProvenanceDiffVsR2": [
+   "/target/created_at: \"2026-10-04T20:59:15.365197+00:00\" -> \"2026-10-04T21:34:39.955887+00:00\"",
+   "/target/updated_at: \"2026-10-04T20:59:15.365197+00:00\" -> \"2026-10-04T21:34:39.955887+00:00\""
+  ]
+ },
+ "target-delete-2.json": {
+  "status": 200,
+  "generation": null,
+  "seasons": {},
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": null,
+  "sources": null,
+  "hasProvenance": false,
+  "nonProvenanceDiffVsR2": []
+ },
+ "x-matchup-error-no-block.json": {
+  "status": 404,
+  "generation": null,
+  "seasons": {},
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": null,
+  "sources": null,
+  "hasProvenance": false,
+  "nonProvenanceDiffVsR2": []
+ },
+ "x-players-no-block.json": {
+  "status": 200,
+  "generation": null,
+  "seasons": {},
+  "streamsListedTwice": [],
+  "sortedStreamThenSeason": null,
+  "sources": null,
+  "hasProvenance": false,
+  "nonProvenanceDiffVsR2": []
+ }
+}
