@@ -3587,7 +3587,9 @@ between a write and the rows already held, and a preview is not a write. The
 account's Targets are unchanged after any number of previews.
 
 The optional body field `season` takes exactly the values, default, and
-errors of the single Backtest's `season` query parameter, and a defender
+errors of the single Backtest's `season` query parameter. Only an omitted
+`season` applies the default; a present one must be a season string, so
+`"season": null` or any other non-string is `400 invalid_input`. A defender
 Condition is validated against the season the preview reads: the defender
 must have played for the opponent in **that** season. Saving a Target
 validates its defender in the default season, the one its saved Backtest

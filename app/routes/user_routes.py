@@ -289,6 +289,20 @@ def delete_saved_filter_set(saved_filter_set_id):
         'message': 'Saved filter set deleted'
     })
 
+def _requested_season(data):
+    """The preview body's requested season: absent is the default rule.
+
+    Only an omitted ``season`` applies the default; a present one must be a
+    season string, so an explicit ``null`` is refused like any other wrong
+    value (crf04/statsplus#104).
+    """
+    if 'season' not in data:
+        return None
+    if not isinstance(data['season'], str):
+        raise InvalidInputError("season must be a YYYY-YY season string.")
+    return data['season']
+
+
 def _target_body():
     """Return the submitted JSON object for a target write."""
     data = request.get_json(silent=True)
@@ -395,17 +409,18 @@ def preview_target():
         the game and the fit count
     """
     data = _target_body()
+    season = _requested_season(data)
 
     draft = user_service.validate_target_draft(
         opponent=data.get('opponent'),
         qualifiers=data.get('qualifiers'),
         note=data.get('note'),
         **({key: data[key] for key in ('conditions', 'stat_preferences') if key in data}),
-        season=data.get('season'),
+        season=season,
     )
     return jsonify({
         'success': True,
-        **target_preview_service.preview(draft, season=data.get('season')),
+        **target_preview_service.preview(draft, season=season),
     })
 
 @user_bp.route('/targets/backtests', methods=['GET'])

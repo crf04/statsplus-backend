@@ -1067,3 +1067,52 @@ def test_a_preview_names_its_season_reason_and_published_season(world):
         (body["season"], body["season_reason"], body["published_season"])
         for body in (fallback, requested)
     ] == [(LAST, "fallback_no_games", NEW), (LAST, "requested", NEW)]
+
+
+@pytest.mark.parametrize("season", [None, 2025, ["2025-26"], {"season": "2025-26"}])
+def test_an_explicit_preview_season_that_is_not_a_season_string_is_refused(
+    client, authenticate, served, dependencies, season
+):
+    dependencies.target_preview_service = TargetPreviewService(
+        backtests=dependencies.target_backtest_service,
+        resolutions=NoTonight(),
+        matchups=object(),
+        injuries=None,
+        settings=served.settings,
+        publication_reader=served.reader,
+    )
+    body = {"opponent": "OKC", "qualifiers": [CORNER_THREE]}
+
+    refused = client.post(
+        "/api/user/targets/preview", json={**body, "season": season}, headers=authenticate()
+    )
+
+    assert refused.status_code == 400
+    assert refused.get_json()["error"]["code"] == "invalid_input"
+
+
+class IdleTonight:
+    def today(self, *_args, **_kwargs):
+        return None
+
+
+def test_an_omitted_preview_season_alone_applies_the_default(
+    client, authenticate, served, dependencies
+):
+    dependencies.target_preview_service = TargetPreviewService(
+        backtests=dependencies.target_backtest_service,
+        resolutions=IdleTonight(),
+        matchups=object(),
+        injuries=None,
+        settings=served.settings,
+        publication_reader=served.reader,
+    )
+
+    response = client.post(
+        "/api/user/targets/preview",
+        json={"opponent": "OKC", "qualifiers": [CORNER_THREE]},
+        headers=authenticate(),
+    )
+
+    assert response.status_code == 200
+    assert _season(response.get_json()) == (NEW, "published")
