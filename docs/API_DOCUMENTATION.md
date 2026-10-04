@@ -123,9 +123,10 @@ unchanged and carry no block. The block is additive: no existing field changes.
 }
 ```
 
-`generation` lists, sorted by `stream_key`, one entry per Publication stream
-the read depended on, taken from the request's own Publication snapshot -- the
-same capture its facts were read from, never a second one. Each entry is the
+`generation` lists one entry per Publication stream the read depended on,
+taken from the request's own Publication snapshot -- the same capture its facts
+were read from, never a second one -- plus any retained prior-season
+Publication described below. Each entry is the
 per-stream shape the Matchup's stream-keyed `provenance` map already uses,
 with no new fields, and every field except `freshness` passes through
 unchanged. `freshness` is normalised to exactly one of:
@@ -144,15 +145,30 @@ A stream the registry can never serve (`unavailable_reason`
 `provider_window_unsupported`, for example `synergy:l15`, Synergy opponent
 L15) is not a dependency and is omitted.
 
+**Retained prior-season Publications.** A completed game from a season before
+the active player-log Publication's season (a 2025-26 game read after 2026-27
+activates) takes its participants and focal lines from the Publication the
+pointer history retains for that season, not from the snapshot. `generation`
+then also lists that retained Publication, in the same read shape: its own
+`publication_id`, `season`, `coverage_cutoff`, `version`, version `status`,
+the `fence` its activation recorded, and `freshness`/`age_seconds` from the
+same per-stream rule. It is listed because its rows were served, so its
+`freshness` is `fresh` or `stale`. The same `stream_key` can therefore appear
+twice, once per season; `season` tells the entries apart, and entries are
+sorted by `stream_key`, then `season`. The snapshot's entry for that stream is
+unchanged and still listed. This applies to the Matchup and to every Targets
+resolve or preview that composes such a game. The Matchup's stream-keyed map
+and `coverage` still describe the snapshot alone.
+
 Which streams each route lists:
 
 | Route | `generation` | `sources` |
 | --- | --- | --- |
 | Slate | `[]` (reads no Publication) | `schedule`, `pool`, `injuries` |
-| Matchup | the Matchup snapshot's streams | `schedule`, `pool`, `injuries` |
+| Matchup | the Matchup snapshot's streams, plus a past-season game's retained `player_game_logs` Publication | `schedule`, `pool`, `injuries` |
 | Unscheduled Matchup | the Matchup snapshot's streams | `{}` |
 | Game logs | `player_game_logs`, the four Player Diet streams, and the five Season Defense Sheet streams | `{}` |
-| Targets resolve | the one snapshot every composed Matchup shared; `[]` when no Target composed a Matchup | the Slate's `schedule`; `pool`, `injuries` of the composed Matchups' own reads (the Slate's when none was composed) |
+| Targets resolve | the one snapshot every composed Matchup shared, plus any retained Publication a composed Matchup read; `[]` when no Target composed a Matchup | the Slate's `schedule`; `pool`, `injuries` of the composed Matchups' own reads (the Slate's when none was composed) |
 | Draft Target preview | the preview's single union capture, narrowed to the Backtest's streams when no Matchup was composed (idle opponent) | as Targets resolve |
 
 Game logs list the Season Defense Sheet streams whether or not the query has

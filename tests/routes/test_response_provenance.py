@@ -964,3 +964,256 @@ def test_an_idle_preview_lists_only_the_streams_its_backtest_read(
         "sources": SLATE_SOURCES,
     }
     assert reader.captures == 1
+
+
+# --- A completed past-season game after the next season activates ------------
+
+
+#: When 2026-27 player logs activate (280 days after 2025-26's), and the
+#: request two hours after that.
+ACTIVATED_2026_27 = m.RETRIEVED_AT + timedelta(days=280)
+AFTER_ROLLOVER = ACTIVATED_2026_27 + timedelta(hours=2)
+PAST_GAME_ID = "0022500001"
+PAST_LAL_AT_BOS = res._game(
+    game_id=PAST_GAME_ID,
+    away=(m.LAL, "LAL", "Los Angeles Lakers"),
+    home=(m.BOS, "BOS", "Boston Celtics"),
+)
+
+
+def _past_event():
+    return {
+        **m._event(),
+        "nba_game_id": PAST_GAME_ID,
+        "scheduled_at": "2026-01-03T00:30:00+00:00",
+        "status_code": 3,
+        "status_text": "Final",
+    }
+
+
+class _PastEvents(m.RecordedEvents):
+    """The 2025-26 schedule holding one completed LAL @ BOS game."""
+
+    def __init__(self):
+        super().__init__([_past_event()])
+
+    def count_events(self, season):
+        return 1
+
+    def get_event(self, season, game_id):
+        assert season == "2025-26"
+        return _past_event() if game_id == PAST_GAME_ID else None
+
+    def latest_final_scheduled_at(self, season):
+        return None
+
+    def get_freshness(self, season, *, now):
+        return {"last_success_at": None, "fresh": False}
+
+
+class _NoInjuries:
+    def get_injuries(self, *, event, season, pool_players):
+        return _injury_result("unavailable", None)
+
+
+@pytest.fixture
+def rollover(tmp_path, monkeypatch):
+    """2025-26 logs, then 2026-27 logs activated; the 2025-26 one is retained.
+
+    A 2025-26 game's participants and focal lines come from the retained
+    2025-26 Publication, while every other stream reads the 2026-27 capture.
+    """
+
+    from sqlalchemy import select
+
+    from app.config.settings import NBASeasonSettings
+    from app.services.database_first_activation import DatabaseFirstPublicationReader
+    from app.services.matchup import MatchupService
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+    from app.services.player_pool import PlayerPool
+    from tests.services import test_matchup_selection_service as selection
+
+    engine, _, _, retained = selection._published_selection_service(
+        tmp_path, selection._default_rows()
+    )
+    selection._reseed_history_from_the_migration(engine)
+    selection._advance_to_next_season(engine, retained)
+    with engine.connect() as connection:
+        current = connection.execute(
+            select(PublicationVersion).where(PublicationVersion.season == "2026-27")
+        ).one()
+    # The Matchup doubles serve only the published 2026-27 evidence season.
+    monkeypatch.setattr(m, "SEASON", "2026-27")
+    reader = DatabaseFirstPublicationReader(engine, clock=lambda: AFTER_ROLLOVER)
+    # Unpinned: every read follows the active player-log Publication's season.
+    settings = RuntimeSettings(
+        environment="testing",
+        nba=NBASeasonSettings.model_construct(_fields_set=set(), current_season="2026-27"),
+    )
+    logs = PlayerGameLogRepository(
+        engine,
+        statistic_catalog=StatisticCatalog.load_default(),
+        stats_surface_season="2026-27",
+        clock=lambda: AFTER_ROLLOVER,
+        stats_surface_max_age=timedelta(hours=30),
+        publication_reader=reader,
+    )
+    matchups = MatchupService(
+        event_catalog=_PastEvents(),
+        player_pool=m.RecordedPool(PlayerPool((), {}, PlayerPool.unavailable_freshness())),
+        player_logs=logs,
+        player_diets=PlayerDietRepository(engine, publication_reader=reader),
+        team_matchups=m.RecordedTeamWindows(m._window(), m._window(last_15=True)),
+        stats_freshness=SimpleNamespace(get=lambda: m.StatsFreshness(m.RETRIEVED_AT)),
+        injuries=_NoInjuries(),
+        settings=settings,
+        statistic_catalog=StatisticCatalog.load_default(),
+        publication_reader=reader,
+        clock=lambda: AFTER_ROLLOVER,
+    )
+    player_game_logs = {
+        **_unregistered("player_game_logs"),
+        "unavailable_reason": None,
+        "status": "active",
+        "version": 1,
+        "fence": 2,
+    }
+    return SimpleNamespace(
+        engine=engine,
+        matchups=matchups,
+        logs=logs,
+        reader=reader,
+        settings=settings,
+        # Sorted by stream key, then season: the retained 2025-26
+        # Publication that named the participants, then the 2026-27 capture.
+        generation=[
+            entry
+            for key in MATCHUP_STREAMS
+            for entry in (
+                [
+                    {
+                        **player_game_logs,
+                        "publication_id": retained.publication_id,
+                        "season": "2025-26",
+                        "coverage_cutoff": "2026-01-15T10:00:00+00:00",
+                        "freshness": "stale",
+                        "age_seconds": 280 * 86400 + 7200,
+                        "payload_checksum": retained.checksum,
+                        "retrieved_at": "2026-01-15T10:00:00+00:00",
+                        "fence": 1,
+                    },
+                    {
+                        **player_game_logs,
+                        "publication_id": current.publication_id,
+                        "season": "2026-27",
+                        "coverage_cutoff": "2026-10-22T10:00:00+00:00",
+                        "freshness": "stale",
+                        "age_seconds": 7200,
+                        "payload_checksum": current.checksum,
+                        "retrieved_at": "2026-10-22T10:00:00+00:00",
+                    },
+                ]
+                if key == "player_game_logs"
+                else [_unregistered(key)]
+            )
+        ],
+    )
+
+
+def test_a_past_season_matchup_lists_the_retained_publication_its_participants_came_from(
+    client, dependencies, authenticate, rollover
+):
+    dependencies.matchup_service = rollover.matchups
+
+    response = client.get(
+        f"/api/games/matchup?game_id={PAST_GAME_ID}", headers=authenticate()
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    # LeBron's focal line is the retained 2025-26 game: 25 points.
+    assert [
+        (
+            player["name"],
+            player["focal_game_line"]["game_date"],
+            player["focal_game_line"]["stats"]["PTS"],
+        )
+        for player in body["players"]
+    ] == [("LeBron James", "2026-01-02", 25.0)]
+    assert body["experience"]["sections"]["participants"]["context"] == "completed_season"
+    assert body["provenance"]["generation"] == rollover.generation
+    # The existing stream-keyed entry still names only the 2026-27 capture.
+    assert body["provenance"]["player_game_logs"]["season"] == "2026-27"
+
+
+def test_resolve_lists_the_retained_publication_a_past_season_matchup_read(
+    client, dependencies, authenticate, rollover
+):
+    dependencies.target_resolution_service = TargetResolutionService(
+        targets=SimpleNamespace(list_targets=lambda uid: [_target("BOS")]),
+        slates=_Slate(listed=(PAST_LAL_AT_BOS,)),
+        matchups=rollover.matchups,
+        publication_reader=rollover.reader,
+        injuries=_NoInjuries(),
+        settings=rollover.settings,
+    )
+
+    response = client.get(
+        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate()
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["targets"][0]["availability"] == {
+        "status": "available",
+        "source": "game_logs",
+        "context": "completed_season",
+        "unavailable_reason": None,
+    }
+    assert body["provenance"]["generation"] == rollover.generation
+
+
+def test_the_preview_lists_the_retained_publication_a_past_season_matchup_read(
+    client, dependencies, authenticate, rollover
+):
+    dependencies.user_service.validate_target_draft = Mock(
+        side_effect=UserService(
+            db_engine=Mock(), settings=RuntimeSettings()
+        ).validate_target_draft
+    )
+    dependencies.target_preview_service = TargetPreviewService(
+        backtests=TargetBacktestService(
+            targets=object(),
+            player_logs=rollover.logs,
+            player_diets=PlayerDietRepository(
+                rollover.engine, publication_reader=rollover.reader
+            ),
+            statistic_catalog=StatisticCatalog.load_default(),
+            settings=rollover.settings,
+            publication_reader=rollover.reader,
+        ),
+        resolutions=TargetResolutionService(
+            targets=object(),
+            slates=_Slate(listed=(PAST_LAL_AT_BOS,)),
+            matchups=rollover.matchups,
+        ),
+        matchups=rollover.matchups,
+        injuries=_NoInjuries(),
+        settings=rollover.settings,
+        publication_reader=rollover.reader,
+    )
+
+    response = client.post(
+        "/api/user/targets/preview",
+        headers=authenticate(),
+        json={"opponent": "BOS", "qualifiers": [TRANSITION_25]},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    # Tonight's game is the completed one; its participants have no Diet.
+    assert (body["today"]["game"]["game_id"], body["today"]["fit_count"]) == (
+        PAST_GAME_ID,
+        0,
+    )
+    assert body["provenance"]["generation"] == rollover.generation

@@ -86,7 +86,7 @@ from app.services.publication_snapshot_calls import (
 from app.services.request_reads import request_read_scope
 from app.services.research_season import (
     event_season,
-    focal_game_rows,
+    focal_game_read,
     published_capture,
     research_season,
 )
@@ -946,8 +946,9 @@ class MatchupService:
         # The backend declares the mode so no client ever infers it from tip
         # dates, empty arrays, or freshness markers.
         historical = is_historical_matchup(event, pool_players)
+        retained_reads: tuple[Any, ...] = ()
         if historical:
-            players, participants_section = self._historical_participants(
+            players, participants_section, retained_reads = self._historical_participants(
                 schedule_season,
                 game_id,
                 team_ids,
@@ -1091,6 +1092,7 @@ class MatchupService:
                     "pool": pool.freshness,
                     "injuries": injury_freshness,
                 },
+                retained_reads,
             ),
         }
 
@@ -1103,11 +1105,13 @@ class MatchupService:
         evidence_season: str | None = None,
         publication_snapshot=None,
         connection: Connection | None = None,
-    ) -> tuple[tuple[_Participant, ...], dict[str, Any]]:
+    ) -> tuple[tuple[_Participant, ...], dict[str, Any], tuple[Any, ...]]:
         """Name the players with a complete canonical row for this game.
 
         ``season`` is the game's own; ``evidence_season`` is the request's
-        published season, which a past season's game no longer matches.
+        published season, which a past season's game no longer matches. The
+        third value is the retained Publication read a past season's rows came
+        from, empty when they came from the request's snapshot.
         """
 
         sync = call_with_read_scope(
@@ -1124,8 +1128,8 @@ class MatchupService:
                 "source": "player_game_logs",
                 "context": None,
                 "unavailable_reason": "game_logs_incomplete",
-            }
-        rows = focal_game_rows(
+            }, ()
+        focal = focal_game_read(
             self.player_logs,
             season,
             game_id,
@@ -1133,14 +1137,16 @@ class MatchupService:
             publication_snapshot=publication_snapshot,
             connection=connection,
         )
-        if rows is None:
+        if focal is None:
             # A season other than the published one holds no row authority.
             return (), {
                 "status": "unavailable",
                 "source": "player_game_logs",
                 "context": None,
                 "unavailable_reason": "game_logs_incomplete",
-            }
+            }, ()
+        rows, retained_read = focal
+        retained_reads = () if retained_read is None else (retained_read,)
         participants = tuple(
             _Participant(
                 canonical_player_id=int(record.player_id),
@@ -1165,13 +1171,13 @@ class MatchupService:
                 "source": "player_game_logs",
                 "context": None,
                 "unavailable_reason": "no_game_log_rows",
-            }
+            }, retained_reads
         return participants, {
             "status": "available",
             "source": "player_game_logs",
             "context": "completed_season",
             "unavailable_reason": None,
-        }
+        }, retained_reads
 
     @staticmethod
     def _pool_participants_section(
@@ -1345,12 +1351,14 @@ class MatchupService:
         season: str,
         publication_snapshot=None,
         sources: Mapping[str, Mapping[str, Any]] | None = None,
+        retained_reads: Sequence[Any] = (),
     ) -> dict[str, Any]:
         """Add the immutable reader's truthful, additive provenance.
 
         The stream-keyed map is the existing contract; the shared
         ``generation``/``sources`` block (crf04/statsplus#107) rides in the
-        same object, built from the same snapshot.
+        same object, built from the same snapshot plus any retained
+        prior-season Publication a past game's participants were read from.
         """
 
         if publication_snapshot is not None:
@@ -1372,7 +1380,11 @@ class MatchupService:
         return {
             "provenance": {
                 **metadata["streams"],
-                **provenance_block(publication_snapshot, sources),
+                **provenance_block(
+                    publication_snapshot,
+                    sources,
+                    also=[read.to_dict() for read in retained_reads],
+                ),
             },
             "coverage": {
                 "mixed_cutoff": bool(metadata["mixed_cutoff"]),

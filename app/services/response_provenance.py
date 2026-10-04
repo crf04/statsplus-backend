@@ -7,11 +7,13 @@ resolve and the Draft Target preview::
      "sources": {<name>: {"status": ..., "retrieved_at": ...}, ...}}
 
 ``generation`` is built from the request's own Publication snapshot -- the
-capture its facts were read from, never a second one -- so a client can tell
-which Publications an answer used and how old each was.  ``sources`` names the
-dependencies that are not Publications (the schedule, the player pool,
-injuries) with the existing ``status`` and ``retrieved_at`` of the read the
-answer used.
+capture its facts were read from, never a second one -- plus any retained
+prior-season Publication a past game's participants were read from, so a
+client can tell which Publications an answer used and how old each was.  One
+stream can appear twice, once per season; ``season`` tells the entries apart.
+``sources`` names the dependencies that are not Publications (the schedule,
+the player pool, injuries) with the existing ``status`` and ``retrieved_at``
+of the read the answer used.
 """
 
 from __future__ import annotations
@@ -38,11 +40,16 @@ def provenance_block(
     sources: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     streams: Collection[str] | None = None,
+    also: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Describe the generation ``snapshot`` captured and the named sources.
 
     ``streams`` narrows the generation to the streams the returned facts
-    used, when a capture covered more than they read.
+    used, when a capture covered more than they read.  ``also`` adds entries,
+    already in the read shape, for Publications the facts read outside the
+    snapshot (a retained prior-season one); an entry naming the same
+    stream, season and Publication as one already listed is not repeated.
+    The result is sorted by stream key, then season.
 
     A stream's ``freshness`` is the reader's age label (``fresh``/``stale``,
     from its per-stream freshness rule) only when the read could serve it;
@@ -65,6 +72,12 @@ def provenance_block(
         if not (read.available and read.freshness in {"fresh", "stale"}):
             entry["freshness"] = "unavailable"
         generation.append(entry)
+    listed = {_publication_key(entry) for entry in generation}
+    for entry in also:
+        if _publication_key(entry) not in listed:
+            listed.add(_publication_key(entry))
+            generation.append(dict(entry))
+    generation.sort(key=lambda entry: (entry["stream_key"], entry["season"] or ""))
     return {
         "generation": generation,
         "sources": {
@@ -75,6 +88,26 @@ def provenance_block(
             for name, freshness in (sources or {}).items()
         },
     }
+
+
+def _publication_key(entry: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+    return (entry["stream_key"], entry["season"], entry["publication_id"])
+
+
+def matchup_generation(
+    matchups: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Every generation entry the composed Matchups reported.
+
+    Each Matchup composed from a shared snapshot lists that snapshot's
+    streams and any retained Publication its own participants came from.
+    """
+
+    return [
+        entry
+        for matchup in matchups
+        for entry in (matchup.get("provenance") or {}).get("generation", ())
+    ]
 
 
 def least_fresh(reads: Iterable[Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -118,6 +151,7 @@ def target_sources(
 __all__ = [
     "UNAVAILABLE_SOURCE",
     "least_fresh",
+    "matchup_generation",
     "provenance_block",
     "target_sources",
 ]
