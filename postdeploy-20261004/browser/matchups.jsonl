@@ -1,0 +1,47 @@
+{"action":"doctor"}
+{"action":"open","path":"/matchups?date=2026-04-10"}
+{"action":"assert","target":{"role":"heading","name":"NOP @ BOS"}}
+{"action":"assert-response","path":"/api/games/slate","status":200,"method":"GET","query":{"date":"2026-04-10"}}
+{"action":"assert-response","method":"GET","path":"/api/user/targets/resolve","query":{"date":"2026-04-10"},"status":200}
+{"action":"assert","target":{"selector":".slate-targets:not(.is-unavailable)"}}
+{"action":"assert","target":{"selector":".slate-targets.is-unavailable"},"state":"hidden"}
+{"action":"proof","name":"slate-desktop"}
+{"action":"click","target":{"selector":"a[href='/matchups/0022501174']"}}
+{"action":"assert","url":"/matchups/0022501174"}
+{"action":"assert","target":{"role":"heading","name":"BOS Defense Sheet"}}
+{"action":"assert-response","path":"/api/games/matchup","status":200,"method":"GET","query":{"game_id":"0022501174"}}
+{"action":"assert","target":{"role":"button","name":"Last 15"},"state":"disabled"}
+{"action":"proof","name":"matchup-desktop"}
+{"action":"assert","target":{"role":"heading","name":"OPP REB"}}
+{"action":"click","target":{"within":{"role":"group","name":"Stat category"},"role":"button","name":"PTS"}}
+{"action":"assert","target":{"within":{"role":"group","name":"Stat category"},"role":"button","name":"PTS"},"attribute":"aria-pressed","value":"true"}
+{"action":"assert","target":{"role":"heading","name":"OPP REB"},"state":"hidden"}
+{"action":"assert","target":{"role":"heading","name":"Cut PTS"}}
+{"action":"viewport","name":"phone"}
+{"action":"click","target":{"within":{"role":"group","name":"Stat category"},"role":"button","name":"All"}}
+{"action":"assert","target":{"role":"heading","name":"OPP REB"}}
+{"action":"click","target":{"within":{"role":"group","name":"Stat category"},"role":"button","name":"PTS"}}
+{"action":"assert","target":{"role":"heading","name":"OPP REB"},"state":"hidden"}
+{"action":"assert","target":{"role":"heading","name":"Cut PTS"}}
+{"action":"assert-layout"}
+{"action":"proof","name":"matchup-phone"}
+{"action":"reload"}
+{"action":"assert","target":{"role":"heading","name":"BOS Defense Sheet"}}
+{"action":"assert-response","path":"/api/games/matchup","status":200,"method":"GET","query":{"game_id":"0022501174"}}
+{"action":"open","path":"/matchups?date=2026-08-01"}
+{"action":"assert","target":{"text":"No games on this slate."}}
+{"action":"assert-response","path":"/api/games/slate","status":200,"method":"GET","query":{"date":"2026-08-01"}}
+{"action":"assert-response","method":"GET","path":"/api/user/targets/resolve","query":{"date":"2026-08-01"},"status":200}
+{"action":"assert","target":{"selector":".slate-targets:not(.is-unavailable)"}}
+{"action":"proof","name":"slate-empty-phone"}
+{"action":"open","path":"/matchups?date=not-a-date"}
+{"action":"assert","target":{"role":"heading","name":"Invalid slate date"}}
+{"action":"assert","target":{"role":"alert"}}
+{"action":"assert-response","path":"/api/games/slate","status":400,"method":"GET","query":{"date":"not-a-date"}}
+{"action":"proof","name":"slate-invalid-phone"}
+{"action":"fill","target":{"label":"Slate date"},"value":"2026-04-10"}
+{"action":"assert","target":{"role":"heading","name":"NOP @ BOS"}}
+{"action":"assert-response","path":"/api/games/slate","status":200,"method":"GET","query":{"date":"2026-04-10"}}
+{"action":"assert-layout"}
+{"action":"proof","name":"slate-recovered-phone"}
+{"action":"cleanup"}

@@ -1,0 +1,25 @@
+{
+  "url": "http://127.0.0.1:5193/matchups?date=2026-04-10",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/matchups/slate-desktop.png",
+  "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/matchups/slate-desktop.aria.txt",
+  "responses": [
+    {
+      "at": "2026-10-04T22:15:52.907Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/games/slate",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:15:54.292Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/user/targets/resolve",
+      "status": 200
+    }
+  ]
+}

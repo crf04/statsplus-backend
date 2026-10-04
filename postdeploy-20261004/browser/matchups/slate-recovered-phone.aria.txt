@@ -1,0 +1,125 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- main:
+  - paragraph: NBA slate
+  - heading "Friday, April 10, 2026" [level=1]
+  - button "Previous date": ←
+  - text: Slate date
+  - textbox "Slate date": 2026-04-10
+  - button "Next date": →
+  - button "Today"
+  - text: 15 games
+  - group "Data freshness": Schedule is stale — as of 26d ago Player pool is unavailable
+  - region "Player pool":
+    - heading "Player pool" [level=2]
+    - paragraph: Past slate — the player pool is unavailable and no current pool is displayed. Game cards retain the returned targetable counts for this slate.
+  - list:
+    - listitem:
+      - heading "7:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "DET @ CHA, 7:00 PM, Final, 0 targetable players, DET 0, CHA 0, Open Team Sheets":
+            - /url: /matchups/0022501171
+            - heading "DET @ CHA" [level=3]
+            - text: Final Detroit Pistons at Charlotte Hornets
+        - listitem:
+          - link "MIA @ WAS, 7:00 PM, Final, 0 targetable players, MIA 0, WAS 0, Open Team Sheets":
+            - /url: /matchups/0022501172
+            - heading "MIA @ WAS" [level=3]
+            - text: Final Miami Heat at Washington Wizards
+        - listitem:
+          - link "CLE @ ATL, 7:00 PM, Final, 0 targetable players, CLE 0, ATL 0, Open Team Sheets":
+            - /url: /matchups/0022501173
+            - heading "CLE @ ATL" [level=3]
+            - text: Final Cleveland Cavaliers at Atlanta Hawks
+    - listitem:
+      - heading "7:30 PM" [level=2]
+      - list:
+        - listitem:
+          - link "NOP @ BOS, 7:30 PM, Final, 0 targetable players, NOP 0, BOS 0, Open Team Sheets":
+            - /url: /matchups/0022501174
+            - heading "NOP @ BOS" [level=3]
+            - text: Final New Orleans Pelicans at Boston Celtics
+        - listitem:
+          - link "PHI @ IND, 7:30 PM, Final, 0 targetable players, PHI 0, IND 0, Open Team Sheets":
+            - /url: /matchups/0022501175
+            - heading "PHI @ IND" [level=3]
+            - text: Final Philadelphia 76ers at Indiana Pacers
+        - listitem:
+          - link "TOR @ NYK, 7:30 PM, Final, 0 targetable players, TOR 0, NYK 0, Open Team Sheets":
+            - /url: /matchups/0022501176
+            - heading "TOR @ NYK" [level=3]
+            - text: Final Toronto Raptors at New York Knicks
+    - listitem:
+      - heading "8:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "ORL @ CHI, 8:00 PM, Final, 0 targetable players, ORL 0, CHI 0, Open Team Sheets":
+            - /url: /matchups/0022501177
+            - heading "ORL @ CHI" [level=3]
+            - text: Final Orlando Magic at Chicago Bulls
+        - listitem:
+          - link "BKN @ MIL, 8:00 PM, Final, 0 targetable players, BKN 0, MIL 0, Open Team Sheets":
+            - /url: /matchups/0022501179
+            - heading "BKN @ MIL" [level=3]
+            - text: Final Brooklyn Nets at Milwaukee Bucks
+        - listitem:
+          - link "DAL @ SAS, 8:00 PM, Final, 0 targetable players, DAL 0, SAS 0, Open Team Sheets":
+            - /url: /matchups/0022501180
+            - heading "DAL @ SAS" [level=3]
+            - text: Final Dallas Mavericks at San Antonio Spurs
+    - listitem:
+      - heading "9:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "OKC @ DEN, 9:00 PM, Final, 0 targetable players, OKC 0, DEN 0, Open Team Sheets":
+            - /url: /matchups/0022501182
+            - heading "OKC @ DEN" [level=3]
+            - text: Final Oklahoma City Thunder at Denver Nuggets
+    - listitem:
+      - heading "9:30 PM" [level=2]
+      - list:
+        - listitem:
+          - link "MIN @ HOU, 9:30 PM, Final, 0 targetable players, MIN 0, HOU 0, Open Team Sheets":
+            - /url: /matchups/0022501178
+            - heading "MIN @ HOU" [level=3]
+            - text: Final Minnesota Timberwolves at Houston Rockets
+        - listitem:
+          - link "MEM @ UTA, 9:30 PM, Final, 0 targetable players, MEM 0, UTA 0, Open Team Sheets":
+            - /url: /matchups/0022501181
+            - heading "MEM @ UTA" [level=3]
+            - text: Final Memphis Grizzlies at Utah Jazz
+    - listitem:
+      - heading "10:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "LAC @ POR, 10:00 PM, Final, 0 targetable players, LAC 0, POR 0, Open Team Sheets":
+            - /url: /matchups/0022501183
+            - heading "LAC @ POR" [level=3]
+            - text: Final Los Angeles Clippers at Portland Trail Blazers
+        - listitem:
+          - link "GSW @ SAC, 10:00 PM, Final, 0 targetable players, GSW 0, SAC 0, Open Team Sheets":
+            - /url: /matchups/0022501184
+            - heading "GSW @ SAC" [level=3]
+            - text: Final Golden State Warriors at Sacramento Kings
+    - listitem:
+      - heading "10:30 PM" [level=2]
+      - list:
+        - listitem:
+          - link "PHX @ LAL, 10:30 PM, Final, 0 targetable players, PHX 0, LAL 0, Open Team Sheets":
+            - /url: /matchups/0022501185
+            - heading "PHX @ LAL" [level=3]
+            - text: Final Phoenix Suns at Los Angeles Lakers

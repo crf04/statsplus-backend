@@ -1,0 +1,45 @@
+{
+  "url": "http://127.0.0.1:5193/targets",
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/prod-targets-readonly/targets-list-phone.png",
+  "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/prod-targets-readonly/targets-list-phone.aria.txt",
+  "responses": [
+    {
+      "at": "2026-10-04T22:16:26.260Z",
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:26.480Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/user/targets",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:26.582Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/teams/POR/season-minutes",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:26.601Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/user/targets/backtests",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:26.828Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/user/targets/resolve",
+      "status": 200
+    }
+  ]
+}

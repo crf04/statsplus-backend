@@ -1,0 +1,304 @@
+PASS game-logs-cade-2025-26-dateto | status 200 | 200
+PASS game-logs-cade-2025-26-dateto | provenance object present (deploy proof) | "dict"
+PASS game-logs-cade-2025-26-dateto | block has exactly generation+sources | []
+PASS game-logs-cade-2025-26-dateto | generation is list | 10
+PASS game-logs-cade-2025-26-dateto | generation sorted by stream_key (then season) | ["assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "synergy_play_types", "synergy_play_types_opponent_season", "traditional_opponent_season"]
+PASS game-logs-cade-2025-26-dateto | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS game-logs-cade-2025-26-dateto | freshness in fresh|stale|unavailable | ["stale"]
+PASS game-logs-cade-2025-26-dateto | no provider_window_unsupported stream in generation | []
+PASS game-logs-cade-2025-26-dateto | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS game-logs-cade-2025-26-dateto | sources keys == [] | []
+PASS game-logs-cade-mcp-equivalent | status 200 | 200
+PASS game-logs-cade-mcp-equivalent | provenance object present (deploy proof) | "dict"
+PASS game-logs-cade-mcp-equivalent | block has exactly generation+sources | []
+PASS game-logs-cade-mcp-equivalent | generation is list | 10
+PASS game-logs-cade-mcp-equivalent | generation sorted by stream_key (then season) | ["assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "synergy_play_types", "synergy_play_types_opponent_season", "traditional_opponent_season"]
+PASS game-logs-cade-mcp-equivalent | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS game-logs-cade-mcp-equivalent | freshness in fresh|stale|unavailable | ["stale"]
+PASS game-logs-cade-mcp-equivalent | no provider_window_unsupported stream in generation | []
+PASS game-logs-cade-mcp-equivalent | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS game-logs-cade-mcp-equivalent | sources keys == [] | []
+PASS game-logs-cade-named-filter | status 200 | 200
+PASS game-logs-cade-named-filter | provenance object present (deploy proof) | "dict"
+PASS game-logs-cade-named-filter | block has exactly generation+sources | []
+PASS game-logs-cade-named-filter | generation is list | 10
+PASS game-logs-cade-named-filter | generation sorted by stream_key (then season) | ["assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "synergy_play_types", "synergy_play_types_opponent_season", "traditional_opponent_season"]
+PASS game-logs-cade-named-filter | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS game-logs-cade-named-filter | freshness in fresh|stale|unavailable | ["stale"]
+PASS game-logs-cade-named-filter | no provider_window_unsupported stream in generation | []
+PASS game-logs-cade-named-filter | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS game-logs-cade-named-filter | sources keys == [] | []
+PASS game-logs-cade-sheet-filter | status 200 | 200
+PASS game-logs-cade-sheet-filter | provenance object present (deploy proof) | "dict"
+PASS game-logs-cade-sheet-filter | block has exactly generation+sources | []
+PASS game-logs-cade-sheet-filter | generation is list | 10
+PASS game-logs-cade-sheet-filter | generation sorted by stream_key (then season) | ["assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "synergy_play_types", "synergy_play_types_opponent_season", "traditional_opponent_season"]
+PASS game-logs-cade-sheet-filter | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS game-logs-cade-sheet-filter | freshness in fresh|stale|unavailable | ["stale"]
+PASS game-logs-cade-sheet-filter | no provider_window_unsupported stream in generation | []
+PASS game-logs-cade-sheet-filter | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS game-logs-cade-sheet-filter | sources keys == [] | []
+PASS game-logs-cade | status 200 | 200
+PASS game-logs-cade | provenance object present (deploy proof) | "dict"
+PASS game-logs-cade | block has exactly generation+sources | []
+PASS game-logs-cade | generation is list | 10
+PASS game-logs-cade | generation sorted by stream_key (then season) | ["assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "synergy_play_types", "synergy_play_types_opponent_season", "traditional_opponent_season"]
+PASS game-logs-cade | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS game-logs-cade | freshness in fresh|stale|unavailable | ["stale"]
+PASS game-logs-cade | no provider_window_unsupported stream in generation | []
+PASS game-logs-cade | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS game-logs-cade | sources keys == [] | []
+PASS matchup-0022501171 | status 200 | 200
+PASS matchup-0022501171 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501171 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501171 | generation is list | 15
+PASS matchup-0022501171 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501171 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501171 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501171 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501171 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501171 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501171 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501171 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501171 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501172 | status 200 | 200
+PASS matchup-0022501172 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501172 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501172 | generation is list | 15
+PASS matchup-0022501172 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501172 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501172 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501172 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501172 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501172 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501172 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501172 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501172 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501173 | status 200 | 200
+PASS matchup-0022501173 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501173 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501173 | generation is list | 15
+PASS matchup-0022501173 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501173 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501173 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501173 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501173 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501173 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501173 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501173 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501173 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501174 | status 200 | 200
+PASS matchup-0022501174 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501174 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501174 | generation is list | 15
+PASS matchup-0022501174 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501174 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501174 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501174 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501174 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501174 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501174 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501174 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501174 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501175 | status 200 | 200
+PASS matchup-0022501175 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501175 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501175 | generation is list | 15
+PASS matchup-0022501175 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501175 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501175 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501175 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501175 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501175 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501175 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501175 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501175 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501176 | status 200 | 200
+PASS matchup-0022501176 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501176 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501176 | generation is list | 15
+PASS matchup-0022501176 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501176 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501176 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501176 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501176 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501176 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501176 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501176 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501176 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501177 | status 200 | 200
+PASS matchup-0022501177 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501177 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501177 | generation is list | 15
+PASS matchup-0022501177 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501177 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501177 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501177 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501177 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501177 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501177 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501177 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501177 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501178 | status 200 | 200
+PASS matchup-0022501178 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501178 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501178 | generation is list | 15
+PASS matchup-0022501178 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501178 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501178 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501178 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501178 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501178 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501178 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501178 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501178 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501179 | status 200 | 200
+PASS matchup-0022501179 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501179 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501179 | generation is list | 15
+PASS matchup-0022501179 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501179 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501179 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501179 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501179 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501179 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501179 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501179 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501179 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501180 | status 200 | 200
+PASS matchup-0022501180 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501180 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501180 | generation is list | 15
+PASS matchup-0022501180 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501180 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501180 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501180 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501180 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501180 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501180 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501180 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501180 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501181 | status 200 | 200
+PASS matchup-0022501181 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501181 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501181 | generation is list | 15
+PASS matchup-0022501181 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501181 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501181 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501181 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501181 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501181 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501181 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501181 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501181 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501182 | status 200 | 200
+PASS matchup-0022501182 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501182 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501182 | generation is list | 15
+PASS matchup-0022501182 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501182 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501182 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501182 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501182 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501182 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501182 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501182 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501182 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501183 | status 200 | 200
+PASS matchup-0022501183 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501183 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501183 | generation is list | 15
+PASS matchup-0022501183 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501183 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501183 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501183 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501183 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501183 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501183 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501183 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501183 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501184 | status 200 | 200
+PASS matchup-0022501184 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501184 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501184 | generation is list | 15
+PASS matchup-0022501184 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501184 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501184 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501184 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501184 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501184 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501184 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501184 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501184 | generation entries match legacy entries (except freshness/age) | []
+PASS matchup-0022501185 | status 200 | 200
+PASS matchup-0022501185 | provenance object present (deploy proof) | "dict"
+PASS matchup-0022501185 | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS matchup-0022501185 | generation is list | 15
+PASS matchup-0022501185 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS matchup-0022501185 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS matchup-0022501185 | freshness in fresh|stale|unavailable | ["stale"]
+PASS matchup-0022501185 | no provider_window_unsupported stream in generation | []
+PASS matchup-0022501185 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS matchup-0022501185 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS matchup-0022501185 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS matchup-0022501185 | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS matchup-0022501185 | generation entries match legacy entries (except freshness/age) | []
+PASS slate-2026-04-10 | status 200 | 200
+PASS slate-2026-04-10 | provenance object present (deploy proof) | "dict"
+PASS slate-2026-04-10 | block has exactly generation+sources | []
+PASS slate-2026-04-10 | generation is list | 0
+PASS slate-2026-04-10 | generation sorted by stream_key (then season) | []
+PASS slate-2026-04-10 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [], "n_keys": 17}
+PASS slate-2026-04-10 | freshness in fresh|stale|unavailable | []
+PASS slate-2026-04-10 | no provider_window_unsupported stream in generation | []
+PASS slate-2026-04-10 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": [], "age_days_range": [0.0, 0.0]}
+PASS slate-2026-04-10 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS slate-2026-04-10 | slate generation == [] | 0
+PASS slate-2026-04-10 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS slate-2026-04-12 | status 200 | 200
+PASS slate-2026-04-12 | provenance object present (deploy proof) | "dict"
+PASS slate-2026-04-12 | block has exactly generation+sources | []
+PASS slate-2026-04-12 | generation is list | 0
+PASS slate-2026-04-12 | generation sorted by stream_key (then season) | []
+PASS slate-2026-04-12 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [], "n_keys": 17}
+PASS slate-2026-04-12 | freshness in fresh|stale|unavailable | []
+PASS slate-2026-04-12 | no provider_window_unsupported stream in generation | []
+PASS slate-2026-04-12 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": [], "age_days_range": [0.0, 0.0]}
+PASS slate-2026-04-12 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS slate-2026-04-12 | slate generation == [] | 0
+PASS slate-2026-04-12 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS slate-2026-10-04 | status 200 | 200
+PASS slate-2026-10-04 | provenance object present (deploy proof) | "dict"
+PASS slate-2026-10-04 | block has exactly generation+sources | []
+PASS slate-2026-10-04 | generation is list | 0
+PASS slate-2026-10-04 | generation sorted by stream_key (then season) | []
+PASS slate-2026-10-04 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [], "n_keys": 17}
+PASS slate-2026-10-04 | freshness in fresh|stale|unavailable | []
+PASS slate-2026-10-04 | no provider_window_unsupported stream in generation | []
+PASS slate-2026-10-04 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": [], "age_days_range": [0.0, 0.0]}
+PASS slate-2026-10-04 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS slate-2026-10-04 | slate generation == [] | 0
+PASS slate-2026-10-04 | sources copy response freshness surface {status,retrieved_at} | {"injuries": {"retrieved_at": null, "status": "unavailable"}, "pool": {"retrieved_at": null, "status": "unavailable"}, "schedule": {"retrieved_at": "2026-09-09T09:00:11.443428+00:00", "status": "stale"}}
+PASS targets-resolve-2026-04-10 | status 200 | 200
+PASS targets-resolve-2026-04-10 | provenance object present (deploy proof) | "dict"
+PASS targets-resolve-2026-04-10 | block has exactly generation+sources | []
+PASS targets-resolve-2026-04-10 | generation is list | 15
+PASS targets-resolve-2026-04-10 | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS targets-resolve-2026-04-10 | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS targets-resolve-2026-04-10 | freshness in fresh|stale|unavailable | ["stale"]
+PASS targets-resolve-2026-04-10 | no provider_window_unsupported stream in generation | []
+PASS targets-resolve-2026-04-10 | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS targets-resolve-2026-04-10 | sources keys == ['injuries', 'pool', 'schedule'] | ["injuries", "pool", "schedule"]
+PASS unscheduled-cade-vs-cha | status 200 | 200
+PASS unscheduled-cade-vs-cha | provenance object present (deploy proof) | "dict"
+PASS unscheduled-cade-vs-cha | legacy stream-keyed entries kept beside generation/sources | {"legacy_keys": 17}
+PASS unscheduled-cade-vs-cha | generation is list | 15
+PASS unscheduled-cade-vs-cha | generation sorted by stream_key (then season) | ["assist_locations_l15", "assist_locations_season", "exact_shot_zones", "exact_shot_zones_opponent_l15", "exact_shot_zones_opponent_season", "grouped_shot_types", "grouped_shot_types_opponent_l15", "grouped_shot_types_opponent_season", "player_assist_locations", "player_game_logs", "player_per36", "
+PASS unscheduled-cade-vs-cha | entries are PublicationRead.to_dict shape | {"key_sets_equal_to_to_dict": [true], "n_keys": 17}
+PASS unscheduled-cade-vs-cha | freshness in fresh|stale|unavailable | ["stale"]
+PASS unscheduled-cade-vs-cha | no provider_window_unsupported stream in generation | []
+PASS unscheduled-cade-vs-cha | freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at | {"rules": ["cutoff_current"], "age_days_range": [23.0, 42.7]}
+PASS unscheduled-cade-vs-cha | sources keys == [] | []
+PASS unscheduled-cade-vs-cha | generation == legacy entries minus provider_window_unsupported | {"omitted": ["synergy:l15", "synergy_play_types_opponent_l15"]}
+PASS unscheduled-cade-vs-cha | generation entries match legacy entries (except freshness/age) | []
+TOTAL 303 FAIL 0

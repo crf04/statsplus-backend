@@ -1,0 +1,17 @@
+{"action":"doctor"}
+{"action":"open","path":"/targets"}
+{"action":"assert-response","method":"GET","path":"/api/user/targets","query":{},"status":200}
+{"action":"assert-response","method":"GET","path":"/api/user/targets/backtests","query":{},"status":200}
+{"action":"assert-response","method":"GET","path":"/api/user/targets/resolve","query":{},"status":200}
+{"action":"assert","target":{"within":{"selector":".targets-active"},"text":"No Targets active today"}}
+{"action":"assert","target":{"text":"Today’s activity unavailable"},"state":"hidden"}
+{"action":"assert","target":{"text":"Reading today’s activity…"},"state":"hidden"}
+{"action":"assert","target":{"within":{"selector":"article.target-card","index":0},"role":"region","name":"Backtest"}}
+{"action":"assert","target":{"within":{"selector":"article.target-card","index":0},"text":"Reading the season…"},"state":"hidden"}
+{"action":"assert","target":{"within":{"selector":"article.target-card","index":1},"text":"Reading the season…"},"state":"hidden"}
+{"action":"snapshot"}
+{"action":"proof","name":"targets-list-desktop"}
+{"action":"viewport","name":"phone"}
+{"action":"assert-layout"}
+{"action":"proof","name":"targets-list-phone"}
+{"action":"cleanup"}

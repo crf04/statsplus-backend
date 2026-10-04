@@ -1,0 +1,595 @@
+[
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 3,
+   "last_line_starts": "Unavailable: injuries, player pool."
+  }
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 3.7,
+   "elapsed_s": [
+    0.11,
+    0.07
+   ]
+  }
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "text footer == structuredContent.data_as_of",
+  "pass": true,
+  "observed": [
+   "Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 game logs, per-36 rates, assist-location Diets, team defense and assist-location defense."
+  ]
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "repeat: identical structuredContent (shared cache)",
+  "pass": true,
+  "observed": null
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "text+structured under 150000",
+  "pass": true,
+  "observed": {
+   "text": 5838,
+   "structured": 23245
+  }
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "structured provenance == backend block (slate-2026-04-10), ignoring age_seconds",
+  "pass": true,
+  "observed": {
+   "byte_equal_incl_age": true
+  }
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "matchup_generation has no duplicate identities",
+  "pass": true,
+  "observed": {
+   "entries": 15,
+   "identities": 15
+  }
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "per-game indices valid, unique, and resolve to that game backend Matchup identities",
+  "pass": true,
+  "observed": {
+   "games": 15,
+   "bad": []
+  }
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "per-game matchup_provenance.sources == backend Matchup sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "matchup_generation identities == union of 15 backend Matchups",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "where": "apps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "per-game entries carry no legacy stream-keyed provenance",
+  "pass": true,
+  "observed": [
+   "generation",
+   "sources"
+  ]
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 3,
+   "last_line_starts": "Unavailable: injuries, player pool."
+  }
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 4.6,
+   "elapsed_s": [
+    1.01,
+    0.06
+   ]
+  }
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "text footer == structuredContent.data_as_of",
+  "pass": true,
+  "observed": [
+   "Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 game logs, per-36 rates, assist-location Diets, team defense and assist-location defense."
+  ]
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "repeat: identical structuredContent (shared cache)",
+  "pass": true,
+  "observed": null
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "text+structured under 150000",
+  "pass": true,
+  "observed": {
+   "text": 4310,
+   "structured": 28164
+  }
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "structured provenance == backend block (matchup-0022501171), ignoring age_seconds",
+  "pass": true,
+  "observed": {
+   "byte_equal_incl_age": false
+  }
+ },
+ {
+  "where": "apps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age)",
+  "pass": true,
+  "observed": {
+   "age_offsets_s": [
+    224,
+    225
+   ],
+   "mcp_minus_backend_request_s": 224
+  }
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 2,
+   "last_line_starts": "Stale: game logs, per-36 rates and assis"
+  }
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 4.5,
+   "elapsed_s": [
+    0.86,
+    0.06
+   ]
+  }
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "text footer == structuredContent.data_as_of",
+  "pass": true,
+  "observed": [
+   "Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 game logs, per-36 rates, assist-location Diets, team defense and assist-location defense."
+  ]
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "repeat: identical structuredContent (shared cache)",
+  "pass": true,
+  "observed": null
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "text+structured under 150000",
+  "pass": true,
+  "observed": {
+   "text": 7841,
+   "structured": 33128
+  }
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "structured provenance == backend block (unscheduled-cade-vs-cha), ignoring age_seconds",
+  "pass": true,
+  "observed": {
+   "byte_equal_incl_age": false
+  }
+ },
+ {
+  "where": "apps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age)",
+  "pass": true,
+  "observed": {
+   "age_offsets_s": [
+    231,
+    232
+   ],
+   "mcp_minus_backend_request_s": 231
+  }
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 2,
+   "last_line_starts": "Stale: game logs and assist-location def"
+  }
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 4.3,
+   "elapsed_s": [
+    0.74,
+    0.74
+   ]
+  }
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "text footer == structuredContent.data_as_of",
+  "pass": true,
+  "observed": [
+   "Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 game logs, assist-location Diets, team defense and assist-location defense."
+  ]
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "repeat (uncached per-user tool): structuredContent identical except age_seconds, which advance by the call gap",
+  "pass": true,
+  "observed": {
+   "age_advance_s": [
+    4,
+    5
+   ],
+   "gap_s": 4.3
+  }
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "text+structured under 150000",
+  "pass": true,
+  "observed": {
+   "text": 3293,
+   "structured": 11836
+  }
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "structured provenance == backend block (game-logs-cade-mcp-equivalent), ignoring age_seconds",
+  "pass": true,
+  "observed": {
+   "byte_equal_incl_age": false
+  }
+ },
+ {
+  "where": "apps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age)",
+  "pass": true,
+  "observed": {
+   "age_offsets_s": [
+    -85,
+    -84
+   ],
+   "mcp_minus_backend_request_s": -84
+  }
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 3,
+   "last_line_starts": "Unavailable: injuries, player pool."
+  }
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 4.6,
+   "elapsed_s": [
+    1.04,
+    1.15
+   ]
+  }
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "text footer == structuredContent.data_as_of",
+  "pass": true,
+  "observed": [
+   "Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 game logs, per-36 rates, assist-location Diets, team defense and assist-location defense."
+  ]
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "repeat (uncached per-user tool): structuredContent identical except age_seconds, which advance by the call gap",
+  "pass": true,
+  "observed": {
+   "age_advance_s": [
+    4,
+    5
+   ],
+   "gap_s": 4.6
+  }
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "text+structured under 150000",
+  "pass": true,
+  "observed": {
+   "text": 7913,
+   "structured": 22970
+  }
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "structured provenance == backend block (targets-resolve-2026-04-10), ignoring age_seconds",
+  "pass": true,
+  "observed": {
+   "byte_equal_incl_age": false
+  }
+ },
+ {
+  "where": "apps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age)",
+  "pass": true,
+  "observed": {
+   "age_offsets_s": [
+    247
+   ],
+   "mcp_minus_backend_request_s": 247
+  }
+ },
+ {
+  "where": "noapps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "noapps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 3,
+   "last_line_starts": "Unavailable: injuries, player pool."
+  }
+ },
+ {
+  "where": "noapps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 3.7,
+   "elapsed_s": [
+    0.09,
+    0.04
+   ]
+  }
+ },
+ {
+  "where": "noapps get_slate {\"date\": \"2026-04-10\"}",
+  "check": "no structuredContent; text identical to the Apps run",
+  "pass": true,
+  "observed": {
+   "structuredContent": null
+  }
+ },
+ {
+  "where": "noapps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "noapps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 3,
+   "last_line_starts": "Unavailable: injuries, player pool."
+  }
+ },
+ {
+  "where": "noapps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 3.6,
+   "elapsed_s": [
+    0.05,
+    0.04
+   ]
+  }
+ },
+ {
+  "where": "noapps get_matchup {\"game\": \"DET @ CHA\", \"date\": \"2026-04-10\"}",
+  "check": "no structuredContent; text identical to the Apps run",
+  "pass": true,
+  "observed": {
+   "structuredContent": null
+  }
+ },
+ {
+  "where": "noapps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "noapps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 2,
+   "last_line_starts": "Stale: game logs, per-36 rates and assis"
+  }
+ },
+ {
+  "where": "noapps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 3.7,
+   "elapsed_s": [
+    0.05,
+    0.78
+   ]
+  }
+ },
+ {
+  "where": "noapps get_matchup {\"player\": \"Cade Cunningham\", \"opponent\": \"CHA\"}",
+  "check": "no structuredContent; text identical to the Apps run",
+  "pass": true,
+  "observed": {
+   "structuredContent": null
+  }
+ },
+ {
+  "where": "noapps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "noapps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 2,
+   "last_line_starts": "Stale: game logs and assist-location def"
+  }
+ },
+ {
+  "where": "noapps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 4.2,
+   "elapsed_s": [
+    0.62,
+    0.6
+   ]
+  }
+ },
+ {
+  "where": "noapps query_game_logs {\"player\": \"Cade Cunningham\", \"vs\": [{\"row\": \"sheet:play_types:OffScreen:PTS\", \"ranks\": [1, 10]}], \"date\": \"2026-04-10\"}",
+  "check": "no structuredContent; text identical to the Apps run",
+  "pass": true,
+  "observed": {
+   "structuredContent": null
+  }
+ },
+ {
+  "where": "noapps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "not isError",
+  "pass": true,
+  "observed": [
+   false,
+   false
+  ]
+ },
+ {
+  "where": "noapps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "footer block starts 'Data as of'; last text line",
+  "pass": true,
+  "observed": {
+   "footer_lines": 3,
+   "last_line_starts": "Unavailable: injuries, player pool."
+  }
+ },
+ {
+  "where": "noapps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "repeat: identical footer and identical text",
+  "pass": true,
+  "observed": {
+   "gap_s": 4.6,
+   "elapsed_s": [
+    0.99,
+    1.01
+   ]
+  }
+ },
+ {
+  "where": "noapps get_targets {\"date\": \"2026-04-10\"}",
+  "check": "no structuredContent; text identical to the Apps run",
+  "pass": true,
+  "observed": {
+   "structuredContent": null
+  }
+ }
+]

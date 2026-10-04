@@ -1,0 +1,1400 @@
+{
+  "startedAt": "2026-10-04T22:16:08.413Z",
+  "coordination": {
+    "root": "/Users/chrisfu/.t3/worktrees/statsplus/t3code-de11429f",
+    "branch": "t3code/de11429f",
+    "head": "b97e927d45d5cf5544532f870606a397bae1e588"
+  },
+  "qaRuntimeSha256": "e6786c7112588af821453e83d4bec5f518f3ae563a613589ab0f18e00c2b46ef",
+  "productionGuardSha256": "f94bf27b53f0d05949fd6ae6d4c75d548d4451f4e064e53f3ad014829d10502b",
+  "helperSha256": "e2f8d857aa5bbdd6241c3bb11dfcec276d346a0b946d7babdff71fbd29f7c35e",
+  "responseTrackerSha256": "e7fff71a907fc47cd4eead40b28430a3fe3d1cc72e920e7bcd25d1fce7955232",
+  "frontend": {
+    "root": "/Users/chrisfu/statsplus-107/frontend",
+    "branch": "",
+    "head": "334f99b7e3623de460cb5142313ca54286d932ca",
+    "fingerprint": "63a49055a37fb5e1cfb05817491877005e855bc6f38de7139eaf86dc7e30a30d"
+  },
+  "backendSource": {
+    "root": "/Users/chrisfu/statsplus-backend",
+    "branch": "master",
+    "head": "ac61b6661fc0d68dd554c2ddd66e879ef9d2003f"
+  },
+  "environment": "production",
+  "deployedBackendRevision": "unknown",
+  "api": "https://statsplus-backend-production.up.railway.app",
+  "origin": "http://127.0.0.1:5193",
+  "out": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search",
+  "runtime": "/var/folders/vl/c4y_fblx7bg4lgkdxnmsbj_h0000gn/T/statsplus-runtime-UgPNYr",
+  "results": [
+    {
+      "ok": true,
+      "action": "launch",
+      "out": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search",
+      "ready": true,
+      "frontend": {
+        "root": "/Users/chrisfu/statsplus-107/frontend",
+        "branch": "",
+        "head": "334f99b7e3623de460cb5142313ca54286d932ca",
+        "fingerprint": "63a49055a37fb5e1cfb05817491877005e855bc6f38de7139eaf86dc7e30a30d"
+      },
+      "origin": "http://127.0.0.1:5193",
+      "api": "https://statsplus-backend-production.up.railway.app",
+      "environment": "production",
+      "auth": {
+        "authenticated": true,
+        "expiresAt": "Sun, 04 Oct 2026 23:16:10 GMT",
+        "transportIsLocal": true
+      }
+    },
+    {
+      "ok": true,
+      "step": 1,
+      "action": "doctor",
+      "commandSha256": "a9335ee9a0fc05c9eaf88b05947b48c514652dd185ee5cd5a66bf58b98c98547",
+      "ready": true,
+      "frontend": {
+        "root": "/Users/chrisfu/statsplus-107/frontend",
+        "branch": "",
+        "head": "334f99b7e3623de460cb5142313ca54286d932ca",
+        "fingerprint": "63a49055a37fb5e1cfb05817491877005e855bc6f38de7139eaf86dc7e30a30d"
+      },
+      "origin": "http://127.0.0.1:5193",
+      "api": "https://statsplus-backend-production.up.railway.app",
+      "environment": "production",
+      "auth": {
+        "authenticated": true,
+        "expiresAt": "Sun, 04 Oct 2026 23:16:10 GMT",
+        "transportIsLocal": true
+      }
+    },
+    {
+      "ok": true,
+      "step": 2,
+      "action": "open",
+      "commandSha256": "a5c3bf2e10ffe5fc129d275fa87078a5310fd8c6bbdf71228bf9fa05c766d1f5"
+    },
+    {
+      "ok": true,
+      "step": 3,
+      "action": "assert-response",
+      "commandSha256": "d6087ae69e6ca7b1ef5d15a5bd128439685822331e8101c91a29871bf20faadd",
+      "response": {
+        "at": "2026-10-04T22:16:11.830Z",
+        "actionStep": 2,
+        "method": "GET",
+        "path": "/api/games/game_logs",
+        "status": 200
+      }
+    },
+    {
+      "ok": true,
+      "step": 4,
+      "action": "assert",
+      "commandSha256": "5ba7b206995ec8f39a56551447eae4519ee4cd3821ff64de8be0c79caa6809db",
+      "assertion": {
+        "target": {
+          "within": {
+            "selector": ".game-logs-main"
+          },
+          "text": "GAMES <= 5"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 5,
+      "action": "assert",
+      "commandSha256": "9f51d38256a6f6ea89f13a6bfd5a28585f041e5f385ec45f9759ba09f03a4204",
+      "assertion": {
+        "target": {
+          "within": {
+            "selector": ".sample-size-text"
+          },
+          "text": "5 of 60 games"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 6,
+      "action": "proof",
+      "commandSha256": "607485496990d2e56ecccc94e72326d8a84b05b42e5be0f75a830d56eb8d6ee7",
+      "url": "http://127.0.0.1:5193/?player_name=LeBron+James&season_filter=2025-26&game_filter=5",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-shared-desktop.png",
+      "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-shared-desktop.aria.txt",
+      "responses": [
+        {
+          "at": "2026-10-04T22:16:10.958Z",
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.229Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.232Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.292Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.316Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.329Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.771Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.830Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.926Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.993Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "step": 7,
+      "action": "click",
+      "commandSha256": "af2ff440567fed8e0ef0e9e85650cdbdda2b64fc210e8f3eff020eb7164a458f"
+    },
+    {
+      "ok": true,
+      "step": 8,
+      "action": "fill",
+      "commandSha256": "eaeacee01c85ab33e9e43cb006ec182c29a7040a9f6ade090cb623208694ccf0"
+    },
+    {
+      "ok": true,
+      "step": 9,
+      "action": "click",
+      "commandSha256": "d19c23ffff387d1fb34d8200d0611bc8ba8547ed21b86d22945860aaf6138559"
+    },
+    {
+      "ok": true,
+      "step": 10,
+      "action": "click",
+      "commandSha256": "5254731c4858d3dbd1b5e3ea24cc3a4261428eadda684b08a333ab2d5bc5c60a"
+    },
+    {
+      "ok": true,
+      "step": 11,
+      "action": "assert-response",
+      "commandSha256": "ce4bb93fb1134100a6d64a28ba49c9a8362aea52aaada92daab6c43837db45ea",
+      "response": {
+        "at": "2026-10-04T22:16:13.203Z",
+        "actionStep": 10,
+        "method": "GET",
+        "path": "/api/games/game_logs",
+        "status": 200
+      }
+    },
+    {
+      "ok": true,
+      "step": 12,
+      "action": "assert",
+      "commandSha256": "93c351ee70935beefceac8006454f5230838f9fcb6c76d808427ba4d42fcbe13",
+      "assertion": {
+        "check": "url",
+        "expectedSha256": "480c8c37c1bdd44e5d0fd756d098335a5d4116974b16234eb594fa725f115e98"
+      }
+    },
+    {
+      "ok": true,
+      "step": 13,
+      "action": "assert",
+      "commandSha256": "4ec041012679a22e69ece720e8cc3b560828e875afa71025a1e4f1b294a4a4b9",
+      "assertion": {
+        "target": {
+          "within": {
+            "selector": ".sample-size-text"
+          },
+          "text": "3 of 60 games"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 14,
+      "action": "assert",
+      "commandSha256": "b47ce60fb49f056dd2350960342d58f86ddb555a2520c7e5ea5b21e3593dfe13",
+      "assertion": {
+        "target": {
+          "within": {
+            "selector": ".game-logs-main"
+          },
+          "text": "GAMES <= 3"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 15,
+      "action": "proof",
+      "commandSha256": "250207ee89767470e0632daa65ba247a358cb8f16d97db3caa56685d7ab42e34",
+      "url": "http://127.0.0.1:5193/?player_name=LeBron+James&season_filter=2025-26&game_filter=3",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-filter-applied-desktop.png",
+      "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-filter-applied-desktop.aria.txt",
+      "responses": [
+        {
+          "at": "2026-10-04T22:16:10.958Z",
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.229Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.232Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.292Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.316Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.329Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.771Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.830Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.926Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.993Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:13.203Z",
+          "actionStep": 10,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "step": 16,
+      "action": "reload",
+      "commandSha256": "58b3ee3e3afd94ba729d1aa0f212914a582015ca6ab066b15105f6816099f849"
+    },
+    {
+      "ok": true,
+      "step": 17,
+      "action": "assert-response",
+      "commandSha256": "ce4bb93fb1134100a6d64a28ba49c9a8362aea52aaada92daab6c43837db45ea",
+      "response": {
+        "at": "2026-10-04T22:16:14.632Z",
+        "actionStep": 16,
+        "method": "GET",
+        "path": "/api/games/game_logs",
+        "status": 200
+      }
+    },
+    {
+      "ok": true,
+      "step": 18,
+      "action": "assert",
+      "commandSha256": "4ec041012679a22e69ece720e8cc3b560828e875afa71025a1e4f1b294a4a4b9",
+      "assertion": {
+        "target": {
+          "within": {
+            "selector": ".sample-size-text"
+          },
+          "text": "3 of 60 games"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 19,
+      "action": "viewport",
+      "commandSha256": "8085c1c1c96b12dcd22168a587fa83e56f36d3cd95c4d694f1d9ed13144f94e1"
+    },
+    {
+      "ok": true,
+      "step": 20,
+      "action": "assert",
+      "commandSha256": "b47ce60fb49f056dd2350960342d58f86ddb555a2520c7e5ea5b21e3593dfe13",
+      "assertion": {
+        "target": {
+          "within": {
+            "selector": ".game-logs-main"
+          },
+          "text": "GAMES <= 3"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 21,
+      "action": "proof",
+      "commandSha256": "fd088e9a4b872bbde3915fafecbfa3958a9ab626143e9c799e7f9b4043a2fbec",
+      "url": "http://127.0.0.1:5193/?player_name=LeBron+James&season_filter=2025-26&game_filter=3",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-reloaded-phone.png",
+      "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-reloaded-phone.aria.txt",
+      "responses": [
+        {
+          "at": "2026-10-04T22:16:10.958Z",
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.229Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.232Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.292Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.316Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.329Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.771Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.830Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.926Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.993Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:13.203Z",
+          "actionStep": 10,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.185Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.187Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.251Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.286Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.339Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.632Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.650Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.727Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.779Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "step": 22,
+      "action": "open",
+      "commandSha256": "caf6862748d42efc10b48bd497a34173e7ec98bc3c4b2902ec59d37bec36c5f8"
+    },
+    {
+      "ok": true,
+      "step": 23,
+      "action": "assert",
+      "commandSha256": "167edf60eab7e4c362b585c7dcebdd91c9d03e7b33f1583ccbc1b30efbbfd831",
+      "assertion": {
+        "target": {
+          "role": "alert"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 24,
+      "action": "assert",
+      "commandSha256": "6d0958f6ec46f6aacfe7eabf2a1969e1f307553b3cdef1667f16f832c4d6fe51",
+      "assertion": {
+        "target": {
+          "role": "button",
+          "name": "Save Filter Set"
+        },
+        "state": "hidden",
+        "check": "hidden"
+      }
+    },
+    {
+      "ok": true,
+      "step": 25,
+      "action": "assert",
+      "commandSha256": "1a795a6823b66e642862316493be140f355548f8b49ed8eb95d7ce012c203eb2",
+      "assertion": {
+        "check": "url",
+        "expectedSha256": "32ab515fb9b75608865eedd9ac23a8094ac7e50084001f0a7ecfeaff83706112"
+      }
+    },
+    {
+      "ok": true,
+      "step": 26,
+      "action": "proof",
+      "commandSha256": "8df6b1b00c018d32291d2d059fc944b01ef26a66ff6a9e4d51c13bc180219c1b",
+      "url": "http://127.0.0.1:5193/?player_name=LeBron+James&game_filter=abc",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-refused-phone.png",
+      "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-refused-phone.aria.txt",
+      "responses": [
+        {
+          "at": "2026-10-04T22:16:10.958Z",
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.229Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.232Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.292Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.316Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.329Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.771Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.830Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.926Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.993Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:13.203Z",
+          "actionStep": 10,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.185Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.187Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.251Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.286Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.339Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.632Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.650Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.727Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.779Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.528Z",
+          "actionStep": 22,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.577Z",
+          "actionStep": 22,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "step": 27,
+      "action": "viewport",
+      "commandSha256": "fd45d81df98c1e58026fe8b759e6ce4201fb14b18432fcc552fba07211269f67"
+    },
+    {
+      "ok": true,
+      "step": 28,
+      "action": "open",
+      "commandSha256": "409e258d6e2a08853ff8e065b37c381b064dc063e412d2e97a8521dfabc8fdcb"
+    },
+    {
+      "ok": true,
+      "step": 29,
+      "action": "assert-response",
+      "commandSha256": "b3557e1f545077ddf7f4e784a7cd9921fd35cc3693a70dd6da6f81cb8de28753",
+      "response": {
+        "at": "2026-10-04T22:16:16.970Z",
+        "actionStep": 28,
+        "method": "GET",
+        "path": "/api/players",
+        "status": 200
+      }
+    },
+    {
+      "ok": true,
+      "step": 30,
+      "action": "assert",
+      "commandSha256": "6d0958f6ec46f6aacfe7eabf2a1969e1f307553b3cdef1667f16f832c4d6fe51",
+      "assertion": {
+        "target": {
+          "role": "button",
+          "name": "Save Filter Set"
+        },
+        "state": "hidden",
+        "check": "hidden"
+      }
+    },
+    {
+      "ok": true,
+      "step": 31,
+      "action": "fill",
+      "commandSha256": "b353f2dcc861d8a3ea1ac1c7eb637b40264769976b06cbdeac79a50693ae8340"
+    },
+    {
+      "ok": true,
+      "step": 32,
+      "action": "click",
+      "commandSha256": "f9d5cded795287ec37b3ea124994a2c542b1c5ac8abd171772cf3bdf89bae782"
+    },
+    {
+      "ok": true,
+      "step": 33,
+      "action": "assert",
+      "commandSha256": "d2cf77e5b71f52df7c2649c8f53adfec2e64b2637822a4ca84f55e07c5999324",
+      "assertion": {
+        "target": {
+          "role": "heading",
+          "name": "LeBron James’s games"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 34,
+      "action": "assert-response",
+      "commandSha256": "a5c3a5feb14b79df4153a0969eb2660d46c5d1478f1fb3cfba8eff1ccaaa2bee",
+      "response": {
+        "at": "2026-10-04T22:16:18.495Z",
+        "actionStep": 32,
+        "method": "GET",
+        "path": "/api/games/game_logs",
+        "status": 200
+      }
+    },
+    {
+      "ok": true,
+      "step": 35,
+      "action": "assert",
+      "commandSha256": "c7685f5738d83284be7c70bc6c118f53acfde8b16de391e255b9189f4ef708a9",
+      "assertion": {
+        "target": {
+          "text": "60 of 60 games match"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 36,
+      "action": "proof",
+      "commandSha256": "a171d93429a66d8e34063f5f0ad22d2f8d699b960a2cdabf5b565ada82b1e991",
+      "url": "http://127.0.0.1:5193/?player_name=LeBron+James",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-browse-desktop.png",
+      "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-browse-desktop.aria.txt",
+      "responses": [
+        {
+          "at": "2026-10-04T22:16:10.958Z",
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.229Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.232Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.292Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.316Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.329Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.771Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.830Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.926Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.993Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:13.203Z",
+          "actionStep": 10,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.185Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.187Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.251Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.286Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.339Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.632Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.650Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.727Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.779Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.528Z",
+          "actionStep": 22,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.577Z",
+          "actionStep": 22,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.914Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.925Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.934Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 404
+        },
+        {
+          "at": "2026-10-04T22:16:16.970Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:18.081Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:18.120Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:18.495Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:19.007Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:19.123Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:19.188Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        }
+      ]
+    },
+    {
+      "ok": true,
+      "step": 37,
+      "action": "click",
+      "commandSha256": "9467b8952a145e10f0cfc56462ec3921356e004bf257b34b882b49cfe8dd40d5"
+    },
+    {
+      "ok": true,
+      "step": 38,
+      "action": "assert",
+      "commandSha256": "5db5ee1690faf54ff9b24d8d54a209cc4a1ebb6aa21a7322ffaae4a349969d2e",
+      "assertion": {
+        "check": "url",
+        "expectedSha256": "df7e940f72aa93cbcb6d70cc35124b0767c7a0e353043c7c24b660ea9be7b952"
+      }
+    },
+    {
+      "ok": true,
+      "step": 39,
+      "action": "assert",
+      "commandSha256": "9a5258ed35cc8ce8a48776a9151e3352f4611227cf4ab70f7c3bf8c9bdc32125",
+      "assertion": {
+        "target": {
+          "role": "heading",
+          "name": "Ask the box score"
+        },
+        "check": "visible"
+      }
+    },
+    {
+      "ok": true,
+      "step": 40,
+      "action": "assert",
+      "commandSha256": "e561c330279ad401b9e15c2c050bdaff21670e2edbcbd755c7d8028bf3e61fea",
+      "assertion": {
+        "target": {
+          "role": "textbox"
+        },
+        "check": "value",
+        "expectedSha256": "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126"
+      }
+    },
+    {
+      "ok": true,
+      "step": 41,
+      "action": "proof",
+      "commandSha256": "4a88008043ef7a44d78127f01ec0fd5e67c2ec91689c6f4f17f82be38fcd48f9",
+      "url": "http://127.0.0.1:5193/",
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      },
+      "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-return-desktop.png",
+      "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-return-desktop.aria.txt",
+      "responses": [
+        {
+          "at": "2026-10-04T22:16:10.958Z",
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.229Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.232Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.292Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.316Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.329Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.771Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.830Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.926Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:11.993Z",
+          "actionStep": 2,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:13.203Z",
+          "actionStep": 10,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.185Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.187Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.251Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.286Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.339Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.632Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.650Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.727Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:14.779Z",
+          "actionStep": 16,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.528Z",
+          "actionStep": 22,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.577Z",
+          "actionStep": 22,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.914Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/teams",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.925Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/user/saved-filter-sets",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:15.934Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 404
+        },
+        {
+          "at": "2026-10-04T22:16:16.970Z",
+          "actionStep": 28,
+          "method": "GET",
+          "path": "/api/players",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:18.081Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/players/profile",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:18.120Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/players/next-opponent",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:18.495Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:19.007Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/games/game_logs",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:19.123Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        },
+        {
+          "at": "2026-10-04T22:16:19.188Z",
+          "actionStep": 32,
+          "method": "GET",
+          "path": "/api/teams/stats",
+          "status": 200
+        }
+      ]
+    }
+  ],
+  "cleanedUp": true
+}

@@ -1,0 +1,46 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- heading "Ask the box score" [level=1]:
+  - text: Ask the
+  - emphasis: box score
+- paragraph: Name a player, add what matters, and get back the exact games you meant.
+- img
+- textbox "LeBron James this year"
+- button "Run it" [disabled]
+- button "Browse without a query"
+- button "Saved Filter Sets"
+- region "One question, three steps":
+  - heading "One question, three steps" [level=2]
+  - paragraph: Each step adds to the query above it. Click to load it.
+  - list:
+    - listitem:
+      - button "Start with a player. Loads Jalen Johnson this year. Adds this year.":
+        - text: Start with a player Jalen Johnson
+        - mark: this year
+        - text: A name and a period is a complete query. Everything else narrows it.
+    - listitem:
+      - button "Narrow it down. Loads Jalen Johnson this year without Trae Young. Adds without Trae Young.":
+        - text: Narrow it down Jalen Johnson this year
+        - mark: without Trae Young
+        - text: Ask what he does when the offence runs through him instead.
+    - listitem:
+      - button "Stack the filters. Loads Jalen Johnson this year without Trae Young against bottom 10 defenses playing 25+ minutes. Adds against bottom 10 defenses playing 25+ minutes.":
+        - text: Stack the filters Jalen Johnson this year without Trae Young
+        - mark: against bottom 10 defenses playing 25+ minutes
+        - text: Filters combine. Keep adding clauses until the sample is the one you mean.
+  - paragraph:
+    - link "Every filter we understand":
+      - /url: /help

@@ -1,0 +1,242 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- main:
+  - link "← Back to slate":
+    - /url: /matchups
+  - paragraph: Historical Matchup · stored evidence
+  - heading "NOP @ BOS" [level=1]
+  - region "Historical matchup evidence":
+    - strong: Schedule
+    - text: ": Completed-season catalog · from Event Catalog · collected 2026-09-09"
+    - strong: Participants
+    - text: ": Completed-season context · from game logs"
+    - strong: Season defense
+    - text: ": Completed-season context · from Defense Sheet publication"
+    - strong: Last 15 defense
+    - text: ": unavailable — No point-in-time snapshot was captured for this game."
+    - strong: Injuries
+    - text: ": unavailable — No pregame injury snapshot was archived for this game."
+  - group "Defense team":
+    - button "NOP defense vs BOS players"
+    - button "BOS defense vs NOP players" [pressed]
+  - paragraph: Tap a player to trace their rows across the sheet; use the score card for the full dossier.
+  - region "Injuries":
+    - heading "Injuries" [level=2]
+    - paragraph: No pregame injury snapshot was archived for this game.
+  - complementary "Players in game":
+    - paragraph: Players in game
+    - heading "Season scoring order" [level=2]
+    - group "Player rail sort":
+      - button "Season scoring" [pressed]
+      - button "Matchup Score"
+    - article "Jeremiah Fears player":
+      - heading "Jeremiah Fears game logs" [level=3]:
+        - link "Jeremiah Fears game logs":
+          - /url: /?player_name=Jeremiah+Fears
+          - text: Jeremiah Fears
+      - paragraph: 14.3 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 44.0 MIN · 36.0 PTS
+      - 'img "Jeremiah Fears last 10 minutes: 19.966667, 27.466667, 27.566667, 22.083333, 25.983333, 36.983333, 36.733333, 37.75, 44.05, 41.383333"'
+      - button "Open selection card"
+    - article "Jordan Poole player":
+      - heading "Jordan Poole game logs" [level=3]:
+        - link "Jordan Poole game logs":
+          - /url: /?player_name=Jordan+Poole
+          - text: Jordan Poole
+      - paragraph: 13.4 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 28.7 MIN · 11.0 PTS
+      - 'img "Jordan Poole last 10 minutes: 24.45, 22.783333, 10.183333, 15.233333, 18.183333, 17.183333, 23.4, 6.183333, 31.95, 28.716667"'
+      - button "Open selection card"
+    - article "Derik Queen player":
+      - heading "Derik Queen game logs" [level=3]:
+        - link "Derik Queen game logs":
+          - /url: /?player_name=Derik+Queen
+          - text: Derik Queen
+      - paragraph: 11.7 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 39.3 MIN · 25.0 PTS
+      - 'img "Derik Queen last 10 minutes: 18.433333, 20.8, 22.533333, 23.966667, 27.683333, 27.633333, 18.283333, 37.183333, 39.333333, 41.05"'
+      - button "Open selection card"
+    - article "Josh Oduro player":
+      - heading "Josh Oduro game logs" [level=3]:
+        - link "Josh Oduro game logs":
+          - /url: /?player_name=Josh+Oduro
+          - text: Josh Oduro
+      - paragraph: 8.3 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 23.9 MIN · 12.0 PTS
+      - paragraph: "PTS Matchup Score unavailable: missing player_diet:play_types."
+      - 'img "Josh Oduro last 10 minutes: 26.466667, 23.95, 31.35"'
+      - button "Open selection card"
+    - article "Trey Alexander player":
+      - heading "Trey Alexander game logs" [level=3]:
+        - link "Trey Alexander game logs":
+          - /url: /?player_name=Trey+Alexander
+          - text: Trey Alexander
+      - paragraph: 5.2 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 14.6 MIN · 10.0 PTS
+      - 'img "Trey Alexander last 10 minutes: 21.15, 11.716667, 4.533333, 2.4, 1.816667, 11.266667, 11.1, 14.566667, 32.083333"'
+      - button "Open selection card"
+    - article "Jordan Hawkins player":
+      - heading "Jordan Hawkins game logs" [level=3]:
+        - link "Jordan Hawkins game logs":
+          - /url: /?player_name=Jordan+Hawkins
+          - text: Jordan Hawkins
+      - paragraph: 5.1 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 23.0 MIN · 20.0 PTS
+      - 'img "Jordan Hawkins last 10 minutes: 1.4, 1.75, 22.133333, 21.45, 5.45, 20.95, 26.383333, 23.25, 22.966667, 32.85"'
+      - button "Open selection card"
+    - article "Micah Peavy player":
+      - heading "Micah Peavy game logs" [level=3]:
+        - link "Micah Peavy game logs":
+          - /url: /?player_name=Micah+Peavy
+          - text: Micah Peavy
+      - paragraph: 4.3 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 36.5 MIN · 2.0 PTS
+      - 'img "Micah Peavy last 10 minutes: 1.75, 3.5, 2.216667, 16.233333, 12.2, 31.75, 27.85, 36.016667, 36.533333, 40.75"'
+      - button "Open selection card"
+    - article "Kevon Looney player":
+      - heading "Kevon Looney game logs" [level=3]:
+        - link "Kevon Looney game logs":
+          - /url: /?player_name=Kevon+Looney
+          - text: Kevon Looney
+      - paragraph: 2.8 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 24.8 MIN · 0.0 PTS
+      - 'img "Kevon Looney last 10 minutes: 11.7, 23.966667, 17.933333, 24.333333, 4.95, 10.133333, 13.883333, 3.65, 28.5, 24.8"'
+      - button "Open selection card"
+    - article "Hunter Dickinson player":
+      - heading "Hunter Dickinson game logs" [level=3]:
+        - link "Hunter Dickinson game logs":
+          - /url: /?player_name=Hunter+Dickinson
+          - text: Hunter Dickinson
+      - paragraph: 2.4 PPG · completed-season context
+      - paragraph: Focal game NOP @ BOS · 5.1 MIN · 2.0 PTS
+      - paragraph: "PTS Matchup Score unavailable: missing player_diet:play_types, player_diet:shot_types."
+      - 'img "Hunter Dickinson last 10 minutes: 4.7, 4.383333, 7.766667, 5.083333, 20.516667"'
+      - button "Open selection card"
+  - region "Defense Sheet controls":
+    - group "Stat window":
+      - button "Season" [pressed]
+      - button "Last 15" [disabled]
+    - group "Deviation filter":
+      - button "All deviations"
+      - button "At least 1 sigma" [pressed]
+      - button "At least 2 sigma"
+    - paragraph: Completed-season context
+    - paragraph: No point-in-time snapshot was captured for this game.
+    - group "Stat category":
+      - button "All"
+      - button "PTS" [pressed]
+      - button "REB"
+      - button "AST"
+      - button "3PM"
+      - button "STL"
+      - button "BLK"
+      - button "TOV"
+      - button "FGA"
+      - button "FG2A"
+      - button "FG3A"
+      - button "PR"
+      - button "PA"
+      - button "RA"
+      - button "PRA"
+      - button "STKS"
+  - region "BOS Defense Sheet":
+    - paragraph: Relative concessions · per 48
+    - heading "BOS Defense Sheet" [level=2]
+    - paragraph: "Season defense provenance: Completed-season context · Defense Sheet publication"
+    - paragraph: 20 rows hidden near league average.
+    - region "Play types":
+      - heading "Play types" [level=3]
+      - article:
+        - text: "2"
+        - heading "Cut POSS" [level=4]
+        - button "Save Cut POSS as a Target": Save as Target
+        - strong: "6.0"
+        - text: "-18.8% vs league -1.9σ"
+        - paragraph: No displayed Diet Shares meet the named threshold.
+      - article:
+        - text: "1"
+        - heading "Cut PTS" [level=4]
+        - button "Save Cut PTS as a Target": Save as Target
+        - strong: "7.8"
+        - text: "-19.2% vs league -1.9σ"
+        - paragraph: No displayed Diet Shares meet the named threshold.
+      - article:
+        - text: "1"
+        - heading "Isolation POSS" [level=4]
+        - button "Save Isolation POSS as a Target": Save as Target
+        - strong: "5.9"
+        - text: "-23.6% vs league -1.8σ"
+        - group "Players leaning on this slice": Derik Queen · 15% poss · +1.4σ
+      - article:
+        - text: "1"
+        - heading "Isolation PTS" [level=4]
+        - button "Save Isolation PTS as a Target": Save as Target
+        - strong: "5.3"
+        - text: "-26.3% vs league -1.9σ"
+        - group "Players leaning on this slice": Derik Queen · 15% poss · +1.4σ
+      - article:
+        - text: "27"
+        - heading "PRBallHandler PTS" [level=4]
+        - button "Save PRBallHandler PTS as a Target": Save as Target
+        - strong: "16.3"
+        - text: +12.0% vs league +1.1σ
+        - group "Players leaning on this slice": Jeremiah Fears · 30% poss · +1.0σ Jordan Poole · 28% poss · +0.9σ
+    - region "Shot types":
+      - heading "Shot types" [level=3]
+      - article:
+        - text: "4"
+        - heading "Catch and Shoot FG2M" [level=4]
+        - button "Save Catch and Shoot FG2M as a Target": Save as Target
+        - strong: "0.5"
+        - text: "-25.9% vs league -1.3σ"
+        - paragraph: No displayed Diet Shares meet the named threshold.
+      - article:
+        - text: "2"
+        - heading "Less Than 10 ft FG2M" [level=4]
+        - button "Save Less Than 10 ft FG2M as a Target": Save as Target
+        - strong: "18.8"
+        - text: "-15.8% vs league -1.8σ"
+        - group "Players leaning on this slice": Josh Oduro · 77% FGA · +1.8σ Derik Queen · 69% FGA · +1.4σ Jeremiah Fears · 54% FGA · +0.6σ
+    - region "Shot zones":
+      - heading "Shot zones" [level=3]
+      - article:
+        - text: "30"
+        - heading "Above the Break 3 FGM" [level=4]
+        - button "Save Above the Break 3 FGM as a Target": Save as Target
+        - strong: "10.9"
+        - text: +14.5% vs league +2.1σ
+        - group "Players leaning on this slice": Jordan Poole · 58% FGA · +1.8σ Jordan Hawkins · 42% FGA · +0.7σ
+      - article:
+        - text: "3"
+        - heading "Corner 3 FGM" [level=4]
+        - button "Save Corner 3 FGM as a Target": Save as Target
+        - strong: "3.0"
+        - text: "-17.5% vs league -1.7σ"
+        - paragraph: No displayed Diet Shares meet the named threshold.
+      - article:
+        - text: "27"
+        - heading "Mid Range FGM" [level=4]
+        - button "Save Mid Range FGM as a Target": Save as Target
+        - strong: "4.3"
+        - text: +14.7% vs league +1.3σ
+        - group "Players leaning on this slice": Jordan Hawkins · 25% FGA · +2.1σ Trey Alexander · 24% FGA · +2.0σ
+      - article:
+        - text: "1"
+        - heading "Restricted Area FGM" [level=4]
+        - button "Save Restricted Area FGM as a Target": Save as Target
+        - strong: "12.0"
+        - text: "-28.8% vs league -2.5σ"
+        - group "Players leaning on this slice": Kevon Looney · 60% FGA · +2.3σ Josh Oduro · 53% FGA · +1.8σ Derik Queen · 50% FGA · +1.6σ Jeremiah Fears · 40% FGA · +0.9σ Micah Peavy · 39% FGA · +0.8σ Jordan Poole · 20% FGA · -0.5σ

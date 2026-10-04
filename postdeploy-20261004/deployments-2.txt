@@ -1,0 +1,8 @@
+backend 16d875cb-5518-4169-9690-95d16dc7e21b SUCCESS 2026-10-04T22:11:10.133Z 58d0407556eabd54854fedd4fee83d1c0cf856c9 Return one provenance block from every MCP-read route (#337) crf04/statsplus-backend master
+backend ef3fbe02-7614-49ad-99bf-2cfe02cc6346 REMOVING 2026-10-03T21:57:54.683Z c1f40b54cf7e0af881381e805f0fc4b91fa3ffca Merge pull request #331 from crf04/fix/309-nl-date-to  Map n crf04/statsplus-backend master
+backend 42a14aab-5b78-4114-98e0-061cf0e811c7 REMOVED 2026-10-03T21:21:47.329Z 46ee9850bf720ea0675006a9a40b9058f3f0879b Merge pull request #330 from crf04/fix/314-null-team-name  S crf04/statsplus-backend master
+backend b31e92a7-9171-4492-8f02-2c6618c556db REMOVED 2026-10-02T21:04:45.881Z e5c248c9c8234d00ac01eaa381c5f7f7cc196e82 Preserve parity artifacts when pruning publications (#328) crf04/statsplus-backend master
+mcp ac7378a5-c7fd-43be-bee2-b85bb9bfc467 SUCCESS 2026-10-04T22:11:43.591Z 98f881255b19719e7cfc271021c918cc3849e2f1 State which data every answer was read from, and flag stale  crf04/statsplus-mcp main
+mcp 58f7aba9-1315-4efe-b869-8bd0df3513dc REMOVED 2026-10-04T05:56:14.402Z 5b31d29a95a82af1845932b1285859a1de61933c Support ChatGPT connector authentication with exact OAuth ca crf04/statsplus-mcp main
+mcp 97babc0f-755b-4c5f-b7dc-3e202e4c2546 REMOVED 2026-10-03T02:47:27.681Z f90dfc986348b3d09d58868ecd8ddbe56c275f00 Merge pull request #9 from crf04/claude/issue-8-unscheduled- crf04/statsplus-mcp main
+mcp 13aebbbd-d721-460c-ac8d-3016dcc06b31 REMOVED 2026-10-03T02:09:49.017Z dc76797f85069b814b5657a1a40ce93c3510f4c9 Merge pull request #7 from crf04/claude/mcp-integration  Add crf04/statsplus-mcp main

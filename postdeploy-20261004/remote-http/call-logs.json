@@ -1,0 +1,485 @@
+[
+ {
+  "timestamp": "2026-10-04T22:14:10.221487288Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": false,
+  "backend_calls": 16,
+  "response_size": 27240,
+  "outcome": "ok",
+  "latency_ms": 3391.3
+ },
+ {
+  "timestamp": "2026-10-04T22:14:16.410546474Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DAL @ SAS",
+   "opponent": null,
+   "player": "Khris Middleton",
+   "team": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 16453,
+  "outcome": "ok",
+  "latency_ms": 858.1
+ },
+ {
+  "timestamp": "2026-10-04T22:14:16.688793594Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": null
+  },
+  "cache_hit": false,
+  "backend_calls": 1,
+  "response_size": 1413,
+  "outcome": "ok",
+  "latency_ms": 90.3
+ },
+ {
+  "timestamp": "2026-10-04T22:14:16.888054904Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": null,
+   "game": null,
+   "opponent": "BOS",
+   "player": "Tyrese Maxey",
+   "team": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 18768,
+  "outcome": "ok",
+  "latency_ms": 798.7
+ },
+ {
+  "timestamp": "2026-10-04T22:14:17.594312758Z",
+  "tool": "get_targets",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": false,
+  "backend_calls": 1,
+  "response_size": 18555,
+  "outcome": "ok",
+  "latency_ms": 1113.9
+ },
+ {
+  "timestamp": "2026-10-04T22:14:37.602255221Z",
+  "tool": "query_game_logs",
+  "arguments": {
+   "date": null,
+   "last_n": 3,
+   "market": "PTS",
+   "player": "Tyrese Maxey",
+   "season": "2025-26",
+   "vs": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 2611,
+  "outcome": "ok",
+  "latency_ms": 644
+ },
+ {
+  "timestamp": "2026-10-04T22:14:37.602263897Z",
+  "tool": "query_game_logs",
+  "arguments": {
+   "date": "2026-04-10",
+   "last_n": 5,
+   "market": "FGA",
+   "player": "Khris Middleton",
+   "season": null,
+   "vs": [
+    {
+     "filter": null,
+     "ranks": [
+      1,
+      10
+     ],
+     "row": "sheet:shot_zones:Mid-Range:FGA"
+    }
+   ]
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 4612,
+  "outcome": "ok",
+  "latency_ms": 644.3
+ },
+ {
+  "timestamp": "2026-10-04T22:14:37.602271208Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DAL @ SAS",
+   "opponent": null,
+   "player": null,
+   "team": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 8140,
+  "outcome": "ok",
+  "latency_ms": 834.1
+ },
+ {
+  "timestamp": "2026-10-04T22:15:07.965775222Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DAL @ SAS",
+   "opponent": null,
+   "player": "Khris Middleton",
+   "team": null
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 16453,
+  "outcome": "ok",
+  "latency_ms": 0.4
+ },
+ {
+  "timestamp": "2026-10-04T22:15:07.965784458Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 27240,
+  "outcome": "ok",
+  "latency_ms": 0.4
+ },
+ {
+  "timestamp": "2026-10-04T22:20:11.012547604Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 27240,
+  "outcome": "ok",
+  "latency_ms": 0.6
+ },
+ {
+  "timestamp": "2026-10-04T22:20:12.440672272Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 27240,
+  "outcome": "ok",
+  "latency_ms": 0.6
+ },
+ {
+  "timestamp": "2026-10-04T22:20:16.862798237Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DET @ CHA",
+   "opponent": null,
+   "player": null,
+   "team": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 8272,
+  "outcome": "ok",
+  "latency_ms": 936.3
+ },
+ {
+  "timestamp": "2026-10-04T22:20:20.528582905Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DET @ CHA",
+   "opponent": null,
+   "player": null,
+   "team": null
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 8272,
+  "outcome": "ok",
+  "latency_ms": 0.4
+ },
+ {
+  "timestamp": "2026-10-04T22:20:25.004418331Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": null,
+   "game": null,
+   "opponent": "CHA",
+   "player": "Cade Cunningham",
+   "team": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 17111,
+  "outcome": "ok",
+  "latency_ms": 808.7
+ },
+ {
+  "timestamp": "2026-10-04T22:20:28.647625359Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": null,
+   "game": null,
+   "opponent": "CHA",
+   "player": "Cade Cunningham",
+   "team": null
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 17111,
+  "outcome": "ok",
+  "latency_ms": 0.6
+ },
+ {
+  "timestamp": "2026-10-04T22:20:33.390291131Z",
+  "tool": "query_game_logs",
+  "arguments": {
+   "date": "2026-04-10",
+   "last_n": null,
+   "market": "PTS",
+   "player": "Cade Cunningham",
+   "season": null,
+   "vs": [
+    {
+     "filter": null,
+     "ranks": [
+      1,
+      10
+     ],
+     "row": "sheet:play_types:OffScreen:PTS"
+    }
+   ]
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 6737,
+  "outcome": "ok",
+  "latency_ms": 698.1
+ },
+ {
+  "timestamp": "2026-10-04T22:20:37.468831335Z",
+  "tool": "query_game_logs",
+  "arguments": {
+   "date": "2026-04-10",
+   "last_n": null,
+   "market": "PTS",
+   "player": "Cade Cunningham",
+   "season": null,
+   "vs": [
+    {
+     "filter": null,
+     "ranks": [
+      1,
+      10
+     ],
+     "row": "sheet:play_types:OffScreen:PTS"
+    }
+   ]
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 6737,
+  "outcome": "ok",
+  "latency_ms": 689
+ },
+ {
+  "timestamp": "2026-10-04T22:20:42.123204677Z",
+  "tool": "get_targets",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": false,
+  "backend_calls": 1,
+  "response_size": 18555,
+  "outcome": "ok",
+  "latency_ms": 974.2
+ },
+ {
+  "timestamp": "2026-10-04T22:20:46.743226374Z",
+  "tool": "get_targets",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": false,
+  "backend_calls": 1,
+  "response_size": 18555,
+  "outcome": "ok",
+  "latency_ms": 1098.5
+ },
+ {
+  "timestamp": "2026-10-04T22:21:10.411740142Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 27240,
+  "outcome": "ok",
+  "latency_ms": 0.4
+ },
+ {
+  "timestamp": "2026-10-04T22:21:12.204589780Z",
+  "tool": "get_slate",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 27240,
+  "outcome": "ok",
+  "latency_ms": 0.4
+ },
+ {
+  "timestamp": "2026-10-04T22:21:15.712853653Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DET @ CHA",
+   "opponent": null,
+   "player": null,
+   "team": null
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 8272,
+  "outcome": "ok",
+  "latency_ms": 0.3
+ },
+ {
+  "timestamp": "2026-10-04T22:21:19.339193661Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": "2026-04-10",
+   "game": "DET @ CHA",
+   "opponent": null,
+   "player": null,
+   "team": null
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 8272,
+  "outcome": "ok",
+  "latency_ms": 0.3
+ },
+ {
+  "timestamp": "2026-10-04T22:21:22.949323244Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": null,
+   "game": null,
+   "opponent": "CHA",
+   "player": "Cade Cunningham",
+   "team": null
+  },
+  "cache_hit": true,
+  "backend_calls": 0,
+  "response_size": 17111,
+  "outcome": "ok",
+  "latency_ms": 0.3
+ },
+ {
+  "timestamp": "2026-10-04T22:21:27.350521991Z",
+  "tool": "get_matchup",
+  "arguments": {
+   "date": null,
+   "game": null,
+   "opponent": "CHA",
+   "player": "Cade Cunningham",
+   "team": null
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 17111,
+  "outcome": "ok",
+  "latency_ms": 739.6
+ },
+ {
+  "timestamp": "2026-10-04T22:21:31.585929788Z",
+  "tool": "query_game_logs",
+  "arguments": {
+   "date": "2026-04-10",
+   "last_n": null,
+   "market": "PTS",
+   "player": "Cade Cunningham",
+   "season": null,
+   "vs": [
+    {
+     "filter": null,
+     "ranks": [
+      1,
+      10
+     ],
+     "row": "sheet:play_types:OffScreen:PTS"
+    }
+   ]
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 6737,
+  "outcome": "ok",
+  "latency_ms": 580
+ },
+ {
+  "timestamp": "2026-10-04T22:21:35.806524030Z",
+  "tool": "query_game_logs",
+  "arguments": {
+   "date": "2026-04-10",
+   "last_n": null,
+   "market": "PTS",
+   "player": "Cade Cunningham",
+   "season": null,
+   "vs": [
+    {
+     "filter": null,
+     "ranks": [
+      1,
+      10
+     ],
+     "row": "sheet:play_types:OffScreen:PTS"
+    }
+   ]
+  },
+  "cache_hit": false,
+  "backend_calls": 2,
+  "response_size": 6737,
+  "outcome": "ok",
+  "latency_ms": 556.6
+ },
+ {
+  "timestamp": "2026-10-04T22:21:40.356343222Z",
+  "tool": "get_targets",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": false,
+  "backend_calls": 1,
+  "response_size": 18555,
+  "outcome": "ok",
+  "latency_ms": 951.3
+ },
+ {
+  "timestamp": "2026-10-04T22:21:45.246822272Z",
+  "tool": "get_targets",
+  "arguments": {
+   "date": "2026-04-10"
+  },
+  "cache_hit": false,
+  "backend_calls": 1,
+  "response_size": 18555,
+  "outcome": "ok",
+  "latency_ms": 965.3
+ }
+]

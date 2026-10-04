@@ -1,0 +1,39 @@
+{
+ "method": "GET",
+ "path": "/api/games/slate?date=2026-10-04",
+ "status": 200,
+ "requested_at": "2026-10-04T22:16:19.013667+00:00",
+ "elapsed_s": 0.1,
+ "response": {
+  "freshness": {
+   "pool": {
+    "providers": {},
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  },
+  "games": [],
+  "provenance": {
+   "generation": [],
+   "sources": {
+    "injuries": {
+     "retrieved_at": null,
+     "status": "unavailable"
+    },
+    "pool": {
+     "retrieved_at": null,
+     "status": "unavailable"
+    },
+    "schedule": {
+     "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+     "status": "stale"
+    }
+   }
+  },
+  "slate_date": "2026-10-04"
+ }
+}

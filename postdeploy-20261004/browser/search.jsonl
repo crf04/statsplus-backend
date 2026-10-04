@@ -1,0 +1,42 @@
+{"action":"doctor"}
+{"action":"open","path":"/?player_name=LeBron+James&season_filter=2025-26&game_filter=5"}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","season_filter":"2025-26","game_filter":"5"},"status":200}
+{"action":"assert","target":{"within":{"selector":".game-logs-main"},"text":"GAMES <= 5"}}
+{"action":"assert","target":{"within":{"selector":".sample-size-text"},"text":"5 of 60 games"}}
+{"action":"proof","name":"search-shared-desktop"}
+{"action":"click","target":{"role":"button","name":"last 5 games"}}
+{"action":"fill","target":{"label":"Last N games"},"value":"3"}
+{"action":"click","target":{"role":"button","name":"Done"}}
+{"action":"click","target":{"role":"button","name":"Apply 1 change"}}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","season_filter":"2025-26","game_filter":"3"},"status":200}
+{"action":"assert","url":"/?player_name=LeBron+James&season_filter=2025-26&game_filter=3"}
+{"action":"assert","target":{"within":{"selector":".sample-size-text"},"text":"3 of 60 games"}}
+{"action":"assert","target":{"within":{"selector":".game-logs-main"},"text":"GAMES <= 3"}}
+{"action":"proof","name":"search-filter-applied-desktop"}
+{"action":"reload"}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James","season_filter":"2025-26","game_filter":"3"},"status":200}
+{"action":"assert","target":{"within":{"selector":".sample-size-text"},"text":"3 of 60 games"}}
+{"action":"viewport","name":"phone"}
+{"action":"assert","target":{"within":{"selector":".game-logs-main"},"text":"GAMES <= 3"}}
+{"action":"proof","name":"search-reloaded-phone"}
+{"action":"open","path":"/?player_name=LeBron+James&game_filter=abc"}
+{"action":"assert","target":{"role":"alert"}}
+{"action":"assert","target":{"role":"button","name":"Save Filter Set"},"state":"hidden"}
+{"action":"assert","url":"/?player_name=LeBron+James&game_filter=abc"}
+{"action":"proof","name":"search-refused-phone"}
+{"action":"viewport","name":"desktop"}
+{"action":"open","path":"/?browse=1"}
+{"action":"assert-response","method":"GET","path":"/api/players","query":{},"status":200}
+{"action":"assert","target":{"role":"button","name":"Save Filter Set"},"state":"hidden"}
+{"action":"fill","target":{"label":"Player:"},"value":"LeBron"}
+{"action":"click","target":{"role":"option","name":"LeBron James"}}
+{"action":"assert","target":{"role":"heading","name":"LeBron James’s games"}}
+{"action":"assert-response","method":"GET","path":"/api/games/game_logs","query":{"player_name":"LeBron James"},"status":200}
+{"action":"assert","target":{"text":"60 of 60 games match"}}
+{"action":"proof","name":"search-browse-desktop"}
+{"action":"click","target":{"role":"button","name":"Back to search"}}
+{"action":"assert","url":"/"}
+{"action":"assert","target":{"role":"heading","name":"Ask the box score"}}
+{"action":"assert","target":{"role":"textbox"},"value":""}
+{"action":"proof","name":"search-return-desktop"}
+{"action":"cleanup"}

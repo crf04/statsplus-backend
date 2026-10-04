@@ -1,0 +1,234 @@
+{
+  "url": "http://127.0.0.1:5193/",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "screenshot": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-return-desktop.png",
+  "aria": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/search/search-return-desktop.aria.txt",
+  "responses": [
+    {
+      "at": "2026-10-04T22:16:10.958Z",
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.229Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/user/saved-filter-sets",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.232Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.292Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/players/profile",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.316Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/players",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.329Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/players/next-opponent",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.771Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.830Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.926Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:11.993Z",
+      "actionStep": 2,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:13.203Z",
+      "actionStep": 10,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.185Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/user/saved-filter-sets",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.187Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.251Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/players/profile",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.286Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/players/next-opponent",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.339Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/players",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.632Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.650Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.727Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:14.779Z",
+      "actionStep": 16,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:15.528Z",
+      "actionStep": 22,
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:15.577Z",
+      "actionStep": 22,
+      "method": "GET",
+      "path": "/api/players",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:15.914Z",
+      "actionStep": 28,
+      "method": "GET",
+      "path": "/api/teams",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:15.925Z",
+      "actionStep": 28,
+      "method": "GET",
+      "path": "/api/user/saved-filter-sets",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:15.934Z",
+      "actionStep": 28,
+      "method": "GET",
+      "path": "/api/players/next-opponent",
+      "status": 404
+    },
+    {
+      "at": "2026-10-04T22:16:16.970Z",
+      "actionStep": 28,
+      "method": "GET",
+      "path": "/api/players",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:18.081Z",
+      "actionStep": 32,
+      "method": "GET",
+      "path": "/api/players/profile",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:18.120Z",
+      "actionStep": 32,
+      "method": "GET",
+      "path": "/api/players/next-opponent",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:18.495Z",
+      "actionStep": 32,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:19.007Z",
+      "actionStep": 32,
+      "method": "GET",
+      "path": "/api/games/game_logs",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:19.123Z",
+      "actionStep": 32,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    },
+    {
+      "at": "2026-10-04T22:16:19.188Z",
+      "actionStep": 32,
+      "method": "GET",
+      "path": "/api/teams/stats",
+      "status": 200
+    }
+  ]
+}

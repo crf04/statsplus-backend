@@ -1,0 +1,271 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- main:
+  - paragraph: NBA slate
+  - heading "Friday, April 10, 2026" [level=1]
+  - button "Previous date": ←
+  - text: Slate date
+  - textbox "Slate date": 2026-04-10
+  - button "Next date": →
+  - button "Today"
+  - text: 15 games 11 Targets active ·
+  - link "All Targets →":
+    - /url: /targets
+  - group "Data freshness": Schedule is stale — as of 26d ago Player pool is unavailable
+  - region "Player pool":
+    - heading "Player pool" [level=2]
+    - paragraph: Past slate — the player pool is unavailable and no current pool is displayed. Game cards retain the returned targetable counts for this slate.
+  - list:
+    - listitem:
+      - heading "7:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "DET @ CHA, 7:00 PM, Final, 0 targetable players, DET 0, CHA 0, Open Team Sheets":
+            - /url: /matchups/0022501171
+            - heading "DET @ CHA" [level=3]
+            - text: Final Detroit Pistons at Charlotte Hornets
+          - article:
+            - text: DET vs Spot up ≥ 36.9% 3 fit
+            - table "Fits for DET vs Spot up ≥ 36.9%":
+              - caption: from game logs
+              - rowgroup:
+                - row "Player Spot up PPG":
+                  - columnheader "Player"
+                  - columnheader "Spot up"
+                  - columnheader "PPG"
+              - rowgroup:
+                - row "Grant Williams CHA 43% lg 25% 7.0":
+                  - cell "Grant Williams CHA"
+                  - cell "43% lg 25%"
+                  - cell "7.0"
+                - row "Sion James CHA 43% lg 25% 5.4":
+                  - cell "Sion James CHA"
+                  - cell "43% lg 25%"
+                  - cell "5.4"
+                - row "Josh Green CHA 61% lg 25% 4.3":
+                  - cell "Josh Green CHA"
+                  - cell "61% lg 25%"
+                  - cell "4.3"
+        - listitem:
+          - link "MIA @ WAS, 7:00 PM, Final, 0 targetable players, MIA 0, WAS 0, Open Team Sheets":
+            - /url: /matchups/0022501172
+            - heading "MIA @ WAS" [level=3]
+            - text: Final Miami Heat at Washington Wizards
+          - article:
+            - text: WAS vs Restricted area ≥ 45.6% 2 fit
+            - table "Fits for WAS vs Restricted area ≥ 45.6%":
+              - caption: from game logs
+              - rowgroup:
+                - row "Player Restricted area PPG":
+                  - columnheader "Player"
+                  - columnheader "Restricted area"
+                  - columnheader "PPG"
+              - rowgroup:
+                - row "Kel'el Ware MIA 48% lg 28% 11.1":
+                  - cell "Kel'el Ware MIA"
+                  - cell "48% lg 28%"
+                  - cell "11.1"
+                - row "Vladislav Goldin MIA thin 100% lg 28% 0.8":
+                  - cell "Vladislav Goldin MIA thin"
+                  - cell "100% lg 28%"
+                  - cell "0.8"
+        - listitem:
+          - link "CLE @ ATL, 7:00 PM, Final, 0 targetable players, CLE 0, ATL 0, Open Team Sheets":
+            - /url: /matchups/0022501173
+            - heading "CLE @ ATL" [level=3]
+            - text: Final Cleveland Cavaliers at Atlanta Hawks
+    - listitem:
+      - heading "7:30 PM" [level=2]
+      - list:
+        - listitem:
+          - link "NOP @ BOS, 7:30 PM, Final, 0 targetable players, NOP 0, BOS 0, Open Team Sheets":
+            - /url: /matchups/0022501174
+            - heading "NOP @ BOS" [level=3]
+            - text: Final New Orleans Pelicans at Boston Celtics
+        - listitem:
+          - link "PHI @ IND, 7:30 PM, Final, 0 targetable players, PHI 0, IND 0, Open Team Sheets":
+            - /url: /matchups/0022501175
+            - heading "PHI @ IND" [level=3]
+            - text: Final Philadelphia 76ers at Indiana Pacers
+          - article:
+            - text: IND vs P&R ball handler ≥ 29.8%
+            - emphasis: "&"
+            - text: Isolation ≥ 7.4% 0 fit
+            - paragraph: No PHI player meets every Qualifier today.
+        - listitem:
+          - link "TOR @ NYK, 7:30 PM, Final, 0 targetable players, TOR 0, NYK 0, Open Team Sheets":
+            - /url: /matchups/0022501176
+            - heading "TOR @ NYK" [level=3]
+            - text: Final Toronto Raptors at New York Knicks
+          - article:
+            - text: NYK vs P&R roll man ≥ 18%
+            - emphasis: "&"
+            - text: Spot up ≤ 20% 0 fit
+            - paragraph: No TOR player meets every Qualifier today.
+    - listitem:
+      - heading "8:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "ORL @ CHI, 8:00 PM, Final, 0 targetable players, ORL 0, CHI 0, Open Team Sheets":
+            - /url: /matchups/0022501177
+            - heading "ORL @ CHI" [level=3]
+            - text: Final Orlando Magic at Chicago Bulls
+          - article:
+            - text: ORL vs Catch & shoot ≥ 42%
+            - emphasis: "&"
+            - text: Spot up ≥ 30.2% 2 fit
+            - table "Fits for ORL vs Catch & shoot ≥ 42%, Spot up ≥ 30.2%":
+              - caption: from game logs
+              - rowgroup:
+                - row "Player Catch & shoot Spot up PPG":
+                  - columnheader "Player"
+                  - columnheader "Catch & shoot"
+                  - columnheader "Spot up"
+                  - columnheader "PPG"
+              - rowgroup:
+                - row "Patrick Williams CHI 47% lg 32% 40% lg 25% 7.0":
+                  - cell "Patrick Williams CHI"
+                  - cell "47% lg 32%"
+                  - cell "40% lg 25%"
+                  - cell "7.0"
+                - row "Yuki Kawamura CHI thin 42% lg 32% 36% lg 25% 3.4":
+                  - cell "Yuki Kawamura CHI thin"
+                  - cell "42% lg 32%"
+                  - cell "36% lg 25%"
+                  - cell "3.4"
+          - article:
+            - text: ORL vs P&R ball handler ≥ 20%
+            - emphasis: "&"
+            - text: Isolation ≥ 12% 0 fit
+            - paragraph: No CHI player meets every Qualifier today.
+          - article:
+            - text: ORL vs Isolation ≥ 17% 0 fit
+            - paragraph: No CHI player meets every Qualifier today.
+        - listitem:
+          - link "BKN @ MIL, 8:00 PM, Final, 0 targetable players, BKN 0, MIL 0, Open Team Sheets":
+            - /url: /matchups/0022501179
+            - heading "BKN @ MIL" [level=3]
+            - text: Final Brooklyn Nets at Milwaukee Bucks
+          - article:
+            - text: BKN vs P&R ball handler ≥ 30.5%
+            - emphasis: "&"
+            - text: Pull-up ≥ 30.9% 0 fit
+            - paragraph: No MIL player meets every Qualifier today.
+        - listitem:
+          - link "DAL @ SAS, 8:00 PM, Final, 0 targetable players, DAL 0, SAS 0, Open Team Sheets":
+            - /url: /matchups/0022501180
+            - heading "DAL @ SAS" [level=3]
+            - text: Final Dallas Mavericks at San Antonio Spurs
+    - listitem:
+      - heading "9:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "OKC @ DEN, 9:00 PM, Final, 0 targetable players, OKC 0, DEN 0, Open Team Sheets":
+            - /url: /matchups/0022501182
+            - heading "OKC @ DEN" [level=3]
+            - text: Final Oklahoma City Thunder at Denver Nuggets
+    - listitem:
+      - heading "9:30 PM" [level=2]
+      - list:
+        - listitem:
+          - link "MIN @ HOU, 9:30 PM, Final, 0 targetable players, MIN 0, HOU 0, Open Team Sheets":
+            - /url: /matchups/0022501178
+            - heading "MIN @ HOU" [level=3]
+            - text: Final Minnesota Timberwolves at Houston Rockets
+          - article:
+            - text: MIN vs Spot up ≥ 38.4% 4 fit
+            - table "Fits for MIN vs Spot up ≥ 38.4%":
+              - caption: from game logs
+              - rowgroup:
+                - row "Player Spot up PPG":
+                  - columnheader "Player"
+                  - columnheader "Spot up"
+                  - columnheader "PPG"
+              - rowgroup:
+                - row "Jabari Smith Jr. HOU 39% lg 25% 15.8":
+                  - cell "Jabari Smith Jr. HOU"
+                  - cell "39% lg 25%"
+                  - cell "15.8"
+                - row "Tari Eason HOU 42% lg 25% 10.4":
+                  - cell "Tari Eason HOU"
+                  - cell "42% lg 25%"
+                  - cell "10.4"
+                - row "Aaron Holiday HOU 39% lg 25% 5.5":
+                  - cell "Aaron Holiday HOU"
+                  - cell "39% lg 25%"
+                  - cell "5.5"
+                - row "Josh Okogie HOU 44% lg 25% 4.5":
+                  - cell "Josh Okogie HOU"
+                  - cell "44% lg 25%"
+                  - cell "4.5"
+          - article:
+            - text: MIN vs Pull-up ≥ 45% 1 fit
+            - table "Fits for MIN vs Pull-up ≥ 45%":
+              - caption: from game logs
+              - rowgroup:
+                - row "Player Pull-up PPG":
+                  - columnheader "Player"
+                  - columnheader "Pull-up"
+                  - columnheader "PPG"
+              - rowgroup:
+                - row "Kevin Durant HOU 52% lg 24% 26.0":
+                  - cell "Kevin Durant HOU"
+                  - cell "52% lg 24%"
+                  - cell "26.0"
+        - listitem:
+          - link "MEM @ UTA, 9:30 PM, Final, 0 targetable players, MEM 0, UTA 0, Open Team Sheets":
+            - /url: /matchups/0022501181
+            - heading "MEM @ UTA" [level=3]
+            - text: Final Memphis Grizzlies at Utah Jazz
+    - listitem:
+      - heading "10:00 PM" [level=2]
+      - list:
+        - listitem:
+          - link "LAC @ POR, 10:00 PM, Final, 0 targetable players, LAC 0, POR 0, Open Team Sheets":
+            - /url: /matchups/0022501183
+            - heading "LAC @ POR" [level=3]
+            - text: Final Los Angeles Clippers at Portland Trail Blazers
+          - article:
+            - text: POR vs P&R roll man ≥ 10.4%
+            - emphasis: "&"
+            - text: Catch & shoot ≥ 22.5% 1 fit
+            - table "Fits for POR vs P&R roll man ≥ 10.4%, Catch & shoot ≥ 22.5%":
+              - caption: from game logs
+              - rowgroup:
+                - row "Player P&R roll man Catch & shoot PPG":
+                  - columnheader "Player"
+                  - columnheader "P&R roll man"
+                  - columnheader "Catch & shoot"
+                  - columnheader "PPG"
+              - rowgroup:
+                - row "Brook Lopez LAC 26% lg 8% 56% lg 32% 8.5":
+                  - cell "Brook Lopez LAC"
+                  - cell "26% lg 8%"
+                  - cell "56% lg 32%"
+                  - cell "8.5"
+        - listitem:
+          - link "GSW @ SAC, 10:00 PM, Final, 0 targetable players, GSW 0, SAC 0, Open Team Sheets":
+            - /url: /matchups/0022501184
+            - heading "GSW @ SAC" [level=3]
+            - text: Final Golden State Warriors at Sacramento Kings
+    - listitem:
+      - heading "10:30 PM" [level=2]
+      - list:
+        - listitem:
+          - link "PHX @ LAL, 10:30 PM, Final, 0 targetable players, PHX 0, LAL 0, Open Team Sheets":
+            - /url: /matchups/0022501185
+            - heading "PHX @ LAL" [level=3]
+            - text: Final Phoenix Suns at Los Angeles Lakers

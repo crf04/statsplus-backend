@@ -1,0 +1,2926 @@
+[
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 10
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "game-logs-cade-2025-26-dateto",
+  "check": "sources keys == []",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 10
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "game-logs-cade-mcp-equivalent",
+  "check": "sources keys == []",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 10
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "game-logs-cade-named-filter",
+  "check": "sources keys == []",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 10
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "game-logs-cade-sheet-filter",
+  "check": "sources keys == []",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 10
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "game-logs-cade",
+  "check": "sources keys == []",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501171",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501172",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501173",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501174",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501175",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501176",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501177",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501178",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501179",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501180",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501181",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501182",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501183",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501184",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "matchup-0022501185",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 0
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [],
+   "age_days_range": [
+    0.0,
+    0.0
+   ]
+  }
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "slate generation == []",
+  "pass": true,
+  "observed": 0
+ },
+ {
+  "file": "slate-2026-04-10",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 0
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [],
+   "age_days_range": [
+    0.0,
+    0.0
+   ]
+  }
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "slate generation == []",
+  "pass": true,
+  "observed": 0
+ },
+ {
+  "file": "slate-2026-04-12",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 0
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [],
+   "age_days_range": [
+    0.0,
+    0.0
+   ]
+  }
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "slate generation == []",
+  "pass": true,
+  "observed": 0
+ },
+ {
+  "file": "slate-2026-10-04",
+  "check": "sources copy response freshness surface {status,retrieved_at}",
+  "pass": true,
+  "observed": {
+   "injuries": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "pool": {
+    "retrieved_at": null,
+    "status": "unavailable"
+   },
+   "schedule": {
+    "retrieved_at": "2026-09-09T09:00:11.443428+00:00",
+    "status": "stale"
+   }
+  }
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "block has exactly generation+sources",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "targets-resolve-2026-04-10",
+  "check": "sources keys == ['injuries', 'pool', 'schedule']",
+  "pass": true,
+  "observed": [
+   "injuries",
+   "pool",
+   "schedule"
+  ]
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "status 200",
+  "pass": true,
+  "observed": 200
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "provenance object present (deploy proof)",
+  "pass": true,
+  "observed": "dict"
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "legacy stream-keyed entries kept beside generation/sources",
+  "pass": true,
+  "observed": {
+   "legacy_keys": 17
+  }
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "generation is list",
+  "pass": true,
+  "observed": 15
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "generation sorted by stream_key (then season)",
+  "pass": true,
+  "observed": [
+   "assist_locations_l15",
+   "assist_locations_season",
+   "exact_shot_zones",
+   "exact_shot_zones_opponent_l15",
+   "exact_shot_zones_opponent_season",
+   "grouped_shot_types",
+   "grouped_shot_types_opponent_l15",
+   "grouped_shot_types_opponent_season",
+   "player_assist_locations",
+   "player_game_logs",
+   "player_per36",
+   "synergy_play_types",
+   "synergy_play_types_opponent_season",
+   "traditional_opponent_l15",
+   "traditional_opponent_season"
+  ]
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "entries are PublicationRead.to_dict shape",
+  "pass": true,
+  "observed": {
+   "key_sets_equal_to_to_dict": [
+    true
+   ],
+   "n_keys": 17
+  }
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "freshness in fresh|stale|unavailable",
+  "pass": true,
+  "observed": [
+   "stale"
+  ]
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "no provider_window_unsupported stream in generation",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "freshness == rule(age_seconds); age_seconds ~= request time - retrieved_at",
+  "pass": true,
+  "observed": {
+   "rules": [
+    "cutoff_current"
+   ],
+   "age_days_range": [
+    23.0,
+    42.7
+   ]
+  }
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "sources keys == []",
+  "pass": true,
+  "observed": []
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "generation == legacy entries minus provider_window_unsupported",
+  "pass": true,
+  "observed": {
+   "omitted": [
+    "synergy:l15",
+    "synergy_play_types_opponent_l15"
+   ]
+  }
+ },
+ {
+  "file": "unscheduled-cade-vs-cha",
+  "check": "generation entries match legacy entries (except freshness/age)",
+  "pass": true,
+  "observed": []
+ }
+]

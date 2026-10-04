@@ -1,0 +1,32 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- main:
+  - paragraph: NBA slate
+  - heading "Saturday, August 1, 2026" [level=1]
+  - button "Previous date": ←
+  - text: Slate date
+  - textbox "Slate date": 2026-08-01
+  - button "Next date": →
+  - button "Today"
+  - text: 0 games 0 Targets active ·
+  - link "All Targets →":
+    - /url: /targets
+  - group "Data freshness": Schedule is stale — as of 26d ago Player pool is unavailable
+  - region "Player pool":
+    - heading "Player pool" [level=2]
+    - paragraph: Past slate — the player pool is unavailable and no current pool is displayed. Game cards retain the returned targetable counts for this slate.
+  - heading "No games on this slate." [level=2]
+  - paragraph: Choose another date to keep browsing the season.

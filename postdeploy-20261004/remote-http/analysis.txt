@@ -1,0 +1,65 @@
+PASS apps get_slate {"date": "2026-04-10"} | not isError | [false, false]
+PASS apps get_slate {"date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 3, "last_line_starts": "Unavailable: injuries, player pool."}
+PASS apps get_slate {"date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 3.7, "elapsed_s": [0.11, 0.07]}
+PASS apps get_slate {"date": "2026-04-10"} | text footer == structuredContent.data_as_of | ["Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 g
+PASS apps get_slate {"date": "2026-04-10"} | repeat: identical structuredContent (shared cache) | null
+PASS apps get_slate {"date": "2026-04-10"} | text+structured under 150000 | {"text": 5838, "structured": 23245}
+PASS apps get_slate {"date": "2026-04-10"} | structured provenance == backend block (slate-2026-04-10), ignoring age_seconds | {"byte_equal_incl_age": true}
+PASS apps get_slate {"date": "2026-04-10"} | matchup_generation has no duplicate identities | {"entries": 15, "identities": 15}
+PASS apps get_slate {"date": "2026-04-10"} | per-game indices valid, unique, and resolve to that game backend Matchup identities | {"games": 15, "bad": []}
+PASS apps get_slate {"date": "2026-04-10"} | per-game matchup_provenance.sources == backend Matchup sources | []
+PASS apps get_slate {"date": "2026-04-10"} | matchup_generation identities == union of 15 backend Matchups | 15
+PASS apps get_slate {"date": "2026-04-10"} | per-game entries carry no legacy stream-keyed provenance | ["generation", "sources"]
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | not isError | [false, false]
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 3, "last_line_starts": "Unavailable: injuries, player pool."}
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 4.6, "elapsed_s": [1.01, 0.06]}
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | text footer == structuredContent.data_as_of | ["Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 g
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | repeat: identical structuredContent (shared cache) | null
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | text+structured under 150000 | {"text": 4310, "structured": 28164}
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | structured provenance == backend block (matchup-0022501171), ignoring age_seconds | {"byte_equal_incl_age": false}
+PASS apps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age) | {"age_offsets_s": [224, 225], "mcp_minus_backend_request_s": 224}
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | not isError | [false, false]
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | footer block starts 'Data as of'; last text line | {"footer_lines": 2, "last_line_starts": "Stale: game logs, per-36 rates and assis"}
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | repeat: identical footer and identical text | {"gap_s": 4.5, "elapsed_s": [0.86, 0.06]}
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | text footer == structuredContent.data_as_of | ["Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 g
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | repeat: identical structuredContent (shared cache) | null
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | text+structured under 150000 | {"text": 7841, "structured": 33128}
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | structured provenance == backend block (unscheduled-cade-vs-cha), ignoring age_seconds | {"byte_equal_incl_age": false}
+PASS apps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age) | {"age_offsets_s": [231, 232], "mcp_minus_backend_request_s": 231}
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | not isError | [false, false]
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 2, "last_line_starts": "Stale: game logs and assist-location def"}
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 4.3, "elapsed_s": [0.74, 0.74]}
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | text footer == structuredContent.data_as_of | ["Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 g
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | repeat (uncached per-user tool): structuredContent identical except age_seconds, which advance by the call gap | {"age_advance_s": [4, 5], "gap_s": 4.3}
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | text+structured under 150000 | {"text": 3293, "structured": 11836}
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | structured provenance == backend block (game-logs-cade-mcp-equivalent), ignoring age_seconds | {"byte_equal_incl_age": false}
+PASS apps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age) | {"age_offsets_s": [-85, -84], "mcp_minus_backend_request_s": -84}
+PASS apps get_targets {"date": "2026-04-10"} | not isError | [false, false]
+PASS apps get_targets {"date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 3, "last_line_starts": "Unavailable: injuries, player pool."}
+PASS apps get_targets {"date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 4.6, "elapsed_s": [1.04, 1.15]}
+PASS apps get_targets {"date": "2026-04-10"} | text footer == structuredContent.data_as_of | ["Data as of the 2025-26 season's 2026-09-09 play-type Diets, shot-zone Diets and shot-type Diets, the 2025-26 season's 2026-09-06 shot-zone defense, the 2025-26 season's 2026-08-24 play-type defense and shot-type defense, and the 2025-26 season's 2026-08-21 g
+PASS apps get_targets {"date": "2026-04-10"} | repeat (uncached per-user tool): structuredContent identical except age_seconds, which advance by the call gap | {"age_advance_s": [4, 5], "gap_s": 4.6}
+PASS apps get_targets {"date": "2026-04-10"} | text+structured under 150000 | {"text": 7913, "structured": 22970}
+PASS apps get_targets {"date": "2026-04-10"} | structured provenance == backend block (targets-resolve-2026-04-10), ignoring age_seconds | {"byte_equal_incl_age": false}
+PASS apps get_targets {"date": "2026-04-10"} | age_seconds offset is one constant == wall time between backend and MCP reads (+-cache age) | {"age_offsets_s": [247], "mcp_minus_backend_request_s": 247}
+PASS noapps get_slate {"date": "2026-04-10"} | not isError | [false, false]
+PASS noapps get_slate {"date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 3, "last_line_starts": "Unavailable: injuries, player pool."}
+PASS noapps get_slate {"date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 3.7, "elapsed_s": [0.09, 0.04]}
+PASS noapps get_slate {"date": "2026-04-10"} | no structuredContent; text identical to the Apps run | {"structuredContent": null}
+PASS noapps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | not isError | [false, false]
+PASS noapps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 3, "last_line_starts": "Unavailable: injuries, player pool."}
+PASS noapps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 3.6, "elapsed_s": [0.05, 0.04]}
+PASS noapps get_matchup {"game": "DET @ CHA", "date": "2026-04-10"} | no structuredContent; text identical to the Apps run | {"structuredContent": null}
+PASS noapps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | not isError | [false, false]
+PASS noapps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | footer block starts 'Data as of'; last text line | {"footer_lines": 2, "last_line_starts": "Stale: game logs, per-36 rates and assis"}
+PASS noapps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | repeat: identical footer and identical text | {"gap_s": 3.7, "elapsed_s": [0.05, 0.78]}
+PASS noapps get_matchup {"player": "Cade Cunningham", "opponent": "CHA"} | no structuredContent; text identical to the Apps run | {"structuredContent": null}
+PASS noapps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | not isError | [false, false]
+PASS noapps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 2, "last_line_starts": "Stale: game logs and assist-location def"}
+PASS noapps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 4.2, "elapsed_s": [0.62, 0.6]}
+PASS noapps query_game_logs {"player": "Cade Cunningham", "vs": [{"row": "sheet:play_types:OffScreen:PTS", "ranks": [1, 10]}], "date": "2026-04-10"} | no structuredContent; text identical to the Apps run | {"structuredContent": null}
+PASS noapps get_targets {"date": "2026-04-10"} | not isError | [false, false]
+PASS noapps get_targets {"date": "2026-04-10"} | footer block starts 'Data as of'; last text line | {"footer_lines": 3, "last_line_starts": "Unavailable: injuries, player pool."}
+PASS noapps get_targets {"date": "2026-04-10"} | repeat: identical footer and identical text | {"gap_s": 4.6, "elapsed_s": [0.99, 1.01]}
+PASS noapps get_targets {"date": "2026-04-10"} | no structuredContent; text identical to the Apps run | {"structuredContent": null}
+TOTAL 64 FAIL 0

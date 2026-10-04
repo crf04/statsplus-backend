@@ -1,0 +1,29 @@
+{
+  "startedAt": "2026-10-04T22:15:49.897Z",
+  "coordination": {
+    "root": "/Users/chrisfu/.t3/worktrees/statsplus/t3code-de11429f",
+    "branch": "t3code/de11429f",
+    "head": "b97e927d45d5cf5544532f870606a397bae1e588"
+  },
+  "qaRuntimeSha256": "e6786c7112588af821453e83d4bec5f518f3ae563a613589ab0f18e00c2b46ef",
+  "productionGuardSha256": "f94bf27b53f0d05949fd6ae6d4c75d548d4451f4e064e53f3ad014829d10502b",
+  "helperSha256": "e2f8d857aa5bbdd6241c3bb11dfcec276d346a0b946d7babdff71fbd29f7c35e",
+  "responseTrackerSha256": "e7fff71a907fc47cd4eead40b28430a3fe3d1cc72e920e7bcd25d1fce7955232",
+  "frontend": {
+    "root": "/Users/chrisfu/statsplus-107/frontend",
+    "branch": "",
+    "head": "334f99b7e3623de460cb5142313ca54286d932ca",
+    "fingerprint": "63a49055a37fb5e1cfb05817491877005e855bc6f38de7139eaf86dc7e30a30d"
+  },
+  "backendSource": {
+    "root": "/Users/chrisfu/statsplus-backend",
+    "branch": "master",
+    "head": "ac61b6661fc0d68dd554c2ddd66e879ef9d2003f"
+  },
+  "environment": "production",
+  "deployedBackendRevision": "unknown",
+  "api": "https://statsplus-backend-production.up.railway.app",
+  "origin": "http://127.0.0.1:5193",
+  "out": "/Users/chrisfu/statsplus-107/review/postdeploy-20261004/browser/matchups",
+  "runtime": "/var/folders/vl/c4y_fblx7bg4lgkdxnmsbj_h0000gn/T/statsplus-runtime-KNdTV5"
+}

@@ -1,0 +1,20 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- button "Open search":
+  - img
+- alert: "This link could not be opened: game_filter is not a value we can apply. No filters were applied."
+- button "Back to search": ←
+- button "Saved Filter Sets"

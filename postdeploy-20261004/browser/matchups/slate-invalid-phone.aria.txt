@@ -1,0 +1,25 @@
+- banner:
+  - navigation "Primary":
+    - link "CourtAI":
+      - /url: /
+    - link "Search":
+      - /url: /
+    - link "Matchups":
+      - /url: /matchups
+    - link "Targets":
+      - /url: /targets
+    - link "Operations":
+      - /url: /operations
+    - button "CF Chris Fu":
+      - text: CF Chris Fu
+      - img
+- main:
+  - paragraph: NBA slate
+  - heading "Invalid slate date" [level=1]
+  - button "Previous date" [disabled]: ←
+  - text: Slate date
+  - textbox "Slate date"
+  - button "Next date" [disabled]: →
+  - button "Today"
+  - paragraph: Requested date “not-a-date” is invalid.
+  - alert: The slate date must use YYYY-MM-DD.
