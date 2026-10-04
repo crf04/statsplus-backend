@@ -278,6 +278,7 @@ def test_game_log_response_models_plain_arrays():
         season_averages=[{"PTS": 24.0}],
         season_game_count=1,
         next_game="Boston Celtics",
+        provenance={"generation": [], "sources": {}},
     )
 
     dumped = response.model_dump()
@@ -289,7 +290,8 @@ def test_game_log_response_models_plain_arrays():
 
 def test_game_log_response_allows_empty_arrays():
     dumped = GameLogResponse(
-        game_logs=[], averages=[], season_averages=[], season_game_count=0, next_game=None
+        game_logs=[], averages=[], season_averages=[], season_game_count=0, next_game=None,
+        provenance={"generation": [], "sources": {}},
     ).model_dump()
     assert dumped["game_logs"] == []
     assert dumped["averages"] == []

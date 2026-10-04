@@ -119,19 +119,53 @@ def focal_game_rows(
     activation, has no authority and is unavailable rather than guessed.
     """
 
+    read = focal_game_read(
+        player_logs,
+        season,
+        game_id,
+        evidence_season=evidence_season,
+        publication_snapshot=publication_snapshot,
+        connection=connection,
+    )
+    return None if read is None else read[0]
+
+
+def focal_game_read(
+    player_logs,
+    season: str,
+    game_id: str,
+    *,
+    evidence_season: str | None,
+    publication_snapshot=None,
+    connection=None,
+):
+    """``focal_game_rows`` and the retained Publication read they came from.
+
+    ``(rows, read)``: ``read`` names the earlier season's retained
+    publication, or is ``None`` when the rows came from the request's own
+    snapshot (which already reports itself) or no reader labels the read.
+    """
+
     if evidence_season is not None and season != evidence_season:
         if season > evidence_season:
             return None
+        retained_read = getattr(player_logs, "retained_game_read", None)
+        if retained_read is not None:
+            return retained_read(season, game_id, connection=connection)
         retained = getattr(player_logs, "retained_game_rows", None)
         if retained is None:
             return None
-        return retained(season, game_id, connection=connection)
-    return call_with_read_scope(
-        player_logs.list_game_rows,
-        season,
-        game_id,
-        publication_snapshot=publication_snapshot,
-        connection=connection,
+        rows = retained(season, game_id, connection=connection)
+        return None if rows is None else (rows, None)
+    return (
+        call_with_read_scope(
+            player_logs.list_game_rows,
+            season,
+            game_id,
+            publication_snapshot=publication_snapshot,
+            connection=connection,
+        ),
+        None,
     )
 
 

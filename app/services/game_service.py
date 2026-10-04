@@ -28,6 +28,7 @@ from app.services.publication_snapshot_calls import (
     call_with_read_scope,
 )
 from app.services.research_season import research_season
+from app.services.response_provenance import provenance_block
 from app.services.team_matchup_query import TEAM_MATCHUP_PUBLICATION_STREAM_KEYS
 from app.utils.cache_config import get_redis_client
 from app.utils.tables import normalize_table_name
@@ -537,6 +538,10 @@ class GameService:
             season_averages=season_average_rows,
             season_game_count=len(full_game_logs),
             next_game=self._get_team_name_by_id(next_team),
+            # Every stream the capture holds feeds this response: the logs,
+            # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
+            # any Team Filter ranking.
+            provenance=provenance_block(publication_snapshot),
         )
         return result.model_dump()
 

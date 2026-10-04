@@ -41,6 +41,7 @@ from app.services.matchup_snapshot import (
     capture_publication_snapshot,
 )
 from app.services.research_season import published_capture
+from app.services.response_provenance import provenance_block
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -73,9 +74,13 @@ class BacktestReader(Protocol):
 
 
 class TodayReader(Protocol):
-    def today(
+    def today_with_sources(
         self, target: Mapping[str, Any], *, matchups: Any
-    ) -> dict[str, Any] | None: ...
+    ) -> tuple[
+        dict[str, Any] | None,
+        Mapping[str, Mapping[str, Any]],
+        list[Mapping[str, Any]],
+    ]: ...
 
 
 class TargetPreviewService:
@@ -120,13 +125,25 @@ class TargetPreviewService:
         previewed = self.backtests.backtest_target(
             draft, publication_snapshot=snapshot, season=season
         )
-        today = self.resolutions.today(
+        today, sources, matchup_generation = self.resolutions.today_with_sources(
             draft,
             matchups=SnapshotMatchups(
                 self.matchups, snapshot, self.injuries, season=season
             ),
         )
-        return {**previewed, "today": today}
+        return {
+            **previewed,
+            "today": today,
+            # The one union capture, narrowed to the Backtest's own streams
+            # when the opponent is idle and no Matchup read the rest, plus any
+            # retained Publication the composed Matchup's participants read.
+            "provenance": provenance_block(
+                snapshot,
+                sources,
+                streams=None if today is not None else BACKTEST_PUBLICATION_STREAM_KEYS,
+                also=matchup_generation,
+            ),
+        }
 
 
 __all__ = [
