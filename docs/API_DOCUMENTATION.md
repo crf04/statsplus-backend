@@ -3454,8 +3454,10 @@ revoking one of its rows invalidates it. A published season read partly live
 and partly retained is computed and not cached (`targets_cache` is `bypass`).
 A hit is served only after the same pointer-only availability check the
 batch makes -- on the live Publication or the retained one, wherever the
-season is read -- so a season whose Publication has become unreadable is
-`503 season_unavailable` even with a warm entry. `season_reason` is
+season is read -- and is keyed on the Publications that check read, so a
+season whose Publication has become unreadable is `503 season_unavailable`
+even with a warm entry, and a revocation or pointer move landing after the
+check cannot select an entry for a Publication the request did not check. `season_reason` is
 the request's own: the season's entry serves a request that named it and one
 that fell back to it.
 

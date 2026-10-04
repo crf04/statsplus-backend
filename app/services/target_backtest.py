@@ -399,8 +399,9 @@ class TargetBacktestService:
         """Return every one of the caller's Targets' cached Backtests.
 
         Cache-only: this read never computes a Backtest and does no
-        per-Target database work.  It lists the Targets, reads the generation
-        pointer once, and looks each Target up under that one generation with
+        per-Target database work.  It lists the Targets, checks the season's
+        Publications pointer-only once, and looks each Target up under the
+        generation of the Publications it checked with
         the single read's own cache key, so every ``ok`` item comes from one
         generation and an entry either read files is a hit for the other.
         Each item, in ``list_targets`` order, is ``ok`` with the body
@@ -435,13 +436,13 @@ class TargetBacktestService:
                 choice = self.seasons.resolve(season, session=session)
                 # Unavailable is not empty, here too: a stream the season has
                 # in neither place fails the batch as it fails the single read.
-                self.seasons.require_streams(
+                identity = self.seasons.require_streams(
                     choice,
                     _PUBLICATION_STREAM_KEYS,
                     projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
                     session=session,
                 )
-                generation = self._read_cache_generation(choice, session)
+                generation = identity if self._cache_enabled else None
             except (InvalidInputError, SeasonUnavailableError):
                 raise
             except Exception:
@@ -802,14 +803,15 @@ class TargetBacktestService:
             # when a Publication becomes unreadable (a lost projection), so a
             # hit must not serve it: a refusal here skips the cache and the
             # uncached read below reports the stream exactly as it would on
-            # a cold cache.
-            self.seasons.require_streams(
+            # a cold cache.  The key is the identity of the Publications this
+            # check read, never a second lookup a concurrent revocation or
+            # pointer move could answer with one it did not check.
+            generation = self.seasons.require_streams(
                 choice,
                 _PUBLICATION_STREAM_KEYS,
                 projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
                 session=session,
             )
-            generation = self._read_cache_generation(choice, session)
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a
             # failed request: answer as the uncached read answers, which
@@ -818,37 +820,6 @@ class TargetBacktestService:
         if generation is None:
             return None, None
         return choice, self._cache_key(target, choice.season, generation)
-
-    def _read_cache_generation(
-        self, choice: BacktestSeason, session: Session | None
-    ) -> Sequence[tuple] | None:
-        """Read the season's Generation identity pointer-only, or ``None``.
-
-        A season the live pointer names keys on the live pointer generation.
-        A retained season keys on its history-row ids, so nightly
-        publications of the published season leave it unchanged and a
-        revocation changes it; a retained season missing a stream is raised
-        as ``season_unavailable`` even with the cache off.  ``None`` is the flag
-        off, no Redis client, or no reader able to answer a generation.  A
-        reader failure is raised for the caller to degrade.
-        """
-
-        if choice.retained:
-            history = self.seasons.retained_history(
-                choice, _PUBLICATION_STREAM_KEYS, session=session
-            )
-            return history if self._cache_enabled else None
-        if not self._cache_enabled:
-            return None
-        reader = self.publication_reader
-        generation_reader = getattr(reader, "generation", None)
-        if not callable(generation_reader):
-            return None
-        return generation_reader(
-            _PUBLICATION_STREAM_KEYS,
-            season=choice.season,
-            session=session,
-        )
 
     @staticmethod
     def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:

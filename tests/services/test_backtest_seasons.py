@@ -807,7 +807,6 @@ def test_a_retained_capture_is_labelled_and_keyed_apart_from_the_live_one(world)
     # generation can never be served to the retained one.
     assert retained.generation != live_mismatch.generation
     assert [key for key, _ in retained.retained_history] == sorted(keys)
-    assert world.reader.retained_history(keys, season=LAST) == retained.retained_history
 
 
 def test_a_season_with_no_history_reads_missing(world):

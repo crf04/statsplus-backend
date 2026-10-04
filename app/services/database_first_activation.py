@@ -1197,31 +1197,6 @@ class DatabaseFirstPublicationReader:
             projection_only_keys=frozenset({"player_game_logs"}),
         )
 
-    def retained_history(
-        self,
-        stream_keys: Iterable[str],
-        *,
-        season: str,
-        session: Session | None = None,
-    ) -> tuple[tuple[str, str | None], ...]:
-        """Name each stream's retained history row for ``season``, no payload.
-
-        ``(stream_key, history_id)`` per key in sorted order, ``None`` where the
-        season retains no Publication of that stream.  The pointer-only
-        counterpart of ``retained_snapshot``, exactly as ``generation`` is of
-        ``snapshot``: a past season's Backtest cache key is these ids.
-        """
-
-        keys = tuple(sorted(set(str(key) for key in stream_keys)))
-        with ExitStack() as stack:
-            if session is None:
-                session = stack.enter_context(self._session())
-                stack.enter_context(session.begin())
-            rows = self._retained_rows(session, keys, season, projection_keys=())
-        return tuple(
-            (key, rows[key][0].history_id if key in rows else None) for key in keys
-        )
-
     def retained_snapshot(
         self,
         stream_keys: Iterable[str],

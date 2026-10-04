@@ -75,3 +75,64 @@ def test_a_pin_ahead_falls_back_and_an_unretained_stream_is_unavailable_on_postg
     assert (body["season"], body["season_reason"]) == (seasons.LAST, "fallback_no_games")
     with pytest.raises(SeasonUnavailableError, match="player_assist_locations"):
         world.backtests().backtest(seasons.OWNER, target["id"])
+
+
+@pytest.mark.parametrize("route", ["single", "batch"])
+def test_a_revocation_after_the_check_never_serves_an_unchecked_entry_on_postgres(
+    client, authenticate, world, dependencies, monkeypatch, route
+):
+    """2025-26 holds A (two games), then B (one game); A loses its projection.
+
+    B's revocation commits on another connection after the request checked B
+    and before it looks the cache up: READ COMMITTED would show a second
+    history lookup A, whose warm two-game entry this request never checked.
+    """
+
+    target = world.saved_target()
+    seasons._pin(world, seasons.NEW)
+    service = world.backtests(redis_client=seasons.bt.FakeRedis())
+    service.backtest(seasons.OWNER, target["id"], season=seasons.LAST)
+    world.compose(
+        "player_game_logs",
+        seasons.LAST,
+        {"rows": seasons._season_logs(seasons.LAST, okc_games=1)},
+    )
+    seasons._activate_new_season(world)
+    service.backtest(seasons.OWNER, target["id"], season=seasons.LAST)
+    with world.engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM publication_player_game_logs WHERE publication_id = "
+            "(SELECT publication_id FROM publication_pointer_history "
+            "WHERE stream_key = 'player_game_logs' AND season = :season "
+            "ORDER BY fence ASC LIMIT 1)"
+        ), {"season": seasons.LAST})
+    check = service.seasons.require_streams
+
+    def revoke_after_the_check(*args, **kwargs):
+        checked = check(*args, **kwargs)
+        monkeypatch.setattr(service.seasons, "require_streams", check)
+        world.revoke("player_game_logs", seasons.LAST)
+        return checked
+
+    monkeypatch.setattr(service.seasons, "require_streams", revoke_after_the_check)
+    dependencies.user_service = world.users
+    dependencies.target_backtest_service = service
+    url = (
+        f"/api/user/targets/{target['id']}/backtest"
+        if route == "single"
+        else "/api/user/targets/backtests"
+    )
+
+    raced = client.get(url, query_string={"season": seasons.LAST}, headers=authenticate())
+    after = client.get(url, query_string={"season": seasons.LAST}, headers=authenticate())
+
+    body = raced.get_json()
+    backtest = body if route == "single" else body["backtests"][0]["backtest"]
+    assert raced.status_code == 200
+    assert backtest["games_considered"] == {"played": 1, "kept": 1}
+    assert after.status_code == 503
+    assert after.get_json()["error"]["details"] == {
+        "season": seasons.LAST,
+        "published_season": seasons.NEW,
+        "stream": "player_game_logs",
+    }

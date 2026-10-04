@@ -254,8 +254,8 @@ class BacktestSeasons:
         *,
         projection_keys: frozenset[str] = frozenset(),
         session: Any | None = None,
-    ) -> None:
-        """Raise naming a stream ``choice.season`` cannot read, opening no payload.
+    ) -> tuple[tuple, ...] | None:
+        """Return the identity of what ``choice.season`` reads, or raise naming a stream.
 
         The pointer-only check ``evidence`` makes, for a read that computes
         nothing or serves a cached result: each stream is read where
@@ -264,15 +264,22 @@ class BacktestSeasons:
         is missing there or unreadable without opening a payload (authority,
         a projection stream's projection).  A corrupt payload is found only by
         a read of it.
+
+        The identity is that of the Publications just checked, so a cache
+        lookup keyed on it cannot reach one a concurrent revocation or pointer
+        move put in their place: the retained history-row ids for a retained
+        season, else the live capture's generation.  ``None`` is a reader that
+        captures no Generation.
         """
 
         keys = tuple(stream_keys)
         pointer_only = frozenset(keys)
         absent = keys
+        identity = None
         if not choice.retained:
             capture = getattr(self.publication_reader, "snapshot", None)
             if not callable(capture):
-                return
+                return None
             live = capture(
                 keys,
                 season=choice.season,
@@ -280,10 +287,14 @@ class BacktestSeasons:
                 session=session,
             )
             if not callable(getattr(live, "read", None)):
-                return
+                # Nothing per stream to check; the capture still names its
+                # Generation.
+                generation = getattr(live, "generation", None)
+                return None if generation is None else tuple(generation)
             absent = self._refuse_unreadable(
                 choice, live, keys, projection_keys, missing_allowed=True
             )
+            identity = tuple(live.generation)
         if absent:
             retained = self._retained_capture(
                 choice.season, absent, projection_only_keys=pointer_only, session=session
@@ -293,6 +304,9 @@ class BacktestSeasons:
             self._refuse_unreadable(
                 choice, retained, absent, projection_keys, missing_allowed=False
             )
+            if choice.retained:
+                identity = tuple(retained.retained_history)
+        return identity
 
     @staticmethod
     def _refuse_unreadable(
@@ -366,21 +380,6 @@ class BacktestSeasons:
             decoded_only_keys=decoded_only_keys,
             session=session,
         )
-
-    def retained_history(
-        self, choice: BacktestSeason, stream_keys: Iterable[str], *, session: Any | None = None
-    ) -> tuple[tuple[str, str | None], ...]:
-        """Name the season's retained history rows, or raise naming a stream."""
-
-        keys = tuple(stream_keys)
-        read_history = getattr(self.publication_reader, "retained_history", None)
-        if not callable(read_history):
-            raise _unavailable(choice, keys[0])
-        history = read_history(keys, season=choice.season, session=session)
-        for key, history_id in history:
-            if history_id is None:
-                raise _unavailable(choice, key)
-        return history
 
 
 def _live_season(live: Any, published: str) -> str | None:
