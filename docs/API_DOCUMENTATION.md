@@ -148,12 +148,12 @@ Which streams each route lists:
 
 | Route | `generation` | `sources` |
 | --- | --- | --- |
-| Slate | `[]` (reads no Publication) | `schedule`, `pool` |
+| Slate | `[]` (reads no Publication) | `schedule`, `pool`, `injuries` |
 | Matchup | the Matchup snapshot's streams | `schedule`, `pool`, `injuries` |
 | Unscheduled Matchup | the Matchup snapshot's streams | `{}` |
 | Game logs | `player_game_logs`, the four Player Diet streams, and the five Season Defense Sheet streams | `{}` |
-| Targets resolve | the one snapshot every composed Matchup shared; `[]` when no Target composed a Matchup | `schedule`, `pool` of the Slate it read |
-| Draft Target preview | the preview's single union capture (Backtest and Matchup), idle or not | `schedule`, `pool` of the Slate it read |
+| Targets resolve | the one snapshot every composed Matchup shared; `[]` when no Target composed a Matchup | the Slate's `schedule`; `pool`, `injuries` of the composed Matchups' own reads (the Slate's when none was composed) |
+| Draft Target preview | the preview's single union capture, narrowed to the Backtest's streams when no Matchup was composed (idle opponent) | as Targets resolve |
 
 Game logs list the Season Defense Sheet streams whether or not the query has
 `teams_against` filters: every row's `PLAYTYPE_RTG` crosses the player's
@@ -164,6 +164,12 @@ Without a configured Publication reader, or when a read captured no snapshot,
 `sources` names the dependencies that are not Publications, each as
 `{status, retrieved_at}` copied from the response's own `freshness` surface
 with its status unchanged (`fresh`, `stale`, `missing`, `unavailable`, ...).
+Each source is the read the answer's facts came from. The Slate's `injuries` is
+the least fresh of its games' stored injury reads (`unavailable`, with
+`retrieved_at: null`, when no read was made). When several composed Matchups
+report one source differently, Targets report the least fresh: the worst status
+(`fresh`, then `stale`/`stale-served`, then anything else), then the oldest
+`retrieved_at`.
 
 **Matchup reconciliation.** Get Matchup and Get Unscheduled Matchup already
 return a top-level `provenance` object keyed by `stream_key`. Those entries
@@ -326,7 +332,7 @@ A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
 name for `team_id`, else `null`; it is never the string `"None"`.
 
 The response also carries the shared [`provenance`](#response-provenance)
-block: an empty `generation` and the `schedule` and `pool` sources.
+block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 
 ```json
 {
