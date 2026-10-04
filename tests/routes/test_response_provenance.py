@@ -13,6 +13,9 @@ service over one real database of seeded Publications, and asserts the
 * ``player_per36`` is registered with nothing published (``missing``), and
   every other stream is not registered at all: both are ``unavailable``;
 * ``synergy:l15`` is a permanently unsupported window and is not listed.
+
+Every Matchup reads its Diets through the real Diet reader, so a Fit's share
+is the seeded Publication's, never a fixture's.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from app.domain.publication_integrity import (
 )
 from app.models.collection_control import PublicationPointer, PublicationVersion
 from app.services.collection_control import PublicationService
+from app.services.player_diet import PlayerDietRepository
 from app.services.slate_service import SlateService
 from app.services.statistic_catalog import StatisticCatalog
 from app.services.target_backtest import TargetBacktestService
@@ -169,6 +173,10 @@ def world(tmp_path):
         publication_strategy="replace",
         enabled=True,
         freshness_rule="daily_recheck",
+    )
+    # The Matchup reads its Diets from the seeded Publication, not a double.
+    matchups.player_diets = PlayerDietRepository(
+        engine, publication_reader=matchups.publication_reader
     )
     return SimpleNamespace(
         engine=engine,
@@ -608,20 +616,29 @@ MATCHUP_POOL = {
     "retrieved_at": "2026-01-15T09:00:00+00:00",
 }
 MATCHUP_INJURIES = {"status": "stale", "retrieved_at": "2026-01-15T03:00:00+00:00"}
-#: LeBron's seeded Transition share in each read is above this.
-TRANSITION_15 = {
+#: Only the seeded Publication's 0.32 Transition share clears this; the
+#: Matchup fixture's own Diet double (0.19) does not.
+TRANSITION_25 = {
     "base": "play_types",
     "slice_key": "Transition",
     "comparator": "at_or_above",
-    "threshold": 0.15,
+    "threshold": 0.25,
 }
+
+
+LAL_AT_BOS = res._game(
+    game_id=GAME_ID,
+    away=(m.LAL, "LAL", "Los Angeles Lakers"),
+    home=(m.BOS, "BOS", "Boston Celtics"),
+)
 
 
 class _Slate:
     """Tonight's Slate: LAL @ BOS, the game the seeded Matchup composes."""
 
-    def __init__(self, *, games=True):
+    def __init__(self, *, games=True, listed=(LAL_AT_BOS,)):
         self.games = games
+        self.listed = list(listed)
 
     def get_slate(self, requested_date=None):
         return {
@@ -630,17 +647,7 @@ class _Slate:
                 "schedule": dict(SLATE_SOURCES["schedule"]),
                 "pool": {**SLATE_SOURCES["pool"], "providers": {}},
             },
-            "games": (
-                [
-                    res._game(
-                        game_id=GAME_ID,
-                        away=(m.LAL, "LAL", "Los Angeles Lakers"),
-                        home=(m.BOS, "BOS", "Boston Celtics"),
-                    )
-                ]
-                if self.games
-                else []
-            ),
+            "games": list(self.listed) if self.games else [],
             "provenance": {"generation": [], "sources": dict(SLATE_SOURCES)},
         }
 
@@ -674,7 +681,7 @@ def _matchup_reads(world):
     return _MatchupInjuries()
 
 
-def _target(opponent, qualifier=TRANSITION_15):
+def _target(opponent, qualifier=TRANSITION_25):
     return {
         "id": f"target-{opponent}",
         "opponent": opponent,
@@ -686,10 +693,10 @@ def _target(opponent, qualifier=TRANSITION_15):
     }
 
 
-def _resolution(world, *targets, injuries):
+def _resolution(world, *targets, injuries, slate=None):
     return TargetResolutionService(
         targets=SimpleNamespace(list_targets=lambda uid: list(targets)),
-        slates=_Slate(),
+        slates=slate or _Slate(),
         matchups=world.matchups,
         publication_reader=world.reader,
         injuries=injuries,
@@ -712,8 +719,12 @@ def test_resolve_returns_the_generation_and_reads_its_fits_came_from(
     assert response.status_code == 200
     body = response.get_json()
     assert [
-        [player["name"] for player in target["players"]] for target in body["targets"]
-    ] == [["LeBron James"], []]
+        [
+            (player["name"], [(share["slice_key"], share["share"]) for share in player["shares"]])
+            for player in target["players"]
+        ]
+        for target in body["targets"]
+    ] == [[("LeBron James", [("Transition", 0.32)])], []]
     assert body["provenance"] == {
         "generation": [world.expected[key] for key in MATCHUP_STREAMS],
         # The schedule chose the games; the Matchup's own pool and injury
@@ -744,6 +755,111 @@ def test_resolve_with_only_idle_targets_read_no_generation(
     assert response.get_json()["provenance"] == {
         "generation": [],
         "sources": SLATE_SOURCES,
+    }
+
+
+MIA_GAME_ID = "0022500585"
+MIA, DEN = 1610612748, 1610612743
+
+
+class _PoolsByGame:
+    """Each composed Matchup's own pool read, by game."""
+
+    def __init__(self, pools):
+        self.pools = pools
+
+    def get_pool_for_game(self, *, season, game_id):
+        return self.pools[game_id]
+
+
+class _InjuriesByGame:
+    """Each composed Matchup's own stored injury read, by game."""
+
+    def __init__(self, reads):
+        self.reads = reads
+
+    def get_injuries(self, *, event, season, pool_players):
+        read = self.reads[str(event["nba_game_id"])]
+        return _injury_result(read["status"], read["retrieved_at"])
+
+
+def test_resolve_reports_the_least_fresh_pool_and_injury_reads_across_its_matchups(
+    client, dependencies, authenticate, world
+):
+    from app.services.player_pool import PlayerPool, PoolPlayer
+
+    def pool(players, freshness):
+        return PlayerPool(
+            players=players,
+            team_counts={},
+            freshness={**freshness, "providers": {}},
+        )
+
+    # LAL @ BOS, composed first: the older pool, the fresher injury read.
+    # MIA @ DEN, composed second: the fresher pool, the older injury read.
+    world.matchups.event_catalog = m.RecordedEvents(
+        [
+            m._event(),
+            {
+                **m._event(),
+                "nba_game_id": MIA_GAME_ID,
+                "home_team_id": DEN,
+                "home_team_name": "Denver Nuggets",
+                "home_team_tricode": "DEN",
+                "away_team_id": MIA,
+                "away_team_name": "Miami Heat",
+                "away_team_tricode": "MIA",
+                "home_team": {"id": DEN, "name": "Denver Nuggets", "tricode": "DEN"},
+                "away_team": {"id": MIA, "name": "Miami Heat", "tricode": "MIA"},
+            },
+        ]
+    )
+    world.matchups.player_pool = _PoolsByGame(
+        {
+            GAME_ID: pool(
+                (PoolPlayer(2544, "LeBron James", m.LAL, ("PTS",), {"prizepicks": ("PTS",)}),),
+                {"status": "stale-served", "retrieved_at": "2026-01-15T09:00:00+00:00"},
+            ),
+            MIA_GAME_ID: pool(
+                (PoolPlayer(1628983, "Jimmy Butler", MIA, ("PTS",), {"prizepicks": ("PTS",)}),),
+                {"status": "fresh", "retrieved_at": "2026-01-15T11:00:00+00:00"},
+            ),
+        }
+    )
+    injuries = _InjuriesByGame(
+        {
+            GAME_ID: {"status": "fresh", "retrieved_at": "2026-01-15T11:30:00+00:00"},
+            MIA_GAME_ID: {"status": "stale", "retrieved_at": "2026-01-15T03:00:00+00:00"},
+        }
+    )
+    slate = _Slate(
+        listed=(
+            LAL_AT_BOS,
+            res._game(
+                game_id=MIA_GAME_ID,
+                away=(MIA, "MIA", "Miami Heat"),
+                home=(DEN, "DEN", "Denver Nuggets"),
+            ),
+        )
+    )
+    dependencies.target_resolution_service = _resolution(
+        world, _target("BOS"), _target("DEN"), injuries=injuries, slate=slate
+    )
+
+    response = client.get(
+        f"/api/user/targets/resolve?date={SLATE_DATE}", headers=authenticate()
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [target["game"]["game_id"] for target in body["targets"]] == [
+        GAME_ID,
+        MIA_GAME_ID,
+    ]
+    assert body["provenance"]["sources"] == {
+        "schedule": SLATE_SOURCES["schedule"],
+        "pool": {"status": "stale-served", "retrieved_at": "2026-01-15T09:00:00+00:00"},
+        "injuries": {"status": "stale", "retrieved_at": "2026-01-15T03:00:00+00:00"},
     }
 
 
@@ -802,7 +918,7 @@ def test_the_preview_returns_the_one_generation_its_backtest_and_matchup_read(
     response = client.post(
         "/api/user/targets/preview",
         headers=authenticate(),
-        json={"opponent": "BOS", "qualifiers": [TRANSITION_15]},
+        json={"opponent": "BOS", "qualifiers": [TRANSITION_25]},
     )
 
     assert response.status_code == 200
@@ -836,7 +952,7 @@ def test_an_idle_preview_lists_only_the_streams_its_backtest_read(
     response = client.post(
         "/api/user/targets/preview",
         headers=authenticate(),
-        json={"opponent": "BOS", "qualifiers": [TRANSITION_15]},
+        json={"opponent": "BOS", "qualifiers": [TRANSITION_25]},
     )
 
     assert response.status_code == 200
