@@ -85,6 +85,14 @@ SHOT_ZONES = (
 # --- fake seams ------------------------------------------------------------
 
 
+#: The Slate's own reads, as its provenance block reports them.
+SLATE_SOURCES = {
+    "schedule": {"status": "fresh", "retrieved_at": None},
+    "pool": {"status": None, "retrieved_at": None},
+    "injuries": {"status": "unavailable", "retrieved_at": None},
+}
+
+
 class FakeSlate:
     """The date -> slate-events path both the slate and matchup reads use."""
 
@@ -101,6 +109,7 @@ class FakeSlate:
             "slate_date": requested_date or SLATE_DATE,
             "freshness": {"schedule": {"status": "fresh"}, "pool": {}},
             "games": list(self.games),
+            "provenance": {"generation": [], "sources": dict(SLATE_SOURCES)},
         }
 
 
@@ -410,7 +419,11 @@ def _matchup(
         ],
         "players": list(players),
         "injuries": {},
-        "freshness": {},
+        # The Matchup's own non-Publication reads.
+        "freshness": {
+            "pool": {"status": "fresh", "retrieved_at": "2026-01-15T10:00:00+00:00"},
+            "injuries": {"status": "unavailable", "retrieved_at": None},
+        },
     }
 
 

@@ -42,7 +42,7 @@ from app.services.matchup_snapshot import (
 )
 from app.services.target_conditions import date_is_kept, minutes_are_kept
 from app.services.research_season import published_capture
-from app.services.response_provenance import provenance_block, slate_sources
+from app.services.response_provenance import provenance_block, target_sources
 
 
 _WINDOW_NAMES = ("season", "last_15")
@@ -129,7 +129,7 @@ class TargetResolutionService:
                 matchups.snapshot
                 if read_matchups and isinstance(matchups, SnapshotMatchups)
                 else None,
-                slate_sources(slate),
+                target_sources(slate, read_matchups.values()),
             ),
         }
 
@@ -187,33 +187,36 @@ class TargetResolutionService:
         service's own reader is not consulted then.
         """
 
-        return self.today_on_slate(target, matchups=matchups)[0]
+        return self.today_with_sources(target, matchups=matchups)[0]
 
-    def today_on_slate(
+    def today_with_sources(
         self,
         target: Mapping[str, Any],
         *,
         matchups: MatchupReader | None = None,
-    ) -> tuple[dict[str, Any] | None, Mapping[str, Any]]:
-        """``today``, paired with the Slate it was resolved against.
+    ) -> tuple[dict[str, Any] | None, dict[str, Mapping[str, Any]]]:
+        """``today``, paired with the sources it was read from.
 
-        A caller reporting where its answer came from states that one Slate's
-        freshness instead of reading the Slate a second time.
+        Those are the Slate's schedule and, when the opponent plays, the
+        composed Matchup's own pool and injury reads; an idle answer read the
+        Slate's. ``today`` is ``None`` exactly when no Matchup was composed.
         """
 
         slate = self.slates.get_slate(None)
+        read_matchups: dict[str, Mapping[str, Any]] = {}
         resolved = self._resolve_target(
             target,
             self._games_by_tricode(slate["games"]),
-            {},
+            read_matchups,
             matchups=self.matchups if matchups is None else matchups,
             slate_date=slate["slate_date"],
         )
+        sources = target_sources(slate, read_matchups.values())
         if resolved["game"] is None:
-            return None, slate
+            return None, sources
         return (
             {"game": resolved["game"], "fit_count": len(resolved["players"])},
-            slate,
+            sources,
         )
 
     def _resolve_target(

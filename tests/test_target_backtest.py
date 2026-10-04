@@ -2657,10 +2657,7 @@ def test_the_lab_preview_never_touches_the_result_cache(
             cache_clock=lambda: 0.0,
         ),
         resolutions=SimpleNamespace(
-            today_on_slate=lambda _target, *, matchups: (
-                None,
-                {"freshness": {"schedule": {"status": "fresh"}, "pool": {}}},
-            )
+            today_with_sources=lambda _target, *, matchups: (None, {})
         ),
         matchups=object(),
         injuries=object(),

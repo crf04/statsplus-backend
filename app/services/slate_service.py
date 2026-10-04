@@ -30,7 +30,11 @@ from app.errors import InvalidInputError, ProviderUnavailableError
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
-from app.services.response_provenance import provenance_block
+from app.services.response_provenance import (
+    UNAVAILABLE_SOURCE,
+    least_fresh,
+    provenance_block,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
@@ -123,6 +127,7 @@ class SlateService:
         games.sort(key=lambda game: (game["scheduled_at"], game["game_id"]))
 
         pool_freshness = PlayerPool.unavailable_freshness()
+        injury_freshness = UNAVAILABLE_SOURCE
         if self.player_pool is not None:
             pool = self.player_pool.get_pool(
                 season=season,
@@ -147,6 +152,11 @@ class SlateService:
                 )
                 for result in results.values():
                     removed_player_ids.update(result.out_player_ids)
+                # Each game's override removes its own players; the counts
+                # are only as fresh as the stalest of them.
+                injury_freshness = least_fresh(
+                    result.block for result in results.values()
+                )
             targetable_counts = dict(pool.team_counts)
             for player in pool.players:
                 if player.canonical_player_id in removed_player_ids:
@@ -179,9 +189,14 @@ class SlateService:
                 "pool": pool_freshness,
             },
             "games": games,
-            # A Slate reads no Publication; its sources are its own freshness.
+            # A Slate reads no Publication; its sources are its own reads.
             "provenance": provenance_block(
-                None, {"schedule": schedule_freshness, "pool": pool_freshness}
+                None,
+                {
+                    "schedule": schedule_freshness,
+                    "pool": pool_freshness,
+                    "injuries": injury_freshness,
+                },
             ),
         }
 
