@@ -1794,7 +1794,7 @@ def test_season_minutes_roster_groups_players_and_orders_by_average(backtest_eng
         _row(3, name='Playoffs only', season_type='Playoffs', minutes=40),
     ))
     payload = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('okc')
-    assert payload == {'season': SEASON, 'players': [
+    assert payload == {'season': SEASON, 'season_reason': 'published', 'published_season': SEASON, 'players': [
         {'player_id': 1, 'name': 'Starter', 'games_played': 2, 'average_minutes': 25.0},
         {'player_id': 2, 'name': 'Reserve', 'games_played': 1, 'average_minutes': 10.0},
     ]}
@@ -2110,8 +2110,10 @@ class GenerationSnapshotReader:
     """A reader answering generations pointer-only and capturing one frozen
     snapshot: the split the real reader gives a request.
 
-    A game-log-only capture is the Backtest season's resolution (#104), not
-    a capture of evidence, so it is recorded apart from ``snapshot_calls``.
+    A game-log-only capture is the Backtest season's resolution (#104), and
+    one narrowing every stream to its projection selects no payload at all
+    (the batch's stream-availability check); neither is a capture of
+    evidence, so both are recorded apart from ``snapshot_calls``.
     """
 
     def __init__(self, reads, generation):
@@ -2134,7 +2136,9 @@ class GenerationSnapshotReader:
         decoded_only_keys=None,
         session=None,
     ):
-        if tuple(stream_keys) == ("player_game_logs",):
+        if tuple(stream_keys) == ("player_game_logs",) or (
+            projection_only_keys == frozenset(stream_keys)
+        ):
             self.season_resolutions.append(season)
         else:
             self.snapshot_calls.append((tuple(stream_keys), season))
@@ -2982,7 +2986,12 @@ def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):
 
     payload, state = service.backtest_all(OWNER)
 
-    assert payload == {"season": SEASON, "season_reason": "published", "backtests": []}
+    assert payload == {
+        "season": SEASON,
+        "season_reason": "published",
+        "published_season": SEASON,
+        "backtests": [],
+    }
     assert state == "-"
     assert client.gets == []
     assert reader.snapshot_calls == []

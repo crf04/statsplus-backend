@@ -95,7 +95,7 @@ from app.services.backtest_season import (
     SEASON_REASON_PUBLISHED,
 )
 from app.errors import InvalidInputError, SeasonUnavailableError
-from app.services.research_season import published_capture, research_season
+from app.services.research_season import research_season
 
 
 logger = getLogger(__name__)
@@ -433,6 +433,11 @@ class TargetBacktestService:
                 listed = self.targets.list_targets(firebase_uid)
             try:
                 choice = self.seasons.resolve(season, session=session)
+                # Unavailable is not empty, here too: a stream the season has
+                # in neither place fails the batch as it fails the single read.
+                self.seasons.require_streams(
+                    choice, _PUBLICATION_STREAM_KEYS, session=session
+                )
                 generation = self._read_cache_generation(choice, session)
             except (InvalidInputError, SeasonUnavailableError):
                 raise
@@ -476,9 +481,7 @@ class TargetBacktestService:
                     {
                         "target_id": target_id,
                         "status": "ok",
-                        "backtest": self._cached_body(
-                            target, evidence, choice.reason
-                        ),
+                        "backtest": self._cached_body(target, evidence, choice),
                     }
                 )
             except Exception as error:  # isolated per Target
@@ -502,6 +505,7 @@ class TargetBacktestService:
         return {
             "season": choice.season,
             "season_reason": choice.reason,
+            "published_season": choice.published,
             "backtests": items,
         }, aggregate_cache_state(
             (item["status"] for item in items),
@@ -588,10 +592,7 @@ class TargetBacktestService:
                 # publication row (its checksum, payload, or projection)
                 # advances no pointer, so it is not detected until the next
                 # generation.
-                return (
-                    self._cached_body(target, evidence, cached_choice.reason),
-                    "hit",
-                )
+                return self._cached_body(target, evidence, cached_choice), "hit"
         with ExitStack() as scope:
             # One connection for every read this request composes, exactly as
             # the Matchup and Selection reads share theirs; a caller already
@@ -608,22 +609,13 @@ class TargetBacktestService:
             # mixed with the live one.
             snapshot = publication_snapshot
             if publication_snapshot is _OWN:
-                captured = live = None
-                if choice is None:
-                    captured, live = published_capture(
-                        self.settings,
-                        self.publication_reader,
-                        lambda season: self._publication_snapshot(
-                            season, session=session
-                        ),
-                    )
-                    choice = self.seasons.choose(captured, live, session=session)
-                if not choice.past and choice.season != captured:
-                    live = self._publication_snapshot(choice.season, session=session)
-                snapshot = self.seasons.evidence(
-                    choice,
-                    live,
+                choice, snapshot = self.seasons.capture(
+                    None,
+                    lambda season: self._publication_snapshot(
+                        season, session=session
+                    ),
                     _PUBLICATION_STREAM_KEYS,
+                    choice=choice,
                     projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
                     decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
                     session=session,
@@ -704,6 +696,7 @@ class TargetBacktestService:
             "target": dict(target),
             "season": season,
             "season_reason": choice.reason,
+            "published_season": choice.published,
             "proxy": PROXY_NOTE,
             "stat_columns": list(markets),
             "summary": self._summary(players, markets),
@@ -713,18 +706,20 @@ class TargetBacktestService:
 
     @staticmethod
     def _cached_body(
-        target: Mapping[str, Any], evidence: Mapping[str, Any], season_reason: str
+        target: Mapping[str, Any], evidence: Mapping[str, Any], choice: BacktestSeason
     ) -> dict[str, Any]:
         """Compose a hit's body in the construction order a miss returns.
 
-        ``season_reason`` is the request's, not the entry's: one season's
-        entry serves a request that named it and one that fell back to it.
+        The season's reason and published season are the request's, not the
+        entry's: one season's entry serves a request that named it and one
+        that fell back to it.
         """
 
         return {
             "target": dict(target),
             "season": evidence["season"],
-            "season_reason": season_reason,
+            "season_reason": choice.reason,
+            "published_season": choice.published,
             "proxy": PROXY_NOTE,
             "stat_columns": evidence["stat_columns"],
             "summary": evidence["summary"],
@@ -826,7 +821,7 @@ class TargetBacktestService:
 
         if choice.retained:
             history = self.seasons.retained_history(
-                choice.season, _PUBLICATION_STREAM_KEYS, session=session
+                choice, _PUBLICATION_STREAM_KEYS, session=session
             )
             return history if self._cache_enabled else None
         if not self._cache_enabled:

@@ -150,6 +150,44 @@ class BacktestSeasons:
             keyword["session"] = session
         return capture((_GAME_LOGS,), season=season, **keyword)
 
+    def capture(
+        self,
+        requested: Any,
+        live_capture,
+        stream_keys: Iterable[str],
+        *,
+        choice: BacktestSeason | None = None,
+        projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
+        session: Any | None = None,
+    ) -> tuple[BacktestSeason, Any]:
+        """Resolve the season and capture its one Generation of ``stream_keys``.
+
+        ``live_capture(season)`` captures the live pointers in a season.  With
+        no ``choice`` and nothing requested, one live capture decides the
+        published season (as ``published_capture`` does) and the default rule
+        applies to it.  The returned capture is ``evidence`` for the season.
+        """
+
+        captured = live = None
+        if choice is None and requested is not None:
+            choice = self.resolve(requested, session=session)
+        if choice is None:
+            captured, live = published_capture(
+                self.settings, self.publication_reader, live_capture
+            )
+            choice = self.choose(captured, live, session=session)
+        if not choice.past and choice.season != captured:
+            live = live_capture(choice.season)
+        return choice, self.evidence(
+            choice,
+            live,
+            stream_keys,
+            projection_only_keys=projection_only_keys,
+            decoded_only_keys=decoded_only_keys,
+            session=session,
+        )
+
     def evidence(
         self,
         choice: BacktestSeason,
@@ -172,7 +210,7 @@ class BacktestSeasons:
         keys = tuple(stream_keys)
         if choice.past:
             return self.retained_snapshot(
-                choice.season,
+                choice,
                 keys,
                 projection_only_keys=projection_only_keys,
                 decoded_only_keys=decoded_only_keys,
@@ -185,7 +223,7 @@ class BacktestSeasons:
         if not absent:
             return live
         retained = self.retained_snapshot(
-            choice.season,
+            choice,
             absent,
             projection_only_keys=projection_only_keys,
             decoded_only_keys=decoded_only_keys,
@@ -202,20 +240,49 @@ class BacktestSeasons:
             retained_history=retained.retained_history,
         )
 
+    def require_streams(
+        self, choice: BacktestSeason, stream_keys: Iterable[str], *, session: Any | None = None
+    ) -> None:
+        """Raise naming a stream ``choice.season`` has in neither place, reading no payload.
+
+        The pointer-only check ``evidence`` makes, for a read that computes
+        nothing: a stream counts when the live pointer names the season or
+        the season retains it.
+        """
+
+        keys = tuple(stream_keys)
+        absent = keys
+        if not choice.retained:
+            capture = getattr(self.publication_reader, "snapshot", None)
+            if not callable(capture):
+                return
+            live = capture(
+                keys,
+                season=choice.season,
+                projection_only_keys=frozenset(keys),
+                session=session,
+            )
+            read_stream = getattr(live, "read", None)
+            if not callable(read_stream):
+                return
+            absent = tuple(key for key in keys if read_stream(key).status == "missing")
+        if absent:
+            self.retained_history(choice, absent, session=session)
+
     def retained_snapshot(
         self,
-        season: str,
+        choice: BacktestSeason,
         stream_keys: Iterable[str],
         *,
         projection_only_keys: frozenset[str] = frozenset(),
         decoded_only_keys: frozenset[str] = frozenset(),
         session: Any | None = None,
     ) -> Any:
-        """Capture ``season``'s retained Generation, or raise naming a stream."""
+        """Capture the season's retained Generation, or raise naming a stream."""
 
         keys = tuple(stream_keys)
         snapshot = self._retained_capture(
-            season,
+            choice.season,
             keys,
             projection_only_keys=projection_only_keys,
             decoded_only_keys=decoded_only_keys,
@@ -223,7 +290,7 @@ class BacktestSeasons:
         )
         for key in keys:
             if snapshot is None or not snapshot.read(key).available:
-                raise _unavailable(season, key)
+                raise _unavailable(choice, key)
         return snapshot
 
     def _retained_capture(
@@ -247,18 +314,18 @@ class BacktestSeasons:
         )
 
     def retained_history(
-        self, season: str, stream_keys: Iterable[str], *, session: Any | None = None
+        self, choice: BacktestSeason, stream_keys: Iterable[str], *, session: Any | None = None
     ) -> tuple[tuple[str, str | None], ...]:
-        """Name ``season``'s retained history rows, or raise naming a stream."""
+        """Name the season's retained history rows, or raise naming a stream."""
 
         keys = tuple(stream_keys)
         read_history = getattr(self.publication_reader, "retained_history", None)
         if not callable(read_history):
-            raise _unavailable(season, keys[0])
-        history = read_history(keys, season=season, session=session)
+            raise _unavailable(choice, keys[0])
+        history = read_history(keys, season=choice.season, session=session)
         for key, history_id in history:
             if history_id is None:
-                raise _unavailable(season, key)
+                raise _unavailable(choice, key)
         return history
 
 
@@ -290,10 +357,13 @@ def _has_games(snapshot: Any) -> bool:
     return not callable(read_stream) or read_stream(_GAME_LOGS).status != "missing"
 
 
-def _unavailable(season: str, stream_key: str) -> SeasonUnavailableError:
+def _unavailable(choice: BacktestSeason, stream_key: str) -> SeasonUnavailableError:
     return SeasonUnavailableError(
-        f"The {season} season is unavailable: no retained {stream_key} "
-        "Publication can be read."
+        f"The {choice.season} season is unavailable: no retained {stream_key} "
+        "Publication can be read.",
+        season=choice.season,
+        published_season=choice.published,
+        stream=stream_key,
     )
 
 

@@ -48,7 +48,7 @@ from app.services.matchup_snapshot import (
     capture_publication_snapshot,
 )
 from app.services.backtest_season import BacktestSeason, BacktestSeasons
-from app.services.research_season import published_capture
+from app.services.target_conditions import require_defender_fielded
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -76,6 +76,7 @@ PREVIEW_DECODED_ONLY_STREAM_KEYS = BACKTEST_DECODED_ONLY_STREAM_KEYS & frozenset
 
 class BacktestReader(Protocol):
     seasons: BacktestSeasons
+    player_logs: Any
 
     def backtest_target(
         self,
@@ -123,24 +124,26 @@ class TargetPreviewService:
         """
 
         seasons = self.backtests.seasons
-        if season is not None:
-            choice = seasons.resolve(season)
-            live = None if choice.past else self._capture(choice.season)
-        else:
-            # One capture decides the season, and every read uses both.
-            published, live = published_capture(
-                self.settings, self.publication_reader, self._capture
-            )
-            choice = seasons.choose(published, live)
-            if not choice.past and choice.season != published:
-                live = self._capture(choice.season)
-        snapshot = seasons.evidence(
-            choice,
-            live,
+        # One capture decides the season, and every read uses both.
+        choice, snapshot = seasons.capture(
+            season,
+            self._capture,
             BACKTEST_PUBLICATION_STREAM_KEYS,
             projection_only_keys=BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
             decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
         )
+        defender = (draft.get("conditions") or {}).get("defender")
+        if defender:
+            # The draft's defender was validated before this capture; a
+            # season activating in between must not leave it checked in a
+            # different season from the Backtest that reads its minutes.
+            require_defender_fielded(
+                self.backtests.player_logs,
+                defender,
+                draft["opponent"],
+                choice.season,
+                publication_snapshot=snapshot,
+            )
         previewed = self.backtests.backtest_target(
             draft, publication_snapshot=snapshot, season=choice
         )

@@ -355,6 +355,28 @@ class SeasonUnavailableError(AppError):
     code = "season_unavailable"
     default_message = "The requested season is unavailable."
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        season: str,
+        published_season: str,
+        stream: str,
+    ) -> None:
+        # The client cannot learn the published season from a failed first
+        # read any other way, so the refusal carries it.
+        self._public_details = {
+            "season": season,
+            "published_season": published_season,
+            "stream": stream,
+        }
+        super().__init__(message, detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any]:
+        return self._public_details
+
 
 def route_error_boundary(
     safe_message: str,

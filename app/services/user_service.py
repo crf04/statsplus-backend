@@ -27,8 +27,10 @@ from app.models.saved_filter_set import (
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.domain.target_statistics import validate_stat_preferences
 from app.services.backtest_season import BacktestSeasons
-from app.services.publication_snapshot_calls import call_with_read_scope
-from app.services.target_conditions import validate_conditions
+from app.services.target_conditions import (
+    require_defender_fielded,
+    validate_conditions,
+)
 from app.models.target import (
     TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
@@ -823,31 +825,26 @@ class UserService:
         """
         conditions = validate_conditions(value)
         if conditions and conditions['defender']:
-            from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
             if self.player_logs is None:
                 raise InvalidConfigurationError("Target defender validation is unavailable.")
-            defender = conditions['defender']
             choice = self.backtest_seasons.resolve(season)
             # The game logs the Backtest itself reads: the season's retained
             # Publication unless the live pointer names that season.
-            snapshot = (
-                self.backtest_seasons.retained_snapshot(
-                    choice.season,
-                    ('player_game_logs',),
-                    projection_only_keys=frozenset({'player_game_logs'}),
-                )
-                if choice.retained
-                else None
-            )
-            rows = call_with_read_scope(
-                self.player_logs.list_player_rows,
+            require_defender_fielded(
+                self.player_logs,
+                conditions['defender'],
+                opponent,
                 choice.season,
-                defender['player_id'],
-                publication_snapshot=snapshot,
+                publication_snapshot=(
+                    self.backtest_seasons.retained_snapshot(
+                        choice,
+                        ('player_game_logs',),
+                        projection_only_keys=frozenset({'player_game_logs'}),
+                    )
+                    if choice.retained
+                    else None
+                ),
             )
-            if not any(row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
-                       and row.season_type == 'Regular Season' for row in rows):
-                raise InvalidInputError("The defender must appear in the opponent's season game logs.")
         return conditions
 
     def validate_target_draft(
