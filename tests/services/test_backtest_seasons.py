@@ -1026,11 +1026,14 @@ def test_an_unreadable_live_stream_is_season_unavailable_not_empty(
 
     target = world.saved_target()
     _activate_new_season(world)
-    _drop_live_game_log_projection(world)
     dependencies.user_service = world.users
     dependencies.target_backtest_service = world.backtests(
         redis_client=redis_client and redis_client()
     )
+    # With the cache on, both seasons' entries are warm before the loss.
+    for season in (None, NEW, LAST):
+        dependencies.target_backtest_service.backtest(OWNER, target["id"], season=season)
+    _drop_live_game_log_projection(world)
     dependencies.target_season_minutes_service = TargetSeasonMinutesService(
         player_logs=world.logs, settings=world.settings, publication_reader=world.reader
     )
