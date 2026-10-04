@@ -3244,17 +3244,20 @@ not been played. Once games exist the published season is read however thin
 it is: a Target whose opponent has played twice reports two games, and the
 previous season stays reachable with `season`.
 
-A season the live `player_game_logs` pointer does not name -- last season
-once the new one activates, or a pinned season the pointer has moved past --
-is read entirely from that season's **retained** Publications: for each
-Backtest stream (`player_game_logs`, `exact_shot_zones`, `grouped_shot_types`,
-`player_assist_locations`, `synergy_play_types`), the latest activation a
-rollback or corrected evidence has not revoked and a restore has not retired.
-Shares, games, season averages, thin-sample checks, and league baselines all
-come from that season; seasons are never mixed, and nothing about today's
-players is implied. If any of those streams has no readable retained
-Publication for the season, the request fails with `503 season_unavailable`
-naming the stream, never an empty `players` list:
+The **previous season** is read entirely from its **retained** Publications,
+whatever the live pointers name: for each Backtest stream (`player_game_logs`,
+`exact_shot_zones`, `grouped_shot_types`, `player_assist_locations`,
+`synergy_play_types`), the latest activation of that season a rollback or
+corrected evidence has not revoked and a restore has not retired. Its
+Generation is therefore fixed until one of those rows is revoked. Shares,
+games, season averages, thin-sample checks, and league baselines all come from
+that season; seasons are never mixed, and nothing about today's players is
+implied. The **published season** reads each stream's live pointer when it
+names that season, and that stream's retained Publication otherwise -- a pin
+set behind the live pointer, or one stream activating a new season before the
+others. If any Backtest stream has no readable Publication for the season in
+either place, the request fails with `503 season_unavailable` naming the
+stream, never an empty `players` list:
 
 ```json
 {
@@ -3426,10 +3429,12 @@ account -- foreign ids are never reported as `403`. `400 invalid_input` for a
 `season` outside the two readable seasons, and `503 season_unavailable` as
 above.
 
-**Cache.** A season the live pointer names is cached under its pointer
-generation. A retained season is cached under the season and its retained
-history-row ids, so nightly publications of the published season leave its
-entry valid and revoking one of its rows invalidates it. `season_reason` is
+**Cache.** A season read from live pointers is cached under its pointer
+generation. A season read entirely from retained Publications -- always the
+previous season -- is cached under the season and its retained history-row
+ids, so nightly publications of the published season leave its entry valid and
+revoking one of its rows invalidates it. A published season read partly live
+and partly retained is computed and not cached (`targets_cache` is `bypass`). `season_reason` is
 the request's own: the season's entry serves a request that named it and one
 that fell back to it.
 
@@ -3677,9 +3682,9 @@ Saving the draft and expanding its Backtest shows the same numbers.
 no date parameter, and the evaluation is season to date.
 
 - `null` when the preview reads a past season (`season` names the previous
-  season, or `season_reason` is `fallback_no_games`) or a retained one: such a
-  season says nothing about tonight's players, and the preview never pairs it
-  with a second capture.
+  season, or `season_reason` is `fallback_no_games`), or a published season any
+  of whose streams was read retained: neither is the Generation tonight's
+  Matchup is in, and the preview never pairs it with a second capture.
 - `null` when the opponent has no game today.
 - Otherwise `game` is the resolve response's game object, and `fit_count` is
   the number of opposing participants meeting every Qualifier by the

@@ -604,28 +604,30 @@ class TargetBacktestService:
                 )
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
-            # evidence.  A past season is one retained Generation, never
+            # evidence.  The previous season is one retained Generation, never
             # mixed with the live one.
             snapshot = publication_snapshot
             if publication_snapshot is _OWN:
-                captured = None
+                captured = live = None
                 if choice is None:
-                    captured, snapshot = published_capture(
+                    captured, live = published_capture(
                         self.settings,
                         self.publication_reader,
                         lambda season: self._publication_snapshot(
                             season, session=session
                         ),
                     )
-                    choice = self.seasons.choose(captured, snapshot, session=session)
-                if choice.retained:
-                    snapshot = self._retained_snapshot(
-                        choice.season, session=session
-                    )
-                elif choice.season != captured:
-                    snapshot = self._publication_snapshot(
-                        choice.season, session=session
-                    )
+                    choice = self.seasons.choose(captured, live, session=session)
+                if not choice.past and choice.season != captured:
+                    live = self._publication_snapshot(choice.season, session=session)
+                snapshot = self.seasons.evidence(
+                    choice,
+                    live,
+                    _PUBLICATION_STREAM_KEYS,
+                    projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
+                    decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
+                    session=session,
+                )
             season = choice.season
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
             rows = tuple(record for record in call_with_read_scope(
@@ -661,8 +663,10 @@ class TargetBacktestService:
             )
             readings = getattr(snapshot, "reads", None)
             eligibility = _required_cache_streams(qualifiers)
+            identity = self._cache_identity(snapshot)
             eligible = (
-                snapshot is not None
+                identity is not None
+                and snapshot is not None
                 and isinstance(readings, Mapping)
                 and all(
                     (read := readings.get(stream)) is not None
@@ -678,9 +682,7 @@ class TargetBacktestService:
                     # generation, so the next request's pre-check key finds
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
-                        self._cache_key(
-                            target, season, self._cache_identity(choice, snapshot)
-                        ),
+                        self._cache_key(target, season, identity),
                         {
                             "players": players,
                             "summary": self._summary(players, markets),
@@ -694,7 +696,9 @@ class TargetBacktestService:
                     # A stream the Target's Qualifiers reference being
                     # unavailable means the read ran on refusal labels, not
                     # evidence; a result computed from those is not one any
-                    # future generation may reuse.
+                    # future generation may reuse.  Nor is one composed from
+                    # live and retained streams at once: no single pointer
+                    # read names that Generation.
                     cache_state = "bypass"
         return {
             "target": dict(target),
@@ -838,23 +842,19 @@ class TargetBacktestService:
         )
 
     @staticmethod
-    def _cache_identity(choice: BacktestSeason, snapshot: Any) -> Sequence[tuple]:
-        """The captured Generation's identity, keyed as the pre-check keys it."""
+    def _cache_identity(snapshot: Any) -> Sequence[tuple] | None:
+        """The captured Generation's identity, keyed as the pre-check keys it.
 
-        if choice.retained:
-            return snapshot.retained_history
-        return getattr(snapshot, "generation", ())
+        Live reads key on the pointer generation and an all-retained capture
+        on its history-row ids; a capture mixing the two has no key.
+        """
 
-    def _retained_snapshot(self, season: str, *, session: Session | None = None):
-        """Capture a season's retained Generation, narrowed as a live one."""
-
-        return self.seasons.retained_snapshot(
-            season,
-            _PUBLICATION_STREAM_KEYS,
-            projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
-            decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
-            session=session,
-        )
+        retained = getattr(snapshot, "retained_history", ())
+        if not retained:
+            return getattr(snapshot, "generation", ())
+        if len(retained) == len(_PUBLICATION_STREAM_KEYS):
+            return retained
+        return None
 
     def _cache_key(
         self,

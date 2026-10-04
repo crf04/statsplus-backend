@@ -828,6 +828,8 @@ class UserService:
                 raise InvalidConfigurationError("Target defender validation is unavailable.")
             defender = conditions['defender']
             choice = self.backtest_seasons.resolve(season)
+            # The game logs the Backtest itself reads: the season's retained
+            # Publication unless the live pointer names that season.
             snapshot = (
                 self.backtest_seasons.retained_snapshot(
                     choice.season,

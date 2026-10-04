@@ -14,17 +14,20 @@ version can compose, activate, or be retained.  A season therefore has zero
 Regular Season games exactly when it has no game-log Publication -- in
 production, while the pin names a season nothing has published yet.
 
-The live pointers name only one season's Publications.  A season the live
-game-log pointer does not name reads each stream's retained Publication
-through the pointer history instead, and a stream that season does not retain
-fails the request with ``season_unavailable`` naming it: unavailable is not
-empty.
+The live pointers name only one season's Publications.  The previous season
+reads every stream's retained Publication through the pointer history, so its
+Generation is fixed until a row is revoked, whatever the live pointers do.
+The published season reads each stream's live pointer when it names that
+season, and its retained Publication otherwise (a pin behind the pointer, or
+one stream activating a new season before the others).  A stream the season
+has in neither place fails the request with ``season_unavailable`` naming it:
+unavailable is not empty.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.errors import InvalidInputError, SeasonUnavailableError
@@ -45,11 +48,11 @@ _GAME_LOG_KEYS = frozenset({_GAME_LOGS})
 
 @dataclass(frozen=True, slots=True)
 class BacktestSeason:
-    """The season one Backtest reads, why, and where its evidence lives.
+    """The season one Backtest reads, why, and where its game logs live.
 
-    ``retained`` is true when the live game-log pointer names another season,
-    so the evidence is the season's retained Generation, keyed by its history
-    rows rather than the live pointer generation.
+    ``retained`` is true when the season's game logs are read from the
+    pointer history: always for the previous season, and for the published
+    season when the live game-log pointer names another one.
     """
 
     season: str
@@ -130,7 +133,10 @@ class BacktestSeasons:
                 season = previous_nba_season(published)
                 reason = SEASON_REASON_FALLBACK_NO_GAMES
         return BacktestSeason(
-            season, reason, published, retained=season != live_season
+            season,
+            reason,
+            published,
+            retained=season != published or season != live_season,
         )
 
     def _game_log_capture(self, season: Any, session: Any | None) -> Any:
@@ -143,6 +149,58 @@ class BacktestSeasons:
         if session is not None and accepts_keyword(capture, "session"):
             keyword["session"] = session
         return capture((_GAME_LOGS,), season=season, **keyword)
+
+    def evidence(
+        self,
+        choice: BacktestSeason,
+        live: Any,
+        stream_keys: Iterable[str],
+        *,
+        projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
+        session: Any | None = None,
+    ) -> Any:
+        """The one capture a Backtest of ``choice`` reads, or raise naming a stream.
+
+        ``live`` is a live capture in ``choice.season`` (unused for the
+        previous season).  Every previous-season stream is retained.  A
+        published-season stream the live pointer has no Publication for in
+        that season (a ``missing`` read) is replaced by its retained read; the
+        result's ``retained_history`` names the rows that were.
+        """
+
+        keys = tuple(stream_keys)
+        if choice.past:
+            return self.retained_snapshot(
+                choice.season,
+                keys,
+                projection_only_keys=projection_only_keys,
+                decoded_only_keys=decoded_only_keys,
+                session=session,
+            )
+        read_stream = getattr(live, "read", None)
+        if not callable(read_stream):
+            return live
+        absent = tuple(key for key in keys if read_stream(key).status == "missing")
+        if not absent:
+            return live
+        retained = self.retained_snapshot(
+            choice.season,
+            absent,
+            projection_only_keys=projection_only_keys,
+            decoded_only_keys=decoded_only_keys,
+            session=session,
+        )
+        reads = {**live.reads, **retained.reads}
+        return replace(
+            live,
+            reads=reads,
+            generation=tuple(
+                (key, read.publication_id, read.fence, read.version)
+                for key, read in sorted(reads.items())
+            ),
+            retained_history=retained.retained_history,
+        )
 
     def retained_snapshot(
         self,

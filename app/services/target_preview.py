@@ -20,7 +20,8 @@ stream is read payload-less only where both reads would.
 season has no games) reads the Backtest from that season's retained
 Generation alone.  ``today`` is about tonight's players, which a past season
 says nothing about, and pairing it with a second capture would break the
-one-generation promise, so it is ``null`` (#104).
+one-generation promise, so it is ``null`` (#104); so is a published season
+any of whose streams had to be read retained.
 
 *No provider, no write.*  The Matchup route may refresh injuries from the
 provider and publish a snapshot when the stored override is stale; that is its
@@ -124,28 +125,28 @@ class TargetPreviewService:
         seasons = self.backtests.seasons
         if season is not None:
             choice = seasons.resolve(season)
-            snapshot = None if choice.retained else self._capture(choice.season)
+            live = None if choice.past else self._capture(choice.season)
         else:
             # One capture decides the season, and every read uses both.
-            published, snapshot = published_capture(
+            published, live = published_capture(
                 self.settings, self.publication_reader, self._capture
             )
-            choice = seasons.choose(published, snapshot)
-            if not choice.retained and choice.season != published:
-                snapshot = self._capture(choice.season)
-        if choice.retained:
-            snapshot = seasons.retained_snapshot(
-                choice.season,
-                BACKTEST_PUBLICATION_STREAM_KEYS,
-                projection_only_keys=BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
-                decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
-            )
+            choice = seasons.choose(published, live)
+            if not choice.past and choice.season != published:
+                live = self._capture(choice.season)
+        snapshot = seasons.evidence(
+            choice,
+            live,
+            BACKTEST_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
+        )
         previewed = self.backtests.backtest_target(
             draft, publication_snapshot=snapshot, season=choice
         )
-        if choice.past or choice.retained:
-            # Tonight's Matchup is not in a retained Generation, and a past
-            # season says nothing about tonight's players.
+        if choice.past or getattr(snapshot, "retained_history", ()):
+            # A past season says nothing about tonight's players, and a
+            # retained read is not the Generation tonight's Matchup is in.
             return {**previewed, "today": None}
         today = self.resolutions.today(
             draft,
