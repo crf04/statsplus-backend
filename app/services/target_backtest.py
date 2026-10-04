@@ -436,7 +436,10 @@ class TargetBacktestService:
                 # Unavailable is not empty, here too: a stream the season has
                 # in neither place fails the batch as it fails the single read.
                 self.seasons.require_streams(
-                    choice, _PUBLICATION_STREAM_KEYS, session=session
+                    choice,
+                    _PUBLICATION_STREAM_KEYS,
+                    projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
+                    session=session,
                 )
                 generation = self._read_cache_generation(choice, session)
             except (InvalidInputError, SeasonUnavailableError):

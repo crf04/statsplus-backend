@@ -1655,11 +1655,21 @@ class DatabaseFirstPublicationReader:
             # publication ID; payload-consuming paths still recompute the
             # payload checksum below.
             if not projection_ready:
+                # Labelled like every other refusal of an existing version,
+                # so a caller can tell which season's Publication refused.
                 return self._missing(
                     stream_key,
                     "unavailable",
                     reason="publication_projection_missing",
                     fence=pointer.fence,
+                    publication_id=publication.publication_id,
+                    season=publication.season,
+                    cutoff=_utc(publication.cutoff).isoformat(),
+                    version=int(publication.version),
+                    retrieved_at=retrieved_at,
+                    checksum=publication.checksum,
+                    freshness=freshness,
+                    age_seconds=age,
                 )
             return PublicationRead(
                 stream_key=stream_key,

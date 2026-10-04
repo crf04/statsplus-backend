@@ -204,7 +204,10 @@ class BacktestSeasons:
         previous season).  Every previous-season stream is retained.  A
         published-season stream the live pointer has no Publication for in
         that season (a ``missing`` read) is replaced by its retained read; the
-        result's ``retained_history`` names the rows that were.
+        result's ``retained_history`` names the rows that were.  A live
+        Publication that exists but cannot be read (corrupt, unauthorised,
+        without its projection) is unavailable too, never an empty season;
+        see ``_readable`` for the reads that still serve.
         """
 
         keys = tuple(stream_keys)
@@ -219,6 +222,10 @@ class BacktestSeasons:
         read_stream = getattr(live, "read", None)
         if not callable(read_stream):
             return live
+        for key in keys:
+            read = read_stream(key)
+            if read.status != "missing" and not _readable(read):
+                raise _unavailable(choice, key)
         absent = tuple(key for key in keys if read_stream(key).status == "missing")
         if not absent:
             return live
@@ -241,13 +248,20 @@ class BacktestSeasons:
         )
 
     def require_streams(
-        self, choice: BacktestSeason, stream_keys: Iterable[str], *, session: Any | None = None
+        self,
+        choice: BacktestSeason,
+        stream_keys: Iterable[str],
+        *,
+        projection_keys: frozenset[str] = frozenset(),
+        session: Any | None = None,
     ) -> None:
         """Raise naming a stream ``choice.season`` has in neither place, reading no payload.
 
         The pointer-only check ``evidence`` makes, for a read that computes
         nothing: a stream counts when the live pointer names the season or
-        the season retains it.
+        the season retains it, and is refused when its live Publication is
+        unreadable without opening a payload (authority, a projection stream's
+        projection).  A corrupt payload is found only by a read of it.
         """
 
         keys = tuple(stream_keys)
@@ -265,6 +279,15 @@ class BacktestSeasons:
             read_stream = getattr(live, "read", None)
             if not callable(read_stream):
                 return
+            for key in keys:
+                read = read_stream(key)
+                # Every key is narrowed to its projection here, so only a
+                # projection stream's missing projection is a real refusal.
+                if read.status != "missing" and not _readable(read) and not (
+                    read.unavailable_reason == "publication_projection_missing"
+                    and key not in projection_keys
+                ):
+                    raise _unavailable(choice, key)
             absent = tuple(key for key in keys if read_stream(key).status == "missing")
         if absent:
             self.retained_history(choice, absent, session=session)
@@ -342,6 +365,21 @@ def _live_season(live: Any, published: str) -> str | None:
         return published
     read = read_stream(_GAME_LOGS)
     return read.season if read.publication_id is not None else None
+
+
+def _readable(read: Any) -> bool:
+    """Whether a live read serves, or is the deployment's own non-Publication read.
+
+    A disabled stream's legacy read and a stream this deployment never
+    registered both read as they did before Publications; neither is an
+    unreadable Publication.
+    """
+
+    return (
+        read.available
+        or read.legacy_fallback_allowed
+        or read.unavailable_reason == "stream_not_registered"
+    )
 
 
 def _has_games(snapshot: Any) -> bool:

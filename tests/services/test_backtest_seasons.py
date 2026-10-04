@@ -1005,3 +1005,65 @@ def test_a_first_default_refusal_tells_the_client_the_published_season(world):
     assert refused.value.public_details == {
         "season": NEW, "published_season": NEW, "stream": "exact_shot_zones"
     }
+
+
+def _drop_live_game_log_projection(world):
+    """The live 2026-27 game-log Publication exists but cannot be read."""
+
+    with world.engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM publication_player_game_logs WHERE publication_id = "
+            "(SELECT active_publication_id FROM publication_pointers "
+            "WHERE stream_key = 'player_game_logs')"
+        ))
+
+
+@pytest.mark.parametrize("redis_client", [None, bt.FakeRedis], ids=("no-cache", "cache"))
+def test_an_unreadable_live_stream_is_season_unavailable_not_empty(
+    client, authenticate, world, dependencies, redis_client
+):
+    from app.services.target_season_minutes import TargetSeasonMinutesService
+
+    target = world.saved_target()
+    _activate_new_season(world)
+    _drop_live_game_log_projection(world)
+    dependencies.user_service = world.users
+    dependencies.target_backtest_service = world.backtests(
+        redis_client=redis_client and redis_client()
+    )
+    dependencies.target_season_minutes_service = TargetSeasonMinutesService(
+        player_logs=world.logs, settings=world.settings, publication_reader=world.reader
+    )
+    expected = {
+        "season": NEW, "published_season": NEW, "stream": "player_game_logs"
+    }
+
+    for url in (
+        f"/api/user/targets/{target['id']}/backtest",
+        "/api/user/targets/backtests",
+        "/api/teams/OKC/season-minutes",
+    ):
+        for query in ({}, {"season": NEW}):
+            response = client.get(url, query_string=query, headers=authenticate())
+            assert response.status_code == 503, (url, query)
+            assert response.get_json()["error"]["code"] == "season_unavailable"
+            assert response.get_json()["error"]["details"] == expected
+    # The previous season is read retained and unaffected.
+    past = client.get(
+        f"/api/user/targets/{target['id']}/backtest",
+        query_string={"season": LAST},
+        headers=authenticate(),
+    )
+    assert past.status_code == 200
+
+
+def test_a_preview_names_its_season_reason_and_published_season(world):
+    _pin(world, NEW)
+
+    fallback = _preview(world, None)
+    requested = _preview(world, LAST)
+
+    assert [
+        (body["season"], body["season_reason"], body["published_season"])
+        for body in (fallback, requested)
+    ] == [(LAST, "fallback_no_games", NEW), (LAST, "requested", NEW)]

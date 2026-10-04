@@ -3256,8 +3256,9 @@ implied. The **published season** reads each stream's live pointer when it
 names that season, and that stream's retained Publication otherwise -- a pin
 set behind the live pointer, or one stream activating a new season before the
 others. If any Backtest stream has no readable Publication for the season in
-either place, the request fails with `503 season_unavailable` naming the
-stream, never an empty `players` list:
+either place -- none exists, or the one that exists cannot be read (corrupt,
+unauthorised, or missing its projection) -- the request fails with
+`503 season_unavailable` naming the stream, never an empty `players` list:
 
 ```json
 {
@@ -3612,7 +3613,7 @@ shape for the draft plus `today`:
     ]
   },
   "season": "2025-26",
-  "season_reason": "published",
+  "season_reason": "requested",
   "published_season": "2025-26",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
   "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
