@@ -1,0 +1,248 @@
+"""Choose the season a Target Backtest reads (crf04/statsplus#104).
+
+A Backtest reads the published season or the one before it, never both.  The
+published season is the one ``research_season`` names: the
+``NBA_CURRENT_SEASON`` pin when set, else the active player-game-log
+publication's season.  With no season requested, a published season with zero
+Regular Season games league-wide falls back to the previous season, so a
+Backtest opened before a season's first game reports last season instead of
+nobody.  Once a game exists the published season is used, however thin.
+
+A game-log Publication cannot hold zero games: ``decode_player_game_logs``
+refuses an empty document and any row that is not Regular Season, so no such
+version can compose, activate, or be retained.  A season therefore has zero
+Regular Season games exactly when it has no game-log Publication -- in
+production, while the pin names a season nothing has published yet.
+
+The live pointers name only one season's Publications.  A season the live
+game-log pointer does not name reads each stream's retained Publication
+through the pointer history instead, and a stream that season does not retain
+fails the request with ``season_unavailable`` naming it: unavailable is not
+empty.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
+
+from app.errors import InvalidInputError, SeasonUnavailableError
+from app.services.publication_snapshot_calls import accepts_keyword
+from app.services.research_season import (
+    previous_nba_season,
+    published_capture,
+)
+
+
+SEASON_REASON_REQUESTED = "requested"
+SEASON_REASON_PUBLISHED = "published"
+SEASON_REASON_FALLBACK_NO_GAMES = "fallback_no_games"
+
+_GAME_LOGS = "player_game_logs"
+_GAME_LOG_KEYS = frozenset({_GAME_LOGS})
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestSeason:
+    """The season one Backtest reads, why, and where its evidence lives.
+
+    ``retained`` is true when the live game-log pointer names another season,
+    so the evidence is the season's retained Generation, keyed by its history
+    rows rather than the live pointer generation.
+    """
+
+    season: str
+    reason: str
+    published: str
+    retained: bool = False
+
+    @property
+    def past(self) -> bool:
+        """Whether this is the season before the published one."""
+
+        return self.season != self.published
+
+
+class BacktestSeasons:
+    """Resolve Backtest seasons and capture a season's retained Generation."""
+
+    def __init__(self, settings, publication_reader: Any | None):
+        self.settings = settings
+        self.publication_reader = publication_reader
+
+    def resolve(
+        self, requested: Any, *, session: Any | None = None
+    ) -> BacktestSeason:
+        """The season a request reads, before any full capture.
+
+        One pointer-and-projection capture of the game logs decides the
+        published season exactly as ``published_capture`` does for a full
+        read, then ``choose`` applies the request to it.
+        """
+
+        published, live = published_capture(
+            self.settings,
+            self.publication_reader,
+            lambda season: self._game_log_capture(season, session),
+        )
+        return self.choose(
+            published, live, requested, session=session
+        )
+
+    def choose(
+        self,
+        published: str,
+        live: Any,
+        requested: Any = None,
+        *,
+        session: Any | None = None,
+    ) -> BacktestSeason:
+        """Apply a request to a live capture taken in the published season.
+
+        A requested season must be the published season or the one before it.
+        With none, the published season is used unless its game logs hold no
+        Regular Season game, in which case the previous season is.
+        """
+
+        live_season = _live_season(live, published)
+        if requested is not None:
+            allowed = (published, previous_nba_season(published))
+            if not isinstance(requested, str) or requested not in allowed:
+                raise InvalidInputError(
+                    f"season must be {allowed[0]} or {allowed[1]}."
+                )
+            season, reason = requested, SEASON_REASON_REQUESTED
+        else:
+            evidence = (
+                live
+                if live_season == published
+                else self._retained_capture(
+                    published,
+                    (_GAME_LOGS,),
+                    projection_only_keys=_GAME_LOG_KEYS,
+                    session=session,
+                )
+            )
+            if _has_games(evidence):
+                season, reason = published, SEASON_REASON_PUBLISHED
+            else:
+                season = previous_nba_season(published)
+                reason = SEASON_REASON_FALLBACK_NO_GAMES
+        return BacktestSeason(
+            season, reason, published, retained=season != live_season
+        )
+
+    def _game_log_capture(self, season: Any, session: Any | None) -> Any:
+        capture = getattr(self.publication_reader, "snapshot", None)
+        if not callable(capture):
+            return None
+        keyword = {}
+        if accepts_keyword(capture, "projection_only_keys"):
+            keyword["projection_only_keys"] = _GAME_LOG_KEYS
+        if session is not None and accepts_keyword(capture, "session"):
+            keyword["session"] = session
+        return capture((_GAME_LOGS,), season=season, **keyword)
+
+    def retained_snapshot(
+        self,
+        season: str,
+        stream_keys: Iterable[str],
+        *,
+        projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
+        session: Any | None = None,
+    ) -> Any:
+        """Capture ``season``'s retained Generation, or raise naming a stream."""
+
+        keys = tuple(stream_keys)
+        snapshot = self._retained_capture(
+            season,
+            keys,
+            projection_only_keys=projection_only_keys,
+            decoded_only_keys=decoded_only_keys,
+            session=session,
+        )
+        for key in keys:
+            if snapshot is None or not snapshot.read(key).available:
+                raise _unavailable(season, key)
+        return snapshot
+
+    def _retained_capture(
+        self,
+        season: str,
+        keys: tuple[str, ...],
+        *,
+        projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
+        session: Any | None = None,
+    ) -> Any:
+        capture = getattr(self.publication_reader, "retained_snapshot", None)
+        if not callable(capture):
+            return None
+        return capture(
+            keys,
+            season=season,
+            projection_only_keys=projection_only_keys,
+            decoded_only_keys=decoded_only_keys,
+            session=session,
+        )
+
+    def retained_history(
+        self, season: str, stream_keys: Iterable[str], *, session: Any | None = None
+    ) -> tuple[tuple[str, str | None], ...]:
+        """Name ``season``'s retained history rows, or raise naming a stream."""
+
+        keys = tuple(stream_keys)
+        read_history = getattr(self.publication_reader, "retained_history", None)
+        if not callable(read_history):
+            raise _unavailable(season, keys[0])
+        history = read_history(keys, season=season, session=session)
+        for key, history_id in history:
+            if history_id is None:
+                raise _unavailable(season, key)
+        return history
+
+
+def _live_season(live: Any, published: str) -> str | None:
+    """The season the live game-log pointer names, as one capture saw it.
+
+    A capture without per-stream reads (no publication reader, or an older
+    one) has no pointer to move past a season, so it serves the published
+    season as it always has.
+    """
+
+    read_stream = getattr(live, "read", None)
+    if not callable(read_stream):
+        return published
+    read = read_stream(_GAME_LOGS)
+    return read.season if read.publication_id is not None else None
+
+
+def _has_games(snapshot: Any) -> bool:
+    """Whether a capture of one season holds its game-log Publication.
+
+    Only a ``missing`` read -- nothing published or retained -- is a season
+    without games.  A version that exists but cannot be read is not evidence
+    of an empty season, so the season is kept and reported as it reads; so is
+    a deployment with no per-stream Publication reads at all.
+    """
+
+    read_stream = getattr(snapshot, "read", None)
+    return not callable(read_stream) or read_stream(_GAME_LOGS).status != "missing"
+
+
+def _unavailable(season: str, stream_key: str) -> SeasonUnavailableError:
+    return SeasonUnavailableError(
+        f"The {season} season is unavailable: no retained {stream_key} "
+        "Publication can be read."
+    )
+
+
+__all__ = [
+    "BacktestSeason",
+    "BacktestSeasons",
+    "SEASON_REASON_FALLBACK_NO_GAMES",
+    "SEASON_REASON_PUBLISHED",
+    "SEASON_REASON_REQUESTED",
+]

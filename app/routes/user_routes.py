@@ -385,10 +385,14 @@ def preview_target():
     duplicate rule applies, so the Lab can evaluate a Target the caller has
     not saved and may never save.
 
+    The optional ``season`` is the published season or the one before it;
+    without it the published season is read unless it has no games yet.
+
     Returns:
         JSON response with the backtest for the draft (its ``target`` carries
         the derived title and no id) and ``today``: ``null`` when the opponent
-        is idle on the current slate date, else the game and the fit count
+        is idle on the current slate date or the season is a past one, else
+        the game and the fit count
     """
     data = _target_body()
 
@@ -397,8 +401,12 @@ def preview_target():
         qualifiers=data.get('qualifiers'),
         note=data.get('note'),
         **({key: data[key] for key in ('conditions', 'stat_preferences') if key in data}),
+        season=data.get('season'),
     )
-    return jsonify({'success': True, **target_preview_service.preview(draft)})
+    return jsonify({
+        'success': True,
+        **target_preview_service.preview(draft, season=data.get('season')),
+    })
 
 @user_bp.route('/targets/backtests', methods=['GET'])
 @require_auth
@@ -414,13 +422,14 @@ def backtest_targets():
     standard error object, so one failing Target never blanks the others.
     Nothing is computed here, and every ``ok`` item comes from one
     Publication generation.  ``<int:target_id>`` only matches integers, so
-    this path never reaches the per-Target routes.
+    this path never reaches the per-Target routes.  The optional ``season``
+    query parameter is resolved once for every Target.
 
     Returns:
         JSON response with the season and one Backtest item per Target
     """
     backtested, cache_state = target_backtest_service.backtest_all(
-        _authenticated_uid()
+        _authenticated_uid(), season=request.args.get('season')
     )
     # hit when every item is ok, miss when any is uncached, else '-'.
     g.targets_cache = cache_state
@@ -436,12 +445,15 @@ def backtest_target(target_id):
     Every player league-wide whose current-season Diet meets every Qualifier
     and is not thin, with their games against the Target's opponent this
     season and their own season per-game averages for the same stat columns.
+    The optional ``season`` query parameter is the published season or the
+    one before it; without it the published season is read unless it has no
+    games yet.
 
     Returns:
         JSON response with the target, its stat columns, and the players
     """
     backtested, cache_state = target_backtest_service.backtest(
-        _authenticated_uid(), target_id
+        _authenticated_uid(), target_id, season=request.args.get('season')
     )
     # The service stays HTTP-free; the route stamps the request log's
     # ``targets_cache`` outcome here: hit, miss, bypass, or the unbilled '-'.

@@ -292,6 +292,7 @@ def test_backtest_all_degrades_to_uncached_when_the_season_lookup_fails():
 
     assert body == {
         "season": CALENDAR,
+        "season_reason": "published",
         "backtests": [{"target_id": 7, "status": "uncached"}],
     }
 

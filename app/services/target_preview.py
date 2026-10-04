@@ -16,6 +16,12 @@ is composed from it through ``MatchupService.get_matchup_from_snapshot``.  The
 projection-only narrowing is the intersection of the two reads' own, so a
 stream is read payload-less only where both reads would.
 
+*One season.*  A past season (requested, or the fallback while the published
+season has no games) reads the Backtest from that season's retained
+Generation alone.  ``today`` is about tonight's players, which a past season
+says nothing about, and pairing it with a second capture would break the
+one-generation promise, so it is ``null`` (#104).
+
 *No provider, no write.*  The Matchup route may refresh injuries from the
 provider and publish a snapshot when the stored override is stale; that is its
 contract, and ``resolve`` (#245) inherits it.  A preview composes its Matchup
@@ -40,6 +46,7 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
+from app.services.backtest_season import BacktestSeason, BacktestSeasons
 from app.services.research_season import published_capture
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
@@ -67,8 +74,14 @@ PREVIEW_DECODED_ONLY_STREAM_KEYS = BACKTEST_DECODED_ONLY_STREAM_KEYS & frozenset
 
 
 class BacktestReader(Protocol):
+    seasons: BacktestSeasons
+
     def backtest_target(
-        self, target: Mapping[str, Any], *, publication_snapshot: Any, season: str
+        self,
+        target: Mapping[str, Any],
+        *,
+        publication_snapshot: Any,
+        season: BacktestSeason,
     ) -> dict[str, Any]: ...
 
 
@@ -98,35 +111,58 @@ class TargetPreviewService:
         self.settings = settings
         self.publication_reader = publication_reader
 
-    def preview(self, draft: Mapping[str, Any]) -> dict[str, Any]:
+    def preview(
+        self, draft: Mapping[str, Any], *, season: str | None = None
+    ) -> dict[str, Any]:
         """Return the draft's Backtest plus ``today``.
 
         ``draft`` is the validated listed shape ``UserService.validate_target_draft``
-        returns; it is echoed as the response's ``target``.
+        returns; it is echoed as the response's ``target``.  ``season`` is the
+        requested season; ``None`` applies the default rule.
         """
 
-        # One capture decides the season, and every read uses both.
-        season, snapshot = published_capture(
-            self.settings,
-            self.publication_reader,
-            lambda season: capture_publication_snapshot(
-                self.publication_reader,
-                PREVIEW_PUBLICATION_STREAM_KEYS,
-                projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
-                decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
-                season=season,
-            ),
-        )
+        seasons = self.backtests.seasons
+        if season is not None:
+            choice = seasons.resolve(season)
+            snapshot = None if choice.retained else self._capture(choice.season)
+        else:
+            # One capture decides the season, and every read uses both.
+            published, snapshot = published_capture(
+                self.settings, self.publication_reader, self._capture
+            )
+            choice = seasons.choose(published, snapshot)
+            if not choice.retained and choice.season != published:
+                snapshot = self._capture(choice.season)
+        if choice.retained:
+            snapshot = seasons.retained_snapshot(
+                choice.season,
+                BACKTEST_PUBLICATION_STREAM_KEYS,
+                projection_only_keys=BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
+                decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
+            )
         previewed = self.backtests.backtest_target(
-            draft, publication_snapshot=snapshot, season=season
+            draft, publication_snapshot=snapshot, season=choice
         )
+        if choice.past or choice.retained:
+            # Tonight's Matchup is not in a retained Generation, and a past
+            # season says nothing about tonight's players.
+            return {**previewed, "today": None}
         today = self.resolutions.today(
             draft,
             matchups=SnapshotMatchups(
-                self.matchups, snapshot, self.injuries, season=season
+                self.matchups, snapshot, self.injuries, season=choice.season
             ),
         )
         return {**previewed, "today": today}
+
+    def _capture(self, season: Any) -> Any:
+        return capture_publication_snapshot(
+            self.publication_reader,
+            PREVIEW_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
+            season=season,
+        )
 
 
 __all__ = [

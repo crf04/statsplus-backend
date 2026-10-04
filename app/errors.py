@@ -343,6 +343,19 @@ class ConflictError(AppError):
     default_message = "The operation conflicts with the current collection state."
 
 
+class SeasonUnavailableError(AppError):
+    """A season's retained Publication of one stream cannot be read.
+
+    Unavailable is not empty: a Backtest whose season has no readable retained
+    Publication of a stream fails naming that stream instead of reporting that
+    nobody fits (crf04/statsplus#104).
+    """
+
+    status_code = 503
+    code = "season_unavailable"
+    default_message = "The requested season is unavailable."
+
+
 def route_error_boundary(
     safe_message: str,
     *,

@@ -1502,7 +1502,7 @@ def test_the_backtest_route_returns_the_backtest_for_the_targets_id(
 
     assert response.status_code == 200
     assert response.get_json() == {"success": True, **BACKTESTED}
-    backtest_service.backtest.assert_called_once_with("test-uid", 7)
+    backtest_service.backtest.assert_called_once_with("test-uid", 7, season=None)
 
 
 def test_the_backtest_route_reports_a_target_of_another_account_as_not_found(
@@ -2108,12 +2108,17 @@ def test_the_scope_loaded_target_still_hides_an_unowned_one(
 
 class GenerationSnapshotReader:
     """A reader answering generations pointer-only and capturing one frozen
-    snapshot: the split the real reader gives a request."""
+    snapshot: the split the real reader gives a request.
+
+    A game-log-only capture is the Backtest season's resolution (#104), not
+    a capture of evidence, so it is recorded apart from ``snapshot_calls``.
+    """
 
     def __init__(self, reads, generation):
         self.reads = reads
         self.frozen_generation = generation
         self.snapshot_calls = []
+        self.season_resolutions = []
         self.generation_calls = []
 
     def generation(self, stream_keys, *, season, session=None):
@@ -2129,7 +2134,10 @@ class GenerationSnapshotReader:
         decoded_only_keys=None,
         session=None,
     ):
-        self.snapshot_calls.append((tuple(stream_keys), season))
+        if tuple(stream_keys) == ("player_game_logs",):
+            self.season_resolutions.append(season)
+        else:
+            self.snapshot_calls.append((tuple(stream_keys), season))
         return SimpleNamespace(reads=self.reads, generation=self.frozen_generation)
 
 
@@ -2974,7 +2982,7 @@ def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):
 
     payload, state = service.backtest_all(OWNER)
 
-    assert payload == {"season": SEASON, "backtests": []}
+    assert payload == {"season": SEASON, "season_reason": "published", "backtests": []}
     assert state == "-"
     assert client.gets == []
     assert reader.snapshot_calls == []
@@ -3063,7 +3071,7 @@ def test_the_batch_route_returns_every_item_and_stamps_the_cache(
 
     assert response.status_code == 200
     assert response.get_json() == {"success": True, **BATCH}
-    backtest_service.backtest_all.assert_called_once_with("test-uid")
+    backtest_service.backtest_all.assert_called_once_with("test-uid", season=None)
     backtest_service.backtest.assert_not_called()
     lines = [
         record.getMessage()

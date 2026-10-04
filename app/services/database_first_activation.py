@@ -33,6 +33,7 @@ from app.domain.team_matchup_taxonomy import (
 from app.domain.publication_integrity import publication_payload_matches_checksum
 from app.models.collection_control import (
     PublicationPointer,
+    PublicationPointerHistory,
     PublicationStream,
     PublicationVersion,
 )
@@ -810,6 +811,11 @@ def _validate_known_publication_payload(
     )
 
 
+#: A read that serves facts: the live pointer's active or rollback version,
+#: a stale-labelled one, or a past season's retained version (#104).
+_SERVING_STATUSES = frozenset({"active", "rollback", "stale", "retained"})
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationRead:
     """One immutable stream read and its bounded provenance."""
@@ -851,7 +857,7 @@ class PublicationRead:
             self.payload is not None
             or self.projection_ready
             or self.decoded is not None
-        ) and self.status in {"active", "rollback", "stale"}
+        ) and self.status in _SERVING_STATUSES
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -879,6 +885,13 @@ class PublicationRead:
         }
 
 
+class _RetainedPointer(NamedTuple):
+    """The pointer fields a retained read takes from its history row."""
+
+    fence: int
+    active_publication_id: str
+
+
 class _SnapshotRow(NamedTuple):
     """One stream's captured generation: its pointer, version, and read shape."""
 
@@ -902,6 +915,9 @@ class PublicationReadSnapshot:
     season: str | None
     reads: Mapping[str, PublicationRead]
     generation: tuple[tuple[str, str | None, int | None, int | None], ...]
+    #: ``(stream_key, history_id)`` per stream of a retained capture, ``None``
+    #: where the season retains no Publication; empty for a live capture.
+    retained_history: tuple[tuple[str, str | None], ...] = ()
 
     def read(self, stream_key: str) -> PublicationRead:
         return self.reads.get(
@@ -926,7 +942,7 @@ class PublicationReadSnapshot:
             (
                 read.cutoff
                 if read.cutoff is not None
-                and read.status in {"active", "rollback", "stale"}
+                and read.status in _SERVING_STATUSES
                 else f"status:{read.status}"
             )
             for read in self.reads.values()
@@ -1181,6 +1197,174 @@ class DatabaseFirstPublicationReader:
             projection_only_keys=frozenset({"player_game_logs"}),
         )
 
+    def retained_history(
+        self,
+        stream_keys: Iterable[str],
+        *,
+        season: str,
+        session: Session | None = None,
+    ) -> tuple[tuple[str, str | None], ...]:
+        """Name each stream's retained history row for ``season``, no payload.
+
+        ``(stream_key, history_id)`` per key in sorted order, ``None`` where the
+        season retains no Publication of that stream.  The pointer-only
+        counterpart of ``retained_snapshot``, exactly as ``generation`` is of
+        ``snapshot``: a past season's Backtest cache key is these ids.
+        """
+
+        keys = tuple(sorted(set(str(key) for key in stream_keys)))
+        with ExitStack() as stack:
+            if session is None:
+                session = stack.enter_context(self._session())
+                stack.enter_context(session.begin())
+            rows = self._retained_rows(session, keys, season, projection_keys=())
+        return tuple(
+            (key, rows[key][0].history_id if key in rows else None) for key in keys
+        )
+
+    def retained_snapshot(
+        self,
+        stream_keys: Iterable[str],
+        *,
+        season: str,
+        projection_only_keys: frozenset[str] = frozenset(),
+        decoded_only_keys: frozenset[str] = frozenset(),
+        session: Session | None = None,
+    ) -> PublicationReadSnapshot:
+        """Capture a past season from its retained Publications (#104).
+
+        The live pointer names only the published season's version, so a past
+        season reads each stream's latest pointer-history row for that season
+        that a rollback or corrected evidence has not revoked, a restore has
+        not retired, and pruning has not deleted.  Per-stream history rows are
+        not one atomic capture; together they are the season's last retained
+        Generation, fixed unless one of them is revoked.
+
+        Each read is checked exactly as a live read is, then labelled
+        ``retained``.  A stream with no such row reads ``missing`` with
+        ``retained_publication_missing``.  ``generation`` keeps the live entry
+        shape with the history row's fence: an entry equal to a live one names
+        the same immutable version in the same season, so the decode and
+        baseline caches keyed on it may be shared, while a live capture whose
+        pointer has moved past the season names a different version.
+        """
+
+        keys = tuple(sorted(set(str(key) for key in stream_keys)))
+        projection_keys = frozenset(projection_only_keys).intersection(keys)
+        decoded_keys = frozenset(decoded_only_keys).intersection(keys)
+        with ExitStack() as stack:
+            if session is None:
+                session = stack.enter_context(self._session())
+                stack.enter_context(session.begin())
+            rows = self._retained_rows(
+                session, keys, season, projection_keys=projection_keys
+            )
+            now = _utc(self.clock())
+            reads = {}
+            for key in keys:
+                if key not in rows:
+                    reads[key] = self._missing(
+                        key,
+                        "missing",
+                        reason="retained_publication_missing",
+                        season=season,
+                    )
+                    continue
+                history, stream, publication, projection_ready = rows[key]
+                reads[key] = self._read_row(
+                    key,
+                    stream=stream,
+                    pointer=_RetainedPointer(
+                        fence=history.fence,
+                        active_publication_id=history.publication_id,
+                    ),
+                    publication=publication,
+                    projection_ready=projection_ready,
+                    hydrate_payload=key not in projection_keys,
+                    decoded_only=key in decoded_keys,
+                    season=season,
+                    require_active=True,
+                    now=now,
+                    session=session,
+                    retained=True,
+                )
+            return PublicationReadSnapshot(
+                season=season,
+                reads=reads,
+                generation=tuple(
+                    (key, read.publication_id, read.fence, read.version)
+                    for key, read in sorted(reads.items())
+                ),
+                retained_history=tuple(
+                    (key, rows[key][0].history_id if key in rows else None)
+                    for key in keys
+                ),
+            )
+
+    @staticmethod
+    def _retained_rows(
+        session: Session,
+        keys: tuple[str, ...],
+        season: str,
+        *,
+        projection_keys: Iterable[str],
+    ) -> dict[str, tuple[Any, Any, Any, bool]]:
+        """Select each stream's latest eligible history row for ``season``.
+
+        ``{stream_key: (history, stream, publication, projection_ready)}``,
+        the publication's payload deferred.  The inner join keeps a pruned
+        publication's row from shadowing the season's latest one that still
+        exists, as ``retained_game_rows`` does.
+        """
+
+        if not keys:
+            return {}
+        history = PublicationPointerHistory
+        statement = (
+            select(
+                history,
+                PublicationStream,
+                PublicationVersion,
+                exists(
+                    select(PublicationPlayerGameLog.publication_id).where(
+                        PublicationPlayerGameLog.publication_id
+                        == PublicationVersion.publication_id
+                    )
+                ).label("projection_ready"),
+            )
+            .join(
+                PublicationVersion,
+                PublicationVersion.publication_id == history.publication_id,
+            )
+            .join(
+                PublicationStream,
+                PublicationStream.stream_key == history.stream_key,
+            )
+            .where(
+                history.stream_key.in_(keys),
+                history.season == season,
+                history.revoked_at.is_(None),
+                history.retired_at.is_(None),
+            )
+            .order_by(history.stream_key, history.fence.desc())
+            .options(defer(PublicationVersion.payload))
+        )
+        projected = frozenset(projection_keys)
+        latest: dict[str, tuple[Any, Any, Any, bool]] = {}
+        for row, stream, publication, projection_ready in session.execute(
+            statement
+        ).all():
+            latest.setdefault(
+                row.stream_key,
+                (
+                    row,
+                    stream,
+                    publication,
+                    row.stream_key in projected and bool(projection_ready),
+                ),
+            )
+        return latest
+
     def _snapshot(
         self,
         stream_keys: Iterable[str],
@@ -1357,7 +1541,15 @@ class DatabaseFirstPublicationReader:
         hydrate_payload: bool = True,
         decoded_only: bool = False,
         payload_text: str | None = None,
+        retained: bool = False,
     ) -> PublicationRead:
+        """Label one stream's captured version, serving it only when sound.
+
+        ``retained`` reads a past season's version through its pointer-history
+        row rather than the live pointer: a replaced version is no longer
+        ``active``, but the unrevoked history row is its season's authority, so
+        it serves labelled ``retained`` after every other check below.
+        """
         if stream is None:
             if stream_key == "synergy:l15":
                 return self._missing(
@@ -1387,7 +1579,9 @@ class DatabaseFirstPublicationReader:
             return self._legacy_fallback(stream_key, fence=pointer.fence if pointer else None)
         if pointer is None or not pointer.active_publication_id:
             return self._missing(stream_key, "missing")
-        if publication is None or publication.status not in {"active", "rollback"}:
+        if publication is None or (
+            not retained and publication.status not in {"active", "rollback"}
+        ):
             return self._missing(
                 stream_key,
                 "missing",
@@ -1408,6 +1602,11 @@ class DatabaseFirstPublicationReader:
                 ),
                 checksum=(publication.checksum if publication is not None else None),
             )
+        served_status = (
+            "retained"
+            if retained
+            else "active" if publication.status == "active" else "rollback"
+        )
         retrieved_at = _utc(publication.created_at)
         age = max(0, int((now - retrieved_at).total_seconds()))
         if season is not None and publication.season != season:
@@ -1468,9 +1667,7 @@ class DatabaseFirstPublicationReader:
                 season=publication.season,
                 cutoff=_utc(publication.cutoff).isoformat(),
                 version=int(publication.version),
-                status=(
-                    "active" if publication.status == "active" else "rollback"
-                ),
+                status=served_status,
                 freshness=freshness,
                 age_seconds=age,
                 payload=None,
@@ -1511,11 +1708,7 @@ class DatabaseFirstPublicationReader:
                         season=publication.season,
                         cutoff=_utc(publication.cutoff).isoformat(),
                         version=int(publication.version),
-                        status=(
-                            "active"
-                            if publication.status == "active"
-                            else "rollback"
-                        ),
+                        status=served_status,
                         freshness=freshness,
                         age_seconds=age,
                         payload=None,
@@ -1634,7 +1827,7 @@ class DatabaseFirstPublicationReader:
             season=publication.season,
             cutoff=_utc(publication.cutoff).isoformat(),
             version=int(publication.version),
-            status="active" if publication.status == "active" else "rollback",
+            status=served_status,
             freshness=freshness,
             age_seconds=age,
             payload=payload,

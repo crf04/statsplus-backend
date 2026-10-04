@@ -66,6 +66,7 @@ The public error categories and HTTP statuses are:
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
+| Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream. |
 
 An error may carry an optional `details` object when a caller cannot act on the
 failure without structured facts. It is present only where this document says
@@ -3211,7 +3212,7 @@ Targets is `200` with an empty `targets` list, not an error.
 #### Backtest one Target over the season to date
 
 ```http
-GET /api/user/targets/7/backtest
+GET /api/user/targets/7/backtest?season=2025-26
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3223,9 +3224,46 @@ averages over the same columns. It is a separate read from
 cheap -- the league-wide game-log scan only runs when a reader expands a
 Target.
 
-The season is the configured current season, the same one the Slate and
-Matchup reads use, and is echoed as `season`. A Target has no season of its
-own. The request makes no NBA, PBP, or DFS call.
+The request makes no NBA, PBP, or DFS call. A Target has no season of its
+own; each request reads exactly one season, echoed as `season`, and says why
+in `season_reason`:
+
+| `season` query | Season read | `season_reason` |
+| --- | --- | --- |
+| absent, the published season has games | the published season | `published` |
+| absent, the published season has zero Regular Season games league-wide | the season before it | `fallback_no_games` |
+| the published season or the one before it | that season | `requested` |
+| anything else, including an empty value | none: `400 invalid_input`, `"season must be <published> or <previous>."` | -- |
+
+The **published season** is the `NBA_CURRENT_SEASON` pin when the deployment
+sets one, else the season of the active `player_game_logs` Publication; no
+request reaches past it. A game-log Publication always holds at least one
+Regular Season game, so zero games means nothing is published for that
+season yet, which happens while the pin names a season whose first game has
+not been played. Once games exist the published season is read however thin
+it is: a Target whose opponent has played twice reports two games, and the
+previous season stays reachable with `season`.
+
+A season the live `player_game_logs` pointer does not name -- last season
+once the new one activates, or a pinned season the pointer has moved past --
+is read entirely from that season's **retained** Publications: for each
+Backtest stream (`player_game_logs`, `exact_shot_zones`, `grouped_shot_types`,
+`player_assist_locations`, `synergy_play_types`), the latest activation a
+rollback or corrected evidence has not revoked and a restore has not retired.
+Shares, games, season averages, thin-sample checks, and league baselines all
+come from that season; seasons are never mixed, and nothing about today's
+players is implied. If any of those streams has no readable retained
+Publication for the season, the request fails with `503 season_unavailable`
+naming the stream, never an empty `players` list:
+
+```json
+{
+  "error": {
+    "code": "season_unavailable",
+    "message": "The 2025-26 season is unavailable: no retained grouped_shot_types Publication can be read."
+  }
+}
+```
 
 ```json
 {
@@ -3247,6 +3285,7 @@ own. The request makes no NBA, PBP, or DFS call.
     "updated_at": "2026-09-04T12:00:00+00:00"
   },
   "season": "2025-26",
+  "season_reason": "requested",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
   "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
   "summary": {
@@ -3383,12 +3422,21 @@ rather than a suppressed one; no Diet evidence exists to be withheld.
 
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another
-account -- foreign ids are never reported as `403`.
+account -- foreign ids are never reported as `403`. `400 invalid_input` for a
+`season` outside the two readable seasons, and `503 season_unavailable` as
+above.
+
+**Cache.** A season the live pointer names is cached under its pointer
+generation. A retained season is cached under the season and its retained
+history-row ids, so nightly publications of the published season leave its
+entry valid and revoking one of its rows invalidates it. `season_reason` is
+the request's own: the season's entry serves a request that named it and one
+that fell back to it.
 
 #### Backtest every Target
 
 ```http
-GET /api/user/targets/backtests
+GET /api/user/targets/backtests?season=2025-26
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3397,13 +3445,16 @@ Returns, in one request, every one of the caller's
 per-Target result cache for the current Publication generation. It never
 computes a Backtest: a Target that is not cached comes back `uncached`, and the
 client reads it through `GET /api/user/targets/<id>/backtest` as before. It
-takes no parameters and covers all of the caller's Targets. The path never
+covers all of the caller's Targets and takes one optional query parameter,
+`season`, with exactly the single route's values and default; the season is
+resolved once and every item is read in it. The path never
 reaches `/api/user/targets/<id>`, whose id only matches integers.
 
 ```json
 {
   "success": true,
   "season": "2025-26",
+  "season_reason": "fallback_no_games",
   "backtests": [
     {
       "target_id": 9,
@@ -3420,6 +3471,7 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
       "backtest": {
         "target": {"id": 7, "opponent": "OKC", "title": "OKC vs Corner 3 ≥ 40%", "...": "..."},
         "season": "2025-26",
+        "season_reason": "fallback_no_games",
         "proxy": "Outcomes are box-score proxies for the Qualifier slices, ...",
         "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
         "summary": {"players": 1, "games": 2, "columns": {"...": "..."}},
@@ -3431,8 +3483,8 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
 }
 ```
 
-- `season` is the configured current season, the same one each Backtest
-  echoes.
+- `season` and `season_reason` are the request's resolved season and why, as
+  on the single route, and every `ok` item's Backtest echoes both.
 - `backtests` has one item per Target, in the order
   [`GET /api/user/targets`](#targets) lists them (newest first), each naming
   its `target_id`.
@@ -3463,10 +3515,13 @@ there are no Targets or the cache is disabled or its generation read failed.
 
 **Empty state.** A caller with no Targets gets `200` with `"backtests": []`.
 
-**Errors.** `401 authentication_required` for an unauthenticated caller. Only a
-failure to read the caller's Target list fails the whole request, with the
-standard error shape: `500 operation_failed`, `"Failed to backtest the
-targets."`. A failed generation read is treated like a disabled cache: every
+**Errors.** `401 authentication_required` for an unauthenticated caller.
+`400 invalid_input` for a `season` outside the two readable seasons, and
+`503 season_unavailable` when the resolved season is a retained one missing a
+stream, exactly as on the single route (checked even when the cache is off).
+Otherwise only a failure to read the caller's Target list fails the whole
+request, with the standard error shape: `500 operation_failed`, `"Failed to
+backtest the targets."`. A failed generation read is treated like a disabled cache: every
 item is `uncached` and `targets_cache` is `-`, so the page degrades to the
 per-Target reads instead of failing.
 
@@ -3492,7 +3547,8 @@ Content-Type: application/json
       "threshold": 0.4
     }
   ],
-  "note": "Leaks corner threes"
+  "note": "Leaks corner threes",
+  "season": "2025-26"
 }
 ```
 
@@ -3503,6 +3559,13 @@ save -- exactly as the saved reads would. The body is the `POST
 per-account cap of 50 nor the duplicate rule applies: both are conflicts
 between a write and the rows already held, and a preview is not a write. The
 account's Targets are unchanged after any number of previews.
+
+The optional body field `season` takes exactly the values, default, and
+errors of the single Backtest's `season` query parameter, and a defender
+Condition is validated against the season the preview reads: the defender
+must have played for the opponent in **that** season. Saving a Target
+validates its defender in the default season, the one its saved Backtest
+reads.
 
 The response is the [Backtest](#backtest-one-target-over-the-season-to-date)
 shape for the draft plus `today`:
@@ -3524,6 +3587,7 @@ shape for the draft plus `today`:
     ]
   },
   "season": "2025-26",
+  "season_reason": "published",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
   "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
   "summary": {
@@ -3612,6 +3676,10 @@ Saving the draft and expanding its Backtest shows the same numbers.
 `today` says whether the draft fires on the **current** ET Slate Date; there is
 no date parameter, and the evaluation is season to date.
 
+- `null` when the preview reads a past season (`season` names the previous
+  season, or `season_reason` is `fallback_no_games`) or a retained one: such a
+  season says nothing about tonight's players, and the preview never pairs it
+  with a second capture.
 - `null` when the opponent has no game today.
 - Otherwise `game` is the resolve response's game object, and `fit_count` is
   the number of opposing participants meeting every Qualifier by the

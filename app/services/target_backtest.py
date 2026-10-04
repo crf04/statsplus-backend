@@ -89,6 +89,12 @@ from app.services.target_conditions import (
     player_minutes_are_kept,
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
+from app.services.backtest_season import (
+    BacktestSeason,
+    BacktestSeasons,
+    SEASON_REASON_PUBLISHED,
+)
+from app.errors import InvalidInputError, SeasonUnavailableError
 from app.services.research_season import published_capture, research_season
 
 
@@ -345,13 +351,16 @@ class TargetBacktestService:
             clock=self._clock,
             message="Targets result cache unavailable (%s); bypassing for %ss",
         )
+        self.seasons = BacktestSeasons(settings, publication_reader)
         self._statistics = {
             statistic.market_category: statistic
             for statistic in statistic_catalog.statistics
             if statistic.market_category is not None
         }
 
-    def backtest(self, firebase_uid: str, target_id: int) -> tuple[dict[str, Any], str]:
+    def backtest(
+        self, firebase_uid: str, target_id: int, *, season: str | None = None
+    ) -> tuple[dict[str, Any], str]:
         """Return one of the caller's Targets with its season to date.
 
         The owned Target load runs inside the same ``request_read_scope`` the
@@ -363,6 +372,9 @@ class TargetBacktestService:
         The second element is this read's result-cache outcome -- ``hit``,
         ``miss``, ``bypass``, or the unbilled ``-`` -- for the caller to
         stamp on the request log; the service itself touches no HTTP state.
+
+        ``season`` is the requested season, validated against the published
+        season and the one before it; ``None`` applies the default rule.
         """
 
         with request_read_scope(self._engine) as (connection, session):
@@ -375,10 +387,15 @@ class TargetBacktestService:
             else:
                 target = self.targets.get_target(firebase_uid, target_id)
             return self._backtest_stateful(
-                target, connection=connection, session=session
+                target,
+                requested_season=season,
+                connection=connection,
+                session=session,
             )
 
-    def backtest_all(self, firebase_uid: str) -> tuple[dict[str, Any], str]:
+    def backtest_all(
+        self, firebase_uid: str, *, season: str | None = None
+    ) -> tuple[dict[str, Any], str]:
         """Return every one of the caller's Targets' cached Backtests.
 
         Cache-only: this read never computes a Backtest and does no
@@ -400,10 +417,13 @@ class TargetBacktestService:
         that fails degrades like a disabled cache: logged, and every item
         ``uncached``.  The second element is the request's ``targets_cache``
         value (``aggregate_cache_state``).
+
+        ``season`` is resolved once for every Target exactly as the single
+        read resolves it.  An invalid one is refused, and a past season that
+        retains no Publication of a stream fails the request as
+        ``season_unavailable``, as the single read would.
         """
 
-        # The response's season if the published one cannot be read either.
-        season = self.settings.nba.current_season
         with request_read_scope(self._engine) as (_connection, session):
             if session is not None:
                 listed = self.targets.list_targets_in_session(
@@ -412,9 +432,15 @@ class TargetBacktestService:
             else:
                 listed = self.targets.list_targets(firebase_uid)
             try:
-                season = research_season(self.settings, self.publication_reader)
-                generation = self._read_cache_generation(season, session)
+                choice = self.seasons.resolve(season, session=session)
+                generation = self._read_cache_generation(choice, session)
+            except (InvalidInputError, SeasonUnavailableError):
+                raise
             except Exception:
+                if season is not None:
+                    # A requested season that could not be checked is not
+                    # one this response may echo.
+                    raise
                 # Degrade like a disabled cache, as the single route's
                 # pre-check does: every item is uncached and the page falls
                 # back to per-Target reads.  That pre-check records nothing,
@@ -423,6 +449,12 @@ class TargetBacktestService:
                     "Target backtest generation read failed; serving every "
                     "Target uncached",
                     exc_info=True,
+                )
+                # The response's season if the published one cannot be read.
+                choice = BacktestSeason(
+                    self.settings.nba.current_season,
+                    SEASON_REASON_PUBLISHED,
+                    self.settings.nba.current_season,
                 )
                 generation = None
 
@@ -434,7 +466,7 @@ class TargetBacktestService:
                     None
                     if generation is None
                     else self._cache_read(
-                        self._cache_key(target, season, generation)
+                        self._cache_key(target, choice.season, generation)
                     )
                 )
                 if evidence is None:
@@ -444,7 +476,9 @@ class TargetBacktestService:
                     {
                         "target_id": target_id,
                         "status": "ok",
-                        "backtest": self._cached_body(target, evidence),
+                        "backtest": self._cached_body(
+                            target, evidence, choice.reason
+                        ),
                     }
                 )
             except Exception as error:  # isolated per Target
@@ -465,7 +499,11 @@ class TargetBacktestService:
                         ),
                     }
                 )
-        return {"season": season, "backtests": items}, aggregate_cache_state(
+        return {
+            "season": choice.season,
+            "season_reason": choice.reason,
+            "backtests": items,
+        }, aggregate_cache_state(
             (item["status"] for item in items),
             cache_enabled=generation is not None,
         )
@@ -477,7 +515,7 @@ class TargetBacktestService:
         publication_snapshot: Any = _OWN,
         connection: Connection | None = None,
         session: Session | None = None,
-        season: str | None = None,
+        season: BacktestSeason | None = None,
     ) -> dict[str, Any]:
         """Return one Target mapping with its season to date.
 
@@ -489,7 +527,7 @@ class TargetBacktestService:
 
         A caller composing this read alongside another passes the generation
         it already holds as ``publication_snapshot``, and the ``season`` it
-        captured that generation for; none is captured then.
+        resolved and captured that generation for; none is captured then.
         """
 
         return self._backtest_stateful(
@@ -497,7 +535,7 @@ class TargetBacktestService:
             publication_snapshot=publication_snapshot,
             connection=connection,
             session=session,
-            season=season,
+            choice=season,
         )[0]
 
     def _backtest_stateful(
@@ -507,7 +545,8 @@ class TargetBacktestService:
         publication_snapshot: Any = _OWN,
         connection: Connection | None = None,
         session: Session | None = None,
-        season: str | None = None,
+        choice: BacktestSeason | None = None,
+        requested_season: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Compute the backtest and report its result-cache outcome.
 
@@ -515,14 +554,19 @@ class TargetBacktestService:
         to the caller rather than stored on ``self`` or stamped on
         ``flask.g``, so a service stays HTTP-free even when its caller is a
         route that wants the outcome on the request log.
+
+        ``choice`` is a season the caller already resolved; otherwise
+        ``requested_season`` is validated, or the default rule applies.
         """
 
         cache_state = "-"
-        # The cache pre-check needs a season before any capture; an own
-        # capture below then decides the season the evidence is read in.
-        season_given = season is not None
-        if season is None:
-            season = research_season(self.settings, self.publication_reader)
+        if choice is None and publication_snapshot is not _OWN:
+            # A caller's own generation without a resolved season reads in
+            # the published season, as it always has.
+            published = research_season(self.settings, self.publication_reader)
+            choice = BacktestSeason(published, SEASON_REASON_PUBLISHED, published)
+        elif choice is None and requested_season is not None:
+            choice = self.seasons.resolve(requested_season, session=session)
         qualifiers = list(target["qualifiers"])
         markets = self._stat_columns(qualifiers)
         # A saved Target is the only caller whose response may be served from
@@ -531,10 +575,10 @@ class TargetBacktestService:
         # whatever ``note`` or ``updated_at`` has since become.  The Lab
         # hands its own snapshot in for a Draft Target the cache must never
         # see.
-        cache_key = (
-            self._saved_backtest_cache_key(target, season, session)
+        cached_choice, cache_key = (
+            self._saved_backtest_cache_key(target, choice, session)
             if publication_snapshot is _OWN and target.get("id") is not None
-            else None
+            else (None, None)
         )
         if cache_key is not None:
             evidence = self._cache_read(cache_key)
@@ -544,7 +588,10 @@ class TargetBacktestService:
                 # publication row (its checksum, payload, or projection)
                 # advances no pointer, so it is not detected until the next
                 # generation.
-                return self._cached_body(target, evidence), "hit"
+                return (
+                    self._cached_body(target, evidence, cached_choice.reason),
+                    "hit",
+                )
         with ExitStack() as scope:
             # One connection for every read this request composes, exactly as
             # the Matchup and Selection reads share theirs; a caller already
@@ -557,16 +604,29 @@ class TargetBacktestService:
                 )
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
-            # evidence.
+            # evidence.  A past season is one retained Generation, never
+            # mixed with the live one.
             snapshot = publication_snapshot
-            if publication_snapshot is _OWN and season_given:
-                snapshot = self._publication_snapshot(season, session=session)
-            elif publication_snapshot is _OWN:
-                season, snapshot = published_capture(
-                    self.settings,
-                    self.publication_reader,
-                    lambda season: self._publication_snapshot(season, session=session),
-                )
+            if publication_snapshot is _OWN:
+                captured = None
+                if choice is None:
+                    captured, snapshot = published_capture(
+                        self.settings,
+                        self.publication_reader,
+                        lambda season: self._publication_snapshot(
+                            season, session=session
+                        ),
+                    )
+                    choice = self.seasons.choose(captured, snapshot, session=session)
+                if choice.retained:
+                    snapshot = self._retained_snapshot(
+                        choice.season, session=session
+                    )
+                elif choice.season != captured:
+                    snapshot = self._publication_snapshot(
+                        choice.season, session=session
+                    )
+            season = choice.season
             opponent_team_id = NBA_TEAM_TRICODE_TO_ID[target["opponent"]]
             rows = tuple(record for record in call_with_read_scope(
                 self.player_logs.list_opponent_rows, season, opponent_team_id,
@@ -619,9 +679,7 @@ class TargetBacktestService:
                     # it or recomputes it -- never a torn hybrid.
                     self._cache_write(
                         self._cache_key(
-                            target,
-                            season,
-                            getattr(snapshot, "generation", ()),
+                            target, season, self._cache_identity(choice, snapshot)
                         ),
                         {
                             "players": players,
@@ -641,6 +699,7 @@ class TargetBacktestService:
         return {
             "target": dict(target),
             "season": season,
+            "season_reason": choice.reason,
             "proxy": PROXY_NOTE,
             "stat_columns": list(markets),
             "summary": self._summary(players, markets),
@@ -650,13 +709,18 @@ class TargetBacktestService:
 
     @staticmethod
     def _cached_body(
-        target: Mapping[str, Any], evidence: Mapping[str, Any]
+        target: Mapping[str, Any], evidence: Mapping[str, Any], season_reason: str
     ) -> dict[str, Any]:
-        """Compose a hit's body in the construction order a miss returns."""
+        """Compose a hit's body in the construction order a miss returns.
+
+        ``season_reason`` is the request's, not the entry's: one season's
+        entry serves a request that named it and one that fell back to it.
+        """
 
         return {
             "target": dict(target),
             "season": evidence["season"],
+            "season_reason": season_reason,
             "proxy": PROXY_NOTE,
             "stat_columns": evidence["stat_columns"],
             "summary": evidence["summary"],
@@ -715,38 +779,52 @@ class TargetBacktestService:
     def _saved_backtest_cache_key(
         self,
         target: Mapping[str, Any],
-        season: str,
+        choice: BacktestSeason | None,
         session: Session | None,
-    ) -> str | None:
-        """Build the generation-keyed cache key, or ``None`` when off.
+    ) -> tuple[BacktestSeason | None, str | None]:
+        """Resolve the season and build its cache key, or ``(None, None)``.
 
         A ``None`` key is the cache deciding it has nothing to say: the
-        feature flag off, no reader able to answer a generation, or no
-        Request scope session to read the pointers on.  Nothing Redis is
-        contacted in that case and ``targets_cache`` stays ``-``.
+        feature flag off, no reader able to answer a generation, or a failed
+        read.  Nothing Redis is contacted in that case and ``targets_cache``
+        stays ``-``.  The season is resolved before any capture, so a hit
+        never captures at all.
         """
 
+        if not self._cache_enabled:
+            return None, None
         try:
-            generation = self._read_cache_generation(season, session)
+            if choice is None:
+                choice = self.seasons.resolve(None, session=session)
+            generation = self._read_cache_generation(choice, session)
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a
-            # failed request: answer as the uncached read answers.
-            return None
+            # failed request: answer as the uncached read answers, which
+            # reports an unavailable season itself.
+            return None, None
         if generation is None:
-            return None
-        return self._cache_key(target, season, generation)
+            return None, None
+        return choice, self._cache_key(target, choice.season, generation)
 
     def _read_cache_generation(
-        self, season: str, session: Session | None
-    ) -> Sequence[tuple[str, str | None, int | None, int | None]] | None:
-        """Read the current generation pointer-only, or ``None`` when off.
+        self, choice: BacktestSeason, session: Session | None
+    ) -> Sequence[tuple] | None:
+        """Read the season's Generation identity pointer-only, or ``None``.
 
-        ``None`` is the flag off, no Redis client, or no reader able to answer
-        a generation.  A reader failure is raised for the caller to degrade:
-        the single read answers uncached silently, and the every-Target read
-        logs it and serves every Target ``uncached``.
+        A season the live pointer names keys on the live pointer generation.
+        A retained season keys on its history-row ids, so nightly
+        publications of the published season leave it unchanged and a
+        revocation changes it; a retained season missing a stream is raised
+        as ``season_unavailable`` even with the cache off.  ``None`` is the flag
+        off, no Redis client, or no reader able to answer a generation.  A
+        reader failure is raised for the caller to degrade.
         """
 
+        if choice.retained:
+            history = self.seasons.retained_history(
+                choice.season, _PUBLICATION_STREAM_KEYS, session=session
+            )
+            return history if self._cache_enabled else None
         if not self._cache_enabled:
             return None
         reader = self.publication_reader
@@ -755,7 +833,26 @@ class TargetBacktestService:
             return None
         return generation_reader(
             _PUBLICATION_STREAM_KEYS,
-            season=season,
+            season=choice.season,
+            session=session,
+        )
+
+    @staticmethod
+    def _cache_identity(choice: BacktestSeason, snapshot: Any) -> Sequence[tuple]:
+        """The captured Generation's identity, keyed as the pre-check keys it."""
+
+        if choice.retained:
+            return snapshot.retained_history
+        return getattr(snapshot, "generation", ())
+
+    def _retained_snapshot(self, season: str, *, session: Session | None = None):
+        """Capture a season's retained Generation, narrowed as a live one."""
+
+        return self.seasons.retained_snapshot(
+            season,
+            _PUBLICATION_STREAM_KEYS,
+            projection_only_keys=_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
             session=session,
         )
 
