@@ -798,17 +798,17 @@ class TargetBacktestService:
         try:
             if choice is None:
                 choice = self.seasons.resolve(None, session=session)
-            if not choice.retained:
-                # The pointer identity survives a live Publication becoming
-                # unreadable (a lost projection), so a hit must not serve it:
-                # a refusal here skips the cache and the uncached read below
-                # reports the stream exactly as it would on a cold cache.
-                self.seasons.require_streams(
-                    choice,
-                    _PUBLICATION_STREAM_KEYS,
-                    projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
-                    session=session,
-                )
+            # Neither the pointer generation nor the history-row ids change
+            # when a Publication becomes unreadable (a lost projection), so a
+            # hit must not serve it: a refusal here skips the cache and the
+            # uncached read below reports the stream exactly as it would on
+            # a cold cache.
+            self.seasons.require_streams(
+                choice,
+                _PUBLICATION_STREAM_KEYS,
+                projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
+                session=session,
+            )
             generation = self._read_cache_generation(choice, session)
         except Exception:
             # The pre-check must not turn a Redis-or-reader outage into a

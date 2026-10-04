@@ -255,16 +255,19 @@ class BacktestSeasons:
         projection_keys: frozenset[str] = frozenset(),
         session: Any | None = None,
     ) -> None:
-        """Raise naming a stream ``choice.season`` has in neither place, reading no payload.
+        """Raise naming a stream ``choice.season`` cannot read, opening no payload.
 
         The pointer-only check ``evidence`` makes, for a read that computes
-        nothing: a stream counts when the live pointer names the season or
-        the season retains it, and is refused when its live Publication is
-        unreadable without opening a payload (authority, a projection stream's
-        projection).  A corrupt payload is found only by a read of it.
+        nothing or serves a cached result: each stream is read where
+        ``evidence`` would read it -- the live pointer when it names the
+        season, else the season's retained Publication -- and refused when it
+        is missing there or unreadable without opening a payload (authority,
+        a projection stream's projection).  A corrupt payload is found only by
+        a read of it.
         """
 
         keys = tuple(stream_keys)
+        pointer_only = frozenset(keys)
         absent = keys
         if not choice.retained:
             capture = getattr(self.publication_reader, "snapshot", None)
@@ -273,24 +276,52 @@ class BacktestSeasons:
             live = capture(
                 keys,
                 season=choice.season,
-                projection_only_keys=frozenset(keys),
+                projection_only_keys=pointer_only,
                 session=session,
             )
-            read_stream = getattr(live, "read", None)
-            if not callable(read_stream):
+            if not callable(getattr(live, "read", None)):
                 return
-            for key in keys:
-                read = read_stream(key)
-                # Every key is narrowed to its projection here, so only a
-                # projection stream's missing projection is a real refusal.
-                if read.status != "missing" and not _readable(read) and not (
-                    read.unavailable_reason == "publication_projection_missing"
-                    and key not in projection_keys
-                ):
-                    raise _unavailable(choice, key)
-            absent = tuple(key for key in keys if read_stream(key).status == "missing")
+            absent = self._refuse_unreadable(
+                choice, live, keys, projection_keys, missing_allowed=True
+            )
         if absent:
-            self.retained_history(choice, absent, session=session)
+            retained = self._retained_capture(
+                choice.season, absent, projection_only_keys=pointer_only, session=session
+            )
+            if retained is None:
+                raise _unavailable(choice, absent[0])
+            self._refuse_unreadable(
+                choice, retained, absent, projection_keys, missing_allowed=False
+            )
+
+    @staticmethod
+    def _refuse_unreadable(
+        choice: BacktestSeason,
+        snapshot: Any,
+        keys: tuple[str, ...],
+        projection_keys: frozenset[str],
+        *,
+        missing_allowed: bool,
+    ) -> tuple[str, ...]:
+        """Raise for an unreadable pointer-only read; return the missing keys.
+
+        Every key is narrowed to its projection here, so only a projection
+        stream's missing projection is a real refusal.
+        """
+
+        missing = []
+        for key in keys:
+            read = snapshot.read(key)
+            if read.status == "missing":
+                if not missing_allowed:
+                    raise _unavailable(choice, key)
+                missing.append(key)
+            elif not _readable(read) and not (
+                read.unavailable_reason == "publication_projection_missing"
+                and key not in projection_keys
+            ):
+                raise _unavailable(choice, key)
+        return tuple(missing)
 
     def retained_snapshot(
         self,

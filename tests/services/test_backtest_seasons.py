@@ -1119,3 +1119,35 @@ def test_an_omitted_preview_season_alone_applies_the_default(
 
     assert response.status_code == 200
     assert _season(response.get_json()) == (NEW, "published")
+
+
+@pytest.mark.parametrize("redis_client", [None, bt.FakeRedis], ids=("no-cache", "cache"))
+def test_an_unreadable_retained_stream_is_season_unavailable_even_when_cached(
+    client, authenticate, world, dependencies, redis_client
+):
+    """2025-26's retained game-log Publication loses its projection."""
+
+    target = world.saved_target()
+    _activate_new_season(world)
+    dependencies.user_service = world.users
+    dependencies.target_backtest_service = world.backtests(
+        redis_client=redis_client and redis_client()
+    )
+    dependencies.target_backtest_service.backtest(OWNER, target["id"], season=LAST)
+    with world.engine.begin() as connection:
+        connection.execute(text(
+            "DELETE FROM publication_player_game_logs WHERE publication_id = "
+            "(SELECT publication_id FROM publication_pointer_history "
+            "WHERE stream_key = 'player_game_logs' AND season = :season "
+            "ORDER BY fence DESC LIMIT 1)"
+        ), {"season": LAST})
+
+    for url in (
+        f"/api/user/targets/{target['id']}/backtest",
+        "/api/user/targets/backtests",
+    ):
+        response = client.get(url, query_string={"season": LAST}, headers=authenticate())
+        assert response.status_code == 503, url
+        assert response.get_json()["error"]["details"] == {
+            "season": LAST, "published_season": NEW, "stream": "player_game_logs"
+        }
