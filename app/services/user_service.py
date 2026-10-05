@@ -821,7 +821,7 @@ class UserService:
         """Validate conditions; a defender must have faced the Backtest's opponent.
 
         ``season`` is the requested Backtest season; ``None`` is the season a
-        saved Target's Backtest reads by the default rule.
+        saved Target's Backtest reads by default.
         """
         conditions = validate_conditions(value)
         if conditions and conditions['defender']:

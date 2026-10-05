@@ -18,9 +18,9 @@ class TargetSeasonMinutesService:
     def get(self, tricode, *, season=None):
         """The team's roster minutes in the season its Backtest would read.
 
-        ``season`` takes the Backtest's values, default, and fallback (#104),
-        so a defender is chosen from the season the Backtest reads; a past
-        season reads its retained game logs.
+        ``season`` takes the Backtest's values and default (#104), so a
+        defender is chosen from the season the Backtest reads; a season other
+        than the published one reads its retained game logs.
         """
 
         tricode = tricode.strip().upper()

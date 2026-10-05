@@ -3230,22 +3230,24 @@ in `season_reason`:
 
 | `season` query | Season read | `season_reason` |
 | --- | --- | --- |
-| absent, the published season has games | the published season | `published` |
-| absent, the published season has zero Regular Season games league-wide | the season before it | `fallback_no_games` |
-| the published season or the one before it | that season | `requested` |
-| anything else, including an empty value | none: `400 invalid_input`, `"season must be <published> or <previous>."` | -- |
+| absent | `2025-26` | `default` |
+| `2025-26` or `2026-27` | that season | `requested` |
+| anything else, including `2024-25` or an empty value | none: `400 invalid_input`, `"season must be 2025-26 or 2026-27."` | -- |
+
+A Backtest reads exactly one of the two supported seasons, `2025-26` and
+`2026-27`. Without `season` it reads `2025-26`, whatever season is published
+and however many games `2026-27` has; `2026-27` is read only when requested.
+Clients deployed before this rule may still see the retired `season_reason`
+values `published` and `fallback_no_games` from an older deployment; this one
+never sends them.
 
 The **published season** is the `NBA_CURRENT_SEASON` pin when the deployment
-sets one, else the season of the active `player_game_logs` Publication; no
-request reaches past it. A game-log Publication always holds at least one
-Regular Season game, so zero games means nothing is published for that
-season yet, which happens while the pin names a season whose first game has
-not been played. Once games exist the published season is read however thin
-it is: a Target whose opponent has played twice reports two games, and the
-previous season stays reachable with `season`.
+sets one, else the season of the active `player_game_logs` Publication. It is
+reported as `published_season` and decides only where the requested season's
+Publications are read from, never which season is read.
 
-The **previous season** is read entirely from its **retained** Publications,
-whatever the live pointers name: for each Backtest stream (`player_game_logs`,
+A season other than the published one is read entirely from its **retained**
+Publications, whatever the live pointers name: for each Backtest stream (`player_game_logs`,
 `exact_shot_zones`, `grouped_shot_types`, `player_assist_locations`,
 `synergy_play_types`), the latest activation of that season a rollback or
 corrected evidence has not revoked and a restore has not retired. Its
@@ -3274,15 +3276,15 @@ unauthorised, or missing its projection) -- the request fails with
 }
 ```
 
-`details.season` is the season the request resolved (requested, published, or
-fallback), `details.published_season` the published season it was resolved
-against, and `details.stream` the first unavailable stream. A client whose
-first default request is refused learns the published season, and the
-previous one it may request, from these details.
+`details.season` is the season the request resolved (requested or default),
+`details.published_season` the published season it was resolved against, and
+`details.stream` the first unavailable stream. A requested `2026-27` with no
+readable Publication -- before its first activation, for example -- is this
+`503`, never an empty Backtest.
 
 Every successful Backtest body also carries `published_season`, the season
-`season` was resolved against, so a client can tell a requested published
-season from a past one without a second request.
+`season` was resolved against, so a client can tell a read of the published
+season from a retained one without a second request.
 
 ```json
 {
@@ -3443,12 +3445,12 @@ rather than a suppressed one; no Diet evidence exists to be withheld.
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another
 account -- foreign ids are never reported as `403`. `400 invalid_input` for a
-`season` outside the two readable seasons, and `503 season_unavailable` as
+`season` other than `2025-26` or `2026-27`, and `503 season_unavailable` as
 above.
 
 **Cache.** A season read from live pointers is cached under its pointer
-generation. A season read entirely from retained Publications -- always the
-previous season -- is cached under the season and its retained history-row
+generation. A season read entirely from retained Publications -- always a
+season other than the published one -- is cached under the season and its retained history-row
 ids, so nightly publications of the published season leave its entry valid and
 revoking one of its rows invalidates it. A published season read partly live
 and partly retained is computed and not cached (`targets_cache` is `bypass`).
@@ -3459,7 +3461,7 @@ season whose Publication has become unreadable is `503 season_unavailable`
 even with a warm entry, and a revocation or pointer move landing after the
 check cannot select an entry for a Publication the request did not check. `season_reason` is
 the request's own: the season's entry serves a request that named it and one
-that fell back to it.
+that defaulted to it.
 
 #### Backtest every Target
 
@@ -3482,7 +3484,7 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
 {
   "success": true,
   "season": "2025-26",
-  "season_reason": "fallback_no_games",
+  "season_reason": "default",
   "published_season": "2026-27",
   "backtests": [
     {
@@ -3500,7 +3502,7 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
       "backtest": {
         "target": {"id": 7, "opponent": "OKC", "title": "OKC vs Corner 3 ≥ 40%", "...": "..."},
         "season": "2025-26",
-        "season_reason": "fallback_no_games",
+        "season_reason": "default",
         "published_season": "2026-27",
         "proxy": "Outcomes are box-score proxies for the Qualifier slices, ...",
         "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
@@ -3711,9 +3713,9 @@ Saving the draft and expanding its Backtest shows the same numbers.
 `today` says whether the draft fires on the **current** ET Slate Date; there is
 no date parameter, and the evaluation is season to date.
 
-- `null` when the preview reads a past season (`season` names the previous
-  season, or `season_reason` is `fallback_no_games`), or a published season any
-  of whose streams was read retained: neither is the Generation tonight's
+- `null` when the preview reads a season other than `published_season`
+  (requested or default), or a published season any of whose streams was read
+  retained: neither is the Generation tonight's
   Matchup is in, and the preview never pairs it with a second capture.
 - `null` when the opponent has no game today.
 - Otherwise `game` is the resolve response's game object, and `fit_count` is
@@ -3799,12 +3801,12 @@ then player id. An empty season returns `players: []`; unknown team returns
 It makes no provider calls.
 
 The optional `season` query parameter takes exactly the
-[Backtest](#backtest-one-target-over-the-season-to-date)'s values, default and
-fallback, and the response's `season`, `season_reason` and `published_season`
+[Backtest](#backtest-one-target-over-the-season-to-date)'s values and
+default, and the response's `season`, `season_reason` and `published_season`
 mean what they mean there, so a defender is chosen from the roster of the
 season the Backtest reads. The roster reads that season's game logs the way the
 Backtest does: the live Publication when the pointer names the season, else
-the retained one. A season outside the two readable seasons is
+the retained one. A season other than `2025-26` or `2026-27` is
 `400 invalid_input`; a season with no readable `player_game_logs` Publication
 is `503 season_unavailable` with the details below.
 

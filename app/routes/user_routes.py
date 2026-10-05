@@ -399,13 +399,14 @@ def preview_target():
     duplicate rule applies, so the Lab can evaluate a Target the caller has
     not saved and may never save.
 
-    The optional ``season`` is the published season or the one before it;
-    without it the published season is read unless it has no games yet.
+    The optional ``season`` is ``2025-26`` or ``2026-27``; without it
+    ``2025-26`` is read.
 
     Returns:
         JSON response with the backtest for the draft (its ``target`` carries
         the derived title and no id) and ``today``: ``null`` when the opponent
-        is idle on the current slate date or the season is a past one, else
+        is idle on the current slate date or the season is not the published
+        one, else
         the game and the fit count
     """
     data = _target_body()
@@ -460,9 +461,8 @@ def backtest_target(target_id):
     Every player league-wide whose current-season Diet meets every Qualifier
     and is not thin, with their games against the Target's opponent this
     season and their own season per-game averages for the same stat columns.
-    The optional ``season`` query parameter is the published season or the
-    one before it; without it the published season is read unless it has no
-    games yet.
+    The optional ``season`` query parameter is ``2025-26`` or ``2026-27``;
+    without it ``2025-26`` is read.
 
     Returns:
         JSON response with the target, its stat columns, and the players

@@ -53,16 +53,21 @@ def test_last_season_reads_its_retained_generation_on_postgres(world):
     revoked, revoked_state = service.backtest(
         seasons.OWNER, target["id"], season=seasons.LAST
     )
-    published, _ = service.backtest(seasons.OWNER, target["id"])
+    default, _ = service.backtest(seasons.OWNER, target["id"])
+    ahead, _ = service.backtest(seasons.OWNER, target["id"], season=seasons.NEW)
 
     assert (first["season"], first["season_reason"]) == (seasons.LAST, "requested")
     assert (first_state, revoked_state) == ("miss", "miss")
     assert first["games_considered"] == {"played": 1, "kept": 1}
     assert revoked["games_considered"] == {"played": 2, "kept": 2}
-    assert (published["season"], published["season_reason"]) == (seasons.NEW, "published")
+    assert (default["season"], default["season_reason"]) == (seasons.LAST, "default")
+    assert default["games_considered"] == {"played": 2, "kept": 2}
+    assert (ahead["season"], ahead["season_reason"]) == (seasons.NEW, "requested")
 
 
-def test_a_pin_ahead_falls_back_and_an_unretained_stream_is_unavailable_on_postgres(world):
+def test_a_pin_ahead_keeps_the_default_and_an_unretained_stream_is_unavailable_on_postgres(
+    world,
+):
     target = world.saved_target()
     seasons._pin(world, seasons.NEW)
     service = world.backtests()
@@ -72,7 +77,7 @@ def test_a_pin_ahead_falls_back_and_an_unretained_stream_is_unavailable_on_postg
     seasons._pin(world, seasons.LAST)
     seasons._activate_new_season(world)
 
-    assert (body["season"], body["season_reason"]) == (seasons.LAST, "fallback_no_games")
+    assert (body["season"], body["season_reason"]) == (seasons.LAST, "default")
     with pytest.raises(SeasonUnavailableError, match="player_assist_locations"):
         world.backtests().backtest(seasons.OWNER, target["id"])
 

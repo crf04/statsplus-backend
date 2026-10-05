@@ -70,7 +70,7 @@ def preview_settings(monkeypatch):
     return use
 
 
-def _preview(reader):
+def _preview(reader, season=None):
     seams = bt._two_games()
     return preview_tests._preview_service(
         logs=seams["logs"],
@@ -78,7 +78,7 @@ def _preview(reader):
         matchups=preview_tests.SnapshotMatchups(res._matchup()),
         reader=reader,
         injuries=object(),
-    ).preview(preview_tests.DRAFT)
+    ).preview(preview_tests.DRAFT, season=season)
 
 
 def test_an_unpinned_preview_reads_the_published_season(preview_settings):
@@ -96,9 +96,9 @@ def test_a_pinned_preview_reads_the_pinned_season(preview_settings):
     preview_settings(_settings(pinned=CALENDAR))
     reader = PublishedReader()
 
-    payload = _preview(reader)
+    payload = _preview(reader, CALENDAR)
 
-    assert reader.captures == [CALENDAR]
+    assert set(reader.captures) == {CALENDAR}
     assert payload["season"] == CALENDAR
     assert reader.lookups == 0
 
@@ -182,10 +182,12 @@ def test_a_pinned_next_opponent_reads_the_pinned_schedule():
 
 
 @pytest.mark.parametrize(
-    ("settings", "expected"),
-    [(_settings(), PUBLISHED), (_settings(pinned=CALENDAR), CALENDAR)],
+    ("settings", "requested", "expected"),
+    [(_settings(), None, PUBLISHED), (_settings(pinned=CALENDAR), CALENDAR, CALENDAR)],
 )
-def test_a_target_defender_is_validated_against_the_published_season(settings, expected):
+def test_a_target_defender_is_validated_against_the_published_season(
+    settings, requested, expected
+):
     from app.services.user_service import UserService
 
     seasons = []
@@ -200,7 +202,9 @@ def test_a_target_defender_is_validated_against_the_published_season(settings, e
     )
 
     conditions = service._validated_conditions(
-        {"defender": {"player_id": 1628983, "minutes": 20, "comparator": "under"}}, "OKC"
+        {"defender": {"player_id": 1628983, "minutes": 20, "comparator": "under"}},
+        "OKC",
+        requested,
     )
 
     assert conditions["defender"]["player_id"] == 1628983
@@ -290,9 +294,10 @@ def test_backtest_all_degrades_to_uncached_when_the_season_lookup_fails():
 
     body, cache_state = service.backtest_all("owner")
 
+    # The default season, against the configured published one.
     assert body == {
-        "season": CALENDAR,
-        "season_reason": "published",
+        "season": PUBLISHED,
+        "season_reason": "default",
         "published_season": CALENDAR,
         "backtests": [{"target_id": 7, "status": "uncached"}],
     }
@@ -528,9 +533,10 @@ def test_a_pinned_matchup_reads_its_event_in_the_pinned_season(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("settings", "season"), [(_settings(), PUBLISHED), (_settings(pinned=CALENDAR), CALENDAR)]
+    ("settings", "requested", "season"),
+    [(_settings(), None, PUBLISHED), (_settings(pinned=CALENDAR), CALENDAR, CALENDAR)],
 )
-def test_a_saved_backtest_reads_the_published_season(settings, season):
+def test_a_saved_backtest_reads_the_published_season(settings, requested, season):
     from app.services.statistic_catalog import StatisticCatalog
     from app.services.target_backtest import TargetBacktestService
 
@@ -547,9 +553,10 @@ def test_a_saved_backtest_reads_the_published_season(settings, season):
         publication_reader=reader,
     )
 
-    body, _ = service.backtest("owner", 3)
+    body, _ = service.backtest("owner", 3, season=requested)
 
-    assert reader.captures == [season]
+    # Every capture is in that season, never the calendar's or another.
+    assert set(reader.captures) == {season}
     assert body["season"] == season
 
 
@@ -648,10 +655,16 @@ def test_season_minutes_stay_consistent_when_a_season_activates_mid_request(tmp_
 
     during = service.get("LAL")
     after = service.get("LAL")
+    requested = service.get("LAL", season=CALENDAR)
 
     assert racing.activated
+    # The default stays 2025-26 across the activation, read live then retained.
     assert (during["season"], [p["player_id"] for p in during["players"]]) == (PUBLISHED, [2544])
-    assert (after["season"], [p["player_id"] for p in after["players"]]) == (CALENDAR, [1641705])
+    assert (after["season"], [p["player_id"] for p in after["players"]]) == (PUBLISHED, [2544])
+    assert after["published_season"] == CALENDAR
+    assert (requested["season"], [p["player_id"] for p in requested["players"]]) == (
+        CALENDAR, [1641705]
+    )
     engine.dispose()
 
 

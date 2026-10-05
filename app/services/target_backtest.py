@@ -92,6 +92,8 @@ from app.utils.redis_breaker import RedisCircuitBreaker
 from app.services.backtest_season import (
     BacktestSeason,
     BacktestSeasons,
+    DEFAULT_BACKTEST_SEASON,
+    SEASON_REASON_DEFAULT,
     SEASON_REASON_PUBLISHED,
 )
 from app.errors import InvalidInputError, SeasonUnavailableError
@@ -373,8 +375,8 @@ class TargetBacktestService:
         ``miss``, ``bypass``, or the unbilled ``-`` -- for the caller to
         stamp on the request log; the service itself touches no HTTP state.
 
-        ``season`` is the requested season, validated against the published
-        season and the one before it; ``None`` applies the default rule.
+        ``season`` is the requested season, one of ``BACKTEST_SEASONS``;
+        ``None`` reads ``DEFAULT_BACKTEST_SEASON``.
         """
 
         with request_read_scope(self._engine) as (connection, session):
@@ -420,8 +422,8 @@ class TargetBacktestService:
         value (``aggregate_cache_state``).
 
         ``season`` is resolved once for every Target exactly as the single
-        read resolves it.  An invalid one is refused, and a past season that
-        retains no Publication of a stream fails the request as
+        read resolves it.  An invalid one is refused, and a season with no
+        readable Publication of a stream fails the request as
         ``season_unavailable``, as the single read would.
         """
 
@@ -459,10 +461,11 @@ class TargetBacktestService:
                     "Target uncached",
                     exc_info=True,
                 )
-                # The response's season if the published one cannot be read.
+                # The default season, against the configured published one
+                # when the publications cannot be read.
                 choice = BacktestSeason(
-                    self.settings.nba.current_season,
-                    SEASON_REASON_PUBLISHED,
+                    DEFAULT_BACKTEST_SEASON,
+                    SEASON_REASON_DEFAULT,
                     self.settings.nba.current_season,
                 )
                 generation = None
@@ -564,7 +567,7 @@ class TargetBacktestService:
         route that wants the outcome on the request log.
 
         ``choice`` is a season the caller already resolved; otherwise
-        ``requested_season`` is validated, or the default rule applies.
+        ``requested_season`` is validated, or the default season is read.
         """
 
         cache_state = "-"
@@ -609,8 +612,8 @@ class TargetBacktestService:
                 )
             # One snapshot for the whole response: the Diet a player ate and
             # the games they played have to come from the same generation of
-            # evidence.  The previous season is one retained Generation, never
-            # mixed with the live one.
+            # evidence.  A season other than the published one is one
+            # retained Generation, never mixed with the live one.
             snapshot = publication_snapshot
             if publication_snapshot is _OWN:
                 choice, snapshot = self.seasons.capture(
@@ -716,7 +719,7 @@ class TargetBacktestService:
 
         The season's reason and published season are the request's, not the
         entry's: one season's entry serves a request that named it and one
-        that fell back to it.
+        that defaulted to it.
         """
 
         return {

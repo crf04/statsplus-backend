@@ -16,10 +16,10 @@ is composed from it through ``MatchupService.get_matchup_from_snapshot``.  The
 projection-only narrowing is the intersection of the two reads' own, so a
 stream is read payload-less only where both reads would.
 
-*One season.*  A past season (requested, or the fallback while the published
-season has no games) reads the Backtest from that season's retained
-Generation alone.  ``today`` is about tonight's players, which a past season
-says nothing about, and pairing it with a second capture would break the
+*One season.*  A season other than the published one (requested, or the
+2025-26 default) reads the Backtest from that season's retained Generation
+alone.  ``today`` is about tonight's players, which such a season says
+nothing about, and pairing it with a second capture would break the
 one-generation promise, so it is ``null`` (#104); so is a published season
 any of whose streams had to be read retained.
 
@@ -120,7 +120,7 @@ class TargetPreviewService:
 
         ``draft`` is the validated listed shape ``UserService.validate_target_draft``
         returns; it is echoed as the response's ``target``.  ``season`` is the
-        requested season; ``None`` applies the default rule.
+        requested season; ``None`` reads the default season.
         """
 
         seasons = self.backtests.seasons
@@ -148,8 +148,9 @@ class TargetPreviewService:
             draft, publication_snapshot=snapshot, season=choice
         )
         if choice.past or getattr(snapshot, "retained_history", ()):
-            # A past season says nothing about tonight's players, and a
-            # retained read is not the Generation tonight's Matchup is in.
+            # A season that is not the published one says nothing about
+            # tonight's players, and a retained read is not the Generation
+            # tonight's Matchup is in.
             return {**previewed, "today": None}
         today = self.resolutions.today(
             draft,

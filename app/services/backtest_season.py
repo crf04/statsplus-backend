@@ -1,27 +1,22 @@
 """Choose the season a Target Backtest reads (crf04/statsplus#104).
 
-A Backtest reads the published season or the one before it, never both.  The
-published season is the one ``research_season`` names: the
+A Backtest reads exactly one of the two supported seasons, 2025-26 or
+2026-27, never both.  With no season requested it reads 2025-26, whatever
+season is published and whether or not 2026-27 has games; a requested
+supported season overrides that, and any other season is refused.  The
+published season -- the one ``research_season`` names: the
 ``NBA_CURRENT_SEASON`` pin when set, else the active player-game-log
-publication's season.  With no season requested, a published season with zero
-Regular Season games league-wide falls back to the previous season, so a
-Backtest opened before a season's first game reports last season instead of
-nobody.  Once a game exists the published season is used, however thin.
+publication's season -- is reported as metadata and decides only where a
+season's Publications are read from.
 
-A game-log Publication cannot hold zero games: ``decode_player_game_logs``
-refuses an empty document and any row that is not Regular Season, so no such
-version can compose, activate, or be retained.  A season therefore has zero
-Regular Season games exactly when it has no game-log Publication -- in
-production, while the pin names a season nothing has published yet.
-
-The live pointers name only one season's Publications.  The previous season
-reads every stream's retained Publication through the pointer history, so its
-Generation is fixed until a row is revoked, whatever the live pointers do.
-The published season reads each stream's live pointer when it names that
-season, and its retained Publication otherwise (a pin behind the pointer, or
-one stream activating a new season before the others).  A stream the season
-has in neither place fails the request with ``season_unavailable`` naming it:
-unavailable is not empty.
+The live pointers name only one season's Publications.  A season other than
+the published one reads every stream's retained Publication through the
+pointer history, so its Generation is fixed until a row is revoked, whatever
+the live pointers do.  The published season reads each stream's live pointer
+when it names that season, and its retained Publication otherwise (a pin
+behind the pointer, or one stream activating a new season before the others).
+A stream the season has in neither place fails the request with
+``season_unavailable`` naming it: unavailable is not empty.
 """
 
 from __future__ import annotations
@@ -32,15 +27,17 @@ from typing import Any
 
 from app.errors import InvalidInputError, SeasonUnavailableError
 from app.services.publication_snapshot_calls import accepts_keyword
-from app.services.research_season import (
-    previous_nba_season,
-    published_capture,
-)
+from app.services.research_season import published_capture
 
 
 SEASON_REASON_REQUESTED = "requested"
+SEASON_REASON_DEFAULT = "default"
 SEASON_REASON_PUBLISHED = "published"
-SEASON_REASON_FALLBACK_NO_GAMES = "fallback_no_games"
+
+#: The seasons a Backtest may read, in the order a client offers them.
+BACKTEST_SEASONS = ("2025-26", "2026-27")
+#: The season a Backtest reads when none is requested.
+DEFAULT_BACKTEST_SEASON = "2025-26"
 
 _GAME_LOGS = "player_game_logs"
 _GAME_LOG_KEYS = frozenset({_GAME_LOGS})
@@ -51,8 +48,8 @@ class BacktestSeason:
     """The season one Backtest reads, why, and where its game logs live.
 
     ``retained`` is true when the season's game logs are read from the
-    pointer history: always for the previous season, and for the published
-    season when the live game-log pointer names another one.
+    pointer history: always for a season other than the published one, and
+    for the published season when the live game-log pointer names another.
     """
 
     season: str
@@ -62,7 +59,7 @@ class BacktestSeason:
 
     @property
     def past(self) -> bool:
-        """Whether this is the season before the published one."""
+        """Whether this season is not the published one, so is read retained."""
 
         return self.season != self.published
 
@@ -89,54 +86,31 @@ class BacktestSeasons:
             self.publication_reader,
             lambda season: self._game_log_capture(season, session),
         )
-        return self.choose(
-            published, live, requested, session=session
-        )
+        return self.choose(published, live, requested)
 
-    def choose(
-        self,
-        published: str,
-        live: Any,
-        requested: Any = None,
-        *,
-        session: Any | None = None,
-    ) -> BacktestSeason:
+    @staticmethod
+    def choose(published: str, live: Any, requested: Any = None) -> BacktestSeason:
         """Apply a request to a live capture taken in the published season.
 
-        A requested season must be the published season or the one before it.
-        With none, the published season is used unless its game logs hold no
-        Regular Season game, in which case the previous season is.
+        A requested season must be one of ``BACKTEST_SEASONS``; with none,
+        ``DEFAULT_BACKTEST_SEASON`` is read.  ``published`` and ``live`` say
+        only where the season's Publications are read from.
         """
 
-        live_season = _live_season(live, published)
-        if requested is not None:
-            allowed = (published, previous_nba_season(published))
-            if not isinstance(requested, str) or requested not in allowed:
-                raise InvalidInputError(
-                    f"season must be {allowed[0]} or {allowed[1]}."
-                )
+        if requested is None:
+            season, reason = DEFAULT_BACKTEST_SEASON, SEASON_REASON_DEFAULT
+        elif isinstance(requested, str) and requested in BACKTEST_SEASONS:
             season, reason = requested, SEASON_REASON_REQUESTED
         else:
-            evidence = (
-                live
-                if live_season == published
-                else self._retained_capture(
-                    published,
-                    (_GAME_LOGS,),
-                    projection_only_keys=_GAME_LOG_KEYS,
-                    session=session,
-                )
+            raise InvalidInputError(
+                f"season must be {BACKTEST_SEASONS[0]} or {BACKTEST_SEASONS[1]}."
             )
-            if _has_games(evidence):
-                season, reason = published, SEASON_REASON_PUBLISHED
-            else:
-                season = previous_nba_season(published)
-                reason = SEASON_REASON_FALLBACK_NO_GAMES
         return BacktestSeason(
             season,
             reason,
             published,
-            retained=season != published or season != live_season,
+            retained=season != published
+            or season != _live_season(live, published),
         )
 
     def _game_log_capture(self, season: Any, session: Any | None) -> Any:
@@ -165,8 +139,8 @@ class BacktestSeasons:
 
         ``live_capture(season)`` captures the live pointers in a season.  With
         no ``choice`` and nothing requested, one live capture decides the
-        published season (as ``published_capture`` does) and the default rule
-        applies to it.  The returned capture is ``evidence`` for the season.
+        published season (as ``published_capture`` does) and the default
+        season is read against it.  The returned capture is ``evidence`` for the season.
         """
 
         captured = live = None
@@ -176,7 +150,7 @@ class BacktestSeasons:
             captured, live = published_capture(
                 self.settings, self.publication_reader, live_capture
             )
-            choice = self.choose(captured, live, session=session)
+            choice = self.choose(captured, live)
         if not choice.past and choice.season != captured:
             live = live_capture(choice.season)
         return choice, self.evidence(
@@ -200,8 +174,8 @@ class BacktestSeasons:
     ) -> Any:
         """The one capture a Backtest of ``choice`` reads, or raise naming a stream.
 
-        ``live`` is a live capture in ``choice.season`` (unused for the
-        previous season).  Every previous-season stream is retained.  A
+        ``live`` is a live capture in ``choice.season`` (unused for a season
+        other than the published one, whose every stream is retained).  A
         published-season stream the live pointer has no Publication for in
         that season (a ``missing`` read) is replaced by its retained read; the
         result's ``retained_history`` names the rows that were.  A live
@@ -412,19 +386,6 @@ def _readable(read: Any) -> bool:
     )
 
 
-def _has_games(snapshot: Any) -> bool:
-    """Whether a capture of one season holds its game-log Publication.
-
-    Only a ``missing`` read -- nothing published or retained -- is a season
-    without games.  A version that exists but cannot be read is not evidence
-    of an empty season, so the season is kept and reported as it reads; so is
-    a deployment with no per-stream Publication reads at all.
-    """
-
-    read_stream = getattr(snapshot, "read", None)
-    return not callable(read_stream) or read_stream(_GAME_LOGS).status != "missing"
-
-
 def _unavailable(choice: BacktestSeason, stream_key: str) -> SeasonUnavailableError:
     return SeasonUnavailableError(
         f"The {choice.season} season is unavailable: no retained {stream_key} "
@@ -438,7 +399,9 @@ def _unavailable(choice: BacktestSeason, stream_key: str) -> SeasonUnavailableEr
 __all__ = [
     "BacktestSeason",
     "BacktestSeasons",
-    "SEASON_REASON_FALLBACK_NO_GAMES",
+    "BACKTEST_SEASONS",
+    "DEFAULT_BACKTEST_SEASON",
+    "SEASON_REASON_DEFAULT",
     "SEASON_REASON_PUBLISHED",
     "SEASON_REASON_REQUESTED",
 ]

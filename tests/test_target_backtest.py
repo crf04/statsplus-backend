@@ -1794,7 +1794,7 @@ def test_season_minutes_roster_groups_players_and_orders_by_average(backtest_eng
         _row(3, name='Playoffs only', season_type='Playoffs', minutes=40),
     ))
     payload = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('okc')
-    assert payload == {'season': SEASON, 'season_reason': 'published', 'published_season': SEASON, 'players': [
+    assert payload == {'season': SEASON, 'season_reason': 'default', 'published_season': SEASON, 'players': [
         {'player_id': 1, 'name': 'Starter', 'games_played': 2, 'average_minutes': 25.0},
         {'player_id': 2, 'name': 'Reserve', 'games_played': 1, 'average_minutes': 10.0},
     ]}
@@ -3034,7 +3034,7 @@ def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):
 
     assert payload == {
         "season": SEASON,
-        "season_reason": "published",
+        "season_reason": "default",
         "published_season": SEASON,
         "backtests": [],
     }
