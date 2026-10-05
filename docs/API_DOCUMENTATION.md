@@ -3466,7 +3466,7 @@ that defaulted to it.
 #### Backtest every Target
 
 ```http
-GET /api/user/targets/backtests?season=2025-26
+GET /api/user/targets/backtests
 Authorization: Bearer <firebase-id-token>
 ```
 
