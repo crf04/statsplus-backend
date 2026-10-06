@@ -773,7 +773,7 @@ def test_a_saved_targets_defender_follows_the_default_season(world):
 class NoTonight:
     """A past season says nothing about tonight, so nothing reads it."""
 
-    def today(self, *_args, **_kwargs):
+    def today_with_sources(self, *_args, **_kwargs):
         raise AssertionError("a past-season preview has no today")
 
 
@@ -799,6 +799,19 @@ def test_a_past_season_preview_reads_that_season_and_has_no_today(world):
     assert _season(body) == (LAST, "requested")
     assert _fitting(body) == [bt.LEBRON]
     assert body["today"] is None
+    # The provenance names the retained 2025-26 Publications the Backtest
+    # read, and no source: no Slate is read for a past season.
+    assert [
+        (entry["stream_key"], entry["season"], entry["status"])
+        for entry in body["provenance"]["generation"]
+    ] == [
+        ("exact_shot_zones", LAST, "retained"),
+        ("grouped_shot_types", LAST, "retained"),
+        ("player_assist_locations", LAST, "retained"),
+        ("player_game_logs", LAST, "retained"),
+        ("synergy_play_types", LAST, "retained"),
+    ]
+    assert body["provenance"]["sources"] == {}
 
 
 def test_a_default_preview_has_no_today_once_2026_27_is_published(world):
@@ -812,8 +825,8 @@ def test_a_default_preview_has_no_today_once_2026_27_is_published(world):
 
 
 class TonightFits:
-    def today(self, *_args, **_kwargs):
-        return {"fit_count": 1}
+    def today_with_sources(self, *_args, **_kwargs):
+        return {"fit_count": 1}, {}, []
 
 
 def test_a_default_preview_of_the_published_2025_26_reads_today(world):
@@ -1183,8 +1196,8 @@ def test_an_explicit_preview_season_that_is_not_a_season_string_is_refused(
 
 
 class IdleTonight:
-    def today(self, *_args, **_kwargs):
-        return None
+    def today_with_sources(self, *_args, **_kwargs):
+        return None, {}, []
 
 
 def test_an_omitted_preview_season_alone_applies_the_default(

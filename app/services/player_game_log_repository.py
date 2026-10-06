@@ -26,7 +26,11 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.utc import assume_utc
-from app.models.collection_control import PublicationPointerHistory, PublicationVersion
+from app.models.collection_control import (
+    PublicationPointerHistory,
+    PublicationStream,
+    PublicationVersion,
+)
 from app.models.player_game_log import (
     PlayerGameLog,
     PlayerGameLogRefresh,
@@ -46,6 +50,7 @@ from app.services.stats_freshness_repository import (
 )
 from app.services.database_first_activation import (
     PublicationPayloadError,
+    PublicationRead,
     decode_player_game_logs,
 )
 from app.services.player_game_log_projection import (
@@ -476,13 +481,30 @@ class PlayerGameLogRepository:
         absent), and the caller keeps the game unavailable.
         """
 
+        retained = self.retained_game_read(season, game_id, connection=connection)
+        return None if retained is None else retained[0]
+
+    def retained_game_read(
+        self,
+        season: str,
+        game_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> tuple[tuple[PlayerGameLogRecord, ...], PublicationRead | None] | None:
+        """``retained_game_rows`` and the Publication read they came from.
+
+        The read describes the retained publication in the snapshot read
+        shape, its freshness from the publication reader's per-stream rule;
+        it is ``None`` without a reader to apply that rule.
+        """
+
         canonical_season = validate_canonical_season(season)
         history = PublicationPointerHistory.__table__
         projection = PublicationPlayerGameLog.__table__
         versions = PublicationVersion.__table__
         with read_connection(self.engine, connection) as connection:
-            publication_id = connection.execute(
-                select(history.c.publication_id)
+            retained = connection.execute(
+                select(history.c.publication_id, history.c.fence)
                 .where(
                     history.c.stream_key == "player_game_logs",
                     history.c.season == canonical_season,
@@ -496,9 +518,10 @@ class PlayerGameLogRepository:
                 )
                 .order_by(history.c.fence.desc())
                 .limit(1)
-            ).scalar()
-            if publication_id is None:
+            ).first()
+            if retained is None:
                 return None
+            publication_id = retained.publication_id
             projected = connection.execute(
                 select(projection.c.publication_id)
                 .where(projection.c.publication_id == publication_id)
@@ -506,12 +529,61 @@ class PlayerGameLogRepository:
             ).first()
             if projected is None:
                 return None
-            return self._projected_game_rows(
+            rows = self._projected_game_rows(
                 publication_id,
                 canonical_season,
                 game_id,
                 connection=connection,
             )
+            return rows, self._retained_read(
+                publication_id, int(retained.fence), connection=connection
+            )
+
+    def _retained_read(
+        self, publication_id: str, fence: int, *, connection: Connection
+    ) -> PublicationRead | None:
+        age_freshness = getattr(self._publication_reader, "age_freshness", None)
+        if age_freshness is None:
+            return None
+        versions = PublicationVersion.__table__
+        streams = PublicationStream.__table__
+        publication = connection.execute(
+            select(
+                versions.c.season,
+                versions.c.cutoff,
+                versions.c.version,
+                versions.c.status,
+                versions.c.checksum,
+                versions.c.created_at,
+                versions.c.manifest_id,
+                versions.c.event_catalog_publication_id,
+                versions.c.event_catalog_checksum,
+                streams.c.freshness_rule,
+            )
+            .join(streams, streams.c.stream_key == versions.c.stream_key)
+            .where(versions.c.publication_id == publication_id)
+        ).one()
+        retrieved_at = assume_utc(publication.created_at)
+        freshness, age = age_freshness(publication.freshness_rule, retrieved_at)
+        return PublicationRead(
+            stream_key="player_game_logs",
+            publication_id=publication_id,
+            season=publication.season,
+            cutoff=assume_utc(publication.cutoff).isoformat(),
+            version=int(publication.version),
+            # The retained version's own status; no pointer names it now.
+            status=publication.status,
+            freshness=freshness,
+            age_seconds=age,
+            payload=None,
+            retrieved_at=retrieved_at,
+            checksum=publication.checksum,
+            fence=fence,
+            manifest_id=publication.manifest_id,
+            event_catalog_publication_id=publication.event_catalog_publication_id,
+            event_catalog_checksum=publication.event_catalog_checksum,
+            projection_ready=True,
+        )
 
     def _projected_game_rows(
         self,

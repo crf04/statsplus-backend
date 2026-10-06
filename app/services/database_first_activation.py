@@ -1501,6 +1501,27 @@ class DatabaseFirstPublicationReader:
     # Explicit verb alias for callers that prefer the read-side vocabulary.
     read_snapshot = snapshot
 
+    def age_freshness(
+        self, freshness_rule: str, retrieved_at: datetime
+    ) -> tuple[str, int]:
+        """One publication's ``(freshness, age_seconds)`` as of this reader's clock.
+
+        The same per-stream rule every snapshot read applies, for a read of a
+        publication no pointer names any more (a season's retained one).
+        """
+
+        return self._age_freshness(freshness_rule, retrieved_at, now=_utc(self.clock()))
+
+    def _age_freshness(
+        self, freshness_rule: str, retrieved_at: datetime, *, now: datetime
+    ) -> tuple[str, int]:
+        age = max(0, int((now - _utc(retrieved_at)).total_seconds()))
+        threshold = self.freshness_seconds.get(str(freshness_rule))
+        return (
+            "fresh" if threshold is not None and age <= threshold else "stale",
+            age,
+        )
+
     def _read_row(
         self,
         stream_key: str,
@@ -1583,7 +1604,9 @@ class DatabaseFirstPublicationReader:
             else "active" if publication.status == "active" else "rollback"
         )
         retrieved_at = _utc(publication.created_at)
-        age = max(0, int((now - retrieved_at).total_seconds()))
+        freshness, age = self._age_freshness(
+            stream.freshness_rule, retrieved_at, now=now
+        )
         if season is not None and publication.season != season:
             return self._missing(
                 stream_key,
@@ -1598,8 +1621,6 @@ class DatabaseFirstPublicationReader:
                 checksum=publication.checksum,
                 age_seconds=age,
             )
-        threshold = self.freshness_seconds.get(str(stream.freshness_rule))
-        freshness = "fresh" if threshold is not None and age <= threshold else "stale"
         if stream_key in NBA_PUBLICATION_STREAM_KEYS:
             try:
                 verify_publication_authority(session, publication)
