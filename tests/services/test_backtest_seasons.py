@@ -862,6 +862,19 @@ def test_a_published_preview_reading_a_retained_stream_has_no_today(world):
 
     _assert_new_seasons_lebron(body)
     assert body["today"] is None
+    # Only the Backtest's streams, one of them retained: the preview's
+    # Matchup-only streams were captured but nothing read them.
+    assert [
+        (entry["stream_key"], entry["season"], entry["status"])
+        for entry in body["provenance"]["generation"]
+    ] == [
+        ("exact_shot_zones", NEW, "retained"),
+        ("grouped_shot_types", NEW, "active"),
+        ("player_assist_locations", NEW, "active"),
+        ("player_game_logs", NEW, "active"),
+        ("synergy_play_types", NEW, "active"),
+    ]
+    assert body["provenance"]["sources"] == {}
 
 
 def test_a_preview_of_an_unretained_season_is_unavailable(world):
