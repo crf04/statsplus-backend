@@ -66,6 +66,7 @@ The public error categories and HTTP statuses are:
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
 | Board too large | `board_too_large` | 400 | The post-filter DFS Board exceeds the configured market ceiling. |
 | DFS Board disabled | `dfs_board_disabled` | 404 | The deployment does not publish the DFS Board. |
+| Season unavailable | `season_unavailable` | 503 | A Backtest's season retains no readable Publication of one of its streams; the message names the stream, and `details` is `{season, published_season, stream}`. |
 
 An error may carry an optional `details` object when a caller cannot act on the
 failure without structured facts. It is present only where this document says
@@ -169,7 +170,7 @@ Which streams each route lists:
 | Unscheduled Matchup | the Matchup snapshot's streams | `{}` |
 | Game logs | `player_game_logs`, the four Player Diet streams, and the five Season Defense Sheet streams | `{}` |
 | Targets resolve | the one snapshot every composed Matchup shared, plus any retained Publication a composed Matchup read; `[]` when no Target composed a Matchup | the Slate's `schedule`; `pool`, `injuries` of the composed Matchups' own reads (the Slate's when none was composed) |
-| Draft Target preview | the preview's single union capture, narrowed to the Backtest's streams when no Matchup was composed (idle opponent) | as Targets resolve |
+| Draft Target preview | the preview's single union capture, narrowed to the Backtest's streams when no Matchup was composed (idle opponent, or a preview whose `today` is `null` because it reads a season other than the published one or a retained Publication) | as Targets resolve; `{}` when `today` is `null` for a non-published-season or retained read, which reads no Slate |
 
 Game logs list the Season Defense Sheet streams whether or not the query has
 `teams_against` filters: every row's `PLAYTYPE_RTG` crosses the player's
@@ -3337,7 +3338,7 @@ Targets is `200` with an empty `targets` list, not an error.
 #### Backtest one Target over the season to date
 
 ```http
-GET /api/user/targets/7/backtest
+GET /api/user/targets/7/backtest?season=2025-26
 Authorization: Bearer <firebase-id-token>
 ```
 
@@ -3349,9 +3350,67 @@ averages over the same columns. It is a separate read from
 cheap -- the league-wide game-log scan only runs when a reader expands a
 Target.
 
-The season is the configured current season, the same one the Slate and
-Matchup reads use, and is echoed as `season`. A Target has no season of its
-own. The request makes no NBA, PBP, or DFS call.
+The request makes no NBA, PBP, or DFS call. A Target has no season of its
+own; each request reads exactly one season, echoed as `season`, and says why
+in `season_reason`:
+
+| `season` query | Season read | `season_reason` |
+| --- | --- | --- |
+| absent | `2025-26` | `default` |
+| `2025-26` or `2026-27` | that season | `requested` |
+| anything else, including `2024-25` or an empty value | none: `400 invalid_input`, `"season must be 2025-26 or 2026-27."` | -- |
+
+A Backtest reads exactly one of the two supported seasons, `2025-26` and
+`2026-27`. Without `season` it reads `2025-26`, whatever season is published
+and however many games `2026-27` has; `2026-27` is read only when requested.
+Clients deployed before this rule may still see the retired `season_reason`
+values `published` and `fallback_no_games` from an older deployment; this one
+never sends them.
+
+The **published season** is the `NBA_CURRENT_SEASON` pin when the deployment
+sets one, else the season of the active `player_game_logs` Publication. It is
+reported as `published_season` and decides only where the requested season's
+Publications are read from, never which season is read.
+
+A season other than the published one is read entirely from its **retained**
+Publications, whatever the live pointers name: for each Backtest stream (`player_game_logs`,
+`exact_shot_zones`, `grouped_shot_types`, `player_assist_locations`,
+`synergy_play_types`), the latest activation of that season a rollback or
+corrected evidence has not revoked and a restore has not retired. Its
+Generation is therefore fixed until one of those rows is revoked. Shares,
+games, season averages, thin-sample checks, and league baselines all come from
+that season; seasons are never mixed, and nothing about today's players is
+implied. The **published season** reads each stream's live pointer when it
+names that season, and that stream's retained Publication otherwise -- a pin
+set behind the live pointer, or one stream activating a new season before the
+others. If any Backtest stream has no readable Publication for the season in
+either place -- none exists, or the one that exists cannot be read (corrupt,
+unauthorised, or missing its projection) -- the request fails with
+`503 season_unavailable` naming the stream, never an empty `players` list:
+
+```json
+{
+  "error": {
+    "code": "season_unavailable",
+    "message": "The 2025-26 season is unavailable: no retained grouped_shot_types Publication can be read.",
+    "details": {
+      "season": "2025-26",
+      "published_season": "2026-27",
+      "stream": "grouped_shot_types"
+    }
+  }
+}
+```
+
+`details.season` is the season the request resolved (requested or default),
+`details.published_season` the published season it was resolved against, and
+`details.stream` the first unavailable stream. A requested `2026-27` with no
+readable Publication -- before its first activation, for example -- is this
+`503`, never an empty Backtest.
+
+Every successful Backtest body also carries `published_season`, the season
+`season` was resolved against, so a client can tell a read of the published
+season from a retained one without a second request.
 
 ```json
 {
@@ -3373,6 +3432,8 @@ own. The request makes no NBA, PBP, or DFS call.
     "updated_at": "2026-09-04T12:00:00+00:00"
   },
   "season": "2025-26",
+  "season_reason": "requested",
+  "published_season": "2026-27",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
   "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
   "summary": {
@@ -3509,7 +3570,24 @@ rather than a suppressed one; no Diet evidence exists to be withheld.
 
 `401 authentication_required` for an unauthenticated caller.
 `404 resource_not_found` for an id that does not exist or belongs to another
-account -- foreign ids are never reported as `403`.
+account -- foreign ids are never reported as `403`. `400 invalid_input` for a
+`season` other than `2025-26` or `2026-27`, and `503 season_unavailable` as
+above.
+
+**Cache.** A season read from live pointers is cached under its pointer
+generation. A season read entirely from retained Publications -- always a
+season other than the published one -- is cached under the season and its retained history-row
+ids, so nightly publications of the published season leave its entry valid and
+revoking one of its rows invalidates it. A published season read partly live
+and partly retained is computed and not cached (`targets_cache` is `bypass`).
+A hit is served only after the same pointer-only availability check the
+batch makes -- on the live Publication or the retained one, wherever the
+season is read -- and is keyed on the Publications that check read, so a
+season whose Publication has become unreadable is `503 season_unavailable`
+even with a warm entry, and a revocation or pointer move landing after the
+check cannot select an entry for a Publication the request did not check. `season_reason` is
+the request's own: the season's entry serves a request that named it and one
+that defaulted to it.
 
 #### Backtest every Target
 
@@ -3523,13 +3601,17 @@ Returns, in one request, every one of the caller's
 per-Target result cache for the current Publication generation. It never
 computes a Backtest: a Target that is not cached comes back `uncached`, and the
 client reads it through `GET /api/user/targets/<id>/backtest` as before. It
-takes no parameters and covers all of the caller's Targets. The path never
+covers all of the caller's Targets and takes one optional query parameter,
+`season`, with exactly the single route's values and default; the season is
+resolved once and every item is read in it. The path never
 reaches `/api/user/targets/<id>`, whose id only matches integers.
 
 ```json
 {
   "success": true,
   "season": "2025-26",
+  "season_reason": "default",
+  "published_season": "2026-27",
   "backtests": [
     {
       "target_id": 9,
@@ -3546,6 +3628,8 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
       "backtest": {
         "target": {"id": 7, "opponent": "OKC", "title": "OKC vs Corner 3 ≥ 40%", "...": "..."},
         "season": "2025-26",
+        "season_reason": "default",
+        "published_season": "2026-27",
         "proxy": "Outcomes are box-score proxies for the Qualifier slices, ...",
         "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
         "summary": {"players": 1, "games": 2, "columns": {"...": "..."}},
@@ -3557,8 +3641,9 @@ reaches `/api/user/targets/<id>`, whose id only matches integers.
 }
 ```
 
-- `season` is the configured current season, the same one each Backtest
-  echoes.
+- `season`, `season_reason` and `published_season` are the request's resolved
+  season, why, and the published season, as on the single route, and every
+  `ok` item's Backtest echoes all three.
 - `backtests` has one item per Target, in the order
   [`GET /api/user/targets`](#targets) lists them (newest first), each naming
   its `target_id`.
@@ -3589,10 +3674,14 @@ there are no Targets or the cache is disabled or its generation read failed.
 
 **Empty state.** A caller with no Targets gets `200` with `"backtests": []`.
 
-**Errors.** `401 authentication_required` for an unauthenticated caller. Only a
-failure to read the caller's Target list fails the whole request, with the
-standard error shape: `500 operation_failed`, `"Failed to backtest the
-targets."`. A failed generation read is treated like a disabled cache: every
+**Errors.** `401 authentication_required` for an unauthenticated caller.
+`400 invalid_input` for a `season` outside the two readable seasons, and
+`503 season_unavailable` when a Backtest stream has no Publication for the
+resolved season, live or retained, exactly as on the single route. The check
+reads pointers and history only, and runs even when the cache is off.
+Otherwise only a failure to read the caller's Target list fails the whole
+request, with the standard error shape: `500 operation_failed`, `"Failed to
+backtest the targets."`. A failed generation read is treated like a disabled cache: every
 item is `uncached` and `targets_cache` is `-`, so the page degrades to the
 per-Target reads instead of failing.
 
@@ -3618,7 +3707,8 @@ Content-Type: application/json
       "threshold": 0.4
     }
   ],
-  "note": "Leaks corner threes"
+  "note": "Leaks corner threes",
+  "season": "2025-26"
 }
 ```
 
@@ -3629,6 +3719,15 @@ save -- exactly as the saved reads would. The body is the `POST
 per-account cap of 50 nor the duplicate rule applies: both are conflicts
 between a write and the rows already held, and a preview is not a write. The
 account's Targets are unchanged after any number of previews.
+
+The optional body field `season` takes exactly the values, default, and
+errors of the single Backtest's `season` query parameter. Only an omitted
+`season` applies the default; a present one must be a season string, so
+`"season": null` or any other non-string is `400 invalid_input`. A defender
+Condition is validated against the season the preview reads: the defender
+must have played for the opponent in **that** season. Saving a Target
+validates its defender in the default season, the one its saved Backtest
+reads.
 
 The response is the [Backtest](#backtest-one-target-over-the-season-to-date)
 shape for the draft plus `today` and one shared
@@ -3651,6 +3750,8 @@ shape for the draft plus `today` and one shared
     ]
   },
   "season": "2025-26",
+  "season_reason": "requested",
+  "published_season": "2025-26",
   "proxy": "Outcomes are box-score proxies for the Qualifier slices, not slice-level results. Base columns are whole-game box-score stats, and /36 columns are derived from minutes. A Corner 3 Qualifier therefore reads as points and three-point attempts rather than as corner threes.",
   "stat_columns": ["PTS", "PTS/36", "3PA", "3PA/36"],
   "summary": {
@@ -3739,6 +3840,10 @@ Saving the draft and expanding its Backtest shows the same numbers.
 `today` says whether the draft fires on the **current** ET Slate Date; there is
 no date parameter, and the evaluation is season to date.
 
+- `null` when the preview reads a season other than `published_season`
+  (requested or default), or a published season any of whose streams was read
+  retained: neither is the Generation tonight's
+  Matchup is in, and the preview never pairs it with a second capture.
 - `null` when the opponent has no game today.
 - Otherwise `game` is the resolve response's game object, and `fit_count` is
   the number of opposing participants meeting every Qualifier by the
@@ -3813,14 +3918,24 @@ passes the defender Condition. A game failing Conditions has no Fits; its game
 identity is still shown. Thus `under 0` excludes an Out defender and
 `at_least 0` includes him.
 
-`GET /api/teams/<tricode>/season-minutes` requires Firebase bearer auth and
-returns `{season, players:[{player_id,name,games_played,average_minutes}]}`.
+`GET /api/teams/<tricode>/season-minutes[?season=YYYY-YY]` requires Firebase
+bearer auth and returns
+`{season, season_reason, published_season, players:[{player_id,name,games_played,average_minutes}]}`.
 The roster comes from the team's Regular Season game-time identity rows,
 including players who have since left, ordered by average minutes descending
 then player id. An empty season returns `players: []`; unknown team returns
 `400 invalid_input`; unauthenticated calls return `401 authentication_required`.
-It reads the same immutable player-game-log publication as the Backtest and
-makes no provider calls.
+It makes no provider calls.
+
+The optional `season` query parameter takes exactly the
+[Backtest](#backtest-one-target-over-the-season-to-date)'s values and
+default, and the response's `season`, `season_reason` and `published_season`
+mean what they mean there, so a defender is chosen from the roster of the
+season the Backtest reads. The roster reads that season's game logs the way the
+Backtest does: the live Publication when the pointer names the season, else
+the retained one. A season other than `2025-26` or `2026-27` is
+`400 invalid_input`; a season with no readable `player_game_logs` Publication
+is `503 season_unavailable` with the details below.
 
 The frontend endpoint catalogue and deterministic fixture are owned by the
 linked frontend issues crf04/statsplus-frontend#101 (baselines) and #102

@@ -343,6 +343,41 @@ class ConflictError(AppError):
     default_message = "The operation conflicts with the current collection state."
 
 
+class SeasonUnavailableError(AppError):
+    """A season's retained Publication of one stream cannot be read.
+
+    Unavailable is not empty: a Backtest whose season has no readable retained
+    Publication of a stream fails naming that stream instead of reporting that
+    nobody fits (crf04/statsplus#104).
+    """
+
+    status_code = 503
+    code = "season_unavailable"
+    default_message = "The requested season is unavailable."
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        season: str,
+        published_season: str,
+        stream: str,
+    ) -> None:
+        # The client cannot learn the published season from a failed first
+        # read any other way, so the refusal carries it.
+        self._public_details = {
+            "season": season,
+            "published_season": published_season,
+            "stream": stream,
+        }
+        super().__init__(message, detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any]:
+        return self._public_details
+
+
 def route_error_boundary(
     safe_message: str,
     *,

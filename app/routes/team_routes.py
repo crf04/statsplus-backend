@@ -42,4 +42,8 @@ def get_teams():
 @require_auth
 @route_error_boundary('Failed to retrieve season minutes.')
 def get_season_minutes(tricode):
-    return jsonify(CurrentAppService('target_season_minutes').get(tricode))
+    return jsonify(
+        CurrentAppService('target_season_minutes').get(
+            tricode, season=request.args.get('season')
+        )
+    )

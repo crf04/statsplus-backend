@@ -2,8 +2,10 @@
 
 from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
 from app.errors import InvalidInputError
+from app.services.backtest_season import BacktestSeasons
 from app.services.publication_snapshot_calls import call_with_read_scope
-from app.services.research_season import published_capture
+
+_GAME_LOGS = ("player_game_logs",)
 
 
 class TargetSeasonMinutesService:
@@ -11,25 +13,34 @@ class TargetSeasonMinutesService:
         self.player_logs = player_logs
         self.settings = settings
         self.publication_reader = publication_reader
+        self.seasons = BacktestSeasons(settings, publication_reader)
 
-    def get(self, tricode):
+    def get(self, tricode, *, season=None):
+        """The team's roster minutes in the season its Backtest would read.
+
+        ``season`` takes the Backtest's values and default (#104), so a
+        defender is chosen from the season the Backtest reads; a season other
+        than the published one reads its retained game logs.
+        """
+
         tricode = tricode.strip().upper()
         if tricode not in NBA_TEAM_TRICODE_TO_ID:
             raise InvalidInputError("The team must be a canonical NBA tricode.")
         # The season and the rows come from one capture.
-        season, snapshot = published_capture(
-            self.settings,
-            self.publication_reader,
+        choice, snapshot = self.seasons.capture(
+            season,
             lambda season: self.publication_reader.snapshot(
-                ("player_game_logs",),
+                _GAME_LOGS,
                 season=season,
-                projection_only_keys=frozenset({"player_game_logs"}),
+                projection_only_keys=frozenset(_GAME_LOGS),
             ),
+            _GAME_LOGS,
+            projection_only_keys=frozenset(_GAME_LOGS),
         )
         players = {}
         for row in call_with_read_scope(
             self.player_logs.list_team_rows,
-            season,
+            choice.season,
             NBA_TEAM_TRICODE_TO_ID[tricode],
             publication_snapshot=snapshot,
         ):
@@ -51,7 +62,9 @@ class TargetSeasonMinutesService:
                 item["average_minutes"] / item["games_played"], 6
             )
         return {
-            "season": season,
+            "season": choice.season,
+            "season_reason": choice.reason,
+            "published_season": choice.published,
             "players": sorted(
                 players.values(),
                 key=lambda item: (-item["average_minutes"], item["player_id"]),

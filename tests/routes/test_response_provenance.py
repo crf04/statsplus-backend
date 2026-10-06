@@ -1206,7 +1206,9 @@ def test_the_preview_lists_the_retained_publication_a_past_season_matchup_read(
     response = client.post(
         "/api/user/targets/preview",
         headers=authenticate(),
-        json={"opponent": "BOS", "qualifiers": [TRANSITION_25]},
+        # An omitted season Backtests 2025-26 and reads no tonight once
+        # 2026-27 is published; the published season composes tonight.
+        json={"opponent": "BOS", "qualifiers": [TRANSITION_25], "season": "2026-27"},
     )
 
     assert response.status_code == 200

@@ -1502,7 +1502,7 @@ def test_the_backtest_route_returns_the_backtest_for_the_targets_id(
 
     assert response.status_code == 200
     assert response.get_json() == {"success": True, **BACKTESTED}
-    backtest_service.backtest.assert_called_once_with("test-uid", 7)
+    backtest_service.backtest.assert_called_once_with("test-uid", 7, season=None)
 
 
 def test_the_backtest_route_reports_a_target_of_another_account_as_not_found(
@@ -1794,7 +1794,7 @@ def test_season_minutes_roster_groups_players_and_orders_by_average(backtest_eng
         _row(3, name='Playoffs only', season_type='Playoffs', minutes=40),
     ))
     payload = TargetSeasonMinutesService(player_logs=logs, settings=backtest_settings).get('okc')
-    assert payload == {'season': SEASON, 'players': [
+    assert payload == {'season': SEASON, 'season_reason': 'default', 'published_season': SEASON, 'players': [
         {'player_id': 1, 'name': 'Starter', 'games_played': 2, 'average_minutes': 25.0},
         {'player_id': 2, 'name': 'Reserve', 'games_played': 1, 'average_minutes': 10.0},
     ]}
@@ -2108,12 +2108,19 @@ def test_the_scope_loaded_target_still_hides_an_unowned_one(
 
 class GenerationSnapshotReader:
     """A reader answering generations pointer-only and capturing one frozen
-    snapshot: the split the real reader gives a request."""
+    snapshot: the split the real reader gives a request.
+
+    A game-log-only capture is the Backtest season's resolution (#104), and
+    one narrowing every stream to its projection selects no payload at all
+    (the batch's stream-availability check); neither is a capture of
+    evidence, so both are recorded apart from ``snapshot_calls``.
+    """
 
     def __init__(self, reads, generation):
         self.reads = reads
         self.frozen_generation = generation
         self.snapshot_calls = []
+        self.season_resolutions = []
         self.generation_calls = []
 
     def generation(self, stream_keys, *, season, session=None):
@@ -2129,7 +2136,12 @@ class GenerationSnapshotReader:
         decoded_only_keys=None,
         session=None,
     ):
-        self.snapshot_calls.append((tuple(stream_keys), season))
+        if tuple(stream_keys) == ("player_game_logs",) or (
+            projection_only_keys == frozenset(stream_keys)
+        ):
+            self.season_resolutions.append(season)
+        else:
+            self.snapshot_calls.append((tuple(stream_keys), season))
         return SimpleNamespace(reads=self.reads, generation=self.frozen_generation)
 
 
@@ -2239,9 +2251,11 @@ def test_a_miss_files_its_field_under_the_generation_key(
 
     assert state == "miss"
 
-    # The generation pre-check ran once with the request's season, and the
-    # one miss captured its snapshot and stored the evidence under it.
-    assert [season for _, season, _ in reader.generation_calls] == [SEASON]
+    # The pre-check keyed the cache on the pointer-only capture it checked,
+    # in the request's season, with no second generation lookup, and the one
+    # miss captured its snapshot and stored the evidence under it.
+    assert reader.season_resolutions == [SEASON, SEASON]
+    assert reader.generation_calls == []
     assert len(reader.snapshot_calls) == 1
     assert [player["canonical_id"] for player in payload["players"]] == [
         LEBRON
@@ -2764,6 +2778,39 @@ def _reads_so_far(service, reader):
     )
 
 
+def test_a_hit_is_keyed_on_the_publications_its_check_read(
+    targets, build_backtest
+):
+    """The pointer moves to version 2 between the check and a second lookup.
+
+    Version 2's warm entry was never checked by this request; the one the
+    check read (version 1) is served.
+    """
+
+    created = _create(targets)
+    service, reader, client = _cached_service(build_backtest)
+    assert service.backtest(OWNER, created["id"])[1] == "miss"
+    moved = tuple(
+        (key, f"pub-2-{key}", 2, 2) for key in BACKTEST_PUBLICATION_STREAM_KEYS
+    )
+    reader.frozen_generation = moved
+    assert service.backtest(OWNER, created["id"])[1] == "miss"
+    checked = _frozen_generation()
+    reader.frozen_generation = checked
+    reader.generation = lambda *args, **kwargs: moved
+    hits_before = len(client.gets)
+
+    payload, state = service.backtest(OWNER, created["id"])
+    batch, batch_state = service.backtest_all(OWNER)
+
+    assert (state, batch_state) == ("hit", "hit")
+    checked_key = backtest_cache_key(
+        created, checked, season=SEASON, settings=service.settings
+    )
+    assert client.gets[hits_before:] == [checked_key, checked_key]
+    assert batch["backtests"][0]["backtest"] == payload
+
+
 def test_every_cached_backtest_is_ok_and_equals_the_single_read_in_list_order(
     targets, build_backtest
 ):
@@ -2780,9 +2827,9 @@ def test_every_cached_backtest_is_ok_and_equals_the_single_read_in_list_order(
     assert payload["season"] == SEASON
     assert [item["target_id"] for item in payload["backtests"]] == listed
     # Served from the entries alone: nothing computed, no snapshot captured,
-    # and one pointer-only generation read for the whole request.
+    # and keyed on the request's one pointer-only availability capture.
     assert _reads_so_far(service, reader) == before
-    assert len(reader.generation_calls) == len(listed) + 1
+    assert reader.generation_calls == []
     for item in payload["backtests"]:
         assert set(item) == {"target_id", "status", "backtest"}
         assert item["status"] == "ok"
@@ -2929,8 +2976,19 @@ def test_a_generation_read_failure_degrades_every_item_to_uncached(
     listed = _three_targets(targets)
 
     class FailingGeneration(GenerationSnapshotReader):
-        def generation(self, *args, **kwargs):
-            raise RuntimeError("publication pointers are unreachable")
+        def snapshot(self, stream_keys, *, season, projection_only_keys=None, **kwargs):
+            # The batch's pointer-only availability capture, which also
+            # names the generation it looks entries up under.
+            if len(tuple(stream_keys)) > 1 and projection_only_keys == frozenset(
+                stream_keys
+            ):
+                raise RuntimeError("publication pointers are unreachable")
+            return super().snapshot(
+                stream_keys,
+                season=season,
+                projection_only_keys=projection_only_keys,
+                **kwargs,
+            )
 
     client = FakeRedis()
     reader = FailingGeneration(_available_reads(), _frozen_generation())
@@ -2976,7 +3034,12 @@ def test_a_caller_with_no_targets_gets_an_empty_list(targets, build_backtest):
 
     payload, state = service.backtest_all(OWNER)
 
-    assert payload == {"season": SEASON, "backtests": []}
+    assert payload == {
+        "season": SEASON,
+        "season_reason": "default",
+        "published_season": SEASON,
+        "backtests": [],
+    }
     assert state == "-"
     assert client.gets == []
     assert reader.snapshot_calls == []
@@ -3065,7 +3128,7 @@ def test_the_batch_route_returns_every_item_and_stamps_the_cache(
 
     assert response.status_code == 200
     assert response.get_json() == {"success": True, **BATCH}
-    backtest_service.backtest_all.assert_called_once_with("test-uid")
+    backtest_service.backtest_all.assert_called_once_with("test-uid", season=None)
     backtest_service.backtest.assert_not_called()
     lines = [
         record.getMessage()

@@ -26,8 +26,11 @@ from app.models.saved_filter_set import (
 )
 from app.domain.player_diet_taxonomy import PLAYER_DIET_QUALIFIER_SLICES
 from app.domain.target_statistics import validate_stat_preferences
-from app.services.research_season import research_season
-from app.services.target_conditions import validate_conditions
+from app.services.backtest_season import BacktestSeasons
+from app.services.target_conditions import (
+    require_defender_fielded,
+    validate_conditions,
+)
 from app.models.target import (
     TARGET_COMPARATORS,
     TARGET_NOTE_MAX_LENGTH,
@@ -267,6 +270,8 @@ class UserService:
         self.player_logs = player_logs
         # Names the published season a defender is validated against.
         self.publication_reader = publication_reader
+        # A defender is validated in the season its Backtest reads (#104).
+        self.backtest_seasons = BacktestSeasons(self.settings, publication_reader)
 
     def _get_session(self):
         """Create a session bound to this service's app-scoped engine."""
@@ -812,18 +817,34 @@ class UserService:
 
         return self._owned_target(session, firebase_uid, target_id).to_dict()
 
-    def _validated_conditions(self, value, opponent):
+    def _validated_conditions(self, value, opponent, season=None):
+        """Validate conditions; a defender must have faced the Backtest's opponent.
+
+        ``season`` is the requested Backtest season; ``None`` is the season a
+        saved Target's Backtest reads by default.
+        """
         conditions = validate_conditions(value)
         if conditions and conditions['defender']:
-            from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
             if self.player_logs is None:
                 raise InvalidConfigurationError("Target defender validation is unavailable.")
-            defender = conditions['defender']
-            season = research_season(self.settings, self.publication_reader)
-            rows = self.player_logs.list_player_rows(season, defender['player_id'])
-            if not any(row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
-                       and row.season_type == 'Regular Season' for row in rows):
-                raise InvalidInputError("The defender must appear in the opponent's season game logs.")
+            choice = self.backtest_seasons.resolve(season)
+            # The game logs the Backtest itself reads: the season's retained
+            # Publication unless the live pointer names that season.
+            require_defender_fielded(
+                self.player_logs,
+                conditions['defender'],
+                opponent,
+                choice.season,
+                publication_snapshot=(
+                    self.backtest_seasons.retained_snapshot(
+                        choice,
+                        ('player_game_logs',),
+                        projection_only_keys=frozenset({'player_game_logs'}),
+                    )
+                    if choice.retained
+                    else None
+                ),
+            )
         return conditions
 
     def validate_target_draft(
@@ -834,6 +855,7 @@ class UserService:
         note: Any = None,
         conditions: Any = None,
         stat_preferences: Any = None,
+        season: Any = None,
     ) -> Dict[str, Any]:
         """Validate an unsaved target and return it as the list would show it.
 
@@ -842,7 +864,8 @@ class UserService:
         timestamps a stored row would carry. Defender membership reads stored
         game logs; nothing is written. The
         per-account cap and the duplicate rule are conflicts between a write
-        and the rows already held, and a draft is not a write.
+        and the rows already held, and a draft is not a write. ``season`` is
+        the requested Backtest season a defender is validated in.
         """
 
         validated_opponent = _validated_target_opponent(opponent)
@@ -852,7 +875,9 @@ class UserService:
             'title': derive_target_title(validated_opponent, validated_qualifiers),
             'note': _validated_target_note(note),
             'qualifiers': validated_qualifiers,
-            'conditions': self._validated_conditions(conditions, validated_opponent),
+            'conditions': self._validated_conditions(
+                conditions, validated_opponent, season
+            ),
             'stat_preferences': validate_stat_preferences(stat_preferences),
         }
 

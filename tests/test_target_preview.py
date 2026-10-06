@@ -278,7 +278,7 @@ def preview_services(dependencies):
     )
     dependencies.target_preview_service = Mock(name="target_preview_service")
     # Echo the validated draft, so a dropped field is visible on the wire.
-    dependencies.target_preview_service.preview.side_effect = lambda draft: {
+    dependencies.target_preview_service.preview.side_effect = lambda draft, season=None: {
         **PREVIEWED,
         "target": draft,
         "today": TODAY,
@@ -311,7 +311,9 @@ def test_the_preview_route_returns_the_drafts_backtest_and_today(
     }
     # The validated draft -- canonical tricode, trimmed note -- is what the
     # preview evaluates.
-    preview_services.target_preview_service.preview.assert_called_once_with(validated)
+    preview_services.target_preview_service.preview.assert_called_once_with(
+        validated, season=None
+    )
 
 
 def test_the_preview_route_reports_an_idle_opponent_as_a_null_today(

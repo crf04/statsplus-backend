@@ -16,6 +16,13 @@ is composed from it through ``MatchupService.get_matchup_from_snapshot``.  The
 projection-only narrowing is the intersection of the two reads' own, so a
 stream is read payload-less only where both reads would.
 
+*One season.*  A season other than the published one (requested, or the
+2025-26 default) reads the Backtest from that season's retained Generation
+alone.  ``today`` is about tonight's players, which such a season says
+nothing about, and pairing it with a second capture would break the
+one-generation promise, so it is ``null`` (#104); so is a published season
+any of whose streams had to be read retained.
+
 *No provider, no write.*  The Matchup route may refresh injuries from the
 provider and publish a snapshot when the stored override is stale; that is its
 contract, and ``resolve`` (#245) inherits it.  A preview composes its Matchup
@@ -40,8 +47,9 @@ from app.services.matchup_snapshot import (
     SnapshotMatchups,
     capture_publication_snapshot,
 )
-from app.services.research_season import published_capture
+from app.services.backtest_season import BacktestSeason, BacktestSeasons
 from app.services.response_provenance import provenance_block
+from app.services.target_conditions import require_defender_fielded
 from app.services.target_backtest import (
     BACKTEST_DECODED_ONLY_STREAM_KEYS,
     BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
@@ -68,8 +76,15 @@ PREVIEW_DECODED_ONLY_STREAM_KEYS = BACKTEST_DECODED_ONLY_STREAM_KEYS & frozenset
 
 
 class BacktestReader(Protocol):
+    seasons: BacktestSeasons
+    player_logs: Any
+
     def backtest_target(
-        self, target: Mapping[str, Any], *, publication_snapshot: Any, season: str
+        self,
+        target: Mapping[str, Any],
+        *,
+        publication_snapshot: Any,
+        season: BacktestSeason,
     ) -> dict[str, Any]: ...
 
 
@@ -103,32 +118,55 @@ class TargetPreviewService:
         self.settings = settings
         self.publication_reader = publication_reader
 
-    def preview(self, draft: Mapping[str, Any]) -> dict[str, Any]:
+    def preview(
+        self, draft: Mapping[str, Any], *, season: str | None = None
+    ) -> dict[str, Any]:
         """Return the draft's Backtest plus ``today``.
 
         ``draft`` is the validated listed shape ``UserService.validate_target_draft``
-        returns; it is echoed as the response's ``target``.
+        returns; it is echoed as the response's ``target``.  ``season`` is the
+        requested season; ``None`` reads the default season.
         """
 
+        seasons = self.backtests.seasons
         # One capture decides the season, and every read uses both.
-        season, snapshot = published_capture(
-            self.settings,
-            self.publication_reader,
-            lambda season: capture_publication_snapshot(
-                self.publication_reader,
-                PREVIEW_PUBLICATION_STREAM_KEYS,
-                projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
-                decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
-                season=season,
-            ),
+        choice, snapshot = seasons.capture(
+            season,
+            self._capture,
+            BACKTEST_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=BACKTEST_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=BACKTEST_DECODED_ONLY_STREAM_KEYS,
         )
+        defender = (draft.get("conditions") or {}).get("defender")
+        if defender:
+            # The draft's defender was validated before this capture; a
+            # season activating in between must not leave it checked in a
+            # different season from the Backtest that reads its minutes.
+            require_defender_fielded(
+                self.backtests.player_logs,
+                defender,
+                draft["opponent"],
+                choice.season,
+                publication_snapshot=snapshot,
+            )
         previewed = self.backtests.backtest_target(
-            draft, publication_snapshot=snapshot, season=season
+            draft, publication_snapshot=snapshot, season=choice
         )
+        if choice.past or getattr(snapshot, "retained_history", ()):
+            # A season that is not the published one says nothing about
+            # tonight's players, and a retained read is not the Generation
+            # tonight's Matchup is in.  No Slate is read, so no source is.
+            return {
+                **previewed,
+                "today": None,
+                "provenance": provenance_block(
+                    snapshot, streams=BACKTEST_PUBLICATION_STREAM_KEYS
+                ),
+            }
         today, sources, matchup_generation = self.resolutions.today_with_sources(
             draft,
             matchups=SnapshotMatchups(
-                self.matchups, snapshot, self.injuries, season=season
+                self.matchups, snapshot, self.injuries, season=choice.season
             ),
         )
         return {
@@ -144,6 +182,15 @@ class TargetPreviewService:
                 also=matchup_generation,
             ),
         }
+
+    def _capture(self, season: Any) -> Any:
+        return capture_publication_snapshot(
+            self.publication_reader,
+            PREVIEW_PUBLICATION_STREAM_KEYS,
+            projection_only_keys=PREVIEW_PROJECTION_ONLY_STREAM_KEYS,
+            decoded_only_keys=PREVIEW_DECODED_ONLY_STREAM_KEYS,
+            season=season,
+        )
 
 
 __all__ = [

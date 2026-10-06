@@ -37,6 +37,32 @@ def player_minutes_are_kept(minutes, threshold):
     return isfinite(value) and value > threshold
 
 
+def require_defender_fielded(player_logs, defender, opponent, season, *, publication_snapshot=None):
+    """Refuse a defender the opponent never fielded in ``season``'s game logs.
+
+    ``publication_snapshot`` is the game-log evidence the Backtest reads, so a
+    defender is checked in exactly the Generation its minutes come from.
+    """
+
+    from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+    from app.services.publication_snapshot_calls import call_with_read_scope
+
+    rows = call_with_read_scope(
+        player_logs.list_player_rows,
+        season,
+        defender["player_id"],
+        publication_snapshot=publication_snapshot,
+    )
+    if not any(
+        row.team_id == NBA_TEAM_TRICODE_TO_ID[opponent]
+        and row.season_type == "Regular Season"
+        for row in rows
+    ):
+        raise InvalidInputError(
+            "The defender must appear in the opponent's season game logs."
+        )
+
+
 def validate_conditions(value):
     if value is None:
         return None
