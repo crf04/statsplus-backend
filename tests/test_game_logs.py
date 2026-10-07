@@ -742,6 +742,27 @@ def test_date_to_bounds_the_season_average_and_game_count_to_season_to_date(
     assert _season_to_date(service, date_to="2024-01-14") == (None, 0)
 
 
+def test_date_to_keeps_a_late_night_game_on_the_end_date_in_the_season_line(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """Calendar-day bound: a 22:30 tip on date_to counts; the next day does not."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+    frame = _game_logs_frame()
+    frame["GAME_DATE"] = [
+        "2024-01-15 19:00:00",
+        "2024-01-17 22:30:00",
+        "2024-01-18 00:30:00",
+    ]
+    monkeypatch.setattr(service, "_get_game_logs", lambda name, season: (frame, None))
+
+    # Games: 01-15 (25 PTS), 01-17 22:30 (15), 01-18 00:30 (30).
+    row, count = _season_to_date(service, date_to="2024-01-17")
+    assert (row["PTS"], row["MIN"], count) == (20.0, 25.0, 2)
+
+
 def test_date_filter_and_date_to_select_an_inclusive_range(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
