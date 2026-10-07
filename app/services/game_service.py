@@ -312,6 +312,21 @@ class GameService:
 
         return df
 
+    @staticmethod
+    def _in_date_range(df, start, end):
+        """Mask of games on or after ``start`` and on or before ``end``.
+
+        Both bounds are optional and compare by calendar day, so a
+        timestamped game on either boundary date is kept.
+        """
+        game_days = pd.to_datetime(df['GAME_DATE'], errors='coerce').dt.normalize()
+        in_range = pd.Series(True, index=df.index)
+        if start:
+            in_range &= game_days >= pd.Timestamp(start)
+        if end:
+            in_range &= game_days <= pd.Timestamp(end)
+        return in_range
+
     def apply_filters(
         self, df, query, teams_against=None, *, publication_snapshot=None
     ):
@@ -323,13 +338,7 @@ class GameService:
         # and ``date_to`` the end date. Both bounds compare by calendar day,
         # so a timestamped game on either boundary date is kept.
         if query.date_filter or query.date_to:
-            game_days = pd.to_datetime(df['GAME_DATE'], errors='coerce').dt.normalize()
-            in_range = pd.Series(True, index=df.index)
-            if query.date_filter:
-                in_range &= game_days >= pd.Timestamp(query.date_filter)
-            if query.date_to:
-                in_range &= game_days <= pd.Timestamp(query.date_to)
-            df = df[in_range]
+            df = df[self._in_date_range(df, query.date_filter, query.date_to)]
 
         # Apply location filter
         if query.location_filter != 'Both':
@@ -525,9 +534,16 @@ class GameService:
             filtered_average_rows = _records(filtered_averages.to_frame().T)
         else:
             filtered_average_rows = []
+        # Season-to-date rule: only ``date_to`` bounds the season average and
+        # its game count; every other filter, ``date_filter`` included, does not.
+        season_logs = full_game_logs
+        if query.date_to:
+            season_logs = full_game_logs[
+                self._in_date_range(full_game_logs, None, query.date_to)
+            ]
         season_average_rows = []
-        if not full_game_logs.empty:
-            season_averages = full_game_logs[average_columns].mean().round(2)
+        if not season_logs.empty:
+            season_averages = season_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
         filtered_logs.drop(['PLAYER_NAME', 'PLAYER_ID', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', '+/-', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
         filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
@@ -536,7 +552,7 @@ class GameService:
             game_logs=_records(filtered_logs),
             averages=filtered_average_rows,
             season_averages=season_average_rows,
-            season_game_count=len(full_game_logs),
+            season_game_count=len(season_logs),
             next_game=self._get_team_name_by_id(next_team),
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and

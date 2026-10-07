@@ -1579,9 +1579,12 @@ arrays, never JSON strings.
 
 Season game count (crf04/statsplus#88): `season_game_count` is an integer
 ≥ 0, always present on a successful response. It counts the games in the
-player's log for the requested `season_filter` before any filter is applied,
-which are exactly the games `season_averages` averages, so no filter changes it.
-It is `0` when the season has no games (and `season_averages` is then `[]`).
+player's log for the requested `season_filter`, which are exactly the games
+`season_averages` averages. It follows the season-to-date rule: with no
+`date_to` it is the whole season and no filter changes it; with `date_to` it
+counts only the season's games on or before that date (inclusive), and no other
+filter, `date_filter` included, changes it. It is `0` when no such games exist
+(and `season_averages` is then `[]`).
 The filtered count is the length of `game_logs`. Together they let a caller
 state a sample as "12 of 71 games".
 
@@ -1659,8 +1662,11 @@ pairs with `date_filter` (the start date). A game is kept when its calendar
 date is on or before `date_to`, so `date_filter` plus `date_to` selects an
 inclusive range, and `date_to` alone trims only the end. Like `date_filter`, it
 trims only the player's own game logs: Team Filter rankings stay
-whole-Regular-Season, `averages` cover only the trimmed rows, and
-`season_averages` is unchanged. A range that keeps no games is the normal
+whole-Regular-Season, and `averages` cover only the trimmed rows. By the
+season-to-date rule, `season_averages` and `season_game_count` cover only the
+season's games on or before `date_to` (inclusive, by calendar day), so a past
+Slate's season average excludes later games; `date_filter` and every other
+filter still take no part in them. A range that keeps no games is the normal
 successful empty result. An unparsable `date_to`, or a `date_to` earlier than
 `date_filter`, joins the malformed values of the #9 note and returns a `400`
 `invalid_input` whose `details` name `date_to`. The response schema and every
@@ -1728,8 +1734,9 @@ other parameter are unchanged.
   parsed those strings must instead read the arrays directly. `next_game`
   remains `null` under the existing contract.
 - Empty result sets return empty arrays (`[]`) for `game_logs` and `averages`;
-  `season_averages` still carries the season aggregate when the full season has
-  games, and `season_game_count` still counts them. `next_game` may be `null`.
+  `season_averages` still carries the season aggregate (season-to-date when
+  `date_to` is set) when those games exist, and `season_game_count` still counts
+  them. `next_game` may be `null`.
 
 Query parameters:
 

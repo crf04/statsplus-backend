@@ -698,7 +698,48 @@ def test_date_to_trims_the_logs_and_filtered_averages_only(
     ]
     assert trimmed["averages"][0]["PTS"] == 20.0
     assert trimmed["averages"][0]["MIN"] == 25.0
-    assert trimmed["season_averages"] == whole["season_averages"]
+    # Season-to-date rule: the season average stops at date_to too.
+    assert whole["season_game_count"] == 3
+    assert trimmed["season_game_count"] == 2
+    assert trimmed["season_averages"][0]["PTS"] == 20.0
+
+
+def _season_to_date(service, **filters):
+    result = service.get_filtered_logs(
+        "LeBron James", GameLogQuery(season_filter="2024-25", **filters)
+    )
+    row = result["season_averages"][0] if result["season_averages"] else None
+    return row, result["season_game_count"]
+
+
+def test_date_to_bounds_the_season_average_and_game_count_to_season_to_date(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    """The season line stops at date_to; no other filter moves it."""
+
+    service = _ranked_service(
+        monkeypatch, mock_db_engine, mock_redis_client, ["MIA", "LAL", "CHI"]
+    )
+
+    # Games: 01-15 (25 PTS, 30 MIN), 01-17 (15, 20), 01-19 (30, 40).
+    row, count = _season_to_date(service, date_to="2024-01-17")
+    assert (row["PTS"], row["MIN"], row["REB"], count) == (20.0, 25.0, 6.0, 2)
+
+    row, count = _season_to_date(service)
+    assert (row["PTS"], row["MIN"], row["REB"], count) == (23.33, 30.0, 7.33, 3)
+
+    # date_filter alone is not part of the season-to-date rule.
+    row, count = _season_to_date(service, date_filter="2024-01-17")
+    assert (row["PTS"], row["MIN"], row["REB"], count) == (23.33, 30.0, 7.33, 3)
+
+    # date_filter plus date_to: only date_to bounds the season line.
+    row, count = _season_to_date(
+        service, date_filter="2024-01-17", date_to="2024-01-17"
+    )
+    assert (row["PTS"], row["MIN"], row["REB"], count) == (20.0, 25.0, 6.0, 2)
+
+    # Before every game: no season line and a zero count.
+    assert _season_to_date(service, date_to="2024-01-14") == (None, 0)
 
 
 def test_date_filter_and_date_to_select_an_inclusive_range(
