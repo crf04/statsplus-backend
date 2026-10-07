@@ -682,8 +682,11 @@ class GameLogResponse(BaseModel):
 
     ``game_logs``, ``averages``, and ``season_averages`` are ordinary JSON
     arrays; ``next_game`` remains ``null`` under the existing game-log
-    contract. ``season_game_count`` is how many games the unfiltered season
-    holds: exactly the games ``season_averages`` averages (crf04/statsplus#88).
+    contract. ``season_game_count`` is how many games ``season_averages`` averages
+    (crf04/statsplus#88). Both follow the season-to-date rule: the whole
+    season, or, when the query carries ``date_to``, only the season's games on
+    or before that calendar day. No other filter, ``date_filter`` included,
+    changes them.
     ``provenance`` is the shared ``generation``/``sources`` block naming the
     Publications the read used (crf04/statsplus#107).
     """
