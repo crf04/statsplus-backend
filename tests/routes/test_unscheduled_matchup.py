@@ -448,12 +448,22 @@ def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
         sheet = bos["defense_sheet"]
         attempts = {
             row["key"]: row["markets"]
-            for row in sheet["shot_zones"] + sheet["shot_types"]
+            for base in ("shot_zones", "shot_types")
+            for row in sheet[base]
             if row["key"].endswith(("FGA", "FG2A", "FG3A"))
         }
-        assert attempts
-        for key, markets in attempts.items():
-            assert not set(markets) & {"PA", "PR", "PRA", "PTS"}, key
+        assert attempts == {
+            "Restricted Area:FGA": ["FGA", "FG2A"],
+            "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
+            "Mid-Range:FGA": ["FGA", "FG2A"],
+            "Corner 3:FGA": ["FGA", "FG3A"],
+            "Above the Break 3:FGA": ["FGA", "FG3A"],
+            **{
+                f"{shot_type}:{stat}": ["FGA", stat]
+                for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
+                for stat in ("FG2A", "FG3A")
+            },
+        }
 
 
 def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):

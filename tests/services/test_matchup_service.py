@@ -716,6 +716,12 @@ def test_shot_zone_rows_expose_only_governed_compatible_markets():
     }
 
 
+def test_possessions_rows_keep_their_points_only_markets():
+    from app.services import matchup
+
+    assert matchup.slice_markets("play_types", "Transition", "POSS") == ("PTS",)
+
+
 def test_every_row_feeding_a_combo_score_lists_the_combo():
     """A combo's score is built from its parts, so a row feeding a part feeds it."""
 
