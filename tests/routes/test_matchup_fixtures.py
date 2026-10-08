@@ -1279,15 +1279,15 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
         for row in payload["teams"][0]["defense_sheet"]["shot_zones"]
     } == {
         "Above the Break 3:FGA": ["FGA", "FG3A"],
-        "Above the Break 3:FGM": ["PTS", "3PM"],
+        "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
         "Corner 3:FGA": ["FGA", "FG3A"],
-        "Corner 3:FGM": ["PTS", "3PM"],
+        "Corner 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
         "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
-        "In The Paint (Non-RA):FGM": ["PTS"],
+        "In The Paint (Non-RA):FGM": ["PTS", "PA", "PR", "PRA"],
         "Mid-Range:FGA": ["FGA", "FG2A"],
-        "Mid-Range:FGM": ["PTS"],
+        "Mid-Range:FGM": ["PTS", "PA", "PR", "PRA"],
         "Restricted Area:FGA": ["FGA", "FG2A"],
-        "Restricted Area:FGM": ["PTS"],
+        "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
     }
     player_shot_types = {
         row["key"] for row in payload["players"][0]["diet_shares"]["shot_types"]

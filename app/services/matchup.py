@@ -109,11 +109,11 @@ _GOVERNED_SHOT_TYPES = frozenset(SHOT_TYPE_SLICES)
 _STAT_MARKETS = {
     "PTS": ("PTS", "PA", "PR", "PRA"),
     "POSS": ("PTS",),
-    "FGM": ("PTS",),
+    "FGM": ("PTS", "PA", "PR", "PRA"),
     "FGA": ("FGA", "FG2A", "FG3A"),
-    "FG2M": ("PTS",),
+    "FG2M": ("PTS", "PA", "PR", "PRA"),
     "FG2A": ("FGA", "FG2A"),
-    "FG3M": ("3PM", "PTS"),
+    "FG3M": ("3PM", "PTS", "PA", "PR", "PRA"),
     "FG3A": ("FGA", "FG3A"),
     "Assists": ("AST", "PA", "RA", "PRA"),
     "Arc3Assists": ("AST", "PA", "RA", "PRA"),
@@ -430,15 +430,15 @@ class _PlayerDiet:
 
 
 def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
-    """The Stat Categories one Defense Sheet row bears on.
+    """The Stat Categories whose Matchup Score reads one Defense Sheet row.
 
     The single mapping from a (Base, slice, stat) identity to the markets it
-    is evidence for.  A shot zone's markets depend on the slice as well as the
+    is evidence for, combos included: a row feeding the PTS part of PRA, PR or
+    PA lists that combo, as ``_combo_score_window`` builds those scores from
+    their parts.  A shot zone's markets depend on the slice as well as the
     statistic -- only a three-point zone's makes bear on 3PM -- so the zone
-    cases are stated before the statistic table.  Public because the Defense
-    Sheet is not the only reader: a Target backtest picks its stat columns
-    from this same mapping, and a second copy could disagree with the
-    ``markets`` a row advertises.
+    cases are stated before the statistic table.  Public so the mapping has
+    one definition; the Defense Sheet payload is its only caller.
     """
 
     if base == "shot_zones":
@@ -446,12 +446,12 @@ def slice_markets(base: str, slice_key: str, stat_key: str) -> tuple[str, ...]:
             if stat_key == "FGA":
                 return ("FGA", "FG2A")
             if stat_key == "FGM":
-                return ("PTS",)
+                return ("PTS", "PA", "PR", "PRA")
         if slice_key in _THREE_POINT_SHOT_ZONES:
             if stat_key == "FGA":
                 return ("FGA", "FG3A")
             if stat_key == "FGM":
-                return ("PTS", "3PM")
+                return ("PTS", "3PM", "PA", "PR", "PRA")
     return _STAT_MARKETS.get(stat_key, ())
 
 
