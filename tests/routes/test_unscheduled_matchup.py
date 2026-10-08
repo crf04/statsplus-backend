@@ -410,6 +410,52 @@ def test_unscheduled_scores_equal_the_game_matchup_scores(tmp_path):
     assert unscheduled.get_json()["league"] == game.get_json()["league"]
 
 
+def test_shot_rows_list_the_combined_markets_on_both_matchups(tmp_path):
+    """The PTS shot rows that feed PA, PR and PRA list them, in this order."""
+
+    client = _fixture_client(tmp_path)
+    expected = {
+        "shot_zones": {
+            "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
+            "In The Paint (Non-RA):FGM": ["PTS", "PA", "PR", "PRA"],
+            "Mid-Range:FGM": ["PTS", "PA", "PR", "PRA"],
+            "Corner 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+            "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
+        },
+        "shot_types": {
+            f"{shot_type}:{stat}": markets
+            for shot_type in ("Catch and Shoot", "Pullups", "Less Than 10 ft")
+            for stat, markets in (
+                ("FG2M", ["PTS", "PA", "PR", "PRA"]),
+                ("FG3M", ["3PM", "PTS", "PA", "PR", "PRA"]),
+            )
+        },
+    }
+
+    game = client.get(f"/api/games/matchup?game_id={GAME_ID}").get_json()
+    unscheduled = client.get(f"{UNSCHEDULED}?player_id=2544&opponent=BOS").get_json()
+
+    for payload in (game, unscheduled):
+        bos = next(team for team in payload["teams"] if team["team_id"] == BOS)
+        for base, rows in expected.items():
+            actual = {
+                row["key"]: row["markets"]
+                for row in bos["defense_sheet"][base]
+                if row["key"] in rows
+            }
+            assert actual == rows
+        # Rows that no combined score reads are unchanged.
+        sheet = bos["defense_sheet"]
+        attempts = {
+            row["key"]: row["markets"]
+            for row in sheet["shot_zones"] + sheet["shot_types"]
+            if row["key"].endswith(("FGA", "FG2A", "FG3A"))
+        }
+        assert attempts
+        for key, markets in attempts.items():
+            assert not set(markets) & {"PA", "PR", "PRA", "PTS"}, key
+
+
 def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
     client = _fixture_client(tmp_path)
 

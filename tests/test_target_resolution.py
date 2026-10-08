@@ -250,7 +250,7 @@ def _team_sheet(offset):
                 {
                     "key": f"{slice_key}:FGM",
                     "label": f"{slice_key} FGM",
-                    "markets": ["PTS", "3PM"],
+                    "markets": ["PTS", "3PM", "PA", "PR", "PRA"],
                     "season": {
                         "allowed_per_48": 9.0 + offset,
                         "percent_vs_league_average": offset * 3,

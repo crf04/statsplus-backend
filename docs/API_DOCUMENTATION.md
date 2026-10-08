@@ -717,6 +717,8 @@ Each league row is `{ key, season, last_15 }`; an available window is
 `{ average_allowed_per_48, sigma }`. Each team row is
 `{ key, label, markets, season, last_15 }`; an available window is
 `{ allowed_per_48, percent_vs_league_average, sigma_deviation, rank }`.
+`markets` lists the Stat Categories whose Matchup Score reads the row, combined
+markets (PA, PR, PRA) included.
 Keys match exactly between team and league rows. Values, population sigma,
 sigma deviation, and rank are backend-derived from the stored 30-team raw fact
 set. `league.defensive_columns` and `teams[].defensive_columns` contain exactly
@@ -766,7 +768,11 @@ only `OPP_REB` excluded for the compatibility carveout; for example, an
 Shot-zone row markets are constrained by the slice as well as the statistic.
 Restricted Area, In The Paint (Non-RA), and Mid-Range FGA rows target only FGA
 and FG2A; Corner 3 and Above the Break 3 FGA rows target only FGA and FG3A.
-Two-point-zone FGM targets PTS, while three-point-zone FGM targets PTS and 3PM.
+Two-point-zone FGM lists `["PTS","PA","PR","PRA"]`, while three-point-zone FGM
+lists `["PTS","3PM","PA","PR","PRA"]`. Shot-type FG2M lists
+`["PTS","PA","PR","PRA"]` and FG3M lists `["3PM","PTS","PA","PR","PRA"]`: the
+PA, PR, and PRA scores build their shot components from the PTS part, which
+reads those rows. Order is part of the contract.
 Those five slices are the complete nonoverlapping shot-zone response vocabulary;
 stored Left/Right Corner 3 children, Backcourt, and unknown duplicate slices are
 not emitted or aggregated. If any of the five aggregate slices is absent, the

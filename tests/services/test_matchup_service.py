@@ -704,16 +704,52 @@ def test_shot_zone_rows_expose_only_governed_compatible_markets():
     }
     assert rows == {
         "Above the Break 3:FGA": ["FGA", "FG3A"],
-        "Above the Break 3:FGM": ["PTS", "3PM"],
+        "Above the Break 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
         "Corner 3:FGA": ["FGA", "FG3A"],
-        "Corner 3:FGM": ["PTS", "3PM"],
+        "Corner 3:FGM": ["PTS", "3PM", "PA", "PR", "PRA"],
         "In The Paint (Non-RA):FGA": ["FGA", "FG2A"],
-        "In The Paint (Non-RA):FGM": ["PTS"],
+        "In The Paint (Non-RA):FGM": ["PTS", "PA", "PR", "PRA"],
         "Mid-Range:FGA": ["FGA", "FG2A"],
-        "Mid-Range:FGM": ["PTS"],
+        "Mid-Range:FGM": ["PTS", "PA", "PR", "PRA"],
         "Restricted Area:FGA": ["FGA", "FG2A"],
-        "Restricted Area:FGM": ["PTS"],
+        "Restricted Area:FGM": ["PTS", "PA", "PR", "PRA"],
     }
+
+
+def test_every_row_feeding_a_combo_score_lists_the_combo():
+    """A combo's score is built from its parts, so a row feeding a part feeds it."""
+
+    from app.services import matchup
+
+    checked = set()
+    for combo, parts in matchup._COMBO_PARTS.items():
+        for part in parts:
+            for base, stat_weights, slice_keys in matchup._PRIMITIVE_SCORE_INPUTS.get(
+                part, ()
+            ):
+                if stat_weights is None:
+                    continue
+                if slice_keys is None:
+                    slice_keys = {
+                        "shot_zones": matchup._GOVERNED_SHOT_ZONES,
+                        "shot_types": frozenset(matchup._SHOT_TYPE_STORED_SLICES),
+                    }.get(base, frozenset({"any slice"}))
+                for slice_key in slice_keys:
+                    for stat_key in stat_weights:
+                        markets = matchup.slice_markets(base, slice_key, stat_key)
+                        assert part in markets and combo in markets, (
+                            combo,
+                            part,
+                            base,
+                            slice_key,
+                            stat_key,
+                            markets,
+                        )
+                        checked.add((combo, base, stat_key))
+    for combo in ("PA", "PR", "PRA"):
+        assert (combo, "shot_zones", "FGM") in checked
+        assert (combo, "shot_types", "FG2M") in checked
+        assert (combo, "shot_types", "FG3M") in checked
 
 
 def test_missing_governed_shot_zone_degrades_only_that_surface():
