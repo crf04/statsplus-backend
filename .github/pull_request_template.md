@@ -18,8 +18,8 @@ exact frontend/backend revisions and commands; explain any omitted check.
 
 For boundary changes, attach desktop and phone screenshots from the local
 frontend connected to production Railway. User-visible changes need labelled
-screenshots from QA or production. Label QA screenshots separately. Include
-video or other action/result evidence where relevant.
+desktop and phone screenshots from QA or production. Label QA screenshots
+separately. Include video or other action/result evidence where relevant.
 
 Paste each verify-statsplus run's `evidence.md`:
 

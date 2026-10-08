@@ -1,5 +1,6 @@
 import unittest
 
+import check_parent_links
 from check_parent_links import parent_closes
 
 
@@ -28,6 +29,32 @@ class ParentClosesTest(unittest.TestCase):
             "fixed the close button for crf04/statsplus#9 users"
         )
         self.assertEqual(parent_closes(text), [])
+
+
+class MainTest(unittest.TestCase):
+    def run_main(self, texts):
+        original = check_parent_links.pull_request_texts
+        check_parent_links.pull_request_texts = lambda: texts
+        try:
+            return check_parent_links.main()
+        finally:
+            check_parent_links.pull_request_texts = original
+
+    def test_a_parent_close_in_any_commit_fails_the_check(self):
+        texts = [
+            ("title", "Add X"),
+            ("body", "Part of crf04/statsplus#5"),
+            ("commits", "Fixes crf04/statsplus#5"),
+        ]
+        self.assertEqual(self.run_main(texts), 1)
+
+    def test_child_links_only_pass_the_check(self):
+        texts = [
+            ("title", "Add X"),
+            ("body", "Closes #9\nPart of crf04/statsplus#5"),
+            ("commits", "Add X"),
+        ]
+        self.assertEqual(self.run_main(texts), 0)
 
 
 if __name__ == "__main__":

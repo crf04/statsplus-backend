@@ -27,18 +27,35 @@ def pull_request_texts() -> list[tuple[str, str]]:
     event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
     pull = event["pull_request"]
     commits = subprocess.run(
-        ["gh", "api", "--paginate", f"{pull['url']}/commits", "--jq", ".[].commit.message"],
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"{pull['url']}/commits",
+            "--jq",
+            ".[].commit.message",
+        ],
         check=True,
         capture_output=True,
         text=True,
     ).stdout
-    return [("title", pull["title"]), ("body", pull.get("body") or ""), ("commits", commits)]
+    return [
+        ("title", pull["title"]),
+        ("body", pull.get("body") or ""),
+        ("commits", commits),
+    ]
 
 
 def main() -> int:
-    found = [(where, hit) for where, text in pull_request_texts() for hit in parent_closes(text)]
+    found = [
+        (where, hit)
+        for where, text in pull_request_texts()
+        for hit in parent_closes(text)
+    ]
     for where, hit in found:
-        print(f"::error::PR {where} says '{hit}'. Use 'Part of crf04/statsplus#N' for the parent.")
+        print(
+            f"::error::PR {where} says '{hit}'. Use 'Part of crf04/statsplus#N' for the parent."
+        )
     return 1 if found else 0
 
 
