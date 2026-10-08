@@ -18,8 +18,9 @@ jobs:
           persist-credentials: false
 
       # A closing keyword aimed at crf04/statsplus would close the coordination
-      # parent when this child merges; see docs/agents/issue-tracker.md there.
-      - name: No closing keyword on the coordination parent
+      # parent when this child merges, and a parent link with no issue here
+      # leaves the child issue open; see docs/agents/issue-tracker.md there.
+      - name: Close the child issue, never the coordination parent
         working-directory: .github/scripts
         env:
           GH_TOKEN: ${{ github.token }}
