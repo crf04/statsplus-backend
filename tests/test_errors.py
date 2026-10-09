@@ -1157,3 +1157,29 @@ def test_error_details_carry_safe_structured_facts():
             },
         }
     }
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "level"),
+    [
+        ("GET", "/invalid-input", "WARNING"),
+        ("GET", "/missing-resource", "WARNING"),
+        ("GET", "/no-such-route", "WARNING"),
+        # 405 has no AppError of its own; its level follows the HTTP status.
+        ("POST", "/invalid-input", "WARNING"),
+        ("GET", "/provider-unavailable", "ERROR"),
+        ("GET", "/unexpected", "ERROR"),
+    ],
+)
+def test_refusals_log_as_warnings_and_server_failures_as_errors(
+    error_app: Flask,
+    caplog: pytest.LogCaptureFixture,
+    method: str,
+    path: str,
+    level: str,
+) -> None:
+    """A 4xx is the caller's to fix; only a 5xx is a failure worth an alert."""
+
+    caplog.set_level(logging.INFO, logger="app.errors")
+    error_app.test_client().open(path, method=method)
+    assert [r.levelname for r in caplog.records if r.name == "app.errors"] == [level]
