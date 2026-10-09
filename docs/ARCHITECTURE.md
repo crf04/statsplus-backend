@@ -197,7 +197,13 @@ inbound `X-Request-ID` only when it matches `^[A-Za-z0-9._:-]{1,128}$` and
 otherwise generates a fresh UUID; the app binds it to `flask.g.request_id` in a
 `before_request` and echoes it on the `X-Request-ID` response header. The same
 ID flows into provider telemetry events, so a log, a provider event, and a
-response header share one correlation key.
+response header share one correlation key. CORS responses add
+`Access-Control-Expose-Headers: X-Request-ID` so the browser can read it.
+
+Application logs are one JSON object per line on stdout (Railway tags stderr
+as `error`), configured by `app.utils.json_logging`: `level` (lowercase),
+`logger`, `message`, `request_id` inside a request context, and `exception`
+(the full traceback, newlines escaped) when the record has `exc_info`.
 
 `before_request` also records a `perf_counter` start and `after_request` emits
 one INFO lifecycle line for every route, including handled error responses:

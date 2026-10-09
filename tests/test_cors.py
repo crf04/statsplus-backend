@@ -103,3 +103,14 @@ def test_production_accepts_a_configured_https_origin_allowlist():
     )
 
     assert settings.cors.allowed_origins == ("https://stats.example.com",)
+
+
+def test_cors_response_exposes_request_id_header(client):
+    response = client.get(
+        "/api/players",
+        headers={"Origin": "http://localhost:3000", "X-Request-ID": "req-abc-123"},
+    )
+
+    assert response.headers["X-Request-ID"] == "req-abc-123"
+    exposed = response.headers["Access-Control-Expose-Headers"]
+    assert "X-Request-ID" in [name.strip() for name in exposed.split(",")]
