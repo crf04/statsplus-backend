@@ -2282,8 +2282,9 @@ Beyond the in-process caches, a saved-Target Backtest is also served from one
 shared Redis result-cache entry (#279). Before computing anything, the flow
 asks the publication reader's pointer-only `generation()` for the five
 streams' `(stream_key, publication_id, fence, version)` labels, builds
-`targets:backtest:v1:<sha256>` over canonical JSON of those labels plus the
-Target's qualifiers in stored `position` order (raw `repr(float(...))`
+`targets:backtest:v2:<sha256>` over canonical JSON of those labels plus the
+Target's opponent (the Backtest reads only that opponent's games), its
+qualifiers in stored `position` order (raw `repr(float(...))`
 thresholds, not the six-decimal signature), its conditions, the settings
 floors that change the computation, and `TARGET_BACKTEST_CACHE_SCHEMA` — so
 `note`/`title` edits hit, any five-stream advance misses, and two users with

@@ -177,10 +177,10 @@ PROXY_NOTE = (
     "three-point attempts rather than as corner threes."
 )
 
-#: Bump whenever the backtest's computation or its stat catalogue changes
-#: (#279): a different schema must never be served from a cached value the
+#: Bump whenever the backtest's computation, its stat catalogue, or the key
+#: body changes (#279; v2 added the opponent, statsplus#123): a different schema must never be served from a cached value the
 #: older code shape wrote, and the constant is part of every key.
-TARGET_BACKTEST_CACHE_SCHEMA = 1
+TARGET_BACKTEST_CACHE_SCHEMA = 2
 
 #: Raw threshold precision in the key: the six-decimal ``qualifier_signature``
 #: folds 0.4000001 and 0.4000004 onto one line, but those two Targets are
@@ -222,19 +222,23 @@ def backtest_cache_key(
     season: str,
     settings: RuntimeSettings,
 ) -> str:
-    """Build ``targets:backtest:v1:<sha256>`` over the canonical key body.
+    """Build ``targets:backtest:v<schema>:<sha256>`` over the canonical key body.
 
     Canonical JSON: sorted object keys, arrays in stored ``position`` order,
     thresholds as ``repr(float(...))`` so raw precision separates two
     qualifiers the wire signature would fold together.  ``note``, ``title``,
     ``stat_preferences``, timestamps, and ``firebase_uid`` are excluded on
     purpose: two users with identical definitions share one entry, and
-    ownership is enforced by the Target load before any lookup.
+    ownership is enforced by the Target load before any lookup.  The
+    ``opponent`` is in the body because the Backtest reads only that
+    opponent's games: two Targets differing only in opponent are different
+    questions (statsplus#123).
     """
 
     body = {
         "schema": TARGET_BACKTEST_CACHE_SCHEMA,
         "season": season,
+        "opponent": target["opponent"],
         "generation": [list(entry) for entry in generation],
         "qualifiers": [
             {
