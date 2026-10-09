@@ -142,19 +142,27 @@ def _log_application_error(
     *,
     http_status: int | None = None,
 ) -> None:
-    """Emit one sanitized diagnostic event for an application error."""
+    """Emit one sanitized diagnostic event for an application error.
+
+    A refusal (4xx) is logged as a warning: the caller can fix it, and it is
+    not a failure worth an alert. Only a server failure (5xx) is an error.
+    """
 
     detail = _sanitize_diagnostic_detail(error.detail)
+    status = http_status if http_status is not None else error.status_code
+    level = logging.ERROR if status >= 500 else logging.WARNING
     if http_status is not None:
         if detail:
-            logger.error(
+            logger.log(
+                level,
                 "HTTP error status=%s code=%s detail=%s",
                 http_status,
                 error.code,
                 detail,
             )
         else:
-            logger.error(
+            logger.log(
+                level,
                 "HTTP error status=%s code=%s",
                 http_status,
                 error.code,
@@ -162,14 +170,14 @@ def _log_application_error(
         return
 
     if detail:
-        logger.error(
+        logger.log(
+            level,
             "Application error code=%s detail=%s",
             error.code,
             detail,
         )
     else:
-        logger.error("Application error code=%s", error.code)
-
+        logger.log(level, "Application error code=%s", error.code)
 
 class AppError(Exception):
     """Base class for expected application failures.
