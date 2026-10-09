@@ -340,3 +340,27 @@ def test_an_end_date_difference_is_a_disagreement():
         "date_filter": {"nlp": None, "llm": "2026-03-01"},
         "date_to": {"nlp": "2026-03-01", "llm": None},
     }
+
+
+def _json_log_line(message: str) -> str:
+    from app.utils.json_logging import JsonFormatter
+
+    record = logging.LogRecord(
+        "app.services.nl_shadow", logging.INFO, __file__, 1, message, None, None
+    )
+    return JsonFormatter().format(record)
+
+
+def test_summarizer_reads_json_log_lines_and_legacy_lines():
+    payload = json.dumps({"outcome": "agree", "latency_ms": 12})
+    json_line = _json_log_line(f"nl_shadow {payload}")
+    legacy_line = f"2026-10-09 INFO app.services.nl_shadow nl_shadow {payload}"
+
+    assert json_line.startswith('{"level": "info"')
+    assert list(parse_records([json_line])) == [{"outcome": "agree", "latency_ms": 12}]
+    assert list(parse_records([legacy_line])) == [
+        {"outcome": "agree", "latency_ms": 12}
+    ]
+    summary = summarize(parse_records([json_line, legacy_line, "unrelated"]))
+    assert summary["comparisons"] == 2
+    assert summary["outcomes"] == {"agree": 2}
