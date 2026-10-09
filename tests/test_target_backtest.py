@@ -2216,6 +2216,7 @@ def _frozen_generation():
 def _key(
     generation,
     *,
+    opponent="OKC",
     qualifiers=(CORNER_THREE,),
     conditions=None,
     season=SEASON,
@@ -2225,6 +2226,7 @@ def _key(
 
     target = {
         "id": 1,
+        "opponent": opponent,
         "qualifiers": list(qualifiers),
         "conditions": conditions,
     }
@@ -2262,7 +2264,7 @@ def test_a_miss_files_its_field_under_the_generation_key(
     ]
     assert len(client.sets) == 1
     cache_key, ttl = client.sets[0]
-    assert cache_key.startswith("targets:backtest:v1:")
+    assert cache_key.startswith("targets:backtest:v2:")
     assert cache_key in client.gets
     assert ttl == 86400
     evidence = json.loads(
@@ -2402,9 +2404,67 @@ def test_a_matchup_volume_floor_alone_changes_the_key():
     )
 
 
+def test_the_opponent_alone_changes_the_key():
+    assert _key(_frozen_generation(), opponent="ORL") != _key(
+        _frozen_generation(), opponent="NYK"
+    )
+
+
+class OpponentLogs(FakeLogs):
+    """FakeLogs whose opponent read returns only that opponent's games."""
+
+    def list_opponent_rows(self, season, opponent_team_id, *, publication_snapshot=None):
+        rows = super().list_opponent_rows(
+            season, opponent_team_id, publication_snapshot=publication_snapshot
+        )
+        return tuple(row for row in rows if row.opponent_team_id == opponent_team_id)
+
+
+def test_two_targets_differing_only_in_opponent_each_get_their_own_cached_rows(
+    targets, build_backtest
+):
+    target_okc = _create(targets, opponent="OKC")
+    target_bos = _create(targets, opponent="BOS")
+    reader = GenerationSnapshotReader(_available_reads(), _frozen_generation())
+    ticks = iter(float(i) for i in range(10_000))
+    service = build_backtest(
+        logs=OpponentLogs(
+            rows=(
+                _row(LEBRON, game_id="L1", game_date=date(2026, 1, 16)),
+                _row(LEBRON, game_id="L2", game_date=date(2025, 11, 3)),
+                _row(
+                    TATUM, name="Jayson Tatum", game_id="T1",
+                    game_date=date(2026, 1, 10), team_id=LAL, team_tricode="LAL",
+                    opponent_team_id=BOS, opponent_team_tricode="BOS",
+                ),
+                _row(
+                    TATUM, name="Jayson Tatum", game_id="T2",
+                    game_date=date(2025, 12, 1), team_id=LAL, team_tricode="LAL",
+                    opponent_team_id=BOS, opponent_team_tricode="BOS",
+                ),
+            )
+        ),
+        diets=FakeDiets(
+            zones={LEBRON: _zone_diet(0.42, 0.2), TATUM: _zone_diet(0.42, 0.2)}
+        ),
+        publication_reader=reader,
+        redis_client=FakeRedis(),
+        cache_clock=lambda: next(ticks),
+    )
+
+    def players(target):
+        payload, state = service.backtest(OWNER, target["id"])
+        return [p["canonical_id"] for p in payload["players"]], state
+
+    assert players(target_okc) == ([LEBRON], "miss")
+    assert players(target_bos) == ([TATUM], "miss")
+    assert players(target_okc) == ([LEBRON], "hit")
+    assert players(target_bos) == ([TATUM], "hit")
+
+
 def test_a_schema_bump_changes_the_key(monkeypatch):
     original = backtest_cache_key(
-        {"id": 1, "qualifiers": [CORNER_THREE], "conditions": None},
+        {"id": 1, "opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": None},
         _frozen_generation(),
         season=SEASON,
         settings=RuntimeSettings(
@@ -2414,10 +2474,10 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 2
+        "app.services.target_backtest.TARGET_BACKTEST_CACHE_SCHEMA", 3
     )
     bumped = backtest_cache_key(
-        {"id": 1, "qualifiers": [CORNER_THREE], "conditions": None},
+        {"id": 1, "opponent": "OKC", "qualifiers": [CORNER_THREE], "conditions": None},
         _frozen_generation(),
         season=SEASON,
         settings=RuntimeSettings(
@@ -2429,8 +2489,8 @@ def test_a_schema_bump_changes_the_key(monkeypatch):
     assert bumped != original
     # One version knob: the schema constant is the namespace, so bumping it
     # is not just a payload change but a different key prefix entirely.
-    assert bumped.startswith("targets:backtest:v2:")
-    assert not bumped.startswith("targets:backtest:v1:")
+    assert original.startswith("targets:backtest:v2:")
+    assert bumped.startswith("targets:backtest:v3:")
 
 
 def test_a_note_only_edit_still_hits_with_the_new_note(
