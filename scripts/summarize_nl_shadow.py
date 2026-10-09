@@ -3,6 +3,7 @@
 Reads log text on stdin and aggregates every ``nl_shadow {...}`` line written by
 ``app.services.nl_shadow``: how often the confident NLP parse and the LLM
 agree, which Filter Set fields they disagree on, and example disagreements.
+Lines may be JSON log objects (the message is used) or plain text.
 Surrounding log prefixes (timestamps, levels, Railway decoration) are ignored.
 
     railway logs | python scripts/summarize_nl_shadow.py
@@ -19,9 +20,27 @@ from collections import Counter
 MARKER = "nl_shadow {"
 
 
+def _unwrap_json_envelope(line: str) -> str:
+    """Return the ``message`` of a JSON log line, or ``line`` if it is plain text.
+
+    Application logs are JSON objects (``app.utils.json_logging``) while older
+    exports are plain text, so both are accepted.
+    """
+    stripped = line.strip()
+    if stripped.startswith("{"):
+        try:
+            envelope = json.loads(stripped)
+        except json.JSONDecodeError:
+            return line
+        if isinstance(envelope, dict) and isinstance(envelope.get("message"), str):
+            return envelope["message"]
+    return line
+
+
 def parse_records(lines):
     """Yield each shadow comparison record found in ``lines``."""
     for line in lines:
+        line = _unwrap_json_envelope(line)
         start = line.find(MARKER)
         if start < 0:
             continue

@@ -17,6 +17,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     from flask import Flask
     from flask_cors import CORS
     from app.config.settings import RuntimeSettings, load_settings, set_runtime_settings
+    from app.utils.json_logging import configure_json_logging
+    from app.utils.request_id import HEADER_NAME as REQUEST_ID_HEADER
 
     load_dotenv()
 
@@ -27,7 +29,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     else:
         settings = load_settings(overrides=config_overrides)
     set_runtime_settings(settings)
-    logging.basicConfig(level=settings.log_level)
+    configure_json_logging(settings.log_level)
 
     app = Flask(__name__)
     # Flask 3 ignores the JSON_SORT_KEYS config key; the provider decides.
@@ -48,7 +50,12 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     if config_overrides:
         app.config.update(config_overrides)
 
-    CORS(app, origins=settings.cors.allowed_origins, always_send=False)
+    CORS(
+        app,
+        origins=settings.cors.allowed_origins,
+        always_send=False,
+        expose_headers=[REQUEST_ID_HEADER],
+    )
 
     _register_request_headers(app)
     _initialize_dependencies(app)

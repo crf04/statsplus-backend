@@ -35,7 +35,9 @@ Every response carries an `X-Request-ID`. If the request sends a safe inbound
 echoed back and used as the correlation ID; otherwise the server generates one.
 Provider-telemetry events raised during the request carry the same ID, so a
 response header, a duration, and a provider event share one key.
-`X-Request-ID` is always set, including on error responses.
+`X-Request-ID` is always set, including on error responses. CORS responses
+send `Access-Control-Expose-Headers: X-Request-ID`, so browser code on an
+allowed origin can read it.
 
 ## Error responses
 
