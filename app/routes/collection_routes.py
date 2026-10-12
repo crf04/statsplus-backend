@@ -65,8 +65,33 @@ def _read_limited_body(limit: int) -> bytes:
     return bytes(output)
 
 
-def _control_error(error: Exception) -> AppError:
+#: Refusals the season cutover routes name in ``error.details.reason`` so an
+#: operator can tell them apart.  A closed vocabulary: any other reason keeps
+#: the generic body.
+CUTOVER_PUBLIC_REASONS = frozenset({
+    "cutover_player_game_logs_candidate_required",
+    "cutover_authority_mismatch",
+    "cutover_superseded",
+    "cutover_not_found",
+    "invalid_season",
+    "ledger_provenance_manifest_mismatch",
+    "ledger_provenance_not_accepted",
+    "ledger_provenance_required",
+    "ledger_provenance_scope_mismatch",
+    "publication_candidate_invalid",
+    "publication_checksum_mismatch",
+    "publication_game_set_mismatch",
+    "publication_governance_unavailable",
+    "reason_required",
+    "stale_composition",
+})
+
+
+def _control_error(
+    error: Exception, *, public_reasons: frozenset[str] = frozenset(),
+) -> AppError:
     reason = getattr(error, "reason", "invalid_input")
+    details = {"reason": reason} if reason in public_reasons else None
     if reason in {
         "identity_revoked", "invalid_identity_secret", "invalid_token", "token_replayed",
     }:
@@ -86,7 +111,10 @@ def _control_error(error: Exception) -> AppError:
         "composition_not_found", "reconciliation_not_found",
         "credential_delivery_unavailable",
     }:
-        return ResourceNotFoundError("The collection resource was not found.", detail=reason)
+        return ResourceNotFoundError(
+            "The collection resource was not found.", detail=reason,
+            public_details=details,
+        )
     if reason == "duplicate_active_operation":
         # The API contract already publishes this exact meaning as its own
         # 409 code, so a caller learns "one is already in flight" from the
@@ -108,8 +136,11 @@ def _control_error(error: Exception) -> AppError:
         # A cutover revert after a later pointer move.
         "cutover_superseded",
     }:
-        return ConflictError(detail=reason)
-    return InvalidInputError("The collection request could not be completed.", detail=reason)
+        return ConflictError(detail=reason, public_details=details)
+    return InvalidInputError(
+        "The collection request could not be completed.", detail=reason,
+        public_details=details,
+    )
 
 
 @collection_bp.post("/collector/token")
@@ -537,7 +568,9 @@ def cutover_season(season: str):
             expected_fences=expected_fences,
         )
     except ControlPlaneError as error:
-        raise _control_error(error) from error
+        raise _control_error(
+            error, public_reasons=CUTOVER_PUBLIC_REASONS,
+        ) from error
     if dry_run:
         return jsonify(result.to_dict()), 200
     return jsonify({"job_id": result.job_id, **result.resource.to_dict()}), 202
@@ -556,20 +589,14 @@ def revert_season_cutover(season: str, cutover_id: str):
             season, cutover_id, actor=_actor(), reason=reason,
         )
     except ControlPlaneError as error:
-        raise _control_error(error) from error
+        raise _control_error(
+            error, public_reasons=CUTOVER_PUBLIC_REASONS,
+        ) from error
     return jsonify({
         "job_id": result.job_id,
         "season": season,
         "cutover_id": cutover_id,
-        "restored": [
-            {
-                "stream_key": version.stream_key,
-                "publication_id": version.publication_id,
-                "season": version.season,
-                "fence": int(version.fence),
-            }
-            for version in result.resource
-        ],
+        "restored": [dict(item) for item in result.resource],
     }), 202
 
 

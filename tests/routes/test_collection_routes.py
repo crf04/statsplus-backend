@@ -911,6 +911,9 @@ def test_season_cutover_route_plans_then_cuts_over(
     # Nothing is held any more: the refusal is a 400 and moves nothing.
     assert again.status_code == 400
     assert again.json["error"]["code"] == "invalid_input"
+    assert again.json["error"]["details"] == {
+        "reason": "cutover_player_game_logs_candidate_required",
+    }
     assert {key: value[1] for key, value in pointers(engine).items()} == {
         "player_game_logs": "2026-27",
         "traditional_opponent_season": "2026-27",
@@ -949,9 +952,11 @@ def test_season_cutover_revert_route_restores_then_conflicts(
     twice = client.post(path, json={"reason": "opened too early"}, headers=headers)
     assert twice.status_code == 409
     assert twice.json["error"]["code"] == "operation_conflict"
+    assert twice.json["error"]["details"] == {"reason": "cutover_superseded"}
     unknown = client.post(
         "/api/admin/collection/seasons/2026-27/cutover/unknown/revert",
         json={"reason": "opened too early"}, headers=headers,
     )
     assert unknown.status_code == 404
     assert unknown.json["error"]["code"] == "resource_not_found"
+    assert unknown.json["error"]["details"] == {"reason": "cutover_not_found"}
