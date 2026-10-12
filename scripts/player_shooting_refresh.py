@@ -12,7 +12,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import create_engine
-from app.services.player_shooting_refresh import PlayerShootingRefresh
+from app.services.player_shooting_refresh import PlayerShootingRefresh, active_manifest_season
 from app.utils.db import _normalize_database_url, is_demo_database_url
 
 
@@ -34,17 +34,24 @@ def _composer(engine):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("season")
+    parser.add_argument(
+        "season", nargs="?",
+        help="season to tick; defaults to the active collection manifest's season",
+    )
     args = parser.parse_args(argv)
     database_url = os.environ.get("DATABASE_URL", "")
     if not database_url or is_demo_database_url(database_url):
         parser.error("DATABASE_URL must identify a writable application database")
     engine = create_engine(_normalize_database_url(database_url))
     try:
-        result = PlayerShootingRefresh(
-            engine, composer_factory=lambda: _composer(engine),
-            clock=lambda: datetime.now(timezone.utc),
-        ).tick(args.season)
+        season = args.season or active_manifest_season(engine)
+        if season is None:
+            result = {"state": "no_active_manifest", "composed_jobs": 0}
+        else:
+            result = PlayerShootingRefresh(
+                engine, composer_factory=lambda: _composer(engine),
+                clock=lambda: datetime.now(timezone.utc),
+            ).tick(season)
         print(json.dumps(result, sort_keys=True))
         return 0
     finally:

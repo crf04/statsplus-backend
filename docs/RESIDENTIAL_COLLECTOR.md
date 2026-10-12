@@ -248,12 +248,19 @@ Keep old release directories until the rehearsal and rollback drill pass.
 
 ## Daily player shooting refresh
 
-`python scripts/player_shooting_refresh.py 2025-26` is the bounded hosted
+`python scripts/player_shooting_refresh.py [season]` is the bounded hosted
 control-plane tick for the enabled player shooting streams, `grouped_shot_types`
 (Shooting Type) and `exact_shot_zones` (Zone Shooting). Configure its
 writable database through `DATABASE_URL`; the command takes no database URL or
 credentials in its arguments. Run it every five minutes (`*/5 * * * *`) with
 the deployed application's environment and migration pre-deploy gate.
+
+The season argument is optional. Omitted, the tick follows the season of the
+newest active collection manifest (`collection_manifests.status = 'active'`), so
+rolling over needs no start-command edit; with no active manifest it prints
+`{"composed_jobs": 0, "state": "no_active_manifest"}` and exits 0. The start
+command is `python scripts/player_shooting_refresh.py`. An explicit season
+(for example `2025-26`) still ticks exactly that season.
 
 The tick requires an already-active Regular Season and at least one explicitly
 enabled stream. Each stream is scheduled on its own `enabled` flag, so one may
