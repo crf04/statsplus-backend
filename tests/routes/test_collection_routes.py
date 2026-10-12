@@ -804,3 +804,154 @@ def test_repair_group_promotion_conflicts_are_stable(client, app):
     )
     assert absent.status_code == 404
     assert absent.json["error"]["code"] == "resource_not_found"
+
+
+# --- Season cutover (#355) ---------------------------------------------------
+
+
+def _install_cutover_world(app, tmp_path):
+    """Bind the admin routes to a control plane with 2026-27 held."""
+
+    from app.services.collection_control import CollectionOperationsService
+    from tests.support.season_cutover import (
+        NOW, PLAYER_LOGS, SEASON_STREAM, compose_new, seed_world,
+    )
+
+    dependencies = _install_collection_services(app)
+    engine, publications = seed_world(tmp_path)
+    held = {
+        stream_key: compose_new(publications, stream_key).publication_id
+        for stream_key in (PLAYER_LOGS, SEASON_STREAM)
+    }
+    dependencies.collection_operations = CollectionOperationsService(
+        engine, publication_service=publications, clock=lambda: NOW,
+    )
+    return engine, held
+
+
+@pytest.mark.parametrize("path", [
+    "/api/admin/collection/seasons/2026-27/cutover",
+    "/api/admin/collection/seasons/2026-27/cutover/job-1/revert",
+])
+def test_season_cutover_routes_are_admin_only(
+    client, app, monkeypatch, authenticate, path,
+):
+    dependencies = _install_collection_services(app)
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+    body = {"reason": "open 2026-27", "dry_run": True}
+
+    unauthenticated = client.post(path, json=body)
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json["error"]["code"] == "authentication_required"
+
+    forbidden = client.post(
+        path, json=body, headers=authenticate({"admin": False}),
+    )
+    assert forbidden.status_code == 403
+    assert forbidden.json["error"]["code"] == "forbidden"
+    assert dependencies.collection_operations.cutover_season.call_count == 0
+    assert dependencies.collection_operations.revert_season_cutover.call_count == 0
+
+
+def test_season_cutover_route_plans_then_cuts_over(
+    client, app, tmp_path, authenticate,
+):
+    from tests.support.season_cutover import pointers
+
+    engine, held = _install_cutover_world(app, tmp_path)
+    headers = authenticate({"admin": True})
+    before = pointers(engine)
+
+    planned = client.post(
+        "/api/admin/collection/seasons/2026-27/cutover",
+        json={"dry_run": True}, headers=headers,
+    )
+    assert planned.status_code == 200, planned.json
+    assert planned.json["refusal"] is None
+    assert [
+        (row["stream_key"], row["candidate_publication_id"], row["fence"])
+        for row in planned.json["streams"]
+    ] == [
+        ("player_game_logs", held["player_game_logs"], 1),
+        ("traditional_opponent_l15", None, 1),
+        ("traditional_opponent_season", held["traditional_opponent_season"], 1),
+    ]
+    assert pointers(engine) == before
+
+    cut = client.post(
+        "/api/admin/collection/seasons/2026-27/cutover",
+        json={
+            "reason": "open 2026-27",
+            "expected_fences": {
+                row["stream_key"]: row["fence"] for row in planned.json["streams"]
+            },
+        },
+        headers=headers,
+    )
+    assert cut.status_code == 202, cut.json
+    assert [
+        (item["stream_key"], item["to_publication_id"], item["fence"])
+        for item in cut.json["moved"]
+    ] == [
+        ("player_game_logs", held["player_game_logs"], 2),
+        ("traditional_opponent_season", held["traditional_opponent_season"], 2),
+    ]
+    assert {key: value[1] for key, value in pointers(engine).items()} == {
+        "player_game_logs": "2026-27",
+        "traditional_opponent_season": "2026-27",
+        "traditional_opponent_l15": "2025-26",
+    }
+
+    again = client.post(
+        "/api/admin/collection/seasons/2026-27/cutover",
+        json={"reason": "open 2026-27 twice"}, headers=headers,
+    )
+    # Nothing is held any more: the refusal is a 400 and moves nothing.
+    assert again.status_code == 400
+    assert again.json["error"]["code"] == "invalid_input"
+    assert {key: value[1] for key, value in pointers(engine).items()} == {
+        "player_game_logs": "2026-27",
+        "traditional_opponent_season": "2026-27",
+        "traditional_opponent_l15": "2025-26",
+    }
+
+
+def test_season_cutover_revert_route_restores_then_conflicts(
+    client, app, tmp_path, authenticate,
+):
+    from tests.support.season_cutover import pointers
+
+    engine, _held = _install_cutover_world(app, tmp_path)
+    headers = authenticate({"admin": True})
+    cut = client.post(
+        "/api/admin/collection/seasons/2026-27/cutover",
+        json={"reason": "open 2026-27"}, headers=headers,
+    )
+    path = f"/api/admin/collection/seasons/2026-27/cutover/{cut.json['job_id']}/revert"
+
+    reverted = client.post(path, json={"reason": "opened too early"}, headers=headers)
+
+    assert reverted.status_code == 202, reverted.json
+    assert [
+        (item["stream_key"], item["season"], item["fence"])
+        for item in reverted.json["restored"]
+    ] == [
+        ("player_game_logs", "2025-26", 3),
+        ("traditional_opponent_season", "2025-26", 3),
+    ]
+    assert {key: value[1] for key, value in pointers(engine).items()} == {
+        "player_game_logs": "2025-26",
+        "traditional_opponent_season": "2025-26",
+        "traditional_opponent_l15": "2025-26",
+    }
+    twice = client.post(path, json={"reason": "opened too early"}, headers=headers)
+    assert twice.status_code == 409
+    assert twice.json["error"]["code"] == "operation_conflict"
+    unknown = client.post(
+        "/api/admin/collection/seasons/2026-27/cutover/unknown/revert",
+        json={"reason": "opened too early"}, headers=headers,
+    )
+    assert unknown.status_code == 404
+    assert unknown.json["error"]["code"] == "resource_not_found"

@@ -105,6 +105,8 @@ def _control_error(error: Exception) -> AppError:
         # request that would split a coupled family.
         "stale_publication_family", "rebuild_lease_held",
         "publication_family_coupled",
+        # A cutover revert after a later pointer move.
+        "cutover_superseded",
     }:
         return ConflictError(detail=reason)
     return InvalidInputError("The collection request could not be completed.", detail=reason)
@@ -506,6 +508,69 @@ def activate_season(season: str):
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": result.job_id, "season": row.season, "status": row.status, "activated_at": row.activated_at.isoformat()}), 202
+
+
+@collection_bp.post("/admin/collection/seasons/<season>/cutover")
+@require_admin
+@route_error_boundary("Failed to cut over the published season.")
+def cutover_season(season: str):
+    """Plan (``dry_run``) or run the one-transaction season cutover."""
+    body = _body()
+    reason = str(body.get("reason", "")).strip()
+    dry_run = body.get("dry_run", False)
+    expected_fences = body.get("expected_fences")
+    if not isinstance(dry_run, bool):
+        raise InvalidInputError("dry_run must be a boolean.")
+    if expected_fences is not None and (
+        not isinstance(expected_fences, dict)
+        or any(
+            isinstance(fence, bool) or not isinstance(fence, int)
+            for fence in expected_fences.values()
+        )
+    ):
+        raise InvalidInputError("expected_fences must map stream keys to integer fences.")
+    if not dry_run and len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").cutover_season(
+            season, actor=_actor(), reason=reason, dry_run=dry_run,
+            expected_fences=expected_fences,
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    if dry_run:
+        return jsonify(result.to_dict()), 200
+    return jsonify({"job_id": result.job_id, **result.resource.to_dict()}), 202
+
+
+@collection_bp.post("/admin/collection/seasons/<season>/cutover/<cutover_id>/revert")
+@require_admin
+@route_error_boundary("Failed to revert the season cutover.")
+def revert_season_cutover(season: str, cutover_id: str):
+    body = _body()
+    reason = str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").revert_season_cutover(
+            season, cutover_id, actor=_actor(), reason=reason,
+        )
+    except ControlPlaneError as error:
+        raise _control_error(error) from error
+    return jsonify({
+        "job_id": result.job_id,
+        "season": season,
+        "cutover_id": cutover_id,
+        "restored": [
+            {
+                "stream_key": version.stream_key,
+                "publication_id": version.publication_id,
+                "season": version.season,
+                "fence": int(version.fence),
+            }
+            for version in result.resource
+        ],
+    }), 202
 
 
 @collection_bp.post("/admin/collection/streams/<path:stream_key>/rollback")
