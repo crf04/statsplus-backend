@@ -21,6 +21,7 @@ from app.services.target_resolution import TargetResolutionService
 from tests import test_target_backtest as bt
 from tests import test_target_preview as preview_tests
 from tests import test_target_resolution as res
+from tests.support.season_rollover import cut_over_if_held
 
 
 PUBLISHED = "2025-26"
@@ -633,11 +634,12 @@ def test_season_minutes_stay_consistent_when_a_season_activates_mid_request(tmp_
             if not self.activated:
                 self.activated = True
                 later = at + timedelta(days=22)
-                PublicationService(engine, clock=lambda: later).compose(
+                publications = PublicationService(engine, clock=lambda: later)
+                cut_over_if_held(publications, publications.compose(
                     "player_game_logs", season=CALENDAR, cutoff=later,
                     payload={"rows": _game("0022600001", "2026-10-21", 1641705, CALENDAR)},
                     expected_fence=first.fence,
-                )
+                ))
             return captured
 
     reader = DatabaseFirstPublicationReader(engine)

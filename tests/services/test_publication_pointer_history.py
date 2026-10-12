@@ -14,6 +14,7 @@ from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.research_season import focal_game_rows
 from app.services.statistic_catalog import StatisticCatalog
 from tests.services.test_matchup_selection_service import _log_row
+from tests.support.season_rollover import cut_over_if_held
 from tests.support.pointer_history import (
     cite_ledger_source, pointer_history, retirements, revoked_fences,
 )
@@ -41,9 +42,9 @@ def lifecycle(tmp_path):
 
 def _compose(publications, season, *, points=10, cutoff=CUTOFF, **kwargs):
     row = {**_log_row(game_id="0022500001", game_date="2026-01-02", minutes=30.0, points=points), "season": season}
-    return publications.compose(
+    return cut_over_if_held(publications, publications.compose(
         STREAM, season=season, cutoff=cutoff, payload={"rows": [row]}, **kwargs
-    )
+    ))
 
 
 def test_each_compose_appends_one_history_row_for_the_publication_it_activated(

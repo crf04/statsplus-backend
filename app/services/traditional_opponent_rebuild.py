@@ -982,14 +982,22 @@ class TraditionalOpponentRebuildService:
         exactly one format, so any pair that gets this far agrees on it.  A
         future compatibility window -- two supported formats at once -- is what
         would make an explicit agreement check meaningful again.
+
+        A season cutover splits the family on purpose: a window with no
+        candidate of the new season stays on the old one until its first
+        composes.  Such a window is never served against the new one (readers
+        report it ``window_not_ready``), so only the windows on the newest
+        season must form one generation.
         """
 
-        seasons, cutoffs, authorities = set(), set(), set()
+        newest = max(version.season for _stream_key, version in targets)
+        cutoffs, authorities = set(), set()
         for stream_key, version in targets:
-            seasons.add(version.season)
+            if version.season != newest:
+                continue
             cutoffs.add(_aware(version.cutoff))
             authorities.add(self._authority_of(session, stream_key, version))
-        if len(seasons) != 1 or len(cutoffs) != 1 or len(authorities) != 1:
+        if len(cutoffs) != 1 or len(authorities) != 1:
             raise ControlPlaneError("publication_family_authority_mismatch")
 
     def _authority_of(self, session, stream_key: str, version):

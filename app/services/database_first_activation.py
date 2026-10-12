@@ -1608,10 +1608,17 @@ class DatabaseFirstPublicationReader:
             stream.freshness_rule, retrieved_at, now=now
         )
         if season is not None and publication.season != season:
+            # A stream still on an earlier season than the one being read is
+            # waiting for its first composition in that season (an L15 window
+            # after a season cutover); a later one is a true mismatch.
             return self._missing(
                 stream_key,
                 "missing",
-                reason="publication_season_mismatch",
+                reason=(
+                    "window_not_ready"
+                    if publication.season < season
+                    else "publication_season_mismatch"
+                ),
                 fence=pointer.fence,
                 publication_id=publication.publication_id,
                 season=publication.season,

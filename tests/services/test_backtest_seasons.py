@@ -29,7 +29,11 @@ from app.domain.team_matchup_taxonomy import PLAY_TYPES, SHOT_TYPE_SLICES
 from app.errors import InvalidInputError, SeasonUnavailableError
 from app.migrations import run_migrations
 from app.models.user import User
-from app.services.collection_control import PublicationService
+from app.models.collection_control import PublicationPointer, PublicationVersion
+from app.services.collection_control import (
+    PublicationService,
+    _move_pointer_to_candidate,
+)
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from app.services.player_diet import PlayerDietRepository
 from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -41,6 +45,7 @@ from app.services.target_backtest import (
 from app.services.target_preview import TargetPreviewService
 from app.services.user_service import UserService
 from tests import test_target_backtest as bt
+from tests.support.season_rollover import cut_over_if_held
 
 OWNER = "test-uid"
 LAST = "2025-26"
@@ -222,7 +227,7 @@ class World:
         """
 
         with Session(self.engine) as session, session.begin():
-            self.publications._compose_active_in_session(
+            version = self.publications._compose_active_in_session(
                 session,
                 stream_key=stream,
                 season=season,
@@ -234,6 +239,22 @@ class World:
                 provenance_ids=set(),
                 now=NOW,
                 derive_expected_fence_from_lock=True,
+            )
+            if version.status != "candidate":
+                return
+            if stream == "player_game_logs":
+                # The published season moves only by an operator cutover.
+                cut_over_if_held(self.publications, version, session=session)
+                return
+            # One stream off the published season: the single-pointer move an
+            # operator activation of the held candidate makes.
+            pointer = session.get(PublicationPointer, stream)
+            _move_pointer_to_candidate(
+                session, pointer, version,
+                current=session.get(
+                    PublicationVersion, pointer.active_publication_id
+                ),
+                actor="test", reason="activate one stream early", now=NOW,
             )
 
     def publish_season(self, season, *, okc_games, corner_three):
