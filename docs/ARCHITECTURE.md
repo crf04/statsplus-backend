@@ -3275,8 +3275,10 @@ Two marks keep a row from serving, and they mean different things.
   `revoked_fence` records the pointer generation at the revocation, including
   the new fence of a pointer the correction cleared. A pointer moving to a
   different season is a move, not a rejection: a rollback or family rollback
-  across seasons records the move without revoking, as composing a new season
-  does not revoke the old one. A same-season rollback also leaves the pointer
+  across seasons records the move without revoking, as a season cutover does
+  not revoke the old one (composition alone never changes a bound stream's
+  season: it holds the candidate until the operator cutover described in
+  [DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md#starting-a-new-season)). A same-season rollback also leaves the pointer
   with no rollback target, and a rollback refuses a target whose activations
   were all revoked, so a second rollback cannot clone rejected content back
   into fresh authority.

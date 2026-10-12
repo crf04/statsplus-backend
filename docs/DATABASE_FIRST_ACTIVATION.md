@@ -355,6 +355,93 @@ lease expires; the next pass reclaims it and resumes from the phase the row
 records, and every state write is fenced by the writer's claimed generation,
 so a revived worker can never overwrite the successor that took over.
 
+## Starting a new season
+
+The published season is the season of the active `player_game_logs`
+Publication; readers follow it (`research_season`). A new season reaches the
+site only through one operator cutover, never by composition alone.
+
+**Hold.** Composition for an enabled stream activates a candidate of season S
+only when the stream has no active Publication yet, or S is the published
+season. Any other season is stored as an inactive, *held* candidate: the
+pointer does not move, the composition job succeeds (it is not retried), and an
+audit event `publication.held` records the stream, season, published season,
+and candidate. A newer held candidate supersedes the stream's earlier held
+candidates of that season. Same-season auto-advance is unchanged, and the hold
+applies to `player_game_logs` itself.
+
+**Cutover.** Once the new season's collection is composing nightly:
+
+1. Plan it, which writes nothing:
+
+   ```
+   POST /admin/collection/seasons/2026-27/cutover
+   {"dry_run": true}
+   ```
+
+   The response lists every enabled stream with its current season,
+   publication, and fence, the held candidate it would move to (or `null`),
+   per-team completed-game counts for the season, and `refusal` — the code the
+   real cutover would refuse with, or `null`.
+2. Run it with the fences the plan reported:
+
+   ```
+   POST /admin/collection/seasons/2026-27/cutover
+   {"reason": "open 2026-27", "expected_fences": {"player_game_logs": 41, ...}}
+   ```
+
+   In one transaction it moves `player_game_logs` and every other enabled
+   stream that has a held candidate of the season to its latest one, with
+   pointer history and activation evidence for each move, under one audit
+   event `season.cutover` whose `operator_job_id` is the cutover id. Stream rows
+   and pointers are locked in key order, as composition locks them, so a
+   concurrent composition either finishes first or waits for the cutover.
+3. Confirm the moved streams read the new season and the unmoved ones read
+   `window_not_ready` (below).
+
+The parity gate (`require_completed_regular_season`) belongs to
+`activate_stream` and is unchanged for 2025-26; the cutover does not use it.
+
+| Code | HTTP | What it means |
+| --- | --- | --- |
+| `cutover_player_game_logs_candidate_required` | 400 | `player_game_logs` has no held candidate of the season. Nothing can move without it. |
+| `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate, usually because it was composed on another night. Let the next composition re-hold it. |
+| `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | A candidate's bytes or decoded payload are not sound. |
+| `stale_composition` | 409 | A moving pointer advanced since the dry run. Plan again. |
+
+Every refusal moves nothing.
+
+**After the cutover.** A stream with no candidate of the new season — typically
+the `*_l15` windows until every team has 15 games — stays on its old
+Publication, and its first new-season candidate activates on its own. Until
+then readers report it `missing` with `unavailable_reason: "window_not_ready"`
+instead of `publication_season_mismatch`. Where the nightly composition has
+already stored a new-season Last-15 observation, the Matchup keeps reporting
+that observation's `insufficient_governed_games`.
+
+The `traditional_opponent` family is deliberately split during this window
+(Season on the new season, L15 on the old). Family rollback still works: in a
+split it rolls back only the window on the newest season, so the family
+returns to its pre-cutover pair. Once the L15 window has joined, family
+rollback moves both windows back one generation as usual, which returns L15 to
+the old season and the family to the split. A Publication Rebuild needs both windows on
+one season and refuses with `publication_family_authority_mismatch` until the
+family reunites.
+
+**Revert.**
+
+```
+POST /admin/collection/seasons/2026-27/cutover/<cutover_id>/revert
+{"reason": "2026-27 opened too early"}
+```
+
+returns every stream the cutover moved to its pre-cutover Publication in one
+transaction, through the fenced rollback, under the audit event
+`season.cutover_revert`. It refuses with `cutover_superseded` (409) once any
+stream that was enabled at the cutover has moved since — including the first
+new-season L15 activation and the next nightly advance — so revert promptly or
+recover per family instead. An unknown cutover id is `cutover_not_found` (404).
+
 ## Evidence that must exist before production activation
 
 These are operator runs against real infrastructure. Each writes a report that

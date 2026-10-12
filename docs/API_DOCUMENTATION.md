@@ -140,7 +140,9 @@ unchanged. `freshness` is normalised to exactly one of:
   `daily_recheck` 24 hours, `seven_day` 7 days).
 - `unavailable` for every read that could not be served: a missing pointer, an
   unregistered or disabled stream, an inactive stream on its legacy fallback, a
-  season mismatch, or a checksum, payload, projection, or authority refusal.
+  season mismatch (`unavailable_reason` `window_not_ready` for a stream still
+  on an earlier season after a cutover, `publication_season_mismatch` for a
+  later one), or a checksum, payload, projection, or authority refusal.
   This holds even when the reader computed an age-based label for the refused
   row (the stream-keyed Matchup map keeps that raw label).
 
@@ -745,7 +747,13 @@ Season values are never substituted. Before every canonical team has 15
 completed governed games the Last-15 window has not opened: each Last-15
 defense Base reports `status: "missing"` with
 `unavailable_reason: "insufficient_governed_games"` league-wide, while Synergy
-play types keeps its permanent `provider_window_unsupported` precedence. Independently published Season and
+play types keeps its permanent `provider_window_unsupported` precedence. After
+a season cutover, a Base whose Publication is still on the previous season
+(typically Last-15, until its first new-season composition) reports
+`status: "missing"` with `unavailable_reason: "window_not_ready"` when no stored
+new-season observation already names it `insufficient_governed_games`; a
+Publication on a later season than the published one reports
+`publication_season_mismatch`. Independently published Season and
 Last-15 scopes can contain different metric identities; the affected
 Base/window becomes `unavailable/legacy_surface_incomplete` rather than making
 the request fail or inventing the absent metric. An event team outside the
@@ -2625,6 +2633,8 @@ GET /api/collector/manifest/<manifest_id>
 POST /api/collector/observations
 POST /api/collector/credential-deliveries/<delivery_id>/claim
 POST /api/admin/collection/seasons/<season>
+POST /api/admin/collection/seasons/<season>/cutover
+POST /api/admin/collection/seasons/<season>/cutover/<cutover_id>/revert
 POST /api/admin/collection/streams/<stream_key>/rollback
 POST /api/admin/collection/streams/<stream_key>/activate
 POST /api/admin/collection/compositions/<job_id>/retry
@@ -2671,6 +2681,39 @@ provider payloads, credentials, actors, or stack traces.
 window of the family back one generation atomically. A per-stream rollback of
 a coupled family is refused, and a target this deployment can no longer read
 is refused as `publication_format_unsupported`.
+
+`POST /api/admin/collection/seasons/<season>/cutover` switches the published
+season. Composition never moves a bound stream to a season other than the one
+the active `player_game_logs` Publication names: it stores the composition as a
+held candidate (audit action `publication.held`) and the composition job
+succeeds. The cutover moves `player_game_logs` and every other enabled stream
+with a held candidate of `<season>` to its latest held candidate in one
+transaction. The body is `{"reason", "dry_run", "expected_fences"}`;
+`expected_fences` (optional) maps stream keys to the fences a dry run reported.
+With `"dry_run": true` it writes nothing and returns `200` with `season`,
+`dry_run`, `refusal` (the code a real cutover would refuse with, or `null`),
+`streams` (every enabled stream: `stream_key`, current `season`,
+`publication_id`, `fence`, and the `candidate_publication_id` and
+`candidate_cutoff` it would move to, or `null`), `team_completed_games` (per
+team `team_id`, `tricode`, `completed_games` in the canonical ledger for
+`<season>`), and an empty `moved`. Otherwise it returns `202` with `job_id`
+(the cutover id) and the same fields, `moved` listing each moved
+`stream_key`, `from_publication_id`, `from_season`, `to_publication_id`, and
+new `fence`. It is `400 invalid_input` without a held `player_game_logs`
+candidate (`cutover_player_game_logs_candidate_required`), when a candidate
+rests on a different manifest or Event Catalog than the `player_game_logs`
+candidate (`cutover_authority_mismatch`), or when a candidate fails its
+checksum or decoder; `409 operation_conflict` when a moving pointer's fence no
+longer matches `expected_fences` (`stale_composition`). A refusal moves
+nothing.
+
+`POST /api/admin/collection/seasons/<season>/cutover/<cutover_id>/revert`
+(body `{"reason"}`) returns every stream that cutover moved to its pre-cutover
+Publication in one transaction, through the fenced rollback (a restored clone
+with the same season, cutoff, and checksum). It returns `202` with `job_id`
+and `restored` (`stream_key`, `publication_id`, `season`, `fence`). It is
+`409 operation_conflict` (`cutover_superseded`) once any stream enabled at the
+cutover has moved since, and `404` for an unknown cutover id.
 
 A conflicting active rebuild for the family is `409
 duplicate_active_operation`.  A stale expected pair, a held worker lease, and a
