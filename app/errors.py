@@ -350,6 +350,20 @@ class ConflictError(AppError):
     code = "operation_conflict"
     default_message = "The operation conflicts with the current collection state."
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: Any = None,
+        public_details: dict[str, Any] | None = None,
+    ) -> None:
+        self._public_details = public_details
+        super().__init__(message, detail=detail)
+
+    @property
+    def public_details(self) -> dict[str, Any] | None:
+        return self._public_details
+
 
 class SeasonUnavailableError(AppError):
     """A season's retained Publication of one stream cannot be read.

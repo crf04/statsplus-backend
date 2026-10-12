@@ -41,6 +41,7 @@ from app.services.target_backtest import (
 from app.services.target_preview import TargetPreviewService
 from app.services.user_service import UserService
 from tests import test_target_backtest as bt
+from tests.support.season_rollover import cut_over_if_held
 
 OWNER = "test-uid"
 LAST = "2025-26"
@@ -222,7 +223,7 @@ class World:
         """
 
         with Session(self.engine) as session, session.begin():
-            self.publications._compose_active_in_session(
+            version = self.publications._compose_active_in_session(
                 session,
                 stream_key=stream,
                 season=season,
@@ -235,6 +236,7 @@ class World:
                 now=NOW,
                 derive_expected_fence_from_lock=True,
             )
+            cut_over_if_held(self.publications, version, session=session)
 
     def publish_season(self, season, *, okc_games, corner_three):
         """Activate one season's five Backtest streams."""

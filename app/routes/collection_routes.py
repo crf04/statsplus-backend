@@ -65,8 +65,34 @@ def _read_limited_body(limit: int) -> bytes:
     return bytes(output)
 
 
-def _control_error(error: Exception) -> AppError:
+#: Refusals the season cutover routes name in ``error.details.reason`` so an
+#: operator can tell them apart.  A closed vocabulary: any other reason keeps
+#: the generic body.
+CUTOVER_PUBLIC_REASONS = frozenset({
+    "cutover_player_game_logs_candidate_required",
+    "cutover_authority_mismatch",
+    "cutover_superseded",
+    "cutover_restore_unavailable",
+    "cutover_not_found",
+    "invalid_season",
+    "ledger_provenance_manifest_mismatch",
+    "ledger_provenance_not_accepted",
+    "ledger_provenance_required",
+    "ledger_provenance_scope_mismatch",
+    "publication_candidate_invalid",
+    "publication_checksum_mismatch",
+    "publication_game_set_mismatch",
+    "publication_governance_unavailable",
+    "reason_required",
+    "stale_composition",
+})
+
+
+def _control_error(
+    error: Exception, *, public_reasons: frozenset[str] = frozenset(),
+) -> AppError:
     reason = getattr(error, "reason", "invalid_input")
+    details = {"reason": reason} if reason in public_reasons else None
     if reason in {
         "identity_revoked", "invalid_identity_secret", "invalid_token", "token_replayed",
     }:
@@ -86,7 +112,10 @@ def _control_error(error: Exception) -> AppError:
         "composition_not_found", "reconciliation_not_found",
         "credential_delivery_unavailable",
     }:
-        return ResourceNotFoundError("The collection resource was not found.", detail=reason)
+        return ResourceNotFoundError(
+            "The collection resource was not found.", detail=reason,
+            public_details=details,
+        )
     if reason == "duplicate_active_operation":
         # The API contract already publishes this exact meaning as its own
         # 409 code, so a caller learns "one is already in flight" from the
@@ -105,9 +134,15 @@ def _control_error(error: Exception) -> AppError:
         # request that would split a coupled family.
         "stale_publication_family", "rebuild_lease_held",
         "publication_family_coupled",
+        # A cutover revert after a later pointer move, or whose restoration
+        # target no longer exists.
+        "cutover_superseded", "cutover_restore_unavailable",
     }:
-        return ConflictError(detail=reason)
-    return InvalidInputError("The collection request could not be completed.", detail=reason)
+        return ConflictError(detail=reason, public_details=details)
+    return InvalidInputError(
+        "The collection request could not be completed.", detail=reason,
+        public_details=details,
+    )
 
 
 @collection_bp.post("/collector/token")
@@ -506,6 +541,65 @@ def activate_season(season: str):
     except ControlPlaneError as error:
         raise _control_error(error) from error
     return jsonify({"job_id": result.job_id, "season": row.season, "status": row.status, "activated_at": row.activated_at.isoformat()}), 202
+
+
+@collection_bp.post("/admin/collection/seasons/<season>/cutover")
+@require_admin
+@route_error_boundary("Failed to cut over the published season.")
+def cutover_season(season: str):
+    """Plan (``dry_run``) or run the one-transaction season cutover."""
+    body = _body()
+    reason = str(body.get("reason", "")).strip()
+    dry_run = body.get("dry_run", False)
+    expected_fences = body.get("expected_fences")
+    if not isinstance(dry_run, bool):
+        raise InvalidInputError("dry_run must be a boolean.")
+    if expected_fences is not None and (
+        not isinstance(expected_fences, dict)
+        or any(
+            isinstance(fence, bool) or not isinstance(fence, int)
+            for fence in expected_fences.values()
+        )
+    ):
+        raise InvalidInputError("expected_fences must map stream keys to integer fences.")
+    if not dry_run and len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").cutover_season(
+            season, actor=_actor(), reason=reason, dry_run=dry_run,
+            expected_fences=expected_fences,
+        )
+    except ControlPlaneError as error:
+        raise _control_error(
+            error, public_reasons=CUTOVER_PUBLIC_REASONS,
+        ) from error
+    if dry_run:
+        return jsonify(result.to_dict()), 200
+    return jsonify({"job_id": result.job_id, **result.resource.to_dict()}), 202
+
+
+@collection_bp.post("/admin/collection/seasons/<season>/cutover/<cutover_id>/revert")
+@require_admin
+@route_error_boundary("Failed to revert the season cutover.")
+def revert_season_cutover(season: str, cutover_id: str):
+    body = _body()
+    reason = str(body.get("reason", "")).strip()
+    if len(reason) < 3:
+        raise InvalidInputError("A human-readable reason is required.")
+    try:
+        result = _service("collection_operations").revert_season_cutover(
+            season, cutover_id, actor=_actor(), reason=reason,
+        )
+    except ControlPlaneError as error:
+        raise _control_error(
+            error, public_reasons=CUTOVER_PUBLIC_REASONS,
+        ) from error
+    return jsonify({
+        "job_id": result.job_id,
+        "season": season,
+        "cutover_id": cutover_id,
+        "restored": [dict(item) for item in result.resource],
+    }), 202
 
 
 @collection_bp.post("/admin/collection/streams/<path:stream_key>/rollback")

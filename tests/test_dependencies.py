@@ -10,6 +10,7 @@ from app.config.settings import (
     load_settings,
 )
 from app.domain.freshness import time_window_timedelta
+from tests.support.season_rollover import cut_over_if_held
 
 
 def _fake_dependencies(settings: RuntimeSettings):
@@ -1064,10 +1065,10 @@ def test_query_defaults_to_published_season_after_calendar_rollover(monkeypatch)
         required_observations=(), publication_strategy="replace", enabled=True,
         freshness_rule="cutoff_current",
     )
-    publisher.compose(
+    cut_over_if_held(publisher, publisher.compose(
         "player_game_logs", season="2026-27", cutoff=published_at, payload=logs,
         expected_fence=reader.read("player_game_logs").fence,
-    )
+    ))
     with engine.begin() as connection:
         connection.execute(text(
             "UPDATE athlete_catalog SET season = '2026-27', "

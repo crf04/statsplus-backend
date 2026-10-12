@@ -3269,14 +3269,17 @@ is captured without inference.
 Two marks keep a row from serving, and they mean different things.
 
 - **Revoked** means the content was withdrawn. A same-season rollback (ordinary
-  or family) stamps `revoked_at` on the publication it moves away from, and
+  or family) stamps `revoked_at` on the publication it moves away from, a
+  season-cutover revert stamps it on every publication the cutover promoted, and
   corrected-ledger invalidation stamps it on every invalidated publication that
   had activated, whatever its status has become and including a retired one.
   `revoked_fence` records the pointer generation at the revocation, including
   the new fence of a pointer the correction cleared. A pointer moving to a
   different season is a move, not a rejection: a rollback or family rollback
-  across seasons records the move without revoking, as composing a new season
-  does not revoke the old one. A same-season rollback also leaves the pointer
+  across seasons records the move without revoking, as a season cutover does
+  not revoke the old one (composition alone never changes a bound stream's
+  season: it holds the candidate until the operator cutover described in
+  [DATABASE_FIRST_ACTIVATION.md](DATABASE_FIRST_ACTIVATION.md#starting-a-new-season)). A same-season rollback also leaves the pointer
   with no rollback target, and a rollback refuses a target whose activations
   were all revoked, so a second rollback cannot clone rejected content back
   into fresh authority.
@@ -3290,7 +3293,9 @@ A row is eligible when it is activated (every row is), unrevoked, and unretired.
 **Retention.** `prune_history` keeps a publication's payload and projection only
 when it is one of: the latest eligible version of its season (per stream); the
 pointer's active publication; the pointer's previous publication (the rollback
-target); or a candidate still awaiting activation. Everything else is deleted,
+target); a candidate still awaiting activation; or a pre-cutover active or
+previous publication a still-reversible season cutover would restore (one whose
+recorded pointer fences are all unchanged). Everything else is deleted,
 about three versions per stream and season in steady state, so a nightly refresh
 no longer grows storage. Activation records (`publication_activations`, migration 059), repair-group
 members (migration 060), and parity artifacts (migration 061) have no foreign key
@@ -3299,7 +3304,8 @@ outlive pruned payloads and never pin retention. The keep set is computed per st
 when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept` (the maintenance command prints both as
 `publications_pruned` and `publications_kept`), where `kept` counts survivors by the
-first matching reason (`active`, `previous`, `candidate`, `season_latest`). Pruning takes the pointer row locks first, in stream
+first matching reason (`active`, `previous`, `candidate`, `season_latest`,
+`cutover_restore`). Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
 cannot delete a target the rollback is reading. History rows carry no foreign

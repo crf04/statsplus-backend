@@ -14,6 +14,7 @@ from app.services.matchup_selection import MatchupSelectionService
 from app.services.player_game_log_repository import PlayerGameLogRepository
 from app.services.player_pool import PlayerPool, PoolPlayer
 from app.services.statistic_catalog import StatisticCatalog
+from tests.support.season_rollover import cut_over_if_held
 
 
 NOW = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
@@ -438,7 +439,8 @@ def _advance_to_next_season(engine, publication):
             )
         )
     later = RETRIEVED_AT + timedelta(days=280)
-    PublicationService(engine, clock=lambda: later).compose(
+    publications = PublicationService(engine, clock=lambda: later)
+    cut_over_if_held(publications, publications.compose(
         "player_game_logs",
         season="2026-27",
         cutoff=later,
@@ -447,7 +449,7 @@ def _advance_to_next_season(engine, publication):
             "season": "2026-27",
         }]},
         expected_fence=publication.fence,
-    )
+    ))
 
 
 def test_a_past_season_historical_selection_reads_the_retained_activation_after_the_publication_advances(

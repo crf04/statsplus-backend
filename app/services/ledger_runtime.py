@@ -924,6 +924,7 @@ class LedgerRuntime:
                                     cutoff=cutoff,
                                     manifest_id=manifest_id,
                                     session=session,
+                                    composition_job_id=str(job["job_id"]),
                                 )
                         except ControlPlaneError as error:
                             nba_failures[job["job_id"]] = str(error)[:255]
@@ -1030,6 +1031,10 @@ class LedgerRuntime:
                         source_observation_ids_by_game=(
                             source_observation_ids_by_game or None
                         ),
+                        composition_job_ids={
+                            str(row["stream_key"]): str(row["job_id"])
+                            for row in slice_jobs
+                        },
                         session=session,
                     )
                     succeeded = _succeeded_ledger_streams(
