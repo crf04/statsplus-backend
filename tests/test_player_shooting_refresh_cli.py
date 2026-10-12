@@ -92,3 +92,18 @@ def test_cli_explicit_season_ignores_the_manifest(tmp_path, monkeypatch, capsys)
     _activate_season(url, "2026-27")
     assert player_shooting_refresh.main(["2026-27"]) == 0
     assert json.loads(capsys.readouterr().out) == {"state": "disabled", "composed_jobs": 0}
+
+
+def test_cli_without_season_follows_the_newer_active_manifest_at_rollover(
+    tmp_path, monkeypatch, capsys,
+):
+    """Issuing a manifest supersedes only active manifests of the same season
+    (app/services/collection_control.py:3118-3120), so at rollover the old
+    season's manifest stays active beside the new one; the newest wins."""
+    url = _migrated_url(tmp_path, monkeypatch)
+    _insert_manifest(url, "m1", "2025-26", "active", "2026-04-01T00:00:00")
+    _insert_manifest(url, "m2", "2026-27", "active", "2026-10-20T00:00:00")
+    _activate_season(url, "2026-27")
+    assert player_shooting_refresh.main([]) == 0
+    assert capsys.readouterr().out == '{"composed_jobs": 0, "state": "disabled"}\n'
+    # Were 2025-26 ticked instead, that season is not active: season_inactive.
