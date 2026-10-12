@@ -3269,7 +3269,8 @@ is captured without inference.
 Two marks keep a row from serving, and they mean different things.
 
 - **Revoked** means the content was withdrawn. A same-season rollback (ordinary
-  or family) stamps `revoked_at` on the publication it moves away from, and
+  or family) stamps `revoked_at` on the publication it moves away from, a
+  season-cutover revert stamps it on every publication the cutover promoted, and
   corrected-ledger invalidation stamps it on every invalidated publication that
   had activated, whatever its status has become and including a retired one.
   `revoked_fence` records the pointer generation at the revocation, including

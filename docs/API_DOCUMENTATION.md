@@ -2684,13 +2684,17 @@ is refused as `publication_format_unsupported`.
 
 `POST /api/admin/collection/seasons/<season>/cutover` switches the published
 season. Composition never moves a bound stream to a season other than the one
-the active `player_game_logs` Publication names: it stores the composition as a
-held candidate (audit action `publication.held`) and the composition job
-succeeds. The cutover moves `player_game_logs` and every other enabled stream
-with a held candidate of `<season>` to its latest held candidate in one
-transaction. The body is `{"reason", "dry_run", "expected_fences"}`;
-`expected_fences` (optional) maps stream keys to the fences a dry run reported.
-With `"dry_run": true` it writes nothing and returns `200` with `season`,
+the active `player_game_logs` Publication names (or, while no season is
+published, to a season other than its own): it stores the composition as a
+held candidate and the composition job succeeds. Every hold writes an audit
+event `publication.held` naming the stream, season, published season, held
+`publication_id`, cutoff, and `composition_job_id`. Only the newest cutoff of a
+season stays held; a delayed earlier-cutoff composition never displaces it.
+The cutover moves `player_game_logs` and every other enabled stream with a held
+candidate of `<season>` to its latest held candidate in one transaction. The
+body is `{"reason", "dry_run", "expected_fences"}`; `expected_fences`
+(optional) maps stream keys to the fences a dry run reported. With
+`"dry_run": true` it writes nothing and returns `200` with `season`,
 `dry_run`, `refusal` (the code a real cutover would refuse with, or `null`),
 `streams` (every enabled stream: `stream_key`, current `season`,
 `publication_id`, `fence`, and the `candidate_publication_id` and
@@ -2698,22 +2702,39 @@ With `"dry_run": true` it writes nothing and returns `200` with `season`,
 team `team_id`, `tricode`, `completed_games` in the canonical ledger for
 `<season>`), and an empty `moved`. Otherwise it returns `202` with `job_id`
 (the cutover id) and the same fields, `moved` listing each moved
-`stream_key`, `from_publication_id`, `from_season`, `to_publication_id`, and
-new `fence`. It is `400 invalid_input` without a held `player_game_logs`
-candidate (`cutover_player_game_logs_candidate_required`), when a candidate
-rests on a different manifest or Event Catalog than the `player_game_logs`
-candidate (`cutover_authority_mismatch`), or when a candidate fails its
-checksum or decoder; `409 operation_conflict` when a moving pointer's fence no
-longer matches `expected_fences` (`stale_composition`). A refusal moves
-nothing.
+`stream_key`, `from_publication_id`, `from_previous_publication_id`,
+`from_season`, `to_publication_id`, and new `fence`.
+
+Every moved candidate must be complete and bound: a verified manifest and
+Event Catalog identity, the same for every candidate as for the
+`player_game_logs` one; a governed roster of all thirty teams; ledger lineage
+of accepted observations that is exactly the governed game set of that
+authority; and a payload its decoder accepts that names only governed games
+(team windows: exactly each team's governed games). Refusals move nothing and
+name their reason in `error.details.reason`:
+
+| `details.reason` | HTTP | Meaning |
+| --- | --- | --- |
+| `cutover_player_game_logs_candidate_required` | 400 | No held `player_game_logs` candidate of the season. |
+| `publication_governance_unavailable` | 400 | A candidate has no verifiable manifest and Event Catalog binding, or its governance cannot be resolved (including an authority that does not govern all thirty teams). |
+| `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate. |
+| `publication_game_set_mismatch` | 400 | A candidate's lineage or payload games differ from the governed games. |
+| `ledger_provenance_not_accepted` / `ledger_provenance_manifest_mismatch` / `ledger_provenance_scope_mismatch` | 400 | A ledger candidate's evidence is no longer the accepted source. |
+| `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | A candidate's bytes or decoded payload are not sound. |
+| `invalid_season` / `reason_required` | 400 | Malformed request. |
+| `stale_composition` | 409 | A moving pointer's fence no longer matches `expected_fences`. |
 
 `POST /api/admin/collection/seasons/<season>/cutover/<cutover_id>/revert`
-(body `{"reason"}`) returns every stream that cutover moved to its pre-cutover
-Publication in one transaction, through the fenced rollback (a restored clone
-with the same season, cutoff, and checksum). It returns `202` with `job_id`
-and `restored` (`stream_key`, `publication_id`, `season`, `fence`). It is
-`409 operation_conflict` (`cutover_superseded`) once any stream enabled at the
-cutover has moved since, and `404` for an unknown cutover id.
+(body `{"reason"}`) undoes that cutover in one transaction: each moved pointer
+names its exact pre-cutover active and previous publications again (same
+`publication_id`s), the promoted candidates are superseded, and their
+pointer-history rows are revoked, so the reverted season keeps no retained
+authority (an explicit-season read of it is unavailable, and retention no
+longer keeps its payload). It returns `202` with `job_id` and `restored`
+(`stream_key`, `publication_id`, `season`, `fence`). It is `409
+operation_conflict` with `details.reason` `cutover_superseded` once any stream
+enabled at the cutover has moved since, and `404` with `cutover_not_found` for
+an unknown cutover id.
 
 A conflicting active rebuild for the family is `409
 duplicate_active_operation`.  A stale expected pair, a held worker lease, and a

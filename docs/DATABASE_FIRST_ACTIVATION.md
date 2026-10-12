@@ -363,12 +363,16 @@ site only through one operator cutover, never by composition alone.
 
 **Hold.** Composition for an enabled stream activates a candidate of season S
 only when the stream has no active Publication yet, or S is the published
-season. Any other season is stored as an inactive, *held* candidate: the
-pointer does not move, the composition job succeeds (it is not retried), and an
-audit event `publication.held` records the stream, season, published season,
-and candidate. A newer held candidate supersedes the stream's earlier held
-candidates of that season. Same-season auto-advance is unchanged, and the hold
-applies to `player_game_logs` itself.
+season (while no season is published, only the stream's own current season).
+Any other season is stored as an inactive, *held* candidate: the pointer does
+not move, the composition job succeeds (it is not retried), and every hold —
+including an identical recomposition — writes an audit event
+`publication.held` with the stream, season, published season, candidate,
+cutoff, and `composition_job_id`, so each job's held outcome is traceable.
+Only the newest governed cutoff of a season stays held: a newer candidate
+supersedes earlier ones, and a delayed earlier-cutoff composition is itself
+superseded rather than displacing the newer one. Same-season auto-advance is
+unchanged, and the hold applies to `player_game_logs` itself.
 
 **Cutover.** Once the new season's collection is composing nightly:
 
@@ -390,8 +394,15 @@ applies to `player_game_logs` itself.
    {"reason": "open 2026-27", "expected_fences": {"player_game_logs": 41, ...}}
    ```
 
-   In one transaction it moves `player_game_logs` and every other enabled
-   stream that has a held candidate of the season to its latest one, with
+   It first proves every candidate it would move complete and bound: a
+   verified manifest and Event Catalog identity shared with the
+   `player_game_logs` candidate, a governed roster of all thirty teams, ledger
+   lineage that is exactly the authority's governed games (and still the
+   accepted evidence), and a payload whose decoder accepts it and names only
+   governed games — the checks composition and operator activation already
+   apply. Then, in one transaction, it moves `player_game_logs` and every
+   other enabled stream that has a held candidate of the season to its latest
+   one, with
    pointer history and activation evidence for each move, under one audit
    event `season.cutover` whose `operator_job_id` is the cutover id. Stream rows
    and pointers are locked in key order, as composition locks them, so a
@@ -405,11 +416,15 @@ The parity gate (`require_completed_regular_season`) belongs to
 | Code | HTTP | What it means |
 | --- | --- | --- |
 | `cutover_player_game_logs_candidate_required` | 400 | `player_game_logs` has no held candidate of the season. Nothing can move without it. |
+| `publication_governance_unavailable` | 400 | A candidate has no verifiable manifest and Event Catalog binding, or its governance cannot be resolved (including an authority that does not govern all thirty teams). |
 | `cutover_authority_mismatch` | 400 | A candidate rests on a different manifest or Event Catalog than the `player_game_logs` candidate, usually because it was composed on another night. Let the next composition re-hold it. |
+| `publication_game_set_mismatch` | 400 | A candidate's lineage or payload games differ from the governed games (for example, composed before the ledger caught up). |
+| `ledger_provenance_*` | 400 | A ledger candidate's evidence is no longer the accepted source. |
 | `publication_checksum_mismatch` / `publication_candidate_invalid` | 400 | A candidate's bytes or decoded payload are not sound. |
 | `stale_composition` | 409 | A moving pointer advanced since the dry run. Plan again. |
 
-Every refusal moves nothing.
+Every refusal moves nothing, and the admin route names it in
+`error.details.reason`.
 
 **After the cutover.** A stream with no candidate of the new season — typically
 the `*_l15` windows until every team has 15 games — stays on its old
@@ -435,9 +450,13 @@ POST /admin/collection/seasons/2026-27/cutover/<cutover_id>/revert
 {"reason": "2026-27 opened too early"}
 ```
 
-returns every stream the cutover moved to its pre-cutover Publication in one
-transaction, through the fenced rollback, under the audit event
-`season.cutover_revert`. It refuses with `cutover_superseded` (409) once any
+returns every stream the cutover moved to its exact pre-cutover state in one
+transaction, under the audit event `season.cutover_revert`: the pointer names
+the same active and previous publications as before the cutover (with a new
+fence and a history row), the promoted candidates are superseded, and their
+pointer-history rows are revoked. The reverted season therefore keeps no
+retained authority — an explicit-season read of it is unavailable — and
+retention stops keeping its payload. It refuses with `cutover_superseded` (409) once any
 stream that was enabled at the cutover has moved since — including the first
 new-season L15 activation and the next nightly advance — so revert promptly or
 recover per family instead. An unknown cutover id is `cutover_not_found` (404).
