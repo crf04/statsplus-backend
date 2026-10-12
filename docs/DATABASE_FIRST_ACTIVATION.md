@@ -398,8 +398,9 @@ unchanged, and the hold applies to `player_game_logs` itself.
    verified manifest and Event Catalog identity shared with the
    `player_game_logs` candidate, a governed roster of all thirty teams, ledger
    lineage that is exactly the authority's governed games (and still the
-   accepted evidence), and a payload whose decoder accepts it and names only
-   governed games — the checks composition and operator activation already
+   accepted evidence), and a payload whose decoder accepts it and covers
+   exactly the governed games (for `player_game_logs`, rows for both teams of
+   every governed game) — the checks composition and operator activation already
    apply. Then, in one transaction, it moves `player_game_logs` and every
    other enabled stream that has a held candidate of the season to its latest
    one, with
@@ -456,7 +457,11 @@ the same active and previous publications as before the cutover (with a new
 fence and a history row), the promoted candidates are superseded, and their
 pointer-history rows are revoked. The reverted season therefore keeps no
 retained authority — an explicit-season read of it is unavailable — and
-retention stops keeping its payload. It refuses with `cutover_superseded` (409) once any
+retention stops keeping its payload. While a cutover is still reversible,
+`prune_history` keeps every publication its revert would restore (kept reason
+`cutover_restore`). Before writing anything the revert checks that each
+restoration target still exists intact, and otherwise refuses with
+`cutover_restore_unavailable` (409). It refuses with `cutover_superseded` (409) once any
 stream that was enabled at the cutover has moved since — including the first
 new-season L15 activation and the next nightly advance — so revert promptly or
 recover per family instead. An unknown cutover id is `cutover_not_found` (404).

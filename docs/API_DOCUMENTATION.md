@@ -2709,8 +2709,9 @@ Every moved candidate must be complete and bound: a verified manifest and
 Event Catalog identity, the same for every candidate as for the
 `player_game_logs` one; a governed roster of all thirty teams; ledger lineage
 of accepted observations that is exactly the governed game set of that
-authority; and a payload its decoder accepts that names only governed games
-(team windows: exactly each team's governed games). Refusals move nothing and
+authority; and a payload its decoder accepts that covers exactly the governed
+games (team windows: exactly each team's governed games; `player_game_logs`:
+rows for both teams of every governed game). Refusals move nothing and
 name their reason in `error.details.reason`:
 
 | `details.reason` | HTTP | Meaning |
@@ -2733,7 +2734,9 @@ authority (an explicit-season read of it is unavailable, and retention no
 longer keeps its payload). It returns `202` with `job_id` and `restored`
 (`stream_key`, `publication_id`, `season`, `fence`). It is `409
 operation_conflict` with `details.reason` `cutover_superseded` once any stream
-enabled at the cutover has moved since, and `404` with `cutover_not_found` for
+enabled at the cutover has moved since, `409` with `cutover_restore_unavailable`
+when a publication it must restore no longer exists intact (retention keeps
+them while the cutover is reversible), and `404` with `cutover_not_found` for
 an unknown cutover id.
 
 A conflicting active rebuild for the family is `409

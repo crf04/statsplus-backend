@@ -3293,7 +3293,9 @@ A row is eligible when it is activated (every row is), unrevoked, and unretired.
 **Retention.** `prune_history` keeps a publication's payload and projection only
 when it is one of: the latest eligible version of its season (per stream); the
 pointer's active publication; the pointer's previous publication (the rollback
-target); or a candidate still awaiting activation. Everything else is deleted,
+target); a candidate still awaiting activation; or a pre-cutover active or
+previous publication a still-reversible season cutover would restore (one whose
+recorded pointer fences are all unchanged). Everything else is deleted,
 about three versions per stream and season in steady state, so a nightly refresh
 no longer grows storage. Activation records (`publication_activations`, migration 059), repair-group
 members (migration 060), and parity artifacts (migration 061) have no foreign key
@@ -3302,7 +3304,8 @@ outlive pruned payloads and never pin retention. The keep set is computed per st
 when a `season` argument narrows what may be deleted. The method returns a
 `PruneResult` with `deleted` and `kept` (the maintenance command prints both as
 `publications_pruned` and `publications_kept`), where `kept` counts survivors by the
-first matching reason (`active`, `previous`, `candidate`, `season_latest`). Pruning takes the pointer row locks first, in stream
+first matching reason (`active`, `previous`, `candidate`, `season_latest`,
+`cutover_restore`). Pruning takes the pointer row locks first, in stream
 order, then touches versions, the same stream, pointer, version order as every
 other writer, so it waits for a concurrent rollback (or makes it wait) and
 cannot delete a target the rollback is reading. History rows carry no foreign
