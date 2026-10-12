@@ -1909,6 +1909,8 @@ class LedgerPublicationComposition:
     reason: str = "ledger correction"
     manifest_id: str | None = None
     corrected_provenance: Mapping[str, str] | None = None
+    #: The composition job this payload settles, recorded on a hold.
+    composition_job_id: str | None = None
 
 
 class UnresolvedIdentityError(ValueError):
@@ -4260,36 +4262,7 @@ class PublicationService(_SessionService):
                     ):
                         raise ControlPlaneError("ledger_parity_cohort_incomplete")
             if candidate is not None and row.provider == "ledger":
-                lineage_rows = session.execute(select(
-                    PublicationObservation.observation_id,
-                    PublicationObservation.slice_key,
-                    CollectionObservation.scope,
-                ).join(
-                    CollectionObservation,
-                    CollectionObservation.observation_id
-                    == PublicationObservation.observation_id,
-                ).where(
-                    PublicationObservation.publication_id
-                    == candidate.publication_id,
-                    PublicationObservation.role.in_((
-                        "completeness_evidence",
-                        "ledger_game",
-                    )),
-                )).all()
-                provenance = {}
-                for observation_id, slice_key, scope_json in lineage_rows:
-                    scope = _safe_json_mapping(scope_json)
-                    game_id = str(slice_key or scope.get("game_id") or "")
-                    if not game_id:
-                        raise ControlPlaneError("ledger_provenance_not_accepted")
-                    provenance[str(observation_id)] = game_id
-                self._assert_ledger_provenance(
-                    session,
-                    season=candidate.season,
-                    cutoff=_aware(candidate.cutoff),
-                    provenance=provenance,
-                    manifest_id=candidate.manifest_id,
-                )
+                self._assert_candidate_ledger_lineage(session, candidate)
             if candidate is not None:
                 _validate_activation_candidate_payload(
                     stream_key,
@@ -4829,6 +4802,7 @@ class PublicationService(_SessionService):
                 ledger_provenance: Mapping[str, str | None] | None = None,
                 session: Session | None = None,
                 _pointer_expectation: tuple[int, str | None] | None = None,
+                _composition_job_id: str | None = None,
     ) -> PublicationVersion:
         now = self.clock()
         with self._session_scope(session) as session:
@@ -4844,6 +4818,7 @@ class PublicationService(_SessionService):
                 provenance_ids=candidate.provenance_ids, now=now,
                 provenance=ledger_provenance, authority=candidate.authority,
                 _pointer_expectation=_pointer_expectation,
+                composition_job_id=_composition_job_id,
             )
 
     def _compose_active_in_session(
@@ -4857,6 +4832,7 @@ class PublicationService(_SessionService):
         authority=None,
         discard_rollback_target: bool = False,
         _pointer_expectation: tuple[int, str | None] | None = None,
+        composition_job_id: str | None = None,
     ) -> PublicationVersion:
         """Advance one stream's fenced pointer to a prepared replacement.
 
@@ -4940,16 +4916,25 @@ class PublicationService(_SessionService):
         if not discard_rollback_target and pointer.active_publication_id:
             # A bound stream advances on its own only within the published
             # season.  Any other season is held as an inactive candidate
-            # until an operator cutover moves the cohort together.
+            # until an operator cutover moves the cohort together.  With no
+            # published season yet, it may advance only within its own.
             published_season = _published_season(session)
-            if published_season is not None and season != published_season:
+            allowed_season = published_season
+            if allowed_season is None:
+                allowed_season = session.scalar(
+                    select(PublicationVersion.season).where(
+                        PublicationVersion.publication_id
+                        == pointer.active_publication_id
+                    )
+                )
+            if season != allowed_season:
                 return self._hold_candidate_in_session(
                     session, stream=stream, season=season, cutoff=cutoff,
                     encoded=encoded, payload=payload, reason=reason,
                     provenance_ids=provenance_ids, provenance=provenance,
                     corrected_provenance=corrected_provenance,
                     authority=authority, published_season=published_season,
-                    now=now,
+                    composition_job_id=composition_job_id, now=now,
                 )
         old = pointer.active_publication_id
         next_version = session.scalar(select(PublicationVersion.version).where(
@@ -5016,23 +5001,21 @@ class PublicationService(_SessionService):
         cutoff: datetime, encoded: str, payload: Any, reason: str | None,
         provenance_ids: set[str], provenance: Mapping[str, str | None] | None,
         corrected_provenance: Mapping[str, str] | None, authority,
-        published_season: str, now: datetime,
+        published_season: str | None, composition_job_id: str | None,
+        now: datetime,
     ) -> PublicationVersion:
         """Store a composition for another season as the stream's held candidate.
 
-        The pointer does not move.  The newest held candidate of a season is
-        the only one a cutover can promote, so it supersedes the stream's
-        earlier candidates of that season; an identical recomposition returns
-        the existing candidate.  A new hold is recorded as a
-        ``publication.held`` audit event in the same transaction.
+        The pointer does not move.  Only the newest governed cutoff of a
+        season is promotable, so of the stream's candidates for that season
+        the latest ``(cutoff, version)`` stays a candidate and every other is
+        superseded -- a delayed composition of an earlier cutoff never
+        displaces a later one.  An identical recomposition returns the
+        existing candidate.  Every hold, including that one, is recorded as a
+        ``publication.held`` audit event naming the composition job.
         """
 
         stream_key = stream.stream_key
-        before = set(session.scalars(select(PublicationVersion.publication_id).where(
-            PublicationVersion.stream_key == stream_key,
-            PublicationVersion.season == season,
-            PublicationVersion.status == "candidate",
-        )))
         if stream.provider == "ledger" and provenance is not None:
             candidate = self.compose_inactive_ledger(
                 stream_key, season=season, cutoff=cutoff, payload=payload,
@@ -5045,25 +5028,28 @@ class PublicationService(_SessionService):
                 encoded=encoded, payload=payload, reason=reason,
                 provenance_ids=provenance_ids, authority=authority, now=now,
             )
-        for earlier in session.scalars(select(PublicationVersion).where(
+        session.flush()
+        held = list(session.scalars(select(PublicationVersion).where(
             PublicationVersion.stream_key == stream_key,
             PublicationVersion.season == season,
             PublicationVersion.status == "candidate",
-            PublicationVersion.publication_id != candidate.publication_id,
-        )):
+        ).order_by(
+            PublicationVersion.cutoff.desc(), PublicationVersion.version.desc(),
+        )))
+        for earlier in held[1:]:
             earlier.status = "superseded"
-        if candidate.publication_id not in before:
-            _add_audit(
-                session, actor="composition", action="publication.held",
-                resource=stream_key, reason="season_held",
-                details={
-                    "season": season,
-                    "published_season": published_season,
-                    "publication_id": candidate.publication_id,
-                    "cutoff": _iso(_aware(candidate.cutoff)),
-                },
-                created_at=now,
-            )
+        _add_audit(
+            session, actor="composition", action="publication.held",
+            resource=stream_key, reason="season_held",
+            details={
+                "season": season,
+                "published_season": published_season,
+                "publication_id": candidate.publication_id,
+                "cutoff": _iso(_aware(candidate.cutoff)),
+                "composition_job_id": composition_job_id,
+            },
+            created_at=now,
+        )
         session.flush()
         return candidate
 
@@ -5295,6 +5281,7 @@ class PublicationService(_SessionService):
                         provenance_ids=provenance_ids, provenance=item.provenance, now=now,
                         derive_expected_fence_from_lock=True,
                         corrected_provenance=item.corrected_provenance,
+                        composition_job_id=item.composition_job_id,
                     ))
                 else:
                     results.append(self.compose_inactive_ledger(
@@ -5691,6 +5678,7 @@ class PublicationService(_SessionService):
     def compose_from_observations(
         self, stream_key: str, *, season: str, cutoff: datetime,
         manifest_id: str, session: Session | None = None,
+        composition_job_id: str | None = None,
     ) -> PublicationVersion:
         """Compose a governed NBA publication from its accepted evidence."""
 
@@ -5711,6 +5699,7 @@ class PublicationService(_SessionService):
                 stream_key, season=season, cutoff=cutoff, payload=None,
                 manifest_id=manifest_id, session=session,
                 _pointer_expectation=pointer_expectation,
+                _composition_job_id=composition_job_id,
             )
 
     def promote_repair_group(
@@ -5939,9 +5928,9 @@ class PublicationService(_SessionService):
                     ),
                 })
                 if candidate is not None:
-                    moves.append((key, pointer, current, candidate))
+                    moves.append((key, stream, pointer, current, candidate))
             refusal = self._cutover_refusal(
-                moves, season=season, expected_fences=expected_fences,
+                session, moves, season=season, expected_fences=expected_fences,
             )
             team_counts = self._season_team_completed_games(session, season)
             if dry_run:
@@ -5953,7 +5942,8 @@ class PublicationService(_SessionService):
             if refusal is not None:
                 raise ControlPlaneError(refusal)
             moved = []
-            for key, pointer, current, candidate in moves:
+            for key, _stream, pointer, current, candidate in moves:
+                from_previous = pointer.previous_publication_id
                 _move_pointer_to_candidate(
                     session, pointer, candidate, current=current,
                     actor=actor, reason=reason, now=now,
@@ -5961,6 +5951,7 @@ class PublicationService(_SessionService):
                 moved.append({
                     "stream_key": key,
                     "from_publication_id": current.publication_id,
+                    "from_previous_publication_id": from_previous,
                     "from_season": current.season,
                     "to_publication_id": candidate.publication_id,
                     "fence": int(pointer.fence),
@@ -5976,45 +5967,145 @@ class PublicationService(_SessionService):
                 },
             )
 
-    @staticmethod
-    def _cutover_refusal(
-        moves, *, season: str, expected_fences: Mapping[str, int] | None,
-    ) -> str | None:
-        """The reason a cutover with these moves must refuse, or ``None``."""
+    def _assert_candidate_ledger_lineage(
+        self, session: Session, candidate: PublicationVersion,
+    ) -> dict[str, str]:
+        """Prove a ledger candidate's recorded games are accepted evidence.
 
-        by_stream = {key: candidate for key, _p, _c, candidate in moves}
-        logs = by_stream.get(PUBLISHED_SEASON_STREAM)
-        if logs is None:
+        Returns ``{observation_id: game_id}`` after the same provenance check
+        composition applies, bound to the candidate's own manifest.
+        """
+
+        lineage_rows = session.execute(select(
+            PublicationObservation.observation_id,
+            PublicationObservation.slice_key,
+            CollectionObservation.scope,
+        ).join(
+            CollectionObservation,
+            CollectionObservation.observation_id
+            == PublicationObservation.observation_id,
+        ).where(
+            PublicationObservation.publication_id == candidate.publication_id,
+            PublicationObservation.role.in_((
+                "completeness_evidence",
+                "ledger_game",
+            )),
+        )).all()
+        provenance = {}
+        for observation_id, slice_key, scope_json in lineage_rows:
+            scope = _safe_json_mapping(scope_json)
+            game_id = str(slice_key or scope.get("game_id") or "")
+            if not game_id:
+                raise ControlPlaneError("ledger_provenance_not_accepted")
+            provenance[str(observation_id)] = game_id
+        self._assert_ledger_provenance(
+            session,
+            season=candidate.season,
+            cutoff=_aware(candidate.cutoff),
+            provenance=provenance,
+            manifest_id=candidate.manifest_id,
+        )
+        return provenance
+
+    def _cutover_refusal(
+        self, session: Session, moves, *, season: str,
+        expected_fences: Mapping[str, int] | None,
+    ) -> str | None:
+        """The reason a cutover with these moves must refuse, or ``None``.
+
+        Every moved candidate must be complete and bound: a verified manifest
+        and Event Catalog identity shared with the ``player_game_logs``
+        candidate, and a payload and lineage that cover exactly the governed
+        games of that authority (all thirty teams) -- the same checks
+        composition and operator activation apply.
+        """
+
+        by_stream = {key: (stream, candidate) for key, stream, _p, _c, candidate in moves}
+        if PUBLISHED_SEASON_STREAM not in by_stream:
             return "cutover_player_game_logs_candidate_required"
         if expected_fences is not None and any(
             expected_fences.get(key) is None
             or int(expected_fences[key]) != int(pointer.fence)
-            for key, pointer, _current, _candidate in moves
+            for key, _stream, pointer, _current, _candidate in moves
         ):
             return "stale_composition"
-        authority = (
-            logs.manifest_id,
-            logs.event_catalog_publication_id,
-            logs.event_catalog_checksum,
-        )
-        for key, candidate in sorted(by_stream.items()):
-            if not publication_payload_matches_checksum(
-                candidate.payload, candidate.checksum,
-            ):
-                return "publication_checksum_mismatch"
+        authority = None
+        for key in [PUBLISHED_SEASON_STREAM] + sorted(
+            set(by_stream) - {PUBLISHED_SEASON_STREAM}
+        ):
+            stream, candidate = by_stream[key]
             try:
-                _validate_activation_candidate_payload(
-                    key, candidate.payload, season=season,
+                self._assert_cutover_candidate(
+                    session, stream, candidate, season=season,
+                    authority=authority,
                 )
             except ControlPlaneError as error:
                 return error.reason
-            if (
-                candidate.manifest_id,
-                candidate.event_catalog_publication_id,
-                candidate.event_catalog_checksum,
-            ) != authority:
-                return "cutover_authority_mismatch"
+            if authority is None:
+                authority = (
+                    candidate.manifest_id,
+                    candidate.event_catalog_publication_id,
+                    candidate.event_catalog_checksum,
+                )
         return None
+
+    def _assert_cutover_candidate(
+        self, session: Session, stream: PublicationStream,
+        candidate: PublicationVersion, *, season: str,
+        authority: tuple[str, str, str] | None,
+    ) -> None:
+        key = stream.stream_key
+        if not publication_payload_matches_checksum(
+            candidate.payload, candidate.checksum,
+        ):
+            raise ControlPlaneError("publication_checksum_mismatch")
+        try:
+            verified = verify_publication_authority(session, candidate)
+        except PublicationGovernanceUnavailable as error:
+            raise ControlPlaneError("publication_governance_unavailable") from error
+        identity = (
+            verified.manifest_id,
+            verified.event_catalog_publication_id,
+            verified.event_catalog_checksum,
+        )
+        if authority is not None and identity != authority:
+            raise ControlPlaneError("cutover_authority_mismatch")
+        if self.l15_expectation_resolver is None:
+            raise ControlPlaneError("publication_governance_unavailable")
+        try:
+            expected = resolve_governed_team_game_ids(
+                self.l15_expectation_resolver,
+                candidate.season,
+                _aware(candidate.cutoff),
+                window="l15" if key.endswith("_l15") else "season",
+                manifest_id=verified.manifest_id,
+                event_catalog_publication_id=verified.event_catalog_publication_id,
+                event_catalog_checksum=verified.event_catalog_checksum,
+            )
+        except PublicationGovernanceUnavailable as error:
+            # Also refuses an authority that does not govern all thirty teams.
+            raise ControlPlaneError("publication_governance_unavailable") from error
+        governed = {
+            str(game_id) for game_ids in expected.values() for game_id in game_ids
+        }
+        if stream.provider == "ledger":
+            lineage = self._assert_candidate_ledger_lineage(session, candidate)
+            if set(lineage.values()) != governed:
+                raise ControlPlaneError("publication_game_set_mismatch")
+        _validate_activation_candidate_payload(
+            key, candidate.payload, season=season,
+            expected_game_ids_by_team=expected,
+        )
+        if key == PUBLISHED_SEASON_STREAM:
+            from app.services.database_first_activation import (
+                decode_player_game_logs,
+            )
+
+            rows = decode_player_game_logs(
+                json.loads(candidate.payload), season=season,
+            )
+            if not {str(row.game_id) for row in rows} <= governed:
+                raise ControlPlaneError("publication_game_set_mismatch")
 
     @staticmethod
     def _season_team_completed_games(
@@ -6049,20 +6140,23 @@ class PublicationService(_SessionService):
         *,
         reason: str,
         session: Session | None = None,
-    ) -> tuple[PublicationVersion, ...]:
-        """Return every stream one cutover moved to its pre-cutover publication.
+    ) -> tuple[dict[str, Any], ...]:
+        """Undo one cutover: every moved stream returns to its exact prior state.
 
         ``cutover`` is the cutover's audit record.  The revert is refused with
         ``cutover_superseded`` once any stream that was enabled at the cutover
-        has moved since, so it can never undo later work.  The moves go
-        through the fenced rollback, which restores each pre-cutover
-        publication's exact content and records the history.
+        has moved since, so it can never undo later work.  Each moved pointer
+        names its pre-cutover active and previous publications again.  The
+        candidate the cutover promoted is withdrawn: superseded, and its
+        pointer-history row revoked, so the reverted season keeps no retained
+        authority and its payload is no longer kept by retention.
         """
 
         moved = list(cutover.get("moved") or ())
         fences = dict(cutover.get("fences") or {})
         if not moved:
             raise ControlPlaneError("cutover_not_found")
+        now = self.clock()
         with self._session_scope(session) as session:
             _lock_streams(
                 session, session.scalars(select(PublicationStream.stream_key))
@@ -6072,22 +6166,50 @@ class PublicationService(_SessionService):
                 fence = int(pointer.fence) if pointer is not None else 0
                 if fence != int(fences[key]):
                     raise ControlPlaneError("cutover_superseded")
+            plans = []
             for item in moved:
                 pointer = session.get(PublicationPointer, item["stream_key"])
+                promoted = session.get(PublicationVersion, item["to_publication_id"])
+                restored = session.get(
+                    PublicationVersion, item["from_publication_id"]
+                )
                 if (
                     pointer is None
                     or pointer.active_publication_id != item["to_publication_id"]
                     or pointer.previous_publication_id
                     != item["from_publication_id"]
+                    or promoted is None
+                    or restored is None
                 ):
                     raise ControlPlaneError("cutover_superseded")
-            return self.rollback_publication_family(
-                [item["stream_key"] for item in moved],
-                reason=reason,
-                expected_fences={
-                    item["stream_key"]: int(item["fence"]) for item in moved
-                },
-                session=session,
+                if not publication_payload_matches_checksum(
+                    restored.payload, restored.checksum
+                ):
+                    raise ControlPlaneError("publication_checksum_mismatch")
+                plans.append((item, pointer, promoted, restored))
+            for item, pointer, promoted, restored in plans:
+                pointer.fence = int(pointer.fence) + 1
+                pointer.active_publication_id = restored.publication_id
+                pointer.previous_publication_id = item.get(
+                    "from_previous_publication_id"
+                )
+                pointer.updated_at = now
+                restored.status = "active"
+                promoted.status = "superseded"
+                _revoke_pointer_history(
+                    session, pointer.stream_key, (promoted.publication_id,),
+                    now=now, fence=pointer.fence,
+                )
+                _record_pointer_activation(session, pointer, restored, now=now)
+            session.flush()
+            return tuple(
+                {
+                    "stream_key": pointer.stream_key,
+                    "publication_id": restored.publication_id,
+                    "season": restored.season,
+                    "fence": int(pointer.fence),
+                }
+                for _item, pointer, _promoted, restored in plans
             )
 
     def current(self, stream_key: str) -> PublicationVersion | None:
@@ -6727,14 +6849,9 @@ class CollectionOperationsService(_SessionService):
             actor=actor, action="season.cutover_revert", resource=season,
             reason=reason, mutation=revert,
             details={"cutover_id": cutover_id},
-            details_from_result=lambda restored: {"restored": [
-                {
-                    "stream_key": version.stream_key,
-                    "publication_id": version.publication_id,
-                    "fence": int(version.fence),
-                }
-                for version in restored
-            ]},
+            details_from_result=lambda restored: {
+                "restored": [dict(item) for item in restored],
+            },
         )
 
     @staticmethod

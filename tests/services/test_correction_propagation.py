@@ -64,6 +64,7 @@ from app.services.team_matchup_repository import (
 from app.services.team_matchup_query import TeamMatchupQueryService
 from tests.services.test_ledger_derivations import _league_games
 from tests.support.pointer_history import pointer_history, retirements, revoked_fences
+from tests.support.season_rollover import cut_over_if_held
 
 
 UTC = timezone.utc
@@ -4004,10 +4005,10 @@ def test_a_correction_clears_a_revoked_rollback_target(tmp_path, family):
         return publications.rollback(stream_key, reason=reason)
 
     register("replace", True)
-    publications.compose(
+    cut_over_if_held(publications, publications.compose(
         stream_key, season="2026-27", cutoff=AS_OF, payload={"value": 20},
         expected_fence=activated[-1].fence,
-    )
+    ))
     rollback("restore the previous season")
     rollback("toggle forward")  # legitimate: the 2025-26 restore is now revoked
     register("ledger_compose", False)

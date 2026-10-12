@@ -29,11 +29,7 @@ from app.domain.team_matchup_taxonomy import PLAY_TYPES, SHOT_TYPE_SLICES
 from app.errors import InvalidInputError, SeasonUnavailableError
 from app.migrations import run_migrations
 from app.models.user import User
-from app.models.collection_control import PublicationPointer, PublicationVersion
-from app.services.collection_control import (
-    PublicationService,
-    _move_pointer_to_candidate,
-)
+from app.services.collection_control import PublicationService
 from app.services.database_first_activation import DatabaseFirstPublicationReader
 from app.services.player_diet import PlayerDietRepository
 from app.services.player_game_log_repository import PlayerGameLogRepository
@@ -240,22 +236,7 @@ class World:
                 now=NOW,
                 derive_expected_fence_from_lock=True,
             )
-            if version.status != "candidate":
-                return
-            if stream == "player_game_logs":
-                # The published season moves only by an operator cutover.
-                cut_over_if_held(self.publications, version, session=session)
-                return
-            # One stream off the published season: the single-pointer move an
-            # operator activation of the held candidate makes.
-            pointer = session.get(PublicationPointer, stream)
-            _move_pointer_to_candidate(
-                session, pointer, version,
-                current=session.get(
-                    PublicationVersion, pointer.active_publication_id
-                ),
-                actor="test", reason="activate one stream early", now=NOW,
-            )
+            cut_over_if_held(self.publications, version, session=session)
 
     def publish_season(self, season, *, okc_games, corner_three):
         """Activate one season's five Backtest streams."""

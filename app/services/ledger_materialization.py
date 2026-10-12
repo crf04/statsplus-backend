@@ -104,6 +104,7 @@ class LedgerMaterializationService:
         recomposition_reason: str | None = None,
         source_observation_ids_by_game: Mapping[str, str] | None = None,
         candidate_stream_keys: frozenset[str] | None = None,
+        composition_job_ids: Mapping[str, str] | None = None,
         session: Session | None = None,
     ) -> LedgerMaterialization:
         canonical_season = validate_canonical_season(season)
@@ -396,6 +397,9 @@ class LedgerMaterializationService:
                         cutoff=publication_cutoff, payload=encoded_payload,
                         provenance=provenance, reason=publication_reason,
                         corrected_provenance=corrected_provenance,
+                        composition_job_id=(composition_job_ids or {}).get(
+                            stream_key
+                        ),
                     ))
                 else:
                     candidate_versions[stream_key] = self.publication_service.compose_inactive_ledger(

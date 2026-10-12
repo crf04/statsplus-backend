@@ -1,10 +1,17 @@
 """A control plane that has published 2025-26 and collected 2026-27.
 
-Each season has its own Event Catalog, ``canonical_game_ledger`` manifest,
-accepted ledger observations, and canonical games, so every publication rests
-on the same kind of authority production uses.  ``player_game_logs`` and both
-traditional-opponent windows are enabled and active on 2025-26; ``player_per36``
-stays registered but disabled.
+Each season has its own completed Event Catalog, ``canonical_game_ledger``
+manifest, accepted ledger observations, and canonical games: fifteen final
+games that give all thirty NBA teams one game each.  Payloads name exactly
+those governed games and the real team identities, and ``PublicationService``
+resolves governance through the production
+``ActiveManifestLedgerGovernanceReader``, so every publication rests on the
+same kind of authority production uses.
+
+``player_game_logs`` and both traditional-opponent windows are enabled and
+active on 2025-26; ``player_per36`` stays registered but disabled.  A second
+2026-27 manifest a day later (one more game) supplies candidates that rest on
+other authority.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, select
 
+from app.domain.nba_teams import NBA_TEAM_ID_TO_TRICODE
 from app.migrations import run_migrations
 from app.models.canonical_game_ledger import (
     CanonicalGameLedgerGame,
@@ -28,8 +36,9 @@ from app.models.collection_control import (
     PublicationVersion,
 )
 from app.services.collection_control import NBA_TEAM_IDS, PublicationService
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader
 from tests.services.test_matchup_selection_service import _log_row
-from tests.support.traditional_opponent_family import v2_payload
+from tests.support.traditional_opponent_family import payload as team_window_payload
 
 UTC = timezone.utc
 OLD = "2025-26"
@@ -38,8 +47,12 @@ OLD_CUTOFF = datetime(2026, 4, 13, 4, tzinfo=UTC)
 NEW_CUTOFF = datetime(2026, 10, 24, 4, tzinfo=UTC)
 #: A second 2026-27 manifest, for candidates that rest on other authority.
 OTHER_CUTOFF = datetime(2026, 10, 25, 4, tzinfo=UTC)
+#: A later season whose only manifest governs two teams.
+SHORT = "2027-28"
+SHORT_CUTOFF = datetime(2026, 10, 25, 5, tzinfo=UTC)
 NOW = datetime(2026, 10, 25, 12, tzinfo=UTC)
-TEAM_IDS = tuple(sorted(NBA_TEAM_IDS))
+TEAM_IDS = tuple(sorted(int(team_id) for team_id in NBA_TEAM_IDS))
+TRICODES = NBA_TEAM_ID_TO_TRICODE
 
 PLAYER_LOGS = "player_game_logs"
 SEASON_STREAM = "traditional_opponent_season"
@@ -47,14 +60,41 @@ L15_STREAM = "traditional_opponent_l15"
 PER36 = "player_per36"
 ENABLED_STREAMS = (PLAYER_LOGS, SEASON_STREAM, L15_STREAM)
 
-#: ``(home index, away index)`` into ``TEAM_IDS`` for each 2026-27 game.
-NEW_GAMES = ((0, 1), (2, 0), (1, 3))
+
+def _games(prefix: str) -> tuple[tuple[str, int, int], ...]:
+    """Fifteen ``(game_id, home_team_id, away_team_id)``: every team once."""
+
+    return tuple(
+        (f"{prefix}{index + 1:05d}", TEAM_IDS[index * 2], TEAM_IDS[index * 2 + 1])
+        for index in range(15)
+    )
 
 
-def _authority(connection, *, season, manifest_id, cutoff, games):
-    """Insert one catalog, manifest, and its accepted ledger games."""
+OLD_GAMES = _games("00225")
+NEW_GAMES = _games("00226")
+#: The later manifest's extra game: the first two teams meet again.
+OTHER_GAME = ("0022600016", TEAM_IDS[0], TEAM_IDS[1])
+SHORT_GAME = ("0022700001", TEAM_IDS[0], TEAM_IDS[1])
 
-    catalog_payload = json.dumps({"manifest": manifest_id})
+
+def _authority(connection, *, season, manifest_id, cutoff, games, catalog_games):
+    """Insert one completed Event Catalog, manifest, and its accepted games."""
+
+    events = [
+        {
+            "nba_game_id": game_id,
+            "home_team_id": home,
+            "away_team_id": away,
+            "phase": "Regular Season",
+            "status": "Final",
+            "status_code": 3,
+            "scheduled_at": (cutoff - timedelta(hours=6)).isoformat(),
+        }
+        for game_id, home, away in catalog_games
+    ]
+    catalog_payload = json.dumps(
+        {"events": events}, sort_keys=True, separators=(",", ":")
+    )
     catalog_checksum = hashlib.sha256(catalog_payload.encode()).hexdigest()
     catalog_id = f"catalog-{manifest_id}"
     connection.execute(CatalogPublication.__table__.insert().values(
@@ -94,9 +134,9 @@ def _authority(connection, *, season, manifest_id, cutoff, games):
         ))
         connection.execute(CanonicalGameLedgerGame.__table__.insert().values(
             game_id=game_id, season=season, season_type="Regular Season",
-            game_date=cutoff.date(),
-            home_team_id=int(TEAM_IDS[home]), home_team_tricode=f"T{home:02d}",
-            away_team_id=int(TEAM_IDS[away]), away_team_tricode=f"T{away:02d}",
+            game_date=(cutoff - timedelta(hours=6)).date(),
+            home_team_id=int(home), home_team_tricode=TRICODES[home],
+            away_team_id=int(away), away_team_tricode=TRICODES[away],
             status="final", source_observation_id=observation_id,
             checksum=hashlib.sha256(game_id.encode()).hexdigest(),
             raw_checksum=hashlib.sha256(game_id.encode()).hexdigest(),
@@ -107,25 +147,44 @@ def _authority(connection, *, season, manifest_id, cutoff, games):
         ))
 
 
-def provenance(prefix: str, count: int) -> dict[str, str]:
-    return {f"pbp:{prefix}-{index}": f"{prefix}-{index}" for index in range(count)}
+def provenance(games) -> dict[str, str]:
+    return {f"pbp:{game_id}": game_id for game_id, _home, _away in games}
 
 
-OLD_PROVENANCE = provenance("old", 15)
-NEW_PROVENANCE = provenance("new", len(NEW_GAMES))
-OTHER_PROVENANCE = provenance("other", 1)
+OLD_PROVENANCE = provenance(OLD_GAMES)
+NEW_PROVENANCE = provenance(NEW_GAMES)
+OTHER_PROVENANCE = provenance((OTHER_GAME,))
+SHORT_PROVENANCE = provenance((SHORT_GAME,))
 
 
-def payload_for(stream_key: str, season: str, *, points: int = 10):
-    """A payload the stream's strict read-side decoder accepts."""
+def payload_for(stream_key: str, season: str, *, points: int = 10, games=None):
+    """A payload naming exactly ``games`` (the season's governed games)."""
 
+    games = games or (OLD_GAMES if season == OLD else NEW_GAMES)
     if stream_key == PLAYER_LOGS:
+        game_id, home, away = games[0]
         row = _log_row(
-            game_id="0022500001", game_date="2026-01-02", minutes=30.0,
-            points=points,
+            game_id=game_id,
+            game_date=(OLD_CUTOFF if season == OLD else NEW_CUTOFF).date().isoformat(),
+            minutes=30.0, points=points,
         )
-        return {"rows": [{**row, "season": season}]}
-    return v2_payload()
+        return {"rows": [{
+            **row, "season": season,
+            "team_id": int(home), "team_tricode": TRICODES[home],
+            "opponent_team_id": int(away), "opponent_team_tricode": TRICODES[away],
+        }]}
+    by_team = {}
+    for game_id, home, away in games:
+        by_team.setdefault(int(home), []).append(game_id)
+        by_team.setdefault(int(away), []).append(game_id)
+
+    def governed(rows):
+        for row in rows:
+            row["team_tricode"] = TRICODES[row["team_id"]]
+            row["game_ids"] = sorted(by_team.get(row["team_id"], ()))
+            row["game_count"] = len(row["game_ids"])
+
+    return team_window_payload(mutate=governed)
 
 
 def seed_world(tmp_path, *, engine=None):
@@ -137,25 +196,27 @@ def seed_world(tmp_path, *, engine=None):
     with engine.begin() as connection:
         _authority(
             connection, season=OLD, manifest_id="manifest-old",
-            cutoff=OLD_CUTOFF,
-            games=[
-                (f"old-{index}", index * 2, index * 2 + 1)
-                for index in range(15)
-            ],
+            cutoff=OLD_CUTOFF, games=OLD_GAMES, catalog_games=OLD_GAMES,
         )
         _authority(
             connection, season=NEW, manifest_id="manifest-new",
-            cutoff=NEW_CUTOFF,
-            games=[
-                (f"new-{index}", home, away)
-                for index, (home, away) in enumerate(NEW_GAMES)
-            ],
+            cutoff=NEW_CUTOFF, games=NEW_GAMES, catalog_games=NEW_GAMES,
         )
         _authority(
             connection, season=NEW, manifest_id="manifest-other",
-            cutoff=OTHER_CUTOFF, games=[("other-0", 4, 5)],
+            cutoff=OTHER_CUTOFF, games=(OTHER_GAME,),
+            catalog_games=NEW_GAMES + (OTHER_GAME,),
         )
-    publications = PublicationService(engine, clock=lambda: NOW)
+        _authority(
+            connection, season=SHORT, manifest_id="manifest-short",
+            cutoff=SHORT_CUTOFF, games=(SHORT_GAME,), catalog_games=(SHORT_GAME,),
+        )
+    publications = PublicationService(
+        engine, clock=lambda: NOW,
+        l15_expectation_resolver=ActiveManifestLedgerGovernanceReader(
+            engine, clock=lambda: NOW,
+        ),
+    )
     publications.register_default_streams()
     for stream_key in ENABLED_STREAMS:
         publications.register_stream(
@@ -171,13 +232,25 @@ def seed_world(tmp_path, *, engine=None):
     return engine, publications
 
 
-def compose_new(publications, stream_key, *, points=11):
+def compose_new(publications, stream_key, *, points=11, payload=None,
+                provenance=None):
     """Compose ``stream_key`` from the 2026-27 ledger, as the nightly job does."""
 
     return publications.recompose_ledger(
         stream_key, season=NEW, cutoff=NEW_CUTOFF,
-        payload=payload_for(stream_key, NEW, points=points),
-        provenance=NEW_PROVENANCE, reason="2026-27 ledger composition",
+        payload=payload or payload_for(stream_key, NEW, points=points),
+        provenance=provenance or NEW_PROVENANCE,
+        reason="2026-27 ledger composition",
+    )
+
+
+def compose_other(publications, stream_key):
+    """Compose ``stream_key`` under the later 2026-27 manifest."""
+
+    return publications.recompose_ledger(
+        stream_key, season=NEW, cutoff=OTHER_CUTOFF,
+        payload=payload_for(stream_key, NEW, games=(OTHER_GAME,)),
+        provenance=OTHER_PROVENANCE, reason="2026-27 ledger composition",
     )
 
 
