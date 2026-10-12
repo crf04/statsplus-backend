@@ -157,22 +157,34 @@ OTHER_PROVENANCE = provenance((OTHER_GAME,))
 SHORT_PROVENANCE = provenance((SHORT_GAME,))
 
 
+def log_rows(season: str, games, *, points: int = 10):
+    """One player's line for each team of each game in ``games``."""
+
+    game_date = (OLD_CUTOFF if season == OLD else NEW_CUTOFF).date().isoformat()
+    rows = []
+    for index, (game_id, home, away) in enumerate(games):
+        for side, (team, opponent) in enumerate(((home, away), (away, home))):
+            rows.append({
+                **_log_row(
+                    player_id=1000 + index * 2 + side,
+                    player_name=f"Player {index * 2 + side}",
+                    game_id=game_id, game_date=game_date,
+                    minutes=30.0, points=points,
+                ),
+                "season": season, "is_home": side == 0,
+                "team_id": int(team), "team_tricode": TRICODES[team],
+                "opponent_team_id": int(opponent),
+                "opponent_team_tricode": TRICODES[opponent],
+            })
+    return rows
+
+
 def payload_for(stream_key: str, season: str, *, points: int = 10, games=None):
     """A payload naming exactly ``games`` (the season's governed games)."""
 
     games = games or (OLD_GAMES if season == OLD else NEW_GAMES)
     if stream_key == PLAYER_LOGS:
-        game_id, home, away = games[0]
-        row = _log_row(
-            game_id=game_id,
-            game_date=(OLD_CUTOFF if season == OLD else NEW_CUTOFF).date().isoformat(),
-            minutes=30.0, points=points,
-        )
-        return {"rows": [{
-            **row, "season": season,
-            "team_id": int(home), "team_tricode": TRICODES[home],
-            "opponent_team_id": int(away), "opponent_team_tricode": TRICODES[away],
-        }]}
+        return {"rows": log_rows(season, games, points=points)}
     by_team = {}
     for game_id, home, away in games:
         by_team.setdefault(int(home), []).append(game_id)

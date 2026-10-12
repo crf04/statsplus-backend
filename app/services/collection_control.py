@@ -1748,6 +1748,40 @@ def _published_season(session: Session) -> str | None:
     )
 
 
+def _reversible_cutover_targets(session: Session) -> set[str]:
+    """Publications a still-reversible season cutover would restore.
+
+    A cutover stays reversible while every pointer it recorded keeps its
+    post-cutover fence; until then its revert must find each moved stream's
+    pre-cutover active and previous publications, so retention keeps them.
+    """
+
+    fences = {
+        stream_key: int(fence)
+        for stream_key, fence in session.execute(
+            select(PublicationPointer.stream_key, PublicationPointer.fence)
+        )
+    }
+    targets: set[str] = set()
+    for details in session.scalars(
+        select(AuditEvent.details).where(AuditEvent.action == "season.cutover")
+    ):
+        record = _safe_json_mapping(details)
+        recorded = record.get("fences")
+        if not isinstance(recorded, Mapping) or any(
+            fences.get(str(key), 0) != int(value)
+            for key, value in recorded.items()
+        ):
+            continue
+        for item in record.get("moved") or ():
+            if not isinstance(item, Mapping):
+                continue
+            for key in ("from_publication_id", "from_previous_publication_id"):
+                if item.get(key):
+                    targets.add(str(item[key]))
+    return targets
+
+
 def _move_pointer_to_candidate(
     session: Session,
     pointer: PublicationPointer,
@@ -3970,7 +4004,7 @@ class ObservationIngestionService(_SessionService):
 
 
 PRUNE_KEEP_REASONS: Final[tuple[str, ...]] = (
-    "active", "previous", "candidate", "season_latest",
+    "active", "previous", "candidate", "season_latest", "cutover_restore",
 )
 
 
@@ -6104,7 +6138,19 @@ class PublicationService(_SessionService):
             rows = decode_player_game_logs(
                 json.loads(candidate.payload), season=season,
             )
-            if not {str(row.game_id) for row in rows} <= governed:
+            # Every governed game, with rows for both of its teams: the
+            # participants the governed per-team expectation names.
+            participants = {
+                game_id: {
+                    str(team_id) for team_id, game_ids in expected.items()
+                    if game_id in {str(value) for value in game_ids}
+                }
+                for game_id in governed
+            }
+            covered: dict[str, set[str]] = {}
+            for row in rows:
+                covered.setdefault(str(row.game_id), set()).add(str(row.team_id))
+            if covered != participants:
                 raise ControlPlaneError("publication_game_set_mismatch")
 
     @staticmethod
@@ -6170,22 +6216,35 @@ class PublicationService(_SessionService):
             for item in moved:
                 pointer = session.get(PublicationPointer, item["stream_key"])
                 promoted = session.get(PublicationVersion, item["to_publication_id"])
-                restored = session.get(
-                    PublicationVersion, item["from_publication_id"]
-                )
                 if (
                     pointer is None
                     or pointer.active_publication_id != item["to_publication_id"]
                     or pointer.previous_publication_id
                     != item["from_publication_id"]
                     or promoted is None
-                    or restored is None
                 ):
                     raise ControlPlaneError("cutover_superseded")
-                if not publication_payload_matches_checksum(
-                    restored.payload, restored.checksum
+                # Every restoration target must still exist intact before any
+                # pointer is written; a missing one refuses the whole revert.
+                restored = session.get(
+                    PublicationVersion, item["from_publication_id"]
+                )
+                previous_id = item.get("from_previous_publication_id")
+                previous = (
+                    session.get(PublicationVersion, previous_id)
+                    if previous_id else None
+                )
+                if any(
+                    target is None
+                    or target.stream_key != item["stream_key"]
+                    or not publication_payload_matches_checksum(
+                        target.payload, target.checksum
+                    )
+                    for target in (
+                        (restored, previous) if previous_id else (restored,)
+                    )
                 ):
-                    raise ControlPlaneError("publication_checksum_mismatch")
+                    raise ControlPlaneError("cutover_restore_unavailable")
                 plans.append((item, pointer, promoted, restored))
             for item, pointer, promoted, restored in plans:
                 pointer.fence = int(pointer.fence) + 1
@@ -6586,6 +6645,7 @@ class PublicationService(_SessionService):
             ).where(PublicationVersion.stream_key.in_(locked_streams))
             if season is not None:
                 version_query = version_query.where(PublicationVersion.season == season)
+            restore_targets = _reversible_cutover_targets(session)
             doomed: list[str] = []
             for publication_id, stream, status in session.execute(version_query).all():
                 pointer = pointers.get(stream)
@@ -6597,6 +6657,8 @@ class PublicationService(_SessionService):
                     reason = "candidate"
                 elif publication_id in season_latest.get(stream, ()):
                     reason = "season_latest"
+                elif publication_id in restore_targets:
+                    reason = "cutover_restore"
                 else:
                     doomed.append(publication_id)
                     continue

@@ -72,6 +72,7 @@ CUTOVER_PUBLIC_REASONS = frozenset({
     "cutover_player_game_logs_candidate_required",
     "cutover_authority_mismatch",
     "cutover_superseded",
+    "cutover_restore_unavailable",
     "cutover_not_found",
     "invalid_season",
     "ledger_provenance_manifest_mismatch",
@@ -133,8 +134,9 @@ def _control_error(
         # request that would split a coupled family.
         "stale_publication_family", "rebuild_lease_held",
         "publication_family_coupled",
-        # A cutover revert after a later pointer move.
-        "cutover_superseded",
+        # A cutover revert after a later pointer move, or whose restoration
+        # target no longer exists.
+        "cutover_superseded", "cutover_restore_unavailable",
     }:
         return ConflictError(detail=reason, public_details=details)
     return InvalidInputError(

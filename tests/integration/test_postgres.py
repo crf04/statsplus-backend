@@ -1721,7 +1721,7 @@ def test_pruning_keeps_the_publication_a_pending_repair_group_guards_while_it_is
 
     assert pending.deleted == 0
     assert dict(pending.kept) == {
-        "active": 1, "previous": 0, "candidate": 0, "season_latest": 0,
+        "active": 1, "previous": 0, "candidate": 0, "season_latest": 0, "cutover_restore": 0,
     }
 
     # The pointer moves on: the group's guard is stale, so promotion would

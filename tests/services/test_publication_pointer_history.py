@@ -160,7 +160,7 @@ def test_pruning_does_not_pin_versions_named_by_activation_evidence(lifecycle):
     }
     assert result.deleted == 4
     assert dict(result.kept) == {
-        "active": 1, "previous": 1, "candidate": 0, "season_latest": 0,
+        "active": 1, "previous": 1, "candidate": 0, "season_latest": 0, "cutover_restore": 0,
     }
     with engine.connect() as connection:
         assert connection.scalar(text(
@@ -216,7 +216,7 @@ def test_pruning_keeps_only_the_versions_that_can_still_serve(lifecycle):
     assert result.deleted == 2
     assert dict(result.kept) == {
         "active": 1, "previous": 1, "candidate": 0,
-        "season_latest": 0,
+        "season_latest": 0, "cutover_restore": 0,
     }
     # Pruned payloads leave their activation record behind.
     assert pointer_history(engine, STREAM) == [
@@ -274,7 +274,7 @@ def test_each_season_keeps_the_version_that_serves_its_past_games(lifecycle):
     }
     assert dict(result.kept) == {
         "active": 1, "previous": 1, "candidate": 0,
-        "season_latest": 1,
+        "season_latest": 1, "cutover_restore": 0,
     }
     assert [
         row.points
@@ -880,7 +880,7 @@ def test_prune_applies_the_keep_set_to_a_stream_with_no_pointer(lifecycle):
 
     assert result.deleted == 2
     assert dict(result.kept) == {
-        "active": 0, "previous": 0, "candidate": 1, "season_latest": 0,
+        "active": 0, "previous": 0, "candidate": 1, "season_latest": 0, "cutover_restore": 0,
     }
     assert _surviving(engine) == {"awaiting"}
 
@@ -913,7 +913,7 @@ def test_the_maintenance_command_prints_what_pruning_deleted_and_kept(
     assert "'publications_pruned': 2" in printed
     assert (
         "'publications_kept': {'active': 1, 'previous': 1, 'candidate': 0, "
-        "'season_latest': 0}" in printed
+        "'season_latest': 0, 'cutover_restore': 0}" in printed
     )
 
 

@@ -410,7 +410,7 @@ def test_pruning_after_a_promotion_deletes_the_displaced_pair_and_keeps_the_decl
 
     assert result.deleted == 2
     assert dict(result.kept) == {
-        "active": 2, "previous": 0, "candidate": 0, "season_latest": 0,
+        "active": 2, "previous": 0, "candidate": 0, "season_latest": 0, "cutover_restore": 0,
     }
     statuses = read_statuses(engine)
     for stream_key in (SEASON_ZONES, L15_ZONES):

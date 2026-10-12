@@ -419,6 +419,8 @@ def test_a_failure_after_the_first_pointer_move_leaves_everything_unchanged(
 
 @pytest.mark.parametrize("defect, refusal", [
     ("unrelated_log_game", "publication_game_set_mismatch"),
+    ("log_game_missing", "publication_game_set_mismatch"),
+    ("log_game_one_team_only", "publication_game_set_mismatch"),
     ("partial_lineage", "publication_game_set_mismatch"),
     ("malformed_payload", "publication_candidate_invalid"),
     ("checksum_mismatch", "publication_checksum_mismatch"),
@@ -436,6 +438,13 @@ def test_cutover_refuses_a_candidate_that_is_not_complete_and_bound(
         stray = ("0022699999",) + NEW_GAMES[0][1:]
         compose_new(publications, PLAYER_LOGS,
                     payload=payload_for(PLAYER_LOGS, NEW, games=(stray,)))
+    elif defect == "log_game_missing":
+        # The night's last game never made it into the logs payload.
+        compose_new(publications, PLAYER_LOGS,
+                    payload=payload_for(PLAYER_LOGS, NEW, games=NEW_GAMES[:14]))
+    elif defect == "log_game_one_team_only":
+        rows = payload_for(PLAYER_LOGS, NEW)["rows"]
+        compose_new(publications, PLAYER_LOGS, payload={"rows": rows[:-1]})
     elif defect == "partial_lineage":
         # Composed before the ledger held the last game of the night.
         compose_new(publications, PLAYER_LOGS,
@@ -718,6 +727,83 @@ def test_revert_tolerates_an_enabled_stream_that_never_composed(world):
     assert {key: value[1] for key, value in pointers(engine).items()} == {
         PLAYER_LOGS: OLD, SEASON_STREAM: OLD, L15_STREAM: OLD,
     }
+
+
+def _advanced_logs_cohort(publications):
+    """Advance 2025-26 logs once, so the pre-cutover pointer has a previous."""
+
+    advanced = publications.recompose_ledger(
+        PLAYER_LOGS, season=OLD, cutoff=OLD_CUTOFF,
+        payload=payload_for(PLAYER_LOGS, OLD, points=30),
+        provenance=OLD_PROVENANCE, reason="2025-26 ledger correction",
+    )
+    _held_cohort(publications)
+    return advanced
+
+
+def test_pruning_before_revert_keeps_every_restoration_target(world):
+    engine, publications, operations, before = world
+    advanced = _advanced_logs_cohort(publications)
+    cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+
+    pruned = publications.prune_history()
+    operations.revert_season_cutover(
+        NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+    )
+
+    # The original 2025-26 logs are only the pre-cutover previous: kept for
+    # the revert, which then restores active and previous exactly.
+    assert pruned.kept["cutover_restore"] == 1
+    assert pointers(engine)[PLAYER_LOGS] == (advanced.publication_id, OLD, "active", 4)
+    with engine.connect() as connection:
+        previous = connection.scalar(select(
+            PublicationPointer.previous_publication_id,
+        ).where(PublicationPointer.stream_key == PLAYER_LOGS))
+    assert previous == _id(before, PLAYER_LOGS)
+    restored = publications.rollback(PLAYER_LOGS, reason="undo the correction")
+    assert (restored.season, restored.checksum) == (
+        OLD, publications_checksum(engine, _id(before, PLAYER_LOGS)),
+    )
+
+
+def publications_checksum(engine, publication_id):
+    with engine.connect() as connection:
+        return connection.scalar(select(PublicationVersion.checksum).where(
+            PublicationVersion.publication_id == publication_id
+        ))
+
+
+def test_revert_refuses_when_a_restoration_target_is_gone(world):
+    from sqlalchemy import delete
+
+    engine, publications, operations, before = world
+    _advanced_logs_cohort(publications)
+    cutover = operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    with engine.begin() as connection:
+        connection.execute(delete(PublicationVersion).where(
+            PublicationVersion.publication_id == _id(before, PLAYER_LOGS)
+        ))
+    unchanged = _durable_state(engine)
+
+    with pytest.raises(ControlPlaneError) as refused:
+        operations.revert_season_cutover(
+            NEW, cutover.job_id, actor=ACTOR, reason="2026-27 opened too early",
+        )
+
+    assert refused.value.reason == "cutover_restore_unavailable"
+    assert _durable_state(engine) == unchanged
+
+
+def test_a_reversed_cutover_no_longer_protects_its_targets(world):
+    engine, publications, operations, before = world
+    _advanced_logs_cohort(publications)
+    operations.cutover_season(NEW, actor=ACTOR, reason=REASON)
+    compose_new(publications, L15_STREAM)  # a later move: no longer reversible
+
+    pruned = publications.prune_history(stream_key=PLAYER_LOGS)
+
+    assert pruned.kept["cutover_restore"] == 0
+    assert publications_checksum(engine, _id(before, PLAYER_LOGS)) is None
 
 
 def test_revert_refuses_after_a_later_move(world):
