@@ -260,7 +260,7 @@ def test_log_events_redact_emails_and_sql_parameters(app, transport):
             "Database error for ada@example.invalid\n"
             "[SQL: INSERT INTO users (email) VALUES (?)]\n"
             "[parameters: ('ada@example.invalid', 'Ada Lovelace')]\n"
-            "DETAIL:  Failing row contains (uid-7, Ada Lovelace, null).\n"
+            "DETAIL:  Failing row contains (uid-7, Ada\nLovelace, null).\n"
             "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
         )
         return {"ok": True}

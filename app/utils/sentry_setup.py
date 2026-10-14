@@ -33,7 +33,10 @@ _SAFE_HEADERS = frozenset(
 )
 _REDACTED = "[Filtered]"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_DATABASE_DETAIL_RE = re.compile(r"^(\s*DETAIL:).*$", re.MULTILINE)
+_DATABASE_DETAIL_RE = re.compile(
+    r"^(\s*DETAIL:).*?(?=\n\s*(?:\[SQL:|\[parameters:|\(Background|CONTEXT:|HINT:|STATEMENT:)|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 _SQL_PARAMETERS_RE = re.compile(r"\[parameters: .*?\]\s*(?=\n|$)", re.DOTALL)
 _REQUEST_FIELDS_DROPPED = ("data", "cookies", "query_string", "env")
 
