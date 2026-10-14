@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify
 
 from ..errors import route_error_boundary
 from ..utils.auth import require_admin
+from ..utils.db import lift_statement_timeout_for_blueprint
 from ..utils.telemetry import (
     snapshot_metrics,
     snapshot_recent_board_events,
@@ -15,6 +16,8 @@ from ._service_proxy import CurrentAppService
 
 # Initialize blueprint and services
 data_bp = Blueprint('data', __name__)
+# Admin refresh routes are exempt from the web statement limit.
+lift_statement_timeout_for_blueprint(data_bp)
 
 data_service = CurrentAppService("data")
 data_jobs_service = CurrentAppService("data_refresh_jobs")

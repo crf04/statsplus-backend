@@ -31,7 +31,7 @@ def postgres_url():
     get_engine.cache_clear()
 
 
-def _web_app(url: str, **overrides):
+def _web_app(url: str, dependencies=None, **overrides):
     settings = load_settings(
         overrides={"DATABASE_URL": url, "FLASK_ENV": "testing", **overrides}
     )
@@ -39,7 +39,7 @@ def _web_app(url: str, **overrides):
         {
             "TESTING": True,
             "RUNTIME_SETTINGS": settings,
-            "DEPENDENCIES": SimpleNamespace(settings=settings),
+            "DEPENDENCIES": dependencies or SimpleNamespace(settings=settings),
             "SKIP_FIREBASE_INIT": True,
             "SKIP_TABLE_CREATE": True,
         }
@@ -141,3 +141,190 @@ def test_command_engines_have_no_statement_timeout(
     assert str(built[0].url) == str(
         create_engine(_normalize_database_url(postgres_url)).url
     )
+
+
+# --- work that legitimately runs long keeps no limit --------------------------
+
+SLOW_SECONDS = 1.5
+LIMIT_MS = 300
+
+
+def _sleep_through(engine) -> str:
+    """Run a statement longer than the limit; return the timeout it ran under."""
+
+    with engine.connect() as connection:
+        connection.execute(text(f"SELECT pg_sleep({SLOW_SECONDS})"))
+        return connection.execute(text("SHOW statement_timeout")).scalar_one()
+
+
+@pytest.fixture
+def admin_headers(monkeypatch):
+    import app.utils.auth as auth
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+    monkeypatch.setattr(
+        auth,
+        "verify_firebase_token",
+        lambda token: {"uid": "admin-uid", "email": "a@example.com", "admin": True},
+    )
+    monkeypatch.setattr(
+        auth,
+        "get_dependencies",
+        lambda: SimpleNamespace(
+            user_service=SimpleNamespace(create_or_update_user=lambda data: None)
+        ),
+    )
+    return {"Authorization": "Bearer test-token"}
+
+
+def test_an_admin_collection_request_runs_past_the_limit(
+    postgres_url, admin_headers
+):
+    dependencies = SimpleNamespace()
+    app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
+    engine = get_engine(app.extensions["runtime_settings"])
+    dependencies.collection_operations = SimpleNamespace(
+        diagnostics=lambda limit: {"statement_timeout": _sleep_through(engine)}
+    )
+
+    response = app.test_client().get(
+        "/api/admin/collection/diagnostics", headers=admin_headers
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"statement_timeout": "0"}
+
+
+def test_a_collector_request_runs_past_the_limit(postgres_url):
+    dependencies = SimpleNamespace()
+    app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
+    engine = get_engine(app.extensions["runtime_settings"])
+    dependencies.collector_tokens = SimpleNamespace(
+        validate=lambda token, required_scope=None: SimpleNamespace(
+            scopes={"poll", "bootstrap", "catalog_publish"}, collector_id="c1"
+        )
+    )
+    dependencies.collection_operations = SimpleNamespace(
+        record_usage=lambda collector_id, polls: None
+    )
+    dependencies.collection_control = SimpleNamespace(
+        discover=lambda claims, limit: {"statement_timeout": _sleep_through(engine)}
+    )
+
+    response = app.test_client().get(
+        "/api/collector/discovery", headers={"Authorization": "Bearer token"}
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"statement_timeout": "0"}
+
+
+def test_an_admin_data_request_runs_past_the_limit(postgres_url, admin_headers):
+    dependencies = SimpleNamespace()
+    app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
+    engine = get_engine(app.extensions["runtime_settings"])
+    dependencies.data_service = SimpleNamespace(
+        get_playtypes=lambda: {"statement_timeout": _sleep_through(engine)}
+    )
+
+    response = app.test_client().get(
+        "/api/data/fetch_playtypes", headers=admin_headers
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"statement_timeout": "0"}
+
+
+def test_a_normal_user_route_still_gets_a_query_timeout(postgres_url, monkeypatch):
+    import app.utils.auth as auth
+    from app.routes import user_routes
+
+    monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+    monkeypatch.setattr(
+        auth,
+        "verify_firebase_token",
+        lambda token: {"uid": "u", "email": "u@example.com"},
+    )
+    monkeypatch.setattr(
+        auth,
+        "get_dependencies",
+        lambda: SimpleNamespace(
+            user_service=SimpleNamespace(
+                create_or_update_user=lambda data: SimpleNamespace()
+            )
+        ),
+    )
+    app = _web_app(postgres_url, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
+    engine = get_engine(app.extensions["runtime_settings"])
+    monkeypatch.setattr(
+        user_routes,
+        "user_service",
+        SimpleNamespace(get_user_stats=lambda uid: _sleep_through(engine)),
+    )
+
+    response = app.test_client().get(
+        "/api/user/stats", headers={"Authorization": "Bearer test-token"}
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "query_timeout"
+
+
+def test_the_limit_returns_after_an_exempt_request(postgres_url, admin_headers):
+    dependencies = SimpleNamespace()
+    app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
+    engine = get_engine(app.extensions["runtime_settings"])
+    dependencies.data_service = SimpleNamespace(
+        get_playtypes=lambda: {"statement_timeout": _show(engine)}
+    )
+
+    exempt = app.test_client().get("/api/data/fetch_playtypes", headers=admin_headers)
+
+    assert exempt.get_json() == {"statement_timeout": "0"}
+    assert _show(engine) == "300ms"
+
+
+def _show(engine) -> str:
+    with engine.connect() as connection:
+        return connection.execute(text("SHOW statement_timeout")).scalar_one()
+
+
+def test_a_refresh_job_runs_past_the_limit(migrated_postgres_url):
+    from app.services.job_service import DataRefreshJobService, SynchronousExecutor
+
+    settings = load_settings(
+        overrides={
+            "DATABASE_URL": migrated_postgres_url,
+            "FLASK_ENV": "testing",
+            "WEB_STATEMENT_TIMEOUT_MS": LIMIT_MS,
+        }
+    )
+    app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": settings,
+            "DEPENDENCIES": SimpleNamespace(settings=settings),
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+    engine = get_engine(app.extensions["runtime_settings"])
+    ran_under = []
+
+    def handler(*, progress_callback, publication_fence=None):
+        ran_under.append(_sleep_through(engine))
+        return True
+
+    jobs = DataRefreshJobService(
+        engine,
+        executor=SynchronousExecutor(),
+        handlers={"update_database": handler},
+        settings=settings,
+        dispatch_on_startup=False,
+        start_poller=False,
+    )
+
+    state = jobs.start("update_database")
+
+    assert ran_under == ["0"]
+    assert jobs.get(state["job_id"])["status"] == "succeeded"

@@ -62,7 +62,9 @@ def test_postgres_engine_passes_the_configured_connect_timeout(monkeypatch):
 
 
 def test_postgres_engine_sets_statement_timeout_only_when_configured(monkeypatch):
-    mock_create_engine = Mock()
+    from sqlalchemy import create_engine
+
+    mock_create_engine = Mock(side_effect=lambda *a, **k: create_engine("sqlite://"))
     monkeypatch.setattr("app.utils.db.create_engine", mock_create_engine)
 
     get_engine(_postgres_settings(statement_timeout_ms=30000))
