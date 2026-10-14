@@ -30,6 +30,7 @@ State that must not cross `fork` is owned per worker:
 | SQLAlchemy engine pool | `post_fork` calls `engine.dispose(close=False)`, so a worker never reuses a DBAPI connection opened in the master. |
 | Redis client | No action: redis-py's connection pool records its pid and resets itself on first use in a new process. |
 | Firebase Admin | No action: `initialize_app` parses credentials without I/O or threads; the auth client and its HTTP session are built lazily in the worker that verifies a token. |
+| Sentry client | `post_fork` calls `init_sentry()` when `SENTRY_DSN` is set, so each worker owns its client and its transport thread; the single-threaded master never starts the SDK. |
 | `ThreadPoolExecutor`s (refresh jobs, DFS snapshot cache, per-call provider pools) | No action: executors start threads only on `submit`, which the master never reaches. |
 
 `run.py`, the test app factory, scripts, and the `projection-collector`
@@ -204,6 +205,19 @@ Application logs are one JSON object per line on stdout (Railway tags stderr
 as `error`), configured by `app.utils.json_logging`: `level` (lowercase),
 `logger`, `message`, `request_id` inside a request context, and `exception`
 (the full traceback, newlines escaped) when the record has `exc_info`.
+
+When `SENTRY_DSN` is set, `app.utils.sentry_setup` reports unhandled exceptions
+and ERROR logs to Sentry as events tagged with the full `request_id` (the
+`(ref ...)` the UI shows is its first 8 characters), the environment, and the
+release (`RAILWAY_GIT_COMMIT_SHA`). The `before_send` scrubber drops request
+bodies, cookies, query strings, every request header outside a short allowlist
+(`Accept*`, `Content-*`, `Host`, `User-Agent`, `X-Request-ID`), users and
+breadcrumbs, and redacts credentials, e-mail addresses, SQL bind parameters and
+Postgres `DETAIL:` lines from messages. Tracing is off. The `app.errors` handlers report a 5xx failure as one exception event with its
+traceback (exception messages pass through the same credential redaction as the
+logs) and the ERROR log record for that failure is dropped, so nothing is
+reported twice; other ERROR logs become log events.
+Without a DSN the SDK is never imported.
 
 `before_request` also records a `perf_counter` start and `after_request` emits
 one INFO lifecycle line for every route, including handled error responses:

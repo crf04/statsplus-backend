@@ -62,7 +62,15 @@ def when_ready(server):
 
 
 def post_fork(server, worker):
-    """Give each worker its own database connections and job dispatcher."""
+    """Give each worker its own database connections, dispatcher and Sentry client."""
+
+    # The SDK's transport owns a background thread, which must not exist in
+    # the single-threaded master, so each worker starts its own client here.
+    # Inert unless SENTRY_DSN is set; the import is deferred with it.
+    if os.environ.get("SENTRY_DSN", "").strip():
+        from app.utils.sentry_setup import init_sentry
+
+        init_sentry()
 
     dependencies = _dependencies(server)
     engine = getattr(dependencies, "engine", None)

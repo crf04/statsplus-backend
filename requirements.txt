@@ -56,6 +56,9 @@ redis==8.1.0
 # Flask Async Support (required for async routes)
 asgiref==3.12.1
 
+# Error reporting (inert unless SENTRY_DSN is set)
+sentry-sdk[flask]==2.72.0
+
 # Production server
 gunicorn==26.2.0
 
