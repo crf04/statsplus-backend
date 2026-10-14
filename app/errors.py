@@ -16,7 +16,7 @@ from functools import wraps
 from typing import Any, ClassVar, ParamSpec, TypeVar
 
 from flask import Flask, jsonify
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from app.utils.telemetry import ProviderResponseError, record_application_failure
 
@@ -319,6 +319,14 @@ class RateLimitedError(AppError):
         return {"retry_after_seconds": self.retry_after}
 
 
+class PayloadTooLargeError(AppError):
+    """The request body is larger than the API accepts."""
+
+    status_code = 413
+    code = "payload_too_large"
+    default_message = "The request body is too large."
+
+
 class AuthorizationError(AppError):
     """An authenticated user is not allowed to perform the operation."""
 
@@ -427,6 +435,9 @@ def route_error_boundary(
                 raise ProviderUnavailableError(detail=error) from error
             except AppError:
                 raise
+            except RequestEntityTooLarge:
+                # The central handler answers the 413 the size cap produced.
+                raise
             except Exception as error:
                 raise error_type(safe_message, detail=error) from error
 
@@ -520,6 +531,8 @@ def register_error_handlers(app: Flask) -> None:
             app_error = AuthorizationError(detail=error.description)
         elif error.code == 404:
             app_error = ResourceNotFoundError(detail=error.description)
+        elif error.code == 413:
+            app_error = PayloadTooLargeError(detail=error.description)
         else:
             app_error = AppError(detail=error.description)
 

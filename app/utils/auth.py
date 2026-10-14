@@ -298,6 +298,9 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
             _authenticate_request()
         return f(*args, **kwargs)
 
+    # Lets the rate limiter authenticate before it counts, so it can key on the
+    # Firebase uid; ``wraps`` copies the marker through outer decorators.
+    decorated_function.requires_auth = True  # type: ignore[attr-defined]
     return decorated_function
 
 
@@ -358,6 +361,7 @@ def require_admin(f: Callable[..., Any]) -> Callable[..., Any]:
 
         return f(*args, **kwargs)
 
+    decorated_function.requires_auth = True  # type: ignore[attr-defined]
     return decorated_function
 
 

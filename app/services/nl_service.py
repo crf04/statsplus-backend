@@ -12,8 +12,15 @@ from threading import Lock
 logger = logging.getLogger(__name__)
 
 class NLService:
-    def __init__(self, engine, settings: RuntimeSettings | None = None, publication_reader=None):
+    def __init__(
+        self,
+        engine,
+        settings: RuntimeSettings | None = None,
+        publication_reader=None,
+        llm_budget=None,
+    ):
         self.engine = engine
+        self.llm_budget = llm_budget
         self.settings = settings or get_runtime_settings()
         self.publication_reader = publication_reader
         self._research_parsers = OrderedDict()
@@ -51,7 +58,7 @@ class NLService:
 
         logger.info("Natural language query system initialized")
 
-    def process_query(self, query):
+    def process_query(self, query, user_id=None):
         scoped = research_service(self, self.publication_reader)
         generation = getattr(scoped, "_research_generation", None)
         if generation is not None:
@@ -69,9 +76,9 @@ class NLService:
                     while len(self._research_parsers) > 2:
                         self._research_parsers.popitem(last=False)
                 scoped.nl_parser, scoped.llm_service = context
-        return scoped._process_query(query)
+        return scoped._process_query(query, user_id=user_id)
 
-    def _process_query(self, query):
+    def _process_query(self, query, user_id=None):
         """Process natural language query with hybrid NLP+LLM routing"""
         if not query or not query.strip():
             raise ValueError("Empty query provided")
@@ -90,6 +97,16 @@ class NLService:
             parsed_components.confidence_breakdown and
             parsed_components.confidence_breakdown.should_use_llm
         )
+
+        if (
+            should_use_llm
+            and self.llm_service
+            and self.llm_budget is not None
+            and user_id is not None
+            and not self.llm_budget.try_consume(user_id)
+        ):
+            logger.info("LLM fallback budget spent for %s; using NLP", user_id)
+            return self._format_nlp_result(parsed_components, query_text)
 
         if should_use_llm and self.llm_service:
             logger.info("Routing to LLM (confidence %.3f): %s", parsed_components.confidence, query_text[:50])

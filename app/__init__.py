@@ -40,6 +40,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     app.json.sort_keys = True
     app.json.compact = True
     app.config.update(
+        # Reject oversized bodies with 413 before a route reads them.
+        MAX_CONTENT_LENGTH=1024 * 1024,
         TESTING=settings.environment == "testing",
         FLASK_ENV=settings.environment,
         LOG_LEVEL=settings.log_level,
@@ -62,6 +64,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _assemble_dependencies(app)
     _verify_schema_is_current(app)
     _register_error_handlers(app)
+    _register_rate_limiting(app)
     _register_blueprints(app)
 
     return app
@@ -212,6 +215,14 @@ def _register_blueprints(app: "Flask") -> None:
     app.register_blueprint(diet_bp, url_prefix="/api/diet")
     app.register_blueprint(user_bp, url_prefix="/api/user")
     app.register_blueprint(collection_bp, url_prefix="/api")
+
+
+def _register_rate_limiting(app: "Flask") -> None:
+    """Enforce the per-user and per-IP request limits."""
+
+    from app.utils.rate_limit import init_rate_limiting
+
+    init_rate_limiting(app, app.extensions["runtime_settings"])
 
 
 def _register_error_handlers(app: "Flask") -> None:
