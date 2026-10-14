@@ -210,8 +210,10 @@ When `SENTRY_DSN` is set, `app.utils.sentry_setup` reports unhandled exceptions
 and ERROR logs to Sentry as events tagged with the full `request_id` (the
 `(ref ...)` the UI shows is its first 8 characters), the environment, and the
 release (`RAILWAY_GIT_COMMIT_SHA`). The `before_send` scrubber drops request
-bodies, cookies, query strings, `Authorization` and other credential headers,
-users and breadcrumbs, and tracing is off. The `app.errors` handlers report a 5xx failure as one exception event with its
+bodies, cookies, query strings, every request header outside a short allowlist
+(`Accept*`, `Content-*`, `Host`, `User-Agent`, `X-Request-ID`), users and
+breadcrumbs, and redacts credentials, e-mail addresses, SQL bind parameters and
+Postgres `DETAIL:` lines from messages. Tracing is off. The `app.errors` handlers report a 5xx failure as one exception event with its
 traceback (exception messages pass through the same credential redaction as the
 logs) and the ERROR log record for that failure is dropped, so nothing is
 reported twice; other ERROR logs become log events.

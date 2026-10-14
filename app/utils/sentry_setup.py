@@ -19,19 +19,21 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-_SENSITIVE_HEADERS = frozenset(
+_SAFE_HEADERS = frozenset(
     {
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-        "x-api-key",
-        "x-forwarded-for",
-        "x-real-ip",
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "content-type",
+        "content-length",
+        "host",
+        "user-agent",
+        "x-request-id",
     }
 )
 _REDACTED = "[Filtered]"
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_DATABASE_DETAIL_RE = re.compile(r"^(\s*DETAIL:).*$", re.MULTILINE)
 _SQL_PARAMETERS_RE = re.compile(r"\[parameters: .*?\]\s*(?=\n|$)", re.DOTALL)
 _REQUEST_FIELDS_DROPPED = ("data", "cookies", "query_string", "env")
 
@@ -81,6 +83,7 @@ def _scrub_text(text: Any) -> Any:
 
     text = _sanitize_diagnostic_detail(text) or ""
     text = _SQL_PARAMETERS_RE.sub("[parameters: [Filtered]]", text)
+    text = _DATABASE_DETAIL_RE.sub(r"\1 [Filtered]", text)
     return _EMAIL_RE.sub(_REDACTED, text)
 
 
@@ -111,8 +114,8 @@ def scrub_event(event: dict[str, Any], hint: Any = None) -> dict[str, Any] | Non
         headers = request.get("headers")
         if isinstance(headers, dict):
             for name in list(headers):
-                if name.lower() in _SENSITIVE_HEADERS:
-                    headers[name] = _REDACTED
+                if name.lower() not in _SAFE_HEADERS:
+                    del headers[name]
     event.pop("user", None)
     event.pop("breadcrumbs", None)
 

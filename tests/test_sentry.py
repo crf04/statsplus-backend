@@ -149,6 +149,8 @@ def test_request_content_never_reaches_the_event(failing_app, transport):
             "Authorization": "Bearer bearer-secret",
             "Cookie": "session=cookie-secret",
             "X-Api-Key": "apikey-secret",
+            "Referer": "https://app.example/?email=referer-secret",
+            "Forwarded": "for=203.0.113.77",
         },
     )
 
@@ -161,6 +163,8 @@ def test_request_content_never_reaches_the_event(failing_app, transport):
         "cookie-secret",
         "apikey-secret",
         "query-secret",
+        "referer-secret",
+        "203.0.113.77",
     ):
         assert secret not in serialized
 
@@ -175,6 +179,8 @@ def test_scrub_event_filters_credentials_and_request_content():
             "headers": {
                 "Authorization": "Bearer t",
                 "Cookie": "s=c",
+                "Referer": "https://x/?email=a@b.c",
+                "Forwarded": "for=203.0.113.9",
                 "Accept": "application/json",
             },
         },
@@ -185,13 +191,15 @@ def test_scrub_event_filters_credentials_and_request_content():
     assert scrub_event(event) == {
         "request": {
             "url": "http://x/api",
-            "headers": {
-                "Authorization": "[Filtered]",
-                "Cookie": "[Filtered]",
-                "Accept": "application/json",
-            },
+            "headers": {"Accept": "application/json"},
         },
     }
+
+
+def test_request_bodies_are_never_collected(transport):
+    init_sentry(_environ(), transport=transport)
+
+    assert sentry_sdk.get_client().options["max_request_body_size"] == "never"
 
 
 def test_tracing_is_off(transport):
@@ -237,6 +245,7 @@ def test_log_events_redact_emails_and_sql_parameters(app, transport):
             "Database error for ada@example.invalid\n"
             "[SQL: INSERT INTO users (email) VALUES (?)]\n"
             "[parameters: ('ada@example.invalid', 'Ada Lovelace')]\n"
+            "DETAIL:  Failing row contains (uid-7, Ada Lovelace, null).\n"
             "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
         )
         return {"ok": True}
@@ -252,6 +261,7 @@ def test_log_events_redact_emails_and_sql_parameters(app, transport):
         "Database error for [Filtered]\n"
         "[SQL: INSERT INTO users (email) VALUES (?)]\n"
         "[parameters: [Filtered]]\n"
+        "DETAIL: [Filtered]\n"
         "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
     )
     assert "Ada" not in json.dumps(transport.events[0]["logentry"])
