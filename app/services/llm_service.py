@@ -128,7 +128,9 @@ class LLMService:
         if not self.config.validate():
             raise LLMError("Invalid LLM configuration")
 
-        self.client = client or OpenAI(api_key=self.config.api_key)
+        # The SDK's own retries would make calls the daily budget never counts;
+        # the attempt loop in ``parse_query`` owns every retry.
+        self.client = client or OpenAI(api_key=self.config.api_key, max_retries=0)
         self.system_prompt = self._load_system_prompt_from_file(DEFAULT_PROMPT_PATH)
 
         logger.info(f"LLM Service initialized with model: {self.config.model}")

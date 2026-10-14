@@ -181,11 +181,21 @@ def test_a_signed_in_caller_on_an_optional_auth_route_is_limited_by_uid(
     client, signed_in
 ):
     # /api/players authenticates optionally: 300/min per uid, not 60/min per IP.
-    statuses = _statuses(client, "get", "/api/players", 70, headers=_as("user-a"))
+    statuses = _statuses(
+        client, "get", "/api/players", 301,
+        headers=_as("user-a", **{"X-Forwarded-For": "198.51.100.1"}),
+    )
 
-    assert 429 not in statuses
-    other = client.get("/api/players", headers=_as("user-b"))
-    assert other.status_code != 429
+    assert 429 not in statuses[:300]
+    assert statuses[300] == 429
+    same_ip_other_user = client.get(
+        "/api/players", headers=_as("user-b", **{"X-Forwarded-For": "198.51.100.1"})
+    )
+    same_user_other_ip = client.get(
+        "/api/players", headers=_as("user-a", **{"X-Forwarded-For": "203.0.113.5"})
+    )
+    assert same_ip_other_user.status_code != 429
+    assert same_user_other_ip.status_code == 429
 
 
 def test_each_app_counts_for_itself(app, client, signed_in, served, dependencies):
@@ -324,7 +334,7 @@ class FakeOpenAI:
 
     instances: list["FakeOpenAI"] = []
 
-    def __init__(self, api_key=None, fail=False):
+    def __init__(self, api_key=None, fail=False, **options):
         self.calls = 0
         self.fail = fail
         self.chat = SimpleNamespace(completions=SimpleNamespace(parse=self._parse))
@@ -505,21 +515,84 @@ def test_bodies_up_to_one_megabyte_are_accepted_and_larger_ones_refused(
     }
 
 
-def test_collector_envelopes_over_one_megabyte_still_reach_their_own_limit(
-    client, monkeypatch
-):
+def _gzip_catalog_body(incompressible_bytes: int) -> bytes:
+    import base64
+    import gzip
+    import json
+    import os
+
+    pad = base64.b64encode(os.urandom(incompressible_bytes)).decode()
+    return gzip.compress(json.dumps({"payload": pad}).encode(), compresslevel=1)
+
+
+def _post_catalog(client, monkeypatch, body: bytes):
     from app.routes import collection_routes
 
     monkeypatch.setattr(
-        collection_routes, "_collector_claims_any", lambda *a, **k: {"sub": "c"}
+        collection_routes, "_collector_claims_any", lambda *a, **k: object()
     )
-    body = b"x" * (1024 * 1024 + 1)  # under the collector's own 2 MB bound
-
-    response = client.post(
+    return client.post(
         "/api/collector/catalog/req-1",
         data=body,
         headers={"Content-Encoding": "gzip"},
         content_type="application/octet-stream",
     )
 
-    assert response.status_code != 413
+
+def test_collector_envelope_over_one_megabyte_is_read_in_full(client, monkeypatch):
+    body = _gzip_catalog_body(1_100_000)
+    assert 1024 * 1024 < len(body) < 2 * 1024 * 1024
+
+    response = _post_catalog(client, monkeypatch, body)
+
+    # The envelope was read, decompressed and parsed: the first thing wrong
+    # with it is the missing catalog version, not its size.
+    assert response.status_code == 400
+    assert response.get_json()["error"]["message"] == (
+        "A catalog version and payload are required."
+    )
+
+
+def test_collector_envelope_over_its_own_two_megabyte_bound_is_refused(
+    client, monkeypatch
+):
+    body = _gzip_catalog_body(2_100_000)
+    assert len(body) > 2 * 1024 * 1024
+
+    response = _post_catalog(client, monkeypatch, body)
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["message"] == (
+        "The compressed request body is too large."
+    )
+
+
+def test_the_openai_sdk_makes_no_calls_the_budget_does_not_count(
+    runtime_settings, monkeypatch
+):
+    import httpx
+    import openai
+
+    requests = []
+
+    def unavailable(request):
+        requests.append(request)
+        return httpx.Response(500, json={"error": {"message": "overloaded"}})
+
+    monkeypatch.setattr(
+        llm_service_module,
+        "OpenAI",
+        lambda **kwargs: openai.OpenAI(
+            **kwargs, http_client=httpx.Client(transport=httpx.MockTransport(unavailable))
+        ),
+    )
+    monkeypatch.setattr(llm_service_module.time, "sleep", lambda seconds: None)
+    settings = runtime_settings.model_copy(
+        update={"llm": LLMSettings(api_key="sk-test", enable_fallback=True, max_retries=1)}
+    )
+    service = llm_service_module.LLMService(settings=settings)
+
+    with pytest.raises(llm_service_module.LLMError):
+        service.parse_query("lebron stuff")
+
+    assert len(requests) == 1
