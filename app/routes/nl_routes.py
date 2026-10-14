@@ -32,7 +32,7 @@ def process_natural_language_query():
     logger.info("NL query from %s (%s): %s", user.get('email'), user.get('uid'), query)
 
     try:
-        result = nl_service.process_query(query)
+        result = nl_service.process_query(query, user_id=user.get('uid'))
         return jsonify(result)
     except ValueError as error:
         raise InvalidInputError(

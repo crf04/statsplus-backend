@@ -51,9 +51,16 @@ def _body() -> dict:
     return value
 
 
+#: Effectively no ``MAX_CONTENT_LENGTH`` (``None`` would restore the app cap).
+_UNBOUNDED_BODY = 1 << 62
+
+
 def _read_limited_body(limit: int) -> bytes:
     """Read a request body in bounded chunks before retaining it."""
 
+    # The app-wide 1 MB cap would 413 a valid envelope (the compressed limit is
+    # 2 MB) before this bound is checked, so lift it: this loop is the bound.
+    request.max_content_length = _UNBOUNDED_BODY
     output = bytearray()
     while True:
         chunk = request.stream.read(min(64 * 1024, limit - len(output) + 1))

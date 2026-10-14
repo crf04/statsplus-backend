@@ -153,6 +153,7 @@ def build_dependencies(
     )
     from app.services.game_service import GameService
     from app.services.job_service import build_data_refresh_job_service
+    from app.services.llm_budget import LLMDailyBudget
     from app.services.nl_service import NLService
     from app.services.player_service import PlayerProfileReader, PlayerService
     from app.services.player_diet import PlayerDietService
@@ -186,6 +187,7 @@ def build_dependencies(
     from app.services.user_service import UserService
     from app.utils.cache_config import get_redis_client
     from app.utils.db import get_engine, is_demo_database_url
+    from app.utils.rate_limit import build_storage
     from app.services.collection_control import (
         CollectorTokenService,
         CollectionControlService,
@@ -798,7 +800,12 @@ def build_dependencies(
         event_mapping_repository=event_mapping_repository,
         event_resolver=event_resolver,
         provider_health_service=provider_health_service,
-        nl_service=NLService(engine, settings=settings, publication_reader=research_publications),
+        nl_service=NLService(
+            engine,
+            settings=settings,
+            publication_reader=research_publications,
+            llm_budget=LLMDailyBudget(build_storage(settings)),
+        ),
         user_service=user_service,
         dfs_snapshot_cache=dfs_snapshot_cache,
         statistic_catalog=statistic_catalog,
