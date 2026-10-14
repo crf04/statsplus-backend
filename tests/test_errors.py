@@ -1239,3 +1239,17 @@ def test_other_database_errors_stay_internal_errors(error_app):
 
     assert response.status_code == 500
     assert response.get_json()["error"]["code"] == "internal_error"
+
+
+def test_an_isolated_item_reports_a_statement_timeout_as_query_timeout(error_app):
+    from app.errors import isolated_error_body
+
+    with error_app.test_request_context("/"):
+        body = isolated_error_body(
+            _statement_timeout_error(), "The item failed."
+        )
+
+    assert body == {
+        "code": "query_timeout",
+        "message": "The request took too long to answer. Try a narrower query.",
+    }
