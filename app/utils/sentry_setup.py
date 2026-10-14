@@ -161,6 +161,9 @@ def init_sentry(
         include_local_variables=False,
         max_breadcrumbs=0,
         traces_sample_rate=0.0,
+        # Auto-enabled integrations (SQLAlchemy, Redis, requests, ...) patch
+        # libraries process-wide for spans and breadcrumbs this setup turns off.
+        auto_enabling_integrations=False,
         integrations=[FlaskIntegration()],
         before_send=scrub_event,
         **options,

@@ -202,6 +202,21 @@ def test_request_bodies_are_never_collected(transport):
     assert sentry_sdk.get_client().options["max_request_body_size"] == "never"
 
 
+def test_library_integrations_do_not_hook_the_database_engine(transport):
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    init_sentry(_environ(), transport=transport)
+
+    assert not event.contains(Engine, "before_cursor_execute", _sqlalchemy_hook())
+
+
+def _sqlalchemy_hook():
+    from sentry_sdk.integrations.sqlalchemy import _before_cursor_execute
+
+    return _before_cursor_execute
+
+
 def test_tracing_is_off(transport):
     init_sentry(_environ(), transport=transport)
 
