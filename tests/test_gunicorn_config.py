@@ -136,3 +136,47 @@ def test_post_fork_tolerates_a_graph_without_engine_or_jobs(monkeypatch, missing
     config.post_fork(_fake_server(SimpleNamespace(**present)), SimpleNamespace())
 
     assert len(calls.mock_calls) == 1
+
+
+def test_post_fork_starts_sentry_in_the_worker_when_a_dsn_is_set(monkeypatch):
+    import sentry_sdk
+
+    config = _load_config(monkeypatch)
+    monkeypatch.setenv("SENTRY_DSN", "https://publickey@o0.ingest.sentry.io/0")
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "abc123")
+    sentry_sdk.get_global_scope().set_client(None)
+    assert sentry_sdk.get_client().is_active() is False
+
+    try:
+        config.post_fork(_fake_server(SimpleNamespace()), SimpleNamespace())
+
+        assert sentry_sdk.get_client().is_active() is True
+        assert sentry_sdk.get_client().options["release"] == "abc123"
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+
+def test_master_hooks_never_start_sentry(monkeypatch):
+    import sentry_sdk
+
+    config = _load_config(monkeypatch)
+    monkeypatch.setenv("SENTRY_DSN", "https://publickey@o0.ingest.sentry.io/0")
+    sentry_sdk.get_global_scope().set_client(None)
+    monkeypatch.setattr(gc, "freeze", Mock())
+
+    config.when_ready(_fake_server(SimpleNamespace()))
+
+    assert sentry_sdk.get_client().is_active() is False
+
+
+def test_post_fork_leaves_sentry_off_without_a_dsn(monkeypatch):
+    import sentry_sdk
+
+    config = _load_config(monkeypatch)
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    sentry_sdk.get_global_scope().set_client(None)
+
+    config.post_fork(_fake_server(SimpleNamespace()), SimpleNamespace())
+
+    assert sentry_sdk.get_client().is_active() is False

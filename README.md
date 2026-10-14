@@ -72,6 +72,8 @@ the most important variables:
 | `PORT` | No | `5000` |
 | `FLASK_DEBUG` | No | `1` in `run.py` |
 | `LOG_LEVEL` | No | `INFO` |
+| `SENTRY_DSN` | No | Unset, error reporting is off and `sentry-sdk` is never imported. When set, each Gunicorn worker starts the SDK after fork; unhandled exceptions and ERROR logs become events tagged `request_id`, with no bodies, cookies, `Authorization` headers or PII, and tracing off |
+| `SENTRY_ENVIRONMENT` | No | Event environment; falls back to `RAILWAY_ENVIRONMENT_NAME`, then `FLASK_ENV`. The release is `RAILWAY_GIT_COMMIT_SHA` |
 | `OPENAI_API_KEY` | No | If absent, NL queries stay in NLP-only mode |
 | `LLM_MODEL` | No | `gpt-4o-mini` |
 | `ENABLE_LLM_FALLBACK` | No | Enabled only when `OPENAI_API_KEY` is present |

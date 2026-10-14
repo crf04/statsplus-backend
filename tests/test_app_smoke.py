@@ -409,7 +409,7 @@ def test_nl_query_endpoint_can_be_exercised_with_mocked_service(client, monkeypa
         monkeypatch.setattr(
             nl_routes.nl_service,
             "process_query",
-            lambda query: {"query": query, "parsed_by": "test"},
+            lambda query, user_id=None: {"query": query, "parsed_by": "test"},
         )
 
     response = client.post("/api/nl-query", json={"query": "LeBron last 10 games"})

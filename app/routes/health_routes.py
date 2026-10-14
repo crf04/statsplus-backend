@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify
 
 from app.dependencies import get_dependencies
 from app.errors import AppError, ProviderUnavailableError
+from app.utils.auth import require_admin
 from ._service_proxy import CurrentAppService
 
 
@@ -44,6 +45,7 @@ def database_healthcheck():
 
 
 @health_bp.route("/detailed", methods=["GET"])
+@require_admin
 def detailed_health():
     """Return all dependency checks or the safe provider-unavailable error."""
 
@@ -57,6 +59,7 @@ def detailed_health():
 
 
 @health_bp.route("/nba-api", methods=["GET"])
+@require_admin
 def nba_api_health():
     """Return the NBA Stats provider health signal."""
 
@@ -71,6 +74,7 @@ def nba_api_health():
 
 @health_bp.route("/pbp-api", methods=["GET"])
 @health_bp.route("/pbp-stats", methods=["GET"])
+@require_admin
 def pbp_stats_health():
     """Return the PBP Stats provider health signal."""
 
