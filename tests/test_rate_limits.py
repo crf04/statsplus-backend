@@ -280,8 +280,8 @@ def test_budget_day_is_the_utc_day_whatever_zone_the_clock_reports():
     budget = LLMDailyBudget(MemoryStorage(), limit=1, now=lambda: clock["now"])
     assert budget.try_consume("user-a") is True
 
-    # 23:30 in New York is still Oct 15 in UTC: the same day, so still spent.
-    clock["now"] = datetime(2026, 10, 14, 23, 30, tzinfo=new_york)
+    # Midnight in New York has passed, but it is 05:00 UTC on the same UTC day.
+    clock["now"] = datetime(2026, 10, 15, 1, 0, tzinfo=new_york)
     assert budget.try_consume("user-a") is False
     # 20:30 on the 15th in New York is 00:30 UTC on the 16th: a new day.
     clock["now"] = datetime(2026, 10, 15, 20, 30, tzinfo=new_york)

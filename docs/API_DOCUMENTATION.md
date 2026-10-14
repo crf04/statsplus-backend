@@ -64,7 +64,7 @@ The public error categories and HTTP statuses are:
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
-| Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB. |
+| Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 | Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh or publication rebuild for the same operation is already queued or running. |
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
@@ -89,7 +89,7 @@ development or test environment.
 ## Rate limits
 
 Limits are counted in Redis, so every worker shares them. A signed-in caller is
-limited by Firebase uid, an unauthenticated one by client IP (the first
+limited by Firebase uid (also on routes where sign-in is optional), an unauthenticated one by client IP (the first
 `X-Forwarded-For` hop behind Railway's proxy). A request over a limit is
 refused with HTTP `429`, a `Retry-After` header (whole seconds until the window
 reopens), and this body:
@@ -112,7 +112,7 @@ have their own lease limits) are not counted. If Redis is unreachable, requests
 are allowed and a warning is logged.
 
 The OpenAI fallback for `POST /api/nl-query` is capped separately at 50 calls
-per user per UTC day. Past the cap the route still answers `200`, with the
+per user per UTC day (every OpenAI request counts, retries included). Past the cap the route still answers `200`, with the
 rule-based parse (`parsed_by: "nlp"`), never a `429`.
 
 ## Response provenance
