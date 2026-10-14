@@ -66,7 +66,7 @@ the most important variables:
 | `DATABASE_MAX_OVERFLOW` | No | `4`; Postgres-only pool overflow above `DATABASE_POOL_SIZE` |
 | `DATABASE_POOL_RECYCLE_SECONDS` | No | `300`; Postgres-only max connection age before recycling |
 | `DATABASE_CONNECT_TIMEOUT_SECONDS` | No | `5`; Postgres-only `psycopg2` connect timeout |
-| `WEB_STATEMENT_TIMEOUT_MS` | No | `30000`; Postgres `statement_timeout` on the web app's connections only (`0` disables); the nightly, the collector and migrations never set it. A cancelled statement answers `503 query_timeout` |
+| `WEB_STATEMENT_TIMEOUT_MS` | No | `30000`; Postgres `statement_timeout` on the web app's connections only (`0` disables); the nightly, the collector, migrations, data-refresh jobs and the collector and admin refresh/collection routes run without it. A cancelled statement answers `503 query_timeout` |
 | `WEB_CONCURRENCY` | No | `8`; Gunicorn worker count |
 | `GUNICORN_THREADS` | No | `2`; threads per Gunicorn worker |
 | `PORT` | No | `5000` |

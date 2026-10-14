@@ -4726,7 +4726,14 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   `create_app` alone sets `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`,
   default 30000) on its engine's connections, and a cancelled statement
   answers `503 query_timeout`; the nightly, the collector and migrations never
-  set it. Scripts that call `create_engine` directly
+  set it. Work that legitimately runs long inside a web worker is exempt: a
+  connection checked out under `app.utils.db.statement_timeout_lifted` runs
+  with `statement_timeout = 0` (one committed `SET` when the scope changes),
+  and the scope covers every data-refresh job handler (`_run_claimed`) and
+  every request on the `collection` (collector and `/admin/collection`) and
+  `data` (`/api/data`) blueprints. It reaches only the calling thread, so a
+  helper thread that issues statements would start limited; none does today.
+  The job heartbeat stays limited because its statements are short. Scripts that call `create_engine` directly
   (`scripts/migrate.py`, `scripts/nightly_refresh.py`, and similar
   one-shot/operator scripts) are not governed by these settings.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.

@@ -350,6 +350,8 @@ def raise_if_query_timeout(error: BaseException) -> None:
     ``503 query_timeout`` instead of being mistaken for an absent row.
     """
 
+    if isinstance(error, QueryTimeoutError):
+        raise error
     timeout = _as_query_timeout(error)
     if timeout is not None:
         raise timeout from error
