@@ -82,3 +82,15 @@ def test_archetype_reads_still_return_empty_on_other_errors():
     service = _player_service(_unavailable())
 
     assert service._get_archetype_players_from_player("Anyone") == []
+
+
+def test_the_generic_snapshot_path_raises_a_statement_timeout():
+    class SnapshotOnly:
+        def snapshot(self, families, **kwargs):
+            raise _timeout()
+
+    repository = object.__new__(PlayerGameLogRepository)
+    repository._publication_reader = SnapshotOnly()
+
+    with pytest.raises(QueryTimeoutError):
+        repository.read_publication_snapshot("2025-26")
