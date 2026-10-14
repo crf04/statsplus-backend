@@ -12,6 +12,8 @@ from threading import Lock
 logger = logging.getLogger(__name__)
 
 class NLService:
+    llm_budget = None
+
     def __init__(
         self,
         engine,
