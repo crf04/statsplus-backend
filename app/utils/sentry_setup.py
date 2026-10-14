@@ -15,6 +15,7 @@ SDK's transport runs a background thread, so ``gunicorn.conf.py`` calls
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -30,6 +31,8 @@ _SENSITIVE_HEADERS = frozenset(
     }
 )
 _REDACTED = "[Filtered]"
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_SQL_PARAMETERS_RE = re.compile(r"\[parameters: .*?\]\s*(?=\n|$)", re.DOTALL)
 _REQUEST_FIELDS_DROPPED = ("data", "cookies", "query_string", "env")
 
 
@@ -69,6 +72,18 @@ def _log_duplicates_reported_exception(event: dict[str, Any]) -> bool:
     )
 
 
+def _scrub_text(text: Any) -> Any:
+    """Redact credentials, e-mail addresses and SQL bind parameters in text."""
+
+    if not isinstance(text, str):
+        return text
+    from app.errors import _sanitize_diagnostic_detail
+
+    text = _sanitize_diagnostic_detail(text) or ""
+    text = _SQL_PARAMETERS_RE.sub("[parameters: [Filtered]]", text)
+    return _EMAIL_RE.sub(_REDACTED, text)
+
+
 def scrub_event(event: dict[str, Any], hint: Any = None) -> dict[str, Any] | None:
     """Tag the event with the request reference and strip request content."""
 
@@ -76,11 +91,18 @@ def scrub_event(event: dict[str, Any], hint: Any = None) -> dict[str, Any] | Non
         return None
     exception = event.get("exception")
     if isinstance(exception, dict):
-        from app.errors import _sanitize_diagnostic_detail
-
         for value in exception.get("values") or []:
             if isinstance(value, dict) and value.get("value"):
-                value["value"] = _sanitize_diagnostic_detail(value["value"])
+                value["value"] = _scrub_text(value["value"])
+    logentry = event.get("logentry")
+    if isinstance(logentry, dict):
+        for key in ("message", "formatted"):
+            if key in logentry:
+                logentry[key] = _scrub_text(logentry[key])
+        if isinstance(logentry.get("params"), (list, tuple)):
+            logentry["params"] = [_scrub_text(p) for p in logentry["params"]]
+    if "message" in event:
+        event["message"] = _scrub_text(event["message"])
 
     request = event.get("request")
     if isinstance(request, dict):

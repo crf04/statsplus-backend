@@ -226,3 +226,32 @@ def test_a_plain_error_log_becomes_one_tagged_log_event(app, transport):
     assert len(transport.events) == 1
     assert transport.events[0]["logentry"]["formatted"] == "backfill failed rows=3"
     assert transport.events[0]["tags"]["request_id"] == response.headers["X-Request-ID"]
+
+
+def test_log_events_redact_emails_and_sql_parameters(app, transport):
+    import logging
+
+    @app.get("/db-error")
+    def db_error():
+        logging.getLogger("app.test").error(
+            "Database error for ada@example.invalid\n"
+            "[SQL: INSERT INTO users (email) VALUES (?)]\n"
+            "[parameters: ('ada@example.invalid', 'Ada Lovelace')]\n"
+            "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
+        )
+        return {"ok": True}
+
+    init_sentry(_environ(), transport=transport)
+
+    app.test_client().get("/db-error")
+
+    sentry_sdk.flush()
+    assert len(transport.events) == 1
+    entry = transport.events[0]["logentry"]
+    assert entry["formatted"] == (
+        "Database error for [Filtered]\n"
+        "[SQL: INSERT INTO users (email) VALUES (?)]\n"
+        "[parameters: [Filtered]]\n"
+        "(Background on this error at: https://sqlalche.me/e/20/gkpj)"
+    )
+    assert "Ada" not in json.dumps(transport.events[0]["logentry"])
