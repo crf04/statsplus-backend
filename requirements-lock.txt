@@ -92,6 +92,7 @@ blinker==1.9.0 \
     # via
     #   -r requirements.txt
     #   flask
+    #   sentry-sdk
 blis==1.3.3 \
     --hash=sha256:034d4560ff3cc43e8aa37e188451b0440e3261d989bb8a42ceee865607715ecd \
     --hash=sha256:1e647341f958421a86b028a2efe16ce19c67dba2a05f79e8f7e80b1ff45328aa \
@@ -155,6 +156,7 @@ certifi==2026.7.22 \
     #   httpcore
     #   httpx
     #   requests
+    #   sentry-sdk
 cffi==2.1.1 \
     --hash=sha256:046bfc24911b37851ee1b51aab8bffe713d89c68c6a057b09484ce9fd5f69b4e \
     --hash=sha256:06c72bb76605a4b0cd0aad6930b69d4baf7dd5d806cfc409b824191099700e66 \
@@ -828,6 +830,7 @@ flask==3.1.3 \
     #   flask-limiter
     #   flask-pymongo
     #   flask-sqlalchemy
+    #   sentry-sdk
 flask-bcrypt==1.0.1 \
     --hash=sha256:062fd991dc9118d05ac0583675507b9fe4670e44416c97e0e6819d03d01f808a \
     --hash=sha256:f07b66b811417ea64eb188ae6455b0b708a793d966e1a80ceec4a23bc42a4369
@@ -1526,6 +1529,7 @@ markupsafe==3.0.3 \
     #   -r requirements.txt
     #   flask
     #   jinja2
+    #   sentry-sdk
     #   werkzeug
 matplotlib==3.11.1 \
     --hash=sha256:0c1f44890d435c1b4ef52f701ad5828cb450ea97bcc83918fda6be74965d6cd2 \
@@ -2897,6 +2901,10 @@ seaborn==0.13.2 \
     --hash=sha256:636f8336facf092165e27924f223d3c62ca560b1f2bb5dff7ab7fad265361987 \
     --hash=sha256:93e60a40988f4d65e9f4885df477e2fdaff6b73a9ded434c1ab356dd57eefff7
     # via -r analysis/nba-archetypes/requirements.txt
+sentry-sdk==2.72.0 \
+    --hash=sha256:0d2ffbc28ee2e63cbaf3d015e93b448cffcc3ef3be03a44704ad36ade72faa95 \
+    --hash=sha256:3e13ace4ffd0b3cc78288236edfc4e4bd90eb12a396cc5845fa10a58ff289f50
+    # via -r requirements.txt
 setuptools==84.0.0 \
     --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670 \
     --hash=sha256:f4695c21257f0d9b537ec2692c941d02ee143b7cc1276941349a546573b2ef73
@@ -3282,6 +3290,7 @@ urllib3==2.8.0 \
     # via
     #   -r requirements.txt
     #   requests
+    #   sentry-sdk
 wasabi==1.1.3 \
     --hash=sha256:4bb3008f003809db0c3e28b4daf20906ea871a2bb43f9914197d540f4f2e0878 \
     --hash=sha256:f76e16e8f7e79f8c4c8be49b4024ac725713ab10cd7f19350ad18a8e3f71728c

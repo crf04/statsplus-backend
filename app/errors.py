@@ -497,11 +497,25 @@ def _error_response(
     return jsonify({"error": error}), status_code
 
 
+def _report_to_sentry(error: BaseException) -> None:
+    """Report a server failure with its traceback; inert without a DSN."""
+
+    import sys
+
+    if "sentry_sdk" not in sys.modules:
+        return
+    from app.utils.sentry_setup import report_exception
+
+    report_exception(error)
+
+
 def register_error_handlers(app: Flask) -> None:
     """Register application and fallback HTTP error handlers on ``app``."""
 
     @app.errorhandler(AppError)
-    def handle_app_error(error: AppError):  # type: ignore[no-untyped-def]
+    def handle_app_error(error: AppError, original: BaseException | None = None):  # type: ignore[no-untyped-def]
+        if error.status_code >= 500:
+            _report_to_sentry(original or error)
         _log_application_error(error)
 
         # Provider failures are counted at the provider seams; the central
@@ -552,7 +566,7 @@ def register_error_handlers(app: Flask) -> None:
         if isinstance(error, HTTPException):
             return handle_http_error(error)
         if isinstance(error, ProviderResponseError):
-            return handle_app_error(ProviderUnavailableError(detail=error))
+            return handle_app_error(ProviderUnavailableError(detail=error), error)
 
         app_error = AppError(detail=error)
-        return handle_app_error(app_error)
+        return handle_app_error(app_error, error)
