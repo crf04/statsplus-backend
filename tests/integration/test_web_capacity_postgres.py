@@ -270,17 +270,22 @@ def test_a_normal_user_route_still_gets_a_query_timeout(postgres_url, monkeypatc
     assert response.get_json()["error"]["code"] == "query_timeout"
 
 
-def test_the_limit_returns_after_an_exempt_request(postgres_url, admin_headers):
+def test_the_limit_returns_after_exempt_requests_on_a_reused_connection(
+    postgres_url, admin_headers
+):
     dependencies = SimpleNamespace()
     app = _web_app(postgres_url, dependencies, WEB_STATEMENT_TIMEOUT_MS=LIMIT_MS)
     engine = get_engine(app.extensions["runtime_settings"])
     dependencies.data_service = SimpleNamespace(
-        get_playtypes=lambda: {"statement_timeout": _show(engine)}
+        get_playtypes=lambda: {"statement_timeout": _sleep_through(engine)}
     )
+    client = app.test_client()
 
-    exempt = app.test_client().get("/api/data/fetch_playtypes", headers=admin_headers)
+    first = client.get("/api/data/fetch_playtypes", headers=admin_headers)
+    second = client.get("/api/data/fetch_playtypes", headers=admin_headers)
 
-    assert exempt.get_json() == {"statement_timeout": "0"}
+    assert first.get_json() == {"statement_timeout": "0"}
+    assert second.get_json() == {"statement_timeout": "0"}
     assert _show(engine) == "300ms"
 
 
