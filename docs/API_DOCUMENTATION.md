@@ -59,6 +59,7 @@ The public error categories and HTTP statuses are:
 | Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
+| Query timeout | `query_timeout` | 503 | A database statement ran past the web `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`, default 30000 ms). The query was cancelled; retry with a narrower request. |
 | Invalid configuration | `invalid_configuration` | 500 | Server configuration cannot safely support the request. |
 | Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
@@ -201,6 +202,14 @@ resolve and preview carry one block for the whole response, not one per
 Target.
 
 ## Health Endpoints
+
+### Liveness
+
+```http
+GET /health
+```
+
+Unauthenticated. Returns `200 {"status": "ok"}` and touches no Postgres, Redis, or provider, so it answers while a dependency is down. Railway uses it as the deploy health check (`railway.json`, `healthcheckPath`).
 
 ### Database Health
 

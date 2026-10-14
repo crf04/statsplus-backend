@@ -113,13 +113,16 @@ def _create_engine(
 
     if pool is None:
         return create_engine(database_url)
+    connect_args: dict[str, object] = {"connect_timeout": pool.connect_timeout_seconds}
+    if pool.statement_timeout_ms is not None:
+        connect_args["options"] = f"-c statement_timeout={pool.statement_timeout_ms}"
     return create_engine(
         database_url,
         pool_pre_ping=True,
         pool_size=pool.pool_size,
         max_overflow=pool.max_overflow,
         pool_recycle=pool.pool_recycle_seconds,
-        connect_args={"connect_timeout": pool.connect_timeout_seconds},
+        connect_args=connect_args,
     )
 
 

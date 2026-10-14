@@ -9,7 +9,7 @@ This document records the interfaces and seams that are expensive to rediscover 
 ### Pre-forking process model
 
 The Procfile runs `gunicorn --config gunicorn.conf.py wsgi:app`. The committed
-config keeps the worker settings (4 gthread workers × 2 threads, 180-second
+config keeps the worker settings (`WEB_CONCURRENCY` gthread workers, default 8, × `GUNICORN_THREADS` threads, default 2, 180-second
 timeout, 5-second keep-alive, recycling after 1000 ± 100 requests, bind
 `0.0.0.0:$PORT`) and sets `preload_app`: the master imports `wsgi:app` once,
 building the whole dependency graph, including the natural-language parser

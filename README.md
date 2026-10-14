@@ -66,6 +66,9 @@ the most important variables:
 | `DATABASE_MAX_OVERFLOW` | No | `4`; Postgres-only pool overflow above `DATABASE_POOL_SIZE` |
 | `DATABASE_POOL_RECYCLE_SECONDS` | No | `300`; Postgres-only max connection age before recycling |
 | `DATABASE_CONNECT_TIMEOUT_SECONDS` | No | `5`; Postgres-only `psycopg2` connect timeout |
+| `WEB_STATEMENT_TIMEOUT_MS` | No | `30000`; Postgres `statement_timeout` on the web app's connections only (`0` disables); the nightly, the collector and migrations never set it. A cancelled statement answers `503 query_timeout` |
+| `WEB_CONCURRENCY` | No | `8`; Gunicorn worker count |
+| `GUNICORN_THREADS` | No | `2`; threads per Gunicorn worker |
 | `PORT` | No | `5000` |
 | `FLASK_DEBUG` | No | `1` in `run.py` |
 | `LOG_LEVEL` | No | `INFO` |
@@ -396,7 +399,7 @@ return the normal empty result when complete, valid coverage is unavailable.
 worker process: all adapters in one worker share the configured gate, while
 each Gunicorn worker has its own gate. The maximum calls the whole application
 can issue at once is workers × `NBA_STATS_MAX_CONCURRENCY` (the Procfile runs
-4 workers, so up to 4 × the bound). This is a per-process bound, not a
+`WEB_CONCURRENCY` workers, default 8, so up to 8 × the bound). This is a per-process bound, not a
 cluster-global lock.
 
 Application failures use a documented structured JSON error response with
@@ -559,7 +562,7 @@ The included `Procfile` starts Gunicorn with the committed configuration:
 gunicorn --config gunicorn.conf.py wsgi:app
 ```
 
-`gunicorn.conf.py` runs 4 workers × 2 threads (timeout 180 s, keep-alive 5 s,
+`gunicorn.conf.py` runs `WEB_CONCURRENCY` workers (default 8) × `GUNICORN_THREADS` threads (default 2) (timeout 180 s, keep-alive 5 s,
 recycling after 1000 ± 100 requests, bind `0.0.0.0:$PORT`) and preloads the app
 in the master so workers share it copy-on-write. Because the app is built in
 the master, an import or startup failure stops the whole server; see

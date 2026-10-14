@@ -1183,3 +1183,59 @@ def test_refusals_log_as_warnings_and_server_failures_as_errors(
     caplog.set_level(logging.INFO, logger="app.errors")
     error_app.test_client().open(path, method=method)
     assert [r.levelname for r in caplog.records if r.name == "app.errors"] == [level]
+
+
+def _statement_timeout_error():
+    from sqlalchemy.exc import OperationalError
+
+    class QueryCanceled(Exception):
+        """Stands in for the driver error Postgres raises (SQLSTATE 57014)."""
+
+        pgcode = "57014"
+
+    return OperationalError(
+        "SELECT pg_sleep(60)",
+        {},
+        QueryCanceled("canceling statement due to statement timeout"),
+    )
+
+
+def test_statement_timeout_is_a_503_query_timeout_not_a_500(error_app):
+    @error_app.get("/slow")
+    def slow() -> None:
+        raise _statement_timeout_error()
+
+    response = error_app.test_client().get("/slow")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": {
+            "code": "query_timeout",
+            "message": "The request took too long to answer. Try a narrower query.",
+        }
+    }
+
+
+def test_statement_timeout_survives_a_route_error_boundary(error_app):
+    @error_app.get("/slow-bounded")
+    @route_error_boundary("The slow thing failed.")
+    def slow_bounded() -> None:
+        raise _statement_timeout_error()
+
+    response = error_app.test_client().get("/slow-bounded")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "query_timeout"
+
+
+def test_other_database_errors_stay_internal_errors(error_app):
+    from sqlalchemy.exc import OperationalError
+
+    @error_app.get("/db-down")
+    def db_down() -> None:
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    response = error_app.test_client().get("/db-down")
+
+    assert response.status_code == 500
+    assert response.get_json()["error"]["code"] == "internal_error"

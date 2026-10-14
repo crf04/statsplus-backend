@@ -10,7 +10,7 @@ The model is intentionally grouped by responsibility:
 
 | Model | Fields | Environment variables |
 | --- | --- | --- |
-| `DatabaseSettings` | `url`, `pool_size`, `max_overflow`, `pool_recycle_seconds`, `connect_timeout_seconds` | `DATABASE_URL`, `DATABASE_POOL_SIZE` (default `3`), `DATABASE_MAX_OVERFLOW` (default `4`), `DATABASE_POOL_RECYCLE_SECONDS` (default `300`), `DATABASE_CONNECT_TIMEOUT_SECONDS` (default `5`) |
+| `DatabaseSettings` | `url`, `pool_size`, `max_overflow`, `pool_recycle_seconds`, `connect_timeout_seconds`, `statement_timeout_ms`, `web_statement_timeout_ms` | `DATABASE_URL`, `DATABASE_POOL_SIZE` (default `3`), `DATABASE_MAX_OVERFLOW` (default `4`), `DATABASE_POOL_RECYCLE_SECONDS` (default `300`), `DATABASE_CONNECT_TIMEOUT_SECONDS` (default `5`), `WEB_STATEMENT_TIMEOUT_MS` (default `30000`; `create_app` copies it into `statement_timeout_ms`, which stays `None` for the nightly, collector and migrations) |
 | `AuthenticationSettings` | Firebase credential sources and `firebase_admin_disabled` | `FIREBASE_SERVICE_ACCOUNT_PATH`, `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_PROJECT_ID`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_ADMIN_DISABLED` |
 | `CacheSettings` | `enabled`, Redis URL/host/port/database/password/TLS, and the saved-Target Backtest result cache flag/TTL | `ENABLE_CACHE`, `REDIS_URL`, `REDISHOST`/`REDIS_HOST`, `REDISPORT`/`REDIS_PORT`, `REDISDB`/`REDIS_DB`, `REDISPASSWORD`/`REDIS_PASSWORD`, `REDISTLS`/`REDIS_TLS`, `TARGET_BACKTEST_CACHE_ENABLED` (default `true`), `TARGET_BACKTEST_CACHE_TTL_SECONDS` (default `86400`) |
 | `FeatureSettings` | DFS Board, injury-report, and database-first projection-reader exposure gates plus its deprecated recorder-default identity | `DFS_BOARD_ENABLED`, `INJURY_REPORT_ENABLED`, `PROJECTION_ARCHIVE_READ_ENABLED` (all default `false`), `PROJECTION_ARCHIVE_READ_PROVIDER` (default `dabble`) |
@@ -32,7 +32,7 @@ and `LOG_LEVEL`.
 `threading.BoundedSemaphore`, while each Gunicorn worker has its own gate. It
 is not a cross-process lock, so the maximum simultaneous calls the whole
 application can make is
-`workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs 4 workers).
+`workers × NBA_STATS_MAX_CONCURRENCY` (the Procfile runs `WEB_CONCURRENCY` workers, default 8).
 
 Season player Diet collection uses the same NBA Stats timeout/concurrency and
 PBP Stats transport settings as the other Nightly provider calls. It has no

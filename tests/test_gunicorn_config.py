@@ -35,13 +35,32 @@ def _load_config(monkeypatch, port: str | None = "8123"):
     return module
 
 
+def test_worker_and_thread_counts_read_the_environment(monkeypatch):
+    monkeypatch.setenv("WEB_CONCURRENCY", "12")
+    monkeypatch.setenv("GUNICORN_THREADS", "3")
+
+    config = _load_config(monkeypatch)
+
+    assert config.workers == 12
+    assert config.threads == 3
+
+
+def test_worker_and_thread_counts_default_to_eight_and_two(monkeypatch):
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("GUNICORN_THREADS", raising=False)
+
+    config = _load_config(monkeypatch)
+
+    assert (config.workers, config.threads) == (8, 2)
+
+
 def test_config_preloads_the_app_with_the_production_worker_settings(monkeypatch):
     config = _load_config(monkeypatch)
 
     assert config.preload_app is True
     assert config.wsgi_app == "wsgi:app"
     assert config.bind == ["0.0.0.0:8123"]
-    assert config.workers == 4
+    assert config.workers == 8
     assert config.threads == 2
     assert config.timeout == 180
     assert config.keepalive == 5

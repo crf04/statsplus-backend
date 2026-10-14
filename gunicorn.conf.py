@@ -27,8 +27,11 @@ os.environ[DEFER_DISPATCHER_ENV] = "1"
 wsgi_app = "wsgi:app"
 preload_app = True
 bind = [f"0.0.0.0:{os.environ.get('PORT', '8000')}"]
-workers = 4
-threads = 2
+# Capacity is configuration: the deployed worker count is set from the load
+# test.  Each worker holds at most 7 Postgres connections (pool_size 3 plus
+# max_overflow 4), so raise WEB_CONCURRENCY with that arithmetic in mind.
+workers = int(os.environ.get("WEB_CONCURRENCY", "8"))
+threads = int(os.environ.get("GUNICORN_THREADS", "2"))
 timeout = 180
 keepalive = 5
 max_requests = 1000
