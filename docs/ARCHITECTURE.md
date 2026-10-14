@@ -4716,9 +4716,17 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   (`pool_size`, `max_overflow`, `pool_recycle_seconds`,
   `connect_timeout_seconds`) only to Postgres engines, so the worst-case
   Postgres connection count is `processes × (pool_size + max_overflow)` — with
-  the Procfile's 4 gunicorn workers and the documented defaults, `4 × (3 + 4)
-  = 28`; the pre-forking master closes the connections it opened while
-  building the app before it forks the first worker. Scripts that call `create_engine` directly
+  the default 8 gunicorn workers (`WEB_CONCURRENCY`) and the documented
+  defaults, `8 × (3 + 4) = 56`; the pre-forking master closes the connections
+  it opened while building the app before it forks the first worker. The whole
+  deployment stays under 200: 56 web, plus at most 15 for the nightly (a bare
+  `create_engine` pool of 5 + 10 overflow) and 7 for the collector, and the MCP
+  server holds none (it reads through `/api`). Scale workers with that
+  arithmetic: 25 workers is the ceiling (`25 × 7 + 22 = 197`).
+  `create_app` alone sets `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`,
+  default 30000) on its engine's connections, and a cancelled statement
+  answers `503 query_timeout`; the nightly, the collector and migrations never
+  set it. Scripts that call `create_engine` directly
   (`scripts/migrate.py`, `scripts/nightly_refresh.py`, and similar
   one-shot/operator scripts) are not governed by these settings.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.

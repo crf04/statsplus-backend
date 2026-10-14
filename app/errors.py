@@ -342,6 +342,19 @@ def _as_query_timeout(error: BaseException) -> QueryTimeoutError | None:
     return None
 
 
+def raise_if_query_timeout(error: BaseException) -> None:
+    """Re-raise a statement timeout as its public error, otherwise return.
+
+    For code that catches a broad database error to degrade (``None``,
+    ``False``, ``0``): call it first so a cancelled statement is answered as
+    ``503 query_timeout`` instead of being mistaken for an absent row.
+    """
+
+    timeout = _as_query_timeout(error)
+    if timeout is not None:
+        raise timeout from error
+
+
 class AuthorizationError(AppError):
     """An authenticated user is not allowed to perform the operation."""
 

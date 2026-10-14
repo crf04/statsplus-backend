@@ -95,3 +95,59 @@ def test_stale_login_is_refreshed(user_engine, runtime_settings):
 
     stored = service.get_user_by_firebase_uid(FIREBASE_USER["uid"])
     assert _naive_utc(stored.last_login) > _naive_utc(original_login)
+
+
+class _TimedOutSession:
+    """A session whose every statement is cancelled by ``statement_timeout``."""
+
+    def query(self, *_args, **_kwargs):
+        from sqlalchemy.exc import OperationalError
+
+        class QueryCanceled(Exception):
+            pgcode = "57014"
+
+        raise OperationalError("SELECT 1", {}, QueryCanceled("statement timeout"))
+
+    def rollback(self):
+        pass
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda service: service.create_or_update_user(FIREBASE_USER),
+        lambda service: service.get_user_by_firebase_uid("uid"),
+        lambda service: service.get_user_by_email("a@example.com"),
+        lambda service: service.update_last_login("uid"),
+        lambda service: service.deactivate_user("uid"),
+        lambda service: service.get_all_active_users_count(),
+    ],
+)
+def test_a_statement_timeout_is_raised_not_mistaken_for_a_missing_user(
+    user_engine, runtime_settings, monkeypatch, call
+):
+    from app.errors import QueryTimeoutError
+
+    service = UserService(user_engine, settings=runtime_settings)
+    monkeypatch.setattr(service, "_get_session", lambda: _TimedOutSession())
+
+    with pytest.raises(QueryTimeoutError):
+        call(service)
+
+
+def test_other_database_errors_still_degrade_to_a_missing_user(
+    user_engine, runtime_settings, monkeypatch
+):
+    from sqlalchemy.exc import OperationalError
+
+    class Down(_TimedOutSession):
+        def query(self, *_args, **_kwargs):
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    service = UserService(user_engine, settings=runtime_settings)
+    monkeypatch.setattr(service, "_get_session", lambda: Down())
+
+    assert service.get_user_by_firebase_uid("uid") is None
