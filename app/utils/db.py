@@ -8,6 +8,9 @@ without code changes elsewhere.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
@@ -100,6 +103,68 @@ def is_demo_database_url(database_url: str) -> bool:
     return Path(database_path).expanduser().resolve() == DEMO_DATABASE_PATH.resolve()
 
 
+#: True while the current thread's work may run statements past the web limit.
+_statement_timeout_lifted: ContextVar[bool] = ContextVar(
+    "statement_timeout_lifted", default=False
+)
+
+
+@contextmanager
+def statement_timeout_lifted() -> Iterator[None]:
+    """Let this thread's database statements run without the web limit.
+
+    For work that legitimately runs long inside a web worker: data-refresh
+    jobs and the admin and collector routes. Connections checked out inside
+    the block run with ``statement_timeout = 0`` and return to the configured
+    limit on their next checkout outside it. It only reaches statements issued
+    on the calling thread; a helper thread starts limited.
+    """
+
+    token = _statement_timeout_lifted.set(True)
+    try:
+        yield
+    finally:
+        _statement_timeout_lifted.reset(token)
+
+
+def lift_statement_timeout_for_blueprint(blueprint: Any) -> None:
+    """Lift the web statement limit for every request routed to ``blueprint``."""
+
+    from flask import g
+
+    @blueprint.before_request
+    def _lift() -> None:
+        g.statement_timeout_token = _statement_timeout_lifted.set(True)
+
+    @blueprint.teardown_request
+    def _restore(_error: BaseException | None) -> None:
+        token = g.pop("statement_timeout_token", None)
+        if token is not None:
+            _statement_timeout_lifted.reset(token)
+
+
+def _apply_statement_timeout_scope(engine: Engine, limit_ms: int) -> None:
+    """Switch a pooled connection between the limit and none on checkout.
+
+    A connection opens with ``limit_ms``. Only when a checkout's scope differs
+    from the connection's current setting does it pay one ``SET``, committed so
+    the pool's rollback on return cannot undo it.
+    """
+
+    @event.listens_for(engine, "checkout")
+    def _on_checkout(dbapi_connection: Any, connection_record: Any, _proxy: Any) -> None:
+        wanted = 0 if _statement_timeout_lifted.get() else limit_ms
+        if connection_record.info.get("statement_timeout_ms", limit_ms) == wanted:
+            return
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"SET statement_timeout = {int(wanted)}")
+        finally:
+            cursor.close()
+        dbapi_connection.commit()
+        connection_record.info["statement_timeout_ms"] = wanted
+
+
 @lru_cache(maxsize=8)
 def _create_engine(
     database_url: str, pool: DatabaseSettings | None = None
@@ -113,14 +178,20 @@ def _create_engine(
 
     if pool is None:
         return create_engine(database_url)
-    return create_engine(
+    connect_args: dict[str, object] = {"connect_timeout": pool.connect_timeout_seconds}
+    if pool.statement_timeout_ms is not None:
+        connect_args["options"] = f"-c statement_timeout={pool.statement_timeout_ms}"
+    engine = create_engine(
         database_url,
         pool_pre_ping=True,
         pool_size=pool.pool_size,
         max_overflow=pool.max_overflow,
         pool_recycle=pool.pool_recycle_seconds,
-        connect_args={"connect_timeout": pool.connect_timeout_seconds},
+        connect_args=connect_args,
     )
+    if pool.statement_timeout_ms is not None:
+        _apply_statement_timeout_scope(engine, pool.statement_timeout_ms)
+    return engine
 
 
 def get_engine(settings: RuntimeSettings | None = None) -> Engine:

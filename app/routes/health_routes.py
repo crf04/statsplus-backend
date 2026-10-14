@@ -18,6 +18,16 @@ from ._service_proxy import CurrentAppService
 health_bp = Blueprint("health", __name__, url_prefix="/api/health")
 health_service = CurrentAppService("provider_health")
 
+# The deploy health check: no prefix, no authentication, and no dependency.
+liveness_bp = Blueprint("liveness", __name__)
+
+
+@liveness_bp.route("/health", methods=["GET"])
+def liveness():
+    """Report that the process is serving; touches no database or provider."""
+
+    return jsonify({"status": "ok"}), 200
+
 
 @health_bp.route("/db", methods=["GET"])
 def database_healthcheck():

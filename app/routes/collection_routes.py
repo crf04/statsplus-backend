@@ -27,9 +27,13 @@ from app.services.collection_control import (
     decompress_gzip_limited,
 )
 from app.utils.auth import get_current_user, require_admin
+from app.utils.db import lift_statement_timeout_for_blueprint
 
 
 collection_bp = Blueprint("collection", __name__)
+# Collector uploads and admin compose, activate, cutover and rebuild routes
+# write whole seasons of facts; they keep no web statement limit.
+lift_statement_timeout_for_blueprint(collection_bp)
 
 
 def _actor() -> str:

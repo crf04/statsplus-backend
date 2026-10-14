@@ -13,6 +13,7 @@ from ..errors import (
     InvalidInputError,
     ProviderUnavailableError,
     ResourceNotFoundError,
+    raise_if_query_timeout,
 )
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services.research_season import research_service
@@ -658,6 +659,7 @@ class PlayerService:
 
             return merged_df.to_dict(orient='records')
         except Exception as e:
+            raise_if_query_timeout(e)
             logger.error("Error getting archetype gamelogs: %s", e)
             return []
 
@@ -761,6 +763,7 @@ class PlayerService:
             result = players_df[players_df['ClusterID'] == cluster_id]['PlayerID']
             return result.tolist()
         except Exception as e:
+            raise_if_query_timeout(e)
             logger.error("Error getting archetype players: %s", e)
             return []
 

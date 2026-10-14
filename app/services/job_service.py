@@ -43,6 +43,7 @@ from app.models.job import (
     DataRefreshJob,
     utcnow,
 )
+from app.utils.db import statement_timeout_lifted
 from app.utils.telemetry import (
     clear_request_id,
     current_request_id,
@@ -600,12 +601,15 @@ class DataRefreshJobService:
             handler = self._handler_for(job.operation)
             if handler is None:
                 raise RuntimeError("No registered handler for refresh operation")
-            result = handler(
-                progress_callback=lambda progress, note=None: self._update_owned_progress(
-                    claimed_job, progress, note
-                ),
-                publication_fence=self._publication_fence(claimed_job),
-            )
+            # A refresh runs minutes of league-wide writes inside a web
+            # worker; the web statement limit is for request-serving queries.
+            with statement_timeout_lifted():
+                result = handler(
+                    progress_callback=lambda progress, note=None: self._update_owned_progress(
+                        claimed_job, progress, note
+                    ),
+                    publication_fence=self._publication_fence(claimed_job),
+                )
             if result is False:
                 self._fail(claimed_job, OperationFailedError())
             else:

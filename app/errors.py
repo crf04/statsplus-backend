@@ -16,6 +16,7 @@ from functools import wraps
 from typing import Any, ClassVar, ParamSpec, TypeVar
 
 from flask import Flask, jsonify
+from sqlalchemy.exc import DBAPIError
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
 from app.utils.telemetry import ProviderResponseError, record_application_failure
@@ -319,6 +320,43 @@ class RateLimitedError(AppError):
         return {"retry_after_seconds": self.retry_after}
 
 
+class QueryTimeoutError(AppError):
+    """A database statement ran past the web statement timeout."""
+
+    status_code = 503
+    code = "query_timeout"
+    default_message = "The request took too long to answer. Try a narrower query."
+
+
+#: Postgres SQLSTATE ``query_canceled``, raised when ``statement_timeout`` fires.
+_QUERY_CANCELED_SQLSTATE = "57014"
+
+
+def _as_query_timeout(error: BaseException) -> QueryTimeoutError | None:
+    """Return the public error for a statement-timeout failure, else ``None``."""
+
+    if isinstance(error, DBAPIError) and (
+        getattr(error.orig, "pgcode", None) == _QUERY_CANCELED_SQLSTATE
+    ):
+        return QueryTimeoutError(detail=error)
+    return None
+
+
+def raise_if_query_timeout(error: BaseException) -> None:
+    """Re-raise a statement timeout as its public error, otherwise return.
+
+    For code that catches a broad database error to degrade (``None``,
+    ``False``, ``0``): call it first so a cancelled statement is answered as
+    ``503 query_timeout`` instead of being mistaken for an absent row.
+    """
+
+    if isinstance(error, QueryTimeoutError):
+        raise error
+    timeout = _as_query_timeout(error)
+    if timeout is not None:
+        raise timeout from error
+
+
 class PayloadTooLargeError(AppError):
     """The request body is larger than the API accepts."""
 
@@ -439,6 +477,9 @@ def route_error_boundary(
                 # The central handler answers the 413 the size cap produced.
                 raise
             except Exception as error:
+                timeout = _as_query_timeout(error)
+                if timeout is not None:
+                    raise timeout from error
                 raise error_type(safe_message, detail=error) from error
 
         return wrapped
@@ -468,7 +509,7 @@ def isolated_error_body(
     elif isinstance(error, AppError):
         app_error = error
     else:
-        app_error = error_type(safe_message, detail=error)
+        app_error = _as_query_timeout(error) or error_type(safe_message, detail=error)
 
     _log_application_error(app_error)
     if app_error.code != "provider_unavailable":
@@ -568,5 +609,5 @@ def register_error_handlers(app: Flask) -> None:
         if isinstance(error, ProviderResponseError):
             return handle_app_error(ProviderUnavailableError(detail=error), error)
 
-        app_error = AppError(detail=error)
+        app_error = _as_query_timeout(error) or AppError(detail=error)
         return handle_app_error(app_error, error)

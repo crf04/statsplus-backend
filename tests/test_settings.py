@@ -487,6 +487,21 @@ def test_database_pool_settings_have_typed_defaults():
     assert settings.database.connect_timeout_seconds == 5
 
 
+def test_web_statement_timeout_defaults_to_thirty_seconds_and_parses_env(monkeypatch):
+    monkeypatch.delenv("WEB_STATEMENT_TIMEOUT_MS", raising=False)
+    assert load_settings(overrides={}).database.web_statement_timeout_ms == 30000
+
+    monkeypatch.setenv("WEB_STATEMENT_TIMEOUT_MS", "1500")
+
+    assert load_settings().database.web_statement_timeout_ms == 1500
+
+
+def test_loaded_settings_apply_no_statement_timeout_until_the_web_app_asks(monkeypatch):
+    monkeypatch.setenv("WEB_STATEMENT_TIMEOUT_MS", "1500")
+
+    assert load_settings().database.statement_timeout_ms is None
+
+
 def test_database_pool_settings_parse_env_values(monkeypatch):
     monkeypatch.setenv("FLASK_ENV", "testing")
     monkeypatch.setenv("DATABASE_POOL_SIZE", "10")
