@@ -128,20 +128,19 @@ def statement_timeout_lifted() -> Iterator[None]:
 
 
 def lift_statement_timeout_for_blueprint(blueprint: Any) -> None:
-    """Run every request routed to ``blueprint`` under ``statement_timeout_lifted``."""
+    """Lift the web statement limit for every request routed to ``blueprint``."""
 
     from flask import g
 
     @blueprint.before_request
     def _lift() -> None:
-        g.statement_timeout_lift = statement_timeout_lifted()
-        g.statement_timeout_lift.__enter__()
+        g.statement_timeout_token = _statement_timeout_lifted.set(True)
 
     @blueprint.teardown_request
     def _restore(_error: BaseException | None) -> None:
-        lift = g.pop("statement_timeout_lift", None)
-        if lift is not None:
-            lift.__exit__(None, None, None)
+        token = g.pop("statement_timeout_token", None)
+        if token is not None:
+            _statement_timeout_lifted.reset(token)
 
 
 def _apply_statement_timeout_scope(engine: Engine, limit_ms: int) -> None:
