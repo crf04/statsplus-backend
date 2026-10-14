@@ -3,7 +3,6 @@ import logging
 
 from ..errors import InvalidInputError, OperationFailedError, route_error_boundary
 from ..utils.auth import require_auth, get_current_user
-from ..utils.rate_limit import NL_QUERY_LIMIT, limiter, user_key
 from ._service_proxy import CurrentAppService
 
 logger = logging.getLogger(__name__)
@@ -14,7 +13,6 @@ nl_bp = Blueprint('nl', __name__)
 nl_service = CurrentAppService("nl")
 
 @nl_bp.route('/nl-query', methods=['POST'])
-@limiter.limit(NL_QUERY_LIMIT, key_func=user_key)
 @require_auth
 @route_error_boundary("Failed to process the natural-language query.")
 def process_natural_language_query():

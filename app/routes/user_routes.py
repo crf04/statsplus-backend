@@ -20,12 +20,6 @@ from app.utils.auth import (
     require_auth_optional,
 )
 from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
-from app.utils.rate_limit import (
-    TARGET_BACKTEST_LIMIT,
-    TARGET_PREVIEW_LIMIT,
-    limiter,
-    user_key,
-)
 from ._service_proxy import CurrentAppService
 
 # Initialize blueprint
@@ -394,7 +388,6 @@ def resolve_targets():
     return jsonify({'success': True, **resolved})
 
 @user_bp.route('/targets/preview', methods=['POST'])
-@limiter.limit(TARGET_PREVIEW_LIMIT, key_func=user_key)
 @require_auth
 @route_error_boundary("Failed to preview the target.")
 def preview_target():
@@ -459,7 +452,6 @@ def backtest_targets():
     return jsonify({'success': True, **backtested})
 
 @user_bp.route('/targets/<int:target_id>/backtest', methods=['GET'])
-@limiter.limit(TARGET_BACKTEST_LIMIT, key_func=user_key)
 @require_auth
 @route_error_boundary(BACKTEST_FAILED_MESSAGE)
 def backtest_target(target_id):

@@ -1,5 +1,5 @@
 from app.services.nl_query.parser import BaseQueryParser
-from app.services.llm_service import LLMParsedQuery, LLMService
+from app.services.llm_service import LLMBudgetExhausted, LLMParsedQuery, LLMService
 from app.services import nl_shadow
 from app.config.settings import RuntimeSettings, get_runtime_settings
 from app.services.research_season import research_service
@@ -100,20 +100,16 @@ class NLService:
             parsed_components.confidence_breakdown.should_use_llm
         )
 
-        if (
-            should_use_llm
-            and self.llm_service
-            and self.llm_budget is not None
-            and user_id is not None
-            and not self.llm_budget.try_consume(user_id)
-        ):
-            logger.info("LLM fallback budget spent for %s; using NLP", user_id)
-            return self._format_nlp_result(parsed_components, query_text)
-
         if should_use_llm and self.llm_service:
             logger.info("Routing to LLM (confidence %.3f): %s", parsed_components.confidence, query_text[:50])
             try:
-                return self._process_with_llm(query_text, parsed_components)
+                return self._process_with_llm(
+                    query_text,
+                    parsed_components,
+                    **self._budget_gate(user_id),
+                )
+            except LLMBudgetExhausted:
+                logger.info("LLM fallback budget spent for %s; using NLP", user_id)
             except Exception as e:
                 logger.error("LLM processing error: %s", e)
                 logger.info("Falling back to NLP result")
@@ -144,10 +140,16 @@ class NLService:
             query_text, parsed_components.confidence, started, diff=diff
         )
 
-    def _process_with_llm(self, query_text: str, parsed_components):
+    def _budget_gate(self, user_id):
+        """Keyword for ``parse_query`` that bills each OpenAI call to ``user_id``."""
+        if self.llm_budget is None or user_id is None:
+            return {}
+        return {"before_call": lambda: self.llm_budget.try_consume(user_id)}
+
+    def _process_with_llm(self, query_text: str, parsed_components, **llm_options):
         """Parse with the LLM, seeded with the players the NLP pass resolved."""
         player_context = self._extract_player_context(parsed_components)
-        llm_query = self.llm_service.parse_query(query_text, player_context)
+        llm_query = self.llm_service.parse_query(query_text, player_context, **llm_options)
         return self._format_llm_result(llm_query, query_text, parsed_components)
 
     def _format_llm_result(self, llm_query: LLMParsedQuery, query_text: str, nlp_components):

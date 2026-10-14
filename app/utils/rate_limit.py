@@ -10,7 +10,9 @@ is allowed and a warning is logged.  Limiter keys carry TTLs, so an
 Flask-Limiter checks limits in a ``before_request`` hook, which runs before a
 route's own ``@require_auth``.  The uid is only known once the token is
 verified, so :func:`init_rate_limiting` registers a hook ahead of the
-limiter's that authenticates routes marked ``requires_auth`` first.
+limiter's that authenticates routes marked ``requires_auth`` (or
+``optional_auth``) first.  Each app owns its limiter and store, so building a
+second app never resets the first one's counts.
 """
 
 from __future__ import annotations
@@ -24,7 +26,11 @@ from flask_limiter import Limit, Limiter, RateLimitExceeded
 from limits.storage import Storage, storage_from_string
 
 from app.config.settings import RuntimeSettings
-from app.utils.auth import _authenticate_request, get_current_user
+from app.utils.auth import (
+    _authenticate_optionally,
+    _authenticate_request,
+    get_current_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +84,6 @@ class FailOpenLimiter(Limiter):
             )
 
 
-limiter = FailOpenLimiter(
-    key_func=user_key,
-    # One bucket per caller across every route without its own limit.
-    default_limits=[
-        Limit(_default_limit, key_function=user_key, scope="default", shared=True)
-    ],
-    strategy="fixed-window",
-)
-
-
-@limiter.request_filter
 def _is_exempt() -> bool:
     """CORS preflights, ``/health``, and machine-credentialed collector routes."""
 
@@ -127,15 +122,72 @@ def build_storage(settings: RuntimeSettings) -> Storage:
     )
 
 
+#: Endpoints with a limit of their own, which replaces the shared default.
+ROUTE_LIMITS = {
+    "users.preview_target": TARGET_PREVIEW_LIMIT,
+    "users.backtest_target": TARGET_BACKTEST_LIMIT,
+    "nl.process_natural_language_query": NL_QUERY_LIMIT,
+    "dfs.dfs_board": DFS_BOARD_LIMIT,
+}
+
+
 def _authenticate_before_limiting() -> None:
     if request.method == "OPTIONS" or get_current_user() is not None:
         return
     view = current_app.view_functions.get(request.endpoint or "")
     if getattr(view, "requires_auth", False):
         _authenticate_request()
+    elif getattr(view, "optional_auth", False):
+        _authenticate_optionally()
 
 
-def _retry_after_seconds() -> int:
+def init_rate_limiting(app: Flask, settings: RuntimeSettings) -> None:
+    """Enforce the contract's limits on ``app``, which owns its limiter and store.
+
+    Call after the blueprints are registered: the per-route limits wrap the
+    registered view functions.
+    """
+
+    uri = storage_uri(settings)
+    app.config["RATELIMIT_STORAGE_URI"] = uri
+    app.config["RATELIMIT_STORAGE_OPTIONS"] = (
+        {}
+        if uri.startswith("memory://")
+        else {
+            "socket_timeout": _STORAGE_TIMEOUT_SECONDS,
+            "socket_connect_timeout": _STORAGE_TIMEOUT_SECONDS,
+        }
+    )
+    limiter = FailOpenLimiter(
+        key_func=user_key,
+        # One bucket per caller across every route without its own limit.
+        default_limits=[
+            Limit(_default_limit, key_function=user_key, scope="default", shared=True)
+        ],
+        strategy="fixed-window",
+    )
+    limiter.request_filter(_is_exempt)
+
+    def rate_limited(_: RateLimitExceeded):  # type: ignore[no-untyped-def]
+        response = jsonify(
+            {"error": {"code": "rate_limited", "message": RATE_LIMITED_MESSAGE}}
+        )
+        response.status_code = 429
+        response.headers["Retry-After"] = str(_retry_after_seconds(limiter))
+        return response
+
+    # Registered first, so the uid exists when the limiter's hook builds keys.
+    app.before_request(_authenticate_before_limiting)
+    limiter.init_app(app)
+    for endpoint, limit in ROUTE_LIMITS.items():
+        app.view_functions[endpoint] = limiter.limit(limit, key_func=user_key)(
+            app.view_functions[endpoint]
+        )
+    app.register_error_handler(RateLimitExceeded, rate_limited)
+    app.extensions["rate_limiter"] = limiter
+
+
+def _retry_after_seconds(limiter: Limiter) -> int:
     """Seconds until the breached window reopens, never less than one."""
 
     try:
@@ -144,42 +196,3 @@ def _retry_after_seconds() -> int:
         return max(1, min(window, math.ceil(current.reset_at - time.time())))
     except Exception:
         return 60
-
-
-def _rate_limited_response(_: RateLimitExceeded):  # type: ignore[no-untyped-def]
-    response = jsonify(
-        {"error": {"code": "rate_limited", "message": RATE_LIMITED_MESSAGE}}
-    )
-    response.status_code = 429
-    response.headers["Retry-After"] = str(_retry_after_seconds())
-    return response
-
-
-def init_rate_limiting(app: Flask, settings: RuntimeSettings) -> None:
-    """Enforce the contract's limits on ``app``."""
-
-    app.config["RATELIMIT_STORAGE_URI"] = storage_uri(settings)
-    app.config["RATELIMIT_STORAGE_OPTIONS"] = (
-        {}
-        if app.config["RATELIMIT_STORAGE_URI"].startswith("memory://")
-        else {
-            "socket_timeout": _STORAGE_TIMEOUT_SECONDS,
-            "socket_connect_timeout": _STORAGE_TIMEOUT_SECONDS,
-        }
-    )
-    # Registered first, so the uid exists when the limiter's hook builds keys.
-    app.before_request(_authenticate_before_limiting)
-    limiter.init_app(app)
-    app.register_error_handler(RateLimitExceeded, _rate_limited_response)
-
-
-__all__ = [
-    "DFS_BOARD_LIMIT",
-    "NL_QUERY_LIMIT",
-    "TARGET_BACKTEST_LIMIT",
-    "TARGET_PREVIEW_LIMIT",
-    "build_storage",
-    "init_rate_limiting",
-    "limiter",
-    "user_key",
-]

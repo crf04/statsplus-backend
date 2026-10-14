@@ -9,7 +9,7 @@ test points the app at an address nothing listens on.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -23,6 +23,7 @@ from app.config.settings import (
     LLMSettings,
     RuntimeSettings,
 )
+from app.services import llm_service as llm_service_module
 from app.services import nl_service as nl_service_module
 from app.services.llm_budget import LLMDailyBudget
 from app.services.llm_service import LLMParsedQuery
@@ -38,7 +39,7 @@ RATE_LIMITED_BODY = {
 
 
 def _sign_in(monkeypatch, *, admin: bool = False) -> None:
-    """Verify any bearer token as a Firebase user whose uid is the token."""
+    """Verify a bearer token ``<uid>`` or ``<uid>:<n>`` as that Firebase uid."""
     import app.utils.auth as auth
 
     claims = {"admin": True, "role": "admin"} if admin else {}
@@ -46,7 +47,11 @@ def _sign_in(monkeypatch, *, admin: bool = False) -> None:
     monkeypatch.setattr(
         auth,
         "verify_firebase_token",
-        lambda token: {"uid": token, "email": f"{token}@example.com", **claims},
+        lambda token: {
+            "uid": token.split(":")[0],
+            "email": f"{token.split(':')[0]}@example.com",
+            **claims,
+        },
     )
 
 
@@ -154,11 +159,67 @@ def test_unauthenticated_routes_are_limited_per_ip_behind_the_proxy(client):
     assert same_client.status_code == 429
 
 
-def test_health_and_preflights_are_never_limited(client):
-    assert 429 not in _statuses(client, "get", "/health", 70)
+def test_health_and_preflights_are_never_limited(app, client):
+    app.add_url_rule("/health", "health_probe", lambda: ({"status": "ok"}, 200))
+
+    assert _statuses(client, "get", "/health", 70) == [200] * 70
     assert 429 not in _statuses(
         client, "options", "/api/health/db", 70, headers={"Origin": "http://localhost:3000"}
     )
+
+
+def test_collector_routes_are_not_limited_as_anonymous_callers(client):
+    path = "/api/collector/status"
+
+    statuses = _statuses(client, "post", path, 70, json={})
+
+    assert 429 not in statuses
+    assert set(statuses) == {401}
+
+
+def test_a_signed_in_caller_on_an_optional_auth_route_is_limited_by_uid(
+    client, signed_in
+):
+    # /api/players authenticates optionally: 300/min per uid, not 60/min per IP.
+    statuses = _statuses(client, "get", "/api/players", 70, headers=_as("user-a"))
+
+    assert 429 not in statuses
+    other = client.get("/api/players", headers=_as("user-b"))
+    assert other.status_code != 429
+
+
+def test_each_app_counts_for_itself(app, client, signed_in, served, dependencies):
+    _statuses(client, "post", "/api/user/targets/preview", 30, json={}, headers=_as("user-a"))
+
+    second_app = create_app(
+        {
+            "TESTING": True,
+            "RUNTIME_SETTINGS": dependencies.settings,
+            "DEPENDENCIES": dependencies,
+            "SKIP_FIREBASE_INIT": True,
+            "SKIP_TABLE_CREATE": True,
+        }
+    )
+
+    first_apps_next = client.post("/api/user/targets/preview", json={}, headers=_as("user-a"))
+    fresh = second_app.test_client().post(
+        "/api/user/targets/preview", json={}, headers=_as("user-a")
+    )
+    assert first_apps_next.status_code == 429
+    assert fresh.status_code == 200
+
+
+def test_a_refreshed_token_is_the_same_user(client, signed_in, served):
+    for refresh in range(30):
+        client.post(
+            "/api/user/targets/preview", json={}, headers=_as(f"user-a:{refresh}")
+        )
+
+    limited = client.post(
+        "/api/user/targets/preview", json={}, headers=_as("user-a:new-token")
+    )
+
+    assert limited.status_code == 429
 
 
 # --- Redis unavailable -----------------------------------------------------
@@ -213,6 +274,20 @@ def test_budget_allows_50_calls_per_user_per_utc_day():
     assert budget.try_consume("user-a") is True
 
 
+def test_budget_day_is_the_utc_day_whatever_zone_the_clock_reports():
+    new_york = timezone(timedelta(hours=-4))
+    clock = {"now": datetime(2026, 10, 14, 21, 0, tzinfo=new_york)}  # 01:00 UTC Oct 15
+    budget = LLMDailyBudget(MemoryStorage(), limit=1, now=lambda: clock["now"])
+    assert budget.try_consume("user-a") is True
+
+    # 23:30 in New York is still Oct 15 in UTC: the same day, so still spent.
+    clock["now"] = datetime(2026, 10, 14, 23, 30, tzinfo=new_york)
+    assert budget.try_consume("user-a") is False
+    # 20:30 on the 15th in New York is 00:30 UTC on the 16th: a new day.
+    clock["now"] = datetime(2026, 10, 15, 20, 30, tzinfo=new_york)
+    assert budget.try_consume("user-a") is True
+
+
 def test_budget_allows_the_call_and_warns_when_its_store_fails(caplog):
     class DeadStorage:
         def incr(self, *args, **kwargs):
@@ -232,13 +307,12 @@ class FakeParser:
         pass
 
     def parse(self, query):
-        breakdown = SimpleNamespace(should_use_llm=True)
         return QueryComponents(
             player_name="LeBron James",
             confidence=0.4,
             raw_query=query,
             intent="game_logs",
-            confidence_breakdown=breakdown,
+            confidence_breakdown=SimpleNamespace(should_use_llm=True),
         )
 
     def resolve_player_name(self, name):
@@ -246,14 +320,21 @@ class FakeParser:
 
 
 class FakeOpenAI:
-    calls: list[str] = []
+    """The OpenAI SDK client: counts calls, answers each with a parsed query."""
 
-    def __init__(self, settings=None):
-        pass
+    instances: list["FakeOpenAI"] = []
 
-    def parse_query(self, query, player_context):
-        FakeOpenAI.calls.append(query)
-        return LLMParsedQuery(
+    def __init__(self, api_key=None, fail=False):
+        self.calls = 0
+        self.fail = fail
+        self.chat = SimpleNamespace(completions=SimpleNamespace(parse=self._parse))
+        FakeOpenAI.instances.append(self)
+
+    def _parse(self, **kwargs):
+        self.calls += 1
+        if self.fail:
+            raise ConnectionError("openai is down")
+        parsed = LLMParsedQuery(
             player_name="LeBron James",
             team_name=None,
             game_count=None,
@@ -269,22 +350,39 @@ class FakeOpenAI:
             time_period=None,
             confidence=0.95,
         )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(refusal=None, parsed=parsed))]
+        )
+
+
+@pytest.fixture
+def fake_openai(monkeypatch):
+    FakeOpenAI.instances = []
+    monkeypatch.setattr(nl_service_module, "BaseQueryParser", FakeParser)
+    monkeypatch.setattr(llm_service_module, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(llm_service_module.time, "sleep", lambda seconds: None)
+    return FakeOpenAI
+
+
+def _nl_service(runtime_settings, *, limit, max_retries=1):
+    settings = runtime_settings.model_copy(
+        update={
+            "llm": LLMSettings(
+                api_key="sk-test", enable_fallback=True, max_retries=max_retries
+            )
+        }
+    )
+    return NLService(
+        Mock(),
+        settings=settings,
+        llm_budget=LLMDailyBudget(MemoryStorage(), limit=limit),
+    )
 
 
 def test_nl_query_past_the_daily_openai_cap_answers_200_with_the_rule_based_parse(
-    monkeypatch, client, signed_in, dependencies, runtime_settings
+    client, signed_in, dependencies, runtime_settings, fake_openai
 ):
-    monkeypatch.setattr(nl_service_module, "BaseQueryParser", FakeParser)
-    monkeypatch.setattr(nl_service_module, "LLMService", FakeOpenAI)
-    FakeOpenAI.calls = []
-    llm_settings = runtime_settings.model_copy(
-        update={"llm": LLMSettings(api_key="sk-test", enable_fallback=True)}
-    )
-    dependencies.nl_service = NLService(
-        Mock(),
-        settings=llm_settings,
-        llm_budget=LLMDailyBudget(MemoryStorage(), limit=2),
-    )
+    dependencies.nl_service = _nl_service(runtime_settings, limit=2)
 
     bodies = [
         client.post(
@@ -301,12 +399,33 @@ def test_nl_query_past_the_daily_openai_cap_answers_200_with_the_rule_based_pars
     ]
     assert bodies[2].get_json()["original_query"] == "lebron stuff"
     assert bodies[2].get_json()["player_name"] == "LeBron James"
-    assert FakeOpenAI.calls == ["lebron stuff", "lebron stuff"]
+    assert fake_openai.instances[0].calls == 2
     # Another user still has a budget.
     other = client.post(
         "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-b")
     )
     assert other.get_json()["parsed_by"] == "hybrid"
+    assert fake_openai.instances[0].calls == 3
+
+
+def test_every_openai_attempt_counts_against_the_cap_retries_included(
+    client, signed_in, dependencies, runtime_settings, fake_openai, monkeypatch
+):
+    dependencies.nl_service = _nl_service(runtime_settings, limit=2, max_retries=2)
+    openai = fake_openai.instances[0]
+    openai.fail = True
+
+    first = client.post(
+        "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a")
+    )
+    second = client.post(
+        "/api/nl-query", json={"query": "lebron stuff"}, headers=_as("user-a")
+    )
+
+    # The first query's two attempts spent the whole budget of 2.
+    assert openai.calls == 2
+    assert first.status_code == second.status_code == 200
+    assert second.get_json()["parsed_by"] == "nlp"
 
 
 # --- admin-only provider health -------------------------------------------
@@ -360,9 +479,14 @@ def test_detailed_health_answers_an_admin(client, monkeypatch):
 # --- request size ----------------------------------------------------------
 
 
-def test_bodies_over_one_megabyte_are_refused(client, signed_in, served):
-    small = client.post(
-        "/api/nl-query", json={"query": "x" * 1000}, headers=_as("user-a")
+def test_bodies_up_to_one_megabyte_are_accepted_and_larger_ones_refused(
+    client, signed_in, served
+):
+    near_cap = client.post(
+        "/api/nl-query",
+        data=b'{"query": "' + b"x" * (900 * 1024) + b'"}',
+        content_type="application/json",
+        headers=_as("user-a"),
     )
     oversized = client.post(
         "/api/nl-query",
@@ -371,7 +495,7 @@ def test_bodies_over_one_megabyte_are_refused(client, signed_in, served):
         headers=_as("user-a"),
     )
 
-    assert small.status_code == 200
+    assert near_cap.status_code == 200
     assert oversized.status_code == 413
     assert oversized.get_json() == {
         "error": {
@@ -379,3 +503,23 @@ def test_bodies_over_one_megabyte_are_refused(client, signed_in, served):
             "message": "The request body is too large.",
         }
     }
+
+
+def test_collector_envelopes_over_one_megabyte_still_reach_their_own_limit(
+    client, monkeypatch
+):
+    from app.routes import collection_routes
+
+    monkeypatch.setattr(
+        collection_routes, "_collector_claims_any", lambda *a, **k: {"sub": "c"}
+    )
+    body = b"x" * (1024 * 1024 + 1)  # under the collector's own 2 MB bound
+
+    response = client.post(
+        "/api/collector/catalog/req-1",
+        data=body,
+        headers={"Content-Encoding": "gzip"},
+        content_type="application/octet-stream",
+    )
+
+    assert response.status_code != 413

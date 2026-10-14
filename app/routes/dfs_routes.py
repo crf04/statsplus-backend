@@ -25,7 +25,6 @@ from app.dependencies import get_dependencies
 from app.errors import route_error_boundary
 from app.services.dfs_board_response import PendingBoardObservation
 from app.utils.auth import require_auth
-from app.utils.rate_limit import DFS_BOARD_LIMIT, limiter, user_key
 
 dfs_bp = Blueprint("dfs", __name__)
 
@@ -39,7 +38,6 @@ _OBSERVATION = "dfs_board_observation"
 
 
 @dfs_bp.route("/board", methods=["GET"])
-@limiter.limit(DFS_BOARD_LIMIT, key_func=user_key)
 @require_auth
 @route_error_boundary("The DFS board could not be assembled.")
 def dfs_board():

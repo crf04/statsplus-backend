@@ -371,33 +371,45 @@ def get_current_user() -> dict[str, Any] | None:
     return getattr(g, "current_user", None)
 
 
+def _authenticate_optionally() -> None:
+    """Attach the caller when a valid bearer token is supplied; once a request."""
+
+    if getattr(g, "optional_auth_attempted", False):
+        return
+    g.optional_auth_attempted = True
+
+    # Optional auth remains optional: an absent token never causes a
+    # Firebase-unavailable response. If a token is supplied, preserve the
+    # historical behavior of ignoring invalid optional credentials.
+    auth_header = request.headers.get("Authorization")
+    try:
+        firebase_app = get_firebase_app() if auth_header else None
+    except Exception as error:
+        logger.warning("Optional Firebase authentication is unavailable: %s", error)
+        firebase_app = None
+
+    if auth_header and firebase_app is not None:
+        try:
+            scheme, token = auth_header.split(" ", 1)
+            if scheme.lower() != "bearer" or not token.strip():
+                return
+
+            decoded_token = verify_firebase_token(token)
+            _sync_firebase_user(decoded_token, tolerate_sync_errors=True)
+        except Exception:
+            # Optional auth must not turn a public route into an outage.
+            pass
+
+
 def require_auth_optional(f: Callable[..., Any]) -> Callable[..., Any]:
     """Optionally authenticate a request when a bearer token is provided."""
 
     @wraps(f)
     def decorated_function(*args: Any, **kwargs: Any) -> Any:
-        # Optional auth remains optional: an absent token never causes a
-        # Firebase-unavailable response. If a token is supplied, preserve the
-        # historical behavior of ignoring invalid optional credentials.
-        auth_header = request.headers.get("Authorization")
-        try:
-            firebase_app = get_firebase_app() if auth_header else None
-        except Exception as error:
-            logger.warning("Optional Firebase authentication is unavailable: %s", error)
-            firebase_app = None
-
-        if auth_header and firebase_app is not None:
-            try:
-                scheme, token = auth_header.split(" ", 1)
-                if scheme.lower() != "bearer" or not token.strip():
-                    return f(*args, **kwargs)
-
-                decoded_token = verify_firebase_token(token)
-                _sync_firebase_user(decoded_token, tolerate_sync_errors=True)
-            except Exception:
-                # Optional auth must not turn a public route into an outage.
-                pass
-
+        _authenticate_optionally()
         return f(*args, **kwargs)
 
+    # The rate limiter authenticates these routes first, so a signed-in caller
+    # is limited by uid rather than by the anonymous IP bucket.
+    decorated_function.optional_auth = True  # type: ignore[attr-defined]
     return decorated_function

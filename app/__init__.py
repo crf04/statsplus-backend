@@ -64,8 +64,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _assemble_dependencies(app)
     _verify_schema_is_current(app)
     _register_error_handlers(app)
-    _register_rate_limiting(app)
     _register_blueprints(app)
+    _register_rate_limiting(app)
 
     return app
 

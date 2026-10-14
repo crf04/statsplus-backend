@@ -38,7 +38,7 @@ class LLMDailyBudget:
     def try_consume(self, uid: str) -> bool:
         """Spend one call for ``uid``; False once today's budget is gone."""
 
-        key = f"llm_fallback/{uid}/{self._now().strftime('%Y-%m-%d')}"
+        key = f"llm_fallback/{uid}/{self._now().astimezone(timezone.utc).strftime('%Y-%m-%d')}"
         try:
             used = self._storage.incr(key, _KEY_TTL_SECONDS)
         except Exception as error:
