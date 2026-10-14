@@ -93,6 +93,42 @@ def test_forced_500_sends_one_event_tagged_with_the_response_request_id(
     assert event["environment"] == "testing"
     assert event["release"] == SHA
     assert event["level"] == "error"
+    values = event["exception"]["values"]
+    assert values[-1]["type"] == "RuntimeError"
+    assert values[-1]["value"] == "kaboom"
+    assert "boom" in [f["function"] for f in values[-1]["stacktrace"]["frames"]]
+
+
+def test_exception_message_secrets_are_redacted(app, transport):
+    @app.get("/leak")
+    def leak():
+        raise RuntimeError("provider said token=" + "exc" + "-secret")
+
+    init_sentry(_environ(), transport=transport)
+
+    app.test_client().get("/leak")
+
+    sentry_sdk.flush()
+    assert len(transport.events) == 1
+    assert "exc-secret" not in json.dumps(transport.events[0])
+
+
+def test_raised_app_error_5xx_is_one_exception_event(app, transport):
+    from app.errors import OperationFailedError
+
+    @app.get("/op-failed")
+    def op_failed():
+        raise OperationFailedError(detail="db down")
+
+    init_sentry(_environ(), transport=transport)
+
+    response = app.test_client().get("/op-failed")
+
+    sentry_sdk.flush()
+    assert response.status_code >= 500
+    assert len(transport.events) == 1
+    assert transport.events[0]["exception"]["values"][-1]["type"] == "OperationFailedError"
+    assert transport.events[0]["tags"]["request_id"] == response.headers["X-Request-ID"]
 
 
 def test_event_carries_a_caller_supplied_request_id(failing_app, transport):
@@ -172,3 +208,21 @@ def test_environment_prefers_the_explicit_sentry_setting(transport):
     )
 
     assert sentry_sdk.get_client().options["environment"] == "beta"
+
+
+def test_a_plain_error_log_becomes_one_tagged_log_event(app, transport):
+    import logging
+
+    @app.get("/logs-error")
+    def logs_error():
+        logging.getLogger("app.test").error("backfill failed rows=3")
+        return {"ok": True}
+
+    init_sentry(_environ(), transport=transport)
+
+    response = app.test_client().get("/logs-error")
+
+    sentry_sdk.flush()
+    assert len(transport.events) == 1
+    assert transport.events[0]["logentry"]["formatted"] == "backfill failed rows=3"
+    assert transport.events[0]["tags"]["request_id"] == response.headers["X-Request-ID"]

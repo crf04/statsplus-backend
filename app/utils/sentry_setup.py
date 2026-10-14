@@ -41,8 +41,46 @@ def _current_request_id() -> str | None:
     return getattr(g, "request_id", None) or None
 
 
-def scrub_event(event: dict[str, Any], hint: Any = None) -> dict[str, Any]:
+def report_exception(error: BaseException) -> None:
+    """Send a handled server failure as one exception event with its traceback.
+
+    Marks the request so ``scrub_event`` drops the ERROR log record the error
+    handler writes for the same failure; a no-op without an active client.
+    """
+
+    import sentry_sdk
+    from flask import g, has_request_context
+
+    if not sentry_sdk.get_client().is_active():
+        return
+    if has_request_context():
+        g.sentry_exception_reported = True
+    sentry_sdk.capture_exception(error)
+
+
+def _log_duplicates_reported_exception(event: dict[str, Any]) -> bool:
+    from flask import g, has_request_context
+
+    return (
+        event.get("logger") == "app.errors"
+        and "exception" not in event
+        and has_request_context()
+        and bool(getattr(g, "sentry_exception_reported", False))
+    )
+
+
+def scrub_event(event: dict[str, Any], hint: Any = None) -> dict[str, Any] | None:
     """Tag the event with the request reference and strip request content."""
+
+    if _log_duplicates_reported_exception(event):
+        return None
+    exception = event.get("exception")
+    if isinstance(exception, dict):
+        from app.errors import _sanitize_diagnostic_detail
+
+        for value in exception.get("values") or []:
+            if isinstance(value, dict) and value.get("value"):
+                value["value"] = _sanitize_diagnostic_detail(value["value"])
 
     request = event.get("request")
     if isinstance(request, dict):
