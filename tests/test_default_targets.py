@@ -106,3 +106,16 @@ def test_an_existing_account_does_not_receive_the_defaults(service):
     service.create_or_update_user({"uid": "old", "email": "old@example.com"})
 
     assert service.list_targets("old") == []
+
+
+def test_a_signup_whose_defaults_fail_stores_no_account(service, monkeypatch):
+    """The user row and its defaults commit together, or not at all."""
+
+    def failing(firebase_uid, now):
+        raise RuntimeError("seeding failed")
+
+    monkeypatch.setattr("app.services.user_service._default_targets", failing)
+
+    assert service.create_or_update_user({"uid": "new", "email": "new@example.com"}) is None
+    with service.engine.connect() as connection:
+        assert connection.execute(User.__table__.select()).all() == []
