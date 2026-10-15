@@ -17,6 +17,7 @@ from app.utils.auth import (
     get_current_user,
     require_admin,
     require_auth,
+    require_auth_allow_waitlisted,
     require_auth_optional,
 )
 from app.services.target_backtest import BACKTEST_FAILED_MESSAGE
@@ -161,6 +162,25 @@ def ping_user_activity():
         'success': True,
         'message': 'Activity updated'
     })
+
+@user_bp.route('/attribution', methods=['POST'])
+@require_auth_allow_waitlisted
+@route_error_boundary("Failed to record the acquisition source.")
+def record_attribution():
+    """
+    Record the account's first-touch acquisition source, once.
+
+    Waitlisted accounts are accepted.  The record is write-once: a repeat
+    leaves the stored values unchanged.
+
+    Returns:
+        201 ``{"recorded": true}`` for the first record, else 200
+        ``{"recorded": false}``
+    """
+    recorded = user_service.record_first_touch(
+        _authenticated_uid(), request.get_json(silent=True)
+    )
+    return jsonify({'recorded': recorded}), 201 if recorded else 200
 
 @user_bp.route('/deactivate', methods=['POST'])
 @require_auth

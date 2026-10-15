@@ -63,6 +63,7 @@ def create_all_tables():
 from .user import User  # noqa: E402
 from .app_setting import AppSetting  # noqa: E402
 from .saved_filter_set import SavedFilterSet  # noqa: E402
+from .user_attribution import UserAttribution  # noqa: E402
 from .target import Target, TargetQualifier  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
 from .athlete_catalog import AthleteCatalog, AthleteCatalogFreshness  # noqa: E402
@@ -154,6 +155,7 @@ __all__ = [
     'User',
     'AppSetting',
     'SavedFilterSet',
+    'UserAttribution',
     'Target',
     'TargetQualifier',
     'DataRefreshJob',
