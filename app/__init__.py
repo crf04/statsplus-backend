@@ -28,6 +28,21 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
         settings = supplied_settings
     else:
         settings = load_settings(overrides=config_overrides)
+    # Only the web app limits statements; the nightly, the collector and
+    # migrations build their settings without ever passing through here.
+    web_timeout = settings.database.web_statement_timeout_ms
+    if (
+        web_timeout
+        and settings.database.statement_timeout_ms is None
+        and settings.database.url.startswith(("postgres://", "postgresql"))
+    ):
+        settings = settings.model_copy(
+            update={
+                "database": settings.database.model_copy(
+                    update={"statement_timeout_ms": web_timeout}
+                )
+            }
+        )
     set_runtime_settings(settings)
     configure_json_logging(settings.log_level)
 
@@ -40,6 +55,8 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     app.json.sort_keys = True
     app.json.compact = True
     app.config.update(
+        # Reject oversized bodies with 413 before a route reads them.
+        MAX_CONTENT_LENGTH=1024 * 1024,
         TESTING=settings.environment == "testing",
         FLASK_ENV=settings.environment,
         LOG_LEVEL=settings.log_level,
@@ -63,6 +80,7 @@ def create_app(config_overrides: dict[str, Any] | None = None) -> "Flask":
     _verify_schema_is_current(app)
     _register_error_handlers(app)
     _register_blueprints(app)
+    _register_rate_limiting(app)
 
     return app
 
@@ -193,7 +211,7 @@ def _register_blueprints(app: "Flask") -> None:
     from app.routes.data_update_routes import data_bp
     from app.routes.dfs_routes import dfs_bp
     from app.routes.game_routes import game_bp, matchups_bp
-    from app.routes.health_routes import health_bp
+    from app.routes.health_routes import health_bp, liveness_bp
     from app.routes.nl_routes import nl_bp
     from app.routes.player_routes import player_bp
     from app.routes.team_routes import team_bp
@@ -210,10 +228,19 @@ def _register_blueprints(app: "Flask") -> None:
     app.register_blueprint(dfs_bp, url_prefix="/api/dfs")
     app.register_blueprint(nl_bp, url_prefix="/api")
     app.register_blueprint(health_bp)
+    app.register_blueprint(liveness_bp)
     app.register_blueprint(diet_bp, url_prefix="/api/diet")
     app.register_blueprint(user_bp, url_prefix="/api/user")
     app.register_blueprint(collection_bp, url_prefix="/api")
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
+
+
+def _register_rate_limiting(app: "Flask") -> None:
+    """Enforce the per-user and per-IP request limits."""
+
+    from app.utils.rate_limit import init_rate_limiting
+
+    init_rate_limiting(app, app.extensions["runtime_settings"])
 
 
 def _register_error_handlers(app: "Flask") -> None:

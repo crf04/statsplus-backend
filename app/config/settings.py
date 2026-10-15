@@ -88,6 +88,13 @@ class DatabaseSettings(BaseModel):
     max_overflow: int = Field(default=4, ge=0)
     pool_recycle_seconds: int = Field(default=300, ge=1)
     connect_timeout_seconds: int = Field(default=5, ge=1)
+    #: Applied to every Postgres connection of an engine built with it. Left
+    #: ``None`` for the nightly, the collector and migrations; only the web
+    #: app sets it, from ``web_statement_timeout_ms`` (see ``create_app``).
+    statement_timeout_ms: int | None = Field(default=None, ge=1)
+    #: ``WEB_STATEMENT_TIMEOUT_MS``: the web app's per-statement limit; ``0``
+    #: disables it.
+    web_statement_timeout_ms: int = Field(default=30000, ge=0)
 
 
 class AuthenticationSettings(BaseModel):
@@ -749,6 +756,8 @@ def _build_settings(
         "DATABASE_CONNECT_TIMEOUT_SECONDS", 5
     )
 
+    web_statement_timeout_ms = reader.integer("WEB_STATEMENT_TIMEOUT_MS", 30000)
+
     configured_dfs_providers = reader.raw("DFS_ENABLED_PROVIDERS")
 
     dfs_cache_fresh = _configured_window(
@@ -887,6 +896,7 @@ def _build_settings(
                 max_overflow=database_max_overflow,
                 pool_recycle_seconds=database_pool_recycle_seconds,
                 connect_timeout_seconds=database_connect_timeout_seconds,
+                web_statement_timeout_ms=web_statement_timeout_ms,
             ),
             auth=auth,
             cache=cache,

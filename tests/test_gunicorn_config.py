@@ -35,13 +35,32 @@ def _load_config(monkeypatch, port: str | None = "8123"):
     return module
 
 
+def test_worker_and_thread_counts_read_the_environment(monkeypatch):
+    monkeypatch.setenv("WEB_CONCURRENCY", "12")
+    monkeypatch.setenv("GUNICORN_THREADS", "3")
+
+    config = _load_config(monkeypatch)
+
+    assert config.workers == 12
+    assert config.threads == 3
+
+
+def test_worker_and_thread_counts_default_to_eight_and_two(monkeypatch):
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("GUNICORN_THREADS", raising=False)
+
+    config = _load_config(monkeypatch)
+
+    assert (config.workers, config.threads) == (8, 2)
+
+
 def test_config_preloads_the_app_with_the_production_worker_settings(monkeypatch):
     config = _load_config(monkeypatch)
 
     assert config.preload_app is True
     assert config.wsgi_app == "wsgi:app"
     assert config.bind == ["0.0.0.0:8123"]
-    assert config.workers == 4
+    assert config.workers == 8
     assert config.threads == 2
     assert config.timeout == 180
     assert config.keepalive == 5
@@ -117,3 +136,47 @@ def test_post_fork_tolerates_a_graph_without_engine_or_jobs(monkeypatch, missing
     config.post_fork(_fake_server(SimpleNamespace(**present)), SimpleNamespace())
 
     assert len(calls.mock_calls) == 1
+
+
+def test_post_fork_starts_sentry_in_the_worker_when_a_dsn_is_set(monkeypatch):
+    import sentry_sdk
+
+    config = _load_config(monkeypatch)
+    monkeypatch.setenv("SENTRY_DSN", "https://publickey@o0.ingest.sentry.io/0")
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "abc123")
+    sentry_sdk.get_global_scope().set_client(None)
+    assert sentry_sdk.get_client().is_active() is False
+
+    try:
+        config.post_fork(_fake_server(SimpleNamespace()), SimpleNamespace())
+
+        assert sentry_sdk.get_client().is_active() is True
+        assert sentry_sdk.get_client().options["release"] == "abc123"
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+
+def test_master_hooks_never_start_sentry(monkeypatch):
+    import sentry_sdk
+
+    config = _load_config(monkeypatch)
+    monkeypatch.setenv("SENTRY_DSN", "https://publickey@o0.ingest.sentry.io/0")
+    sentry_sdk.get_global_scope().set_client(None)
+    monkeypatch.setattr(gc, "freeze", Mock())
+
+    config.when_ready(_fake_server(SimpleNamespace()))
+
+    assert sentry_sdk.get_client().is_active() is False
+
+
+def test_post_fork_leaves_sentry_off_without_a_dsn(monkeypatch):
+    import sentry_sdk
+
+    config = _load_config(monkeypatch)
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    sentry_sdk.get_global_scope().set_client(None)
+
+    config.post_fork(_fake_server(SimpleNamespace()), SimpleNamespace())
+
+    assert sentry_sdk.get_client().is_active() is False

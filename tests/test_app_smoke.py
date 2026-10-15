@@ -21,6 +21,21 @@ def test_app_factory_registers_expected_routes(app):
     assert "/api/user/debug/all" not in routes
 
 
+def test_health_answers_ok_without_opening_a_database_session(client, monkeypatch):
+    from sqlalchemy.engine import Engine
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("the database must not be touched")
+
+    monkeypatch.setattr(Engine, "connect", refuse)
+    monkeypatch.setattr(Engine, "begin", refuse)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
+
+
 def test_database_healthcheck(client):
     response = client.get("/api/health/db")
 
@@ -394,7 +409,7 @@ def test_nl_query_endpoint_can_be_exercised_with_mocked_service(client, monkeypa
         monkeypatch.setattr(
             nl_routes.nl_service,
             "process_query",
-            lambda query: {"query": query, "parsed_by": "test"},
+            lambda query, user_id=None: {"query": query, "parsed_by": "test"},
         )
 
     response = client.post("/api/nl-query", json={"query": "LeBron last 10 games"})

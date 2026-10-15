@@ -26,6 +26,7 @@ from app.domain.freshness import (
     within_max_age,
 )
 from app.domain.utc import assume_utc
+from app.errors import raise_if_query_timeout
 from app.models.collection_control import (
     PublicationPointerHistory,
     PublicationStream,
@@ -1086,7 +1087,8 @@ class PlayerGameLogRepository:
                 # receives its real stale status separately.
                 return True
             return self.get_read_freshness(canonical_season).status == "fresh"
-        except SQLAlchemyError:
+        except SQLAlchemyError as error:
+            raise_if_query_timeout(error)
             return False
 
     def read_publication_snapshot(self, season: str) -> Any | None:
@@ -1108,7 +1110,8 @@ class PlayerGameLogRepository:
         if callable(projected_snapshot):
             try:
                 return projected_snapshot(season=canonical_season)
-            except SQLAlchemyError:
+            except SQLAlchemyError as error:
+                raise_if_query_timeout(error)
                 return None
         snapshot = getattr(self._publication_reader, "snapshot", None)
         if not callable(snapshot):
@@ -1117,7 +1120,8 @@ class PlayerGameLogRepository:
             return None
         try:
             return snapshot(("player_game_logs",), season=canonical_season)
-        except SQLAlchemyError:
+        except SQLAlchemyError as error:
+            raise_if_query_timeout(error)
             return None
 
     def stored_game_ids(self, season: str) -> frozenset[str]:

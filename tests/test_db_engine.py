@@ -61,6 +61,23 @@ def test_postgres_engine_passes_the_configured_connect_timeout(monkeypatch):
     assert kwargs["pool_recycle"] == 300
 
 
+def test_postgres_engine_sets_statement_timeout_only_when_configured(monkeypatch):
+    from sqlalchemy import create_engine
+
+    mock_create_engine = Mock(side_effect=lambda *a, **k: create_engine("sqlite://"))
+    monkeypatch.setattr("app.utils.db.create_engine", mock_create_engine)
+
+    get_engine(_postgres_settings(statement_timeout_ms=30000))
+    get_engine(_postgres_settings())
+
+    with_timeout, without = mock_create_engine.call_args_list
+    assert with_timeout.kwargs["connect_args"] == {
+        "connect_timeout": 5,
+        "options": "-c statement_timeout=30000",
+    }
+    assert without.kwargs["connect_args"] == {"connect_timeout": 5}
+
+
 def test_sqlite_engine_is_built_with_no_extra_keyword_arguments(monkeypatch, tmp_path):
     mock_create_engine = Mock()
     monkeypatch.setattr("app.utils.db.create_engine", mock_create_engine)

@@ -14,7 +14,7 @@ the alias, exact, and fuzzy matching.
 
 import os
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 import logging
 
 from openai import OpenAI
@@ -116,6 +116,10 @@ class LLMError(Exception):
     pass
 
 
+class LLMBudgetExhausted(LLMError):
+    """The caller's daily OpenAI budget is spent; no call was made."""
+
+
 class LLMService:
     """Parse NBA queries into ``LLMParsedQuery`` with an OpenAI chat model."""
 
@@ -124,7 +128,9 @@ class LLMService:
         if not self.config.validate():
             raise LLMError("Invalid LLM configuration")
 
-        self.client = client or OpenAI(api_key=self.config.api_key)
+        # The SDK's own retries would make calls the daily budget never counts;
+        # the attempt loop in ``parse_query`` owns every retry.
+        self.client = client or OpenAI(api_key=self.config.api_key, max_retries=0)
         self.system_prompt = self._load_system_prompt_from_file(DEFAULT_PROMPT_PATH)
 
         logger.info(f"LLM Service initialized with model: {self.config.model}")
@@ -193,7 +199,11 @@ class LLMService:
         )
 
     def parse_query(
-        self, user_query: str, player_context: Optional[Dict[str, Any]] = None
+        self,
+        user_query: str,
+        player_context: Optional[Dict[str, Any]] = None,
+        *,
+        before_call: Optional[Callable[[], bool]] = None,
     ) -> LLMParsedQuery:
         """
         Parse one query into the structured-output schema.
@@ -201,6 +211,8 @@ class LLMService:
         Args:
             user_query: The user's natural language query
             player_context: Players the deterministic parser already resolved
+            before_call: Asked before every OpenAI call, retries included;
+                False spends no call and raises ``LLMBudgetExhausted``
 
         Returns:
             LLMParsedQuery: The validated model reply
@@ -214,6 +226,8 @@ class LLMService:
         ]
         last_error: Exception | None = None
         for attempt in range(self.config.max_retries):
+            if before_call is not None and not before_call():
+                raise LLMBudgetExhausted("The daily LLM call budget is spent")
             try:
                 response = self.client.chat.completions.parse(
                     model=self.config.model,

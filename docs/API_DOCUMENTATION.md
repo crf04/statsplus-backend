@@ -97,11 +97,14 @@ The public error categories and HTTP statuses are:
 | Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
+| Query timeout | `query_timeout` | 503 | A database statement ran past the web `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`, default 30000 ms). The query was cancelled; retry with a narrower request. |
 | Invalid configuration | `invalid_configuration` | 500 | Server configuration cannot safely support the request. |
 | Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
 | Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins. See "Beta sign-ups and the waitlist". |
+| Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
+| Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
 | Duplicate active operation | `duplicate_active_operation` | 409 | A data refresh or publication rebuild for the same operation is already queued or running. |
 | Collection operation conflict | `operation_conflict` | 409 | A collection fence, immutable cycle, retry state, or idempotency key conflicts with durable current state. |
@@ -122,6 +125,35 @@ For local, credential-free development only, set
 for local requests. The bypass is rejected when `FLASK_ENV=production`; never
 enable it in a deployed environment. It is accepted only in an explicit
 development or test environment.
+
+## Rate limits
+
+Limits are counted in Redis, so every worker shares them. A signed-in caller is
+limited by Firebase uid (also on routes where sign-in is optional), an unauthenticated one by client IP (the first
+`X-Forwarded-For` hop behind Railway's proxy). A request over a limit is
+refused with HTTP `429`, a `Retry-After` header (whole seconds until the window
+reopens), and this body:
+
+```json
+{"error": {"code": "rate_limited", "message": "Too many requests. Try again in a few seconds."}}
+```
+
+| Endpoint | Limit |
+| --- | --- |
+| `POST /api/user/targets/preview` | 30/min per user |
+| `GET /api/user/targets/<id>/backtest` | 60/min per user |
+| `POST /api/nl-query` | 30/min per user |
+| `GET /api/dfs/board` | 30/min per user |
+| every other authenticated `/api` route | 300/min per user, one shared bucket |
+| unauthenticated routes, except `/health` | 60/min per IP |
+
+CORS preflights, `/health`, and the collector's own credentialed routes (which
+have their own lease limits) are not counted. If Redis is unreachable, requests
+are allowed and a warning is logged.
+
+The OpenAI fallback for `POST /api/nl-query` is capped separately at 50 calls
+per user per UTC day (every OpenAI request counts, retries included). Past the cap the route still answers `200`, with the
+rule-based parse (`parsed_by: "nlp"`), never a `429`.
 
 ## Response provenance
 
@@ -241,6 +273,14 @@ Target.
 
 ## Health Endpoints
 
+### Liveness
+
+```http
+GET /health
+```
+
+Unauthenticated. Returns `200 {"status": "ok"}` and touches no Postgres, Redis, or provider, so it answers while a dependency is down. Railway uses it as the deploy health check (`railway.json`, `healthcheckPath`).
+
 ### Database Health
 
 ```http
@@ -248,6 +288,11 @@ GET /api/health/db
 ```
 
 Runs `SELECT 1` against the configured SQLAlchemy engine and returns the dialect, driver, timestamp, and status.
+
+The NBA API, PBP Stats, and Detailed checks call outside providers, so they
+require an administrator: `401` without a valid token, `403` for a signed-in
+user without the admin claim (the same rule as the data-refresh routes).
+`/api/health/db` stays unauthenticated.
 
 ### NBA API Health
 

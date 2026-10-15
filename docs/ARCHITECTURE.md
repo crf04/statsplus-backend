@@ -9,7 +9,7 @@ This document records the interfaces and seams that are expensive to rediscover 
 ### Pre-forking process model
 
 The Procfile runs `gunicorn --config gunicorn.conf.py wsgi:app`. The committed
-config keeps the worker settings (4 gthread workers × 2 threads, 180-second
+config keeps the worker settings (`WEB_CONCURRENCY` gthread workers, default 8, × `GUNICORN_THREADS` threads, default 2, 180-second
 timeout, 5-second keep-alive, recycling after 1000 ± 100 requests, bind
 `0.0.0.0:$PORT`) and sets `preload_app`: the master imports `wsgi:app` once,
 building the whole dependency graph, including the natural-language parser
@@ -30,6 +30,7 @@ State that must not cross `fork` is owned per worker:
 | SQLAlchemy engine pool | `post_fork` calls `engine.dispose(close=False)`, so a worker never reuses a DBAPI connection opened in the master. |
 | Redis client | No action: redis-py's connection pool records its pid and resets itself on first use in a new process. |
 | Firebase Admin | No action: `initialize_app` parses credentials without I/O or threads; the auth client and its HTTP session are built lazily in the worker that verifies a token. |
+| Sentry client | `post_fork` calls `init_sentry()` when `SENTRY_DSN` is set, so each worker owns its client and its transport thread; the single-threaded master never starts the SDK. |
 | `ThreadPoolExecutor`s (refresh jobs, DFS snapshot cache, per-call provider pools) | No action: executors start threads only on `submit`, which the master never reaches. |
 
 `run.py`, the test app factory, scripts, and the `projection-collector`
@@ -204,6 +205,19 @@ Application logs are one JSON object per line on stdout (Railway tags stderr
 as `error`), configured by `app.utils.json_logging`: `level` (lowercase),
 `logger`, `message`, `request_id` inside a request context, and `exception`
 (the full traceback, newlines escaped) when the record has `exc_info`.
+
+When `SENTRY_DSN` is set, `app.utils.sentry_setup` reports unhandled exceptions
+and ERROR logs to Sentry as events tagged with the full `request_id` (the
+`(ref ...)` the UI shows is its first 8 characters), the environment, and the
+release (`RAILWAY_GIT_COMMIT_SHA`). The `before_send` scrubber drops request
+bodies, cookies, query strings, every request header outside a short allowlist
+(`Accept*`, `Content-*`, `Host`, `User-Agent`, `X-Request-ID`), users and
+breadcrumbs, and redacts credentials, e-mail addresses, SQL bind parameters and
+Postgres `DETAIL:` lines from messages. Tracing is off. The `app.errors` handlers report a 5xx failure as one exception event with its
+traceback (exception messages pass through the same credential redaction as the
+logs) and the ERROR log record for that failure is dropped, so nothing is
+reported twice; other ERROR logs become log events.
+Without a DSN the SDK is never imported.
 
 `before_request` also records a `perf_counter` start and `after_request` emits
 one INFO lifecycle line for every route, including handled error responses:
@@ -4716,9 +4730,24 @@ The authoritative local and CI gate is `./scripts/check.sh`.
   (`pool_size`, `max_overflow`, `pool_recycle_seconds`,
   `connect_timeout_seconds`) only to Postgres engines, so the worst-case
   Postgres connection count is `processes × (pool_size + max_overflow)` — with
-  the Procfile's 4 gunicorn workers and the documented defaults, `4 × (3 + 4)
-  = 28`; the pre-forking master closes the connections it opened while
-  building the app before it forks the first worker. Scripts that call `create_engine` directly
+  the default 8 gunicorn workers (`WEB_CONCURRENCY`) and the documented
+  defaults, `8 × (3 + 4) = 56`; the pre-forking master closes the connections
+  it opened while building the app before it forks the first worker. The whole
+  deployment stays under 200: 56 web, plus at most 15 for the nightly (a bare
+  `create_engine` pool of 5 + 10 overflow) and 7 for the collector, and the MCP
+  server holds none (it reads through `/api`). Scale workers with that
+  arithmetic: 25 workers is the ceiling (`25 × 7 + 22 = 197`).
+  `create_app` alone sets `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`,
+  default 30000) on its engine's connections, and a cancelled statement
+  answers `503 query_timeout`; the nightly, the collector and migrations never
+  set it. Work that legitimately runs long inside a web worker is exempt: a
+  connection checked out under `app.utils.db.statement_timeout_lifted` runs
+  with `statement_timeout = 0` (one committed `SET` when the scope changes),
+  and the scope covers every data-refresh job handler (`_run_claimed`) and
+  every request on the `collection` (collector and `/admin/collection`) and
+  `data` (`/api/data`) blueprints. It reaches only the calling thread, so a
+  helper thread that issues statements would start limited; none does today.
+  The job heartbeat stays limited because its statements are short. Scripts that call `create_engine` directly
   (`scripts/migrate.py`, `scripts/nightly_refresh.py`, and similar
   one-shot/operator scripts) are not governed by these settings.
 - Several services catch broad exceptions and return sentinel values, which can hide provider-specific failures.

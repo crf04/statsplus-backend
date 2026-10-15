@@ -24,6 +24,7 @@ from app.errors import (
     InvalidInputError,
     OperationFailedError,
     ResourceNotFoundError,
+    raise_if_query_timeout,
 )
 from app.models import get_session, SavedFilterSet, Target, TargetQualifier, User
 from app.models.app_setting import SIGNUPS_OPEN_KEY, AppSetting
@@ -371,10 +372,12 @@ class UserService:
                 
         except SQLAlchemyError as e:
             session.rollback()
+            raise_if_query_timeout(e)
             logger.error(f"Database error in create_or_update_user: {e}")
             return None
         except Exception as e:
             session.rollback()
+            raise_if_query_timeout(e)
             logger.error(f"Unexpected error in create_or_update_user: {e}")
             return None
         finally:
@@ -482,6 +485,7 @@ class UserService:
             user = session.query(User).filter_by(firebase_uid=firebase_uid).first()
             return user
         except SQLAlchemyError as e:
+            raise_if_query_timeout(e)
             logger.error(f"Database error in get_user_by_firebase_uid: {e}")
             return None
         finally:
@@ -502,6 +506,7 @@ class UserService:
             user = session.query(User).filter_by(email=email).first()
             return user
         except SQLAlchemyError as e:
+            raise_if_query_timeout(e)
             logger.error(f"Database error in get_user_by_email: {e}")
             return None
         finally:
@@ -530,6 +535,7 @@ class UserService:
                 return False
         except SQLAlchemyError as e:
             session.rollback()
+            raise_if_query_timeout(e)
             logger.error(f"Database error in update_last_login: {e}")
             return False
         finally:
@@ -558,6 +564,7 @@ class UserService:
                 return False
         except SQLAlchemyError as e:
             session.rollback()
+            raise_if_query_timeout(e)
             logger.error(f"Database error in deactivate_user: {e}")
             return False
         finally:
@@ -603,6 +610,7 @@ class UserService:
             count = session.query(User).filter_by(is_active=True).count()
             return count
         except SQLAlchemyError as e:
+            raise_if_query_timeout(e)
             logger.error(f"Database error in get_all_active_users_count: {e}")
             return 0
         finally:
