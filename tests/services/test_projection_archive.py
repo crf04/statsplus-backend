@@ -3251,7 +3251,19 @@ def test_rows_stored_without_a_line_produce_no_line_entry(tmp_path):
     assert player.lines == {}
 
 
-def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(tmp_path):
+@pytest.mark.parametrize(
+    "live_points_lines",
+    [
+        # One line in each part, and the parts disagree.
+        ("27.5",),
+        # Two live lines already conflict; the closing 26.5 must not
+        # resurrect a PTS line once the two parts are combined.
+        ("27.5", "28.5"),
+    ],
+)
+def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(
+    tmp_path, live_points_lines
+):
     engine = create_engine(f"sqlite:///{tmp_path / 'projection-combined-lines.sqlite3'}")
     run_migrations(engine)
     catalog = StatisticCatalog.load_default()
@@ -3291,14 +3303,13 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(tmp_pa
         _line_snapshot(
             "dabble",
             (
-                # Two live lines already conflict; the closing 26.5 must not
-                # resurrect a PTS line once the two parts are combined.
-                _line_market(catalog, provider="dabble", market_id="pts-live-a",
-                             statistic_id="points", threshold="27.5",
-                             game_id=live_game_id),
-                _line_market(catalog, provider="dabble", market_id="pts-live-b",
-                             statistic_id="points", threshold="28.5",
-                             game_id=live_game_id),
+                *(
+                    _line_market(catalog, provider="dabble",
+                                 market_id=f"pts-live-{threshold}",
+                                 statistic_id="points", threshold=threshold,
+                                 game_id=live_game_id)
+                    for threshold in live_points_lines
+                ),
                 _line_market(catalog, provider="dabble", market_id="reb-live",
                              statistic_id="rebounds", threshold="7.5",
                              game_id=live_game_id),
