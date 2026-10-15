@@ -2315,7 +2315,7 @@ def test_cli_rehearsal_command_invokes_compatibility_probes(monkeypatch, capsys)
             return (ProbeResult("event_catalog", True, {"season": season}),)
 
     monkeypatch.setattr(cli, "ResidentialCompatibilityProbes", FakeProbes)
-    monkeypatch.setattr(cli, "NBAStatsProviderAdapter", lambda: object())
+    monkeypatch.setattr(cli, "NBAStatsProviderAdapter", lambda **_: object())
     monkeypatch.setattr(cli, "NBA_TEAM_IDS", (1610612737, 1610612738))
     monkeypatch.setenv("COLLECTOR_RAILWAY_URL", "https://railway.example")
     monkeypatch.setenv("COLLECTOR_IDENTITY_ID", "collector")
