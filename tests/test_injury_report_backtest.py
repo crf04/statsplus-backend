@@ -234,10 +234,11 @@ def test_backtest_scores_each_check_overall_and_per_month(tmp_path):
     # Identity: 115 rows in the file, 2 names absent from the catalog.
     overall = document["overall"]
     assert (overall["identity_rows"], overall["identity_matched"]) == (115, 113)
-    assert [(row["date"], row["name"], row["status"]) for row in document["unmatched"]] == [
-        ("2025-12-25", "Harrison Ingram", "Out"),
-        ("2025-12-26", "Taelon Peter", "Probable"),
+    assert document["unmatched"] == [
+        {"name": "Harrison Ingram", "team": "SAS", "rows": 1},
+        {"name": "Taelon Peter", "team": "IND", "rows": 1},
     ]
+    assert document["unmatched_rows"] == 2
     assert overall["identity_rate"] == round(113 / 115, 4)
     assert document["thresholds"]["identity"]["passed"] is False  # 98.3% < 99%
 
@@ -396,3 +397,46 @@ def test_pdftotext_counts_the_status_cells_of_a_recorded_report():
     assert backtest.pdftotext_status_cells(
         (FIXTURES / "Injury-Report_2025-10-21_05PM.pdf").read_bytes()
     ) == 54
+
+
+def _evaluate_after(tmp_path, statement):
+    from sqlalchemy import text
+
+    engine, logs, _ = _season_database(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(text(statement))
+    inputs = backtest.load_inputs(engine, SEASON, publication_reader=Publications(logs))
+    fetcher = backtest.ReportFetcher(
+        tmp_path / "cache", delay_seconds=0, session=FakeCdn(SITE), sleep=lambda s: None
+    )
+    return backtest.evaluate(inputs, fetcher)
+
+
+@needs_pdftotext
+def test_athletes_inactive_in_the_end_of_season_catalog_still_reconcile(tmp_path):
+    document = _evaluate_after(tmp_path, "UPDATE athlete_catalog SET is_active_for_season = 0")
+
+    assert document["overall"]["identity_matched"] == 113
+    assert document["unmatched_rows"] == 2
+
+
+@needs_pdftotext
+@pytest.mark.parametrize(
+    ("matchup", "day", "rows"),
+    [("DAL@GSW", "2025-12-25", 13), ("PHX@NOP", "2025-12-26", 5)],
+)
+def test_games_missing_from_the_event_catalog_are_listed_not_graded(
+    tmp_path, matchup, day, rows
+):
+    # Stands in for a Cup final or a postponed game the catalog never held.
+    document = _evaluate_after(
+        tmp_path,
+        f"DELETE FROM event_catalog WHERE home_team_tricode || '' = '{matchup[-3:]}' "
+        f"AND away_team_tricode = '{matchup[:3]}'",
+    )
+
+    assert document["thresholds"]["parse_completeness"]["value"] == 1.0
+    assert document["completeness_failures"] == []
+    listed = document["games_not_in_catalog"]
+    assert listed == [{"date": day, "matchup": matchup, "rows": rows}]
+    assert document["overall"]["identity_rows"] == 115 - rows

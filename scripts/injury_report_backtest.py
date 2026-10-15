@@ -284,16 +284,18 @@ def evaluate(
         played_minutes[(str(record.game_id), int(record.player_id))] = float(
             record.minutes
         )
-    index = AthleteNameIndex(
-        [row for row in inputs.athletes if row.get("is_active_for_season")]
-    )
+    # Every row of the season, active or not: the catalog is an end-of-season
+    # snapshot here, so players who left mid-season are inactive in it, while
+    # the live catalog refreshes daily and has no such gap.
+    index = AthleteNameIndex(list(inputs.athletes))
     teams = {code: {"team_id": team_id} for code, team_id in NBA_TEAM_TRICODE_TO_ID.items()}
 
     overall = _Tally()
     months: dict[str, _Tally] = defaultdict(_Tally)
     coverage_failures: list[dict[str, Any]] = []
     completeness_failures: list[dict[str, Any]] = []
-    unmatched: list[dict[str, Any]] = []
+    unmatched: Counter = Counter()
+    games_not_in_catalog: Counter = Counter()
     out_played: list[dict[str, Any]] = []
     ungraded_games: set[str] = set()
     per_date: list[dict[str, Any]] = []
@@ -324,9 +326,7 @@ def evaluate(
         for tally in tallies:
             tally.covered += 1
 
-        problems = _completeness_problems(
-            report, content, event_by_key, count_status_cells
-        )
+        problems = _completeness_problems(report, content, count_status_cells)
         record["rows"] = len(report.rows)
         if problems:
             completeness_failures.append({**record, "problems": problems})
@@ -334,7 +334,16 @@ def evaluate(
             for tally in tallies:
                 tally.reports_complete += 1
 
-        todays_rows = tuple(row for row in report.rows if row.game_date == game_date)
+        in_catalog = []
+        for row in report.rows:
+            if row.game_date != game_date:
+                continue
+            away, _, home = row.matchup.partition("@")
+            if (game_date, away, home) in event_by_key:
+                in_catalog.append(row)
+            else:
+                games_not_in_catalog[(game_date.isoformat(), row.matchup)] += 1
+        todays_rows = tuple(in_catalog)
         todays = ParsedInjuryReport(report.title, todays_rows, (), ())
         entries = entries_from_report(todays, source_url=REPORT_BASE_URL + name)
         reconciled, _ = reconcile_injury_entries(entries, teams=teams, catalog=index)
@@ -351,15 +360,7 @@ def evaluate(
                 tally.identity_rows += 1
                 tally.identity_matched += player_id is not None
             if player_id is None:
-                unmatched.append(
-                    {
-                        "date": game_date.isoformat(),
-                        "matchup": row.matchup,
-                        "team": row.team_tricode,
-                        "name": row.display_name,
-                        "status": row.status,
-                    }
-                )
+                unmatched[(row.display_name, row.team_tricode)] += 1
                 continue
             away, _, home = row.matchup.partition("@")
             event = event_by_key.get((game_date, away, home))
@@ -395,7 +396,17 @@ def evaluate(
         "downloads": {"network": fetcher.downloads, "cache_hits": fetcher.cache_hits},
         "coverage_failures": coverage_failures,
         "completeness_failures": completeness_failures,
-        "unmatched": unmatched,
+        "unmatched": [
+            {"name": name, "team": team, "rows": count}
+            for (name, team), count in sorted(
+                unmatched.items(), key=lambda item: (-item[1], item[0])
+            )
+        ],
+        "unmatched_rows": sum(unmatched.values()),
+        "games_not_in_catalog": [
+            {"date": day, "matchup": matchup, "rows": count}
+            for (day, matchup), count in sorted(games_not_in_catalog.items())
+        ],
         "out_players_who_played": out_played,
         "games_without_logs": sorted(ungraded_games),
         "per_date": per_date,
@@ -410,7 +421,6 @@ def evaluate(
 def _completeness_problems(
     report: ParsedInjuryReport,
     content: bytes,
-    event_by_key: Mapping[tuple[date, str, str], Any],
     count_status_cells: Callable[[bytes], int],
 ) -> list[str]:
     problems: list[str] = []
@@ -426,8 +436,6 @@ def _completeness_problems(
             problems.append(f"{where}: invalid status {row.status!r}")
         if row.team_tricode not in {away, home}:
             problems.append(f"{where}: team {row.team_name!r} is not in the matchup")
-        if (row.game_date, away, home) not in event_by_key:
-            problems.append(f"{where}: no such game in the Event Catalog")
     return problems
 
 
@@ -480,7 +488,9 @@ def format_summary(document: Mapping[str, Any]) -> str:
             f"{item['reports_complete']:>8} {item['identity_rate']!s:>8}  {out['precision']}"
         )
     lines.append(
-        f"  unmatched names: {len(document['unmatched'])}; "
+        f"  unmatched: {document['unmatched_rows']} rows, "
+        f"{len(document['unmatched'])} (name, team) pairs; "
+        f"games not in catalog: {len(document['games_not_in_catalog'])}; "
         f"Out who played: {len(document['out_players_who_played'])}; "
         f"coverage failures: {len(document['coverage_failures'])}; "
         f"incomplete reports: {len(document['completeness_failures'])}"
