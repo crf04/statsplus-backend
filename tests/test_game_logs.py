@@ -442,6 +442,52 @@ def test_get_filtered_logs_resolves_a_player_only_present_in_the_athlete_catalog
     GameLogResponse.model_validate(result)
 
 
+def test_get_filtered_logs_names_the_player_even_when_filters_match_no_games(
+    mock_db_engine, mock_redis_client
+):
+    """The client shows the player's headshot from the NBA person id, so the
+    id comes from the season's logs, not the filtered ones."""
+
+    class _LogsSource:
+        def get_player_logs(self, player_id, season):
+            frame = _game_logs_frame().copy()
+            frame["PLAYER_ID"] = 2544
+            return frame
+
+    service = GameService(
+        mock_db_engine,
+        mock_redis_client,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba=NBASeasonSettings(current_season="2024-25"),
+        ),
+        game_logs_source=_LogsSource(),
+        team_filter_rankings=_StubRankings(["LAL"]),
+    )
+    service.get_player_id = lambda player_name, season: 2544
+    query = GameLogQuery(season_filter="2024-25", minutes_filter="45,48")
+
+    result = service.get_filtered_logs("LeBron James", query)
+
+    assert result["game_logs"] == []
+    assert result["player_id"] == 2544
+    GameLogResponse.model_validate(result)
+
+
+def test_get_filtered_logs_has_no_player_id_for_a_season_without_games(
+    monkeypatch, mock_db_engine, mock_redis_client
+):
+    service = _make_service(monkeypatch, mock_db_engine, mock_redis_client)
+    monkeypatch.setattr(
+        service, "_get_game_logs", lambda player_name, season: (_game_logs_frame().iloc[0:0], None)
+    )
+
+    result = service.get_filtered_logs("LeBron James", GameLogQuery(season_filter="2024-25"))
+
+    assert result["season_game_count"] == 0
+    assert result["player_id"] is None
+
+
 def test_service_returns_empty_arrays_when_no_games_match(
     monkeypatch, mock_db_engine, mock_redis_client
 ):
