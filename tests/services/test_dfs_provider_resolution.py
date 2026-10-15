@@ -280,3 +280,112 @@ def test_dabble_lines_resolve_with_standard_and_one_sided_variants_and_periods()
         ("fg-attempted", "18.5"): (auto, cade, "full_game", "standard", "standard", "field_goals_attempted"),
         ("first-quarter-points", "5.5"): (auto, cade, "first_quarter", "standard", "standard", None),
     }
+
+
+# -- Dabble game resolution and period guards ----------------------------------
+
+
+def _dabble_with(mutate):
+    detail = _json("dabble", "recorded_2026-10-15.fixture_details.json")
+    mutate(detail["sportFixtureDetail"])
+    session = _Session(
+        _json("dabble", "recorded_2026-10-15.competitions.json"),
+        _json("dabble", "recorded_2026-10-15.fixtures.json"),
+        detail,
+    )
+    return DabbleAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
+
+
+def _periods(snapshot):
+    return {
+        (m.statistic.label, str(m.threshold.value)): m.scoring_period.value
+        for m in snapshot.markets
+    }
+
+
+def test_dabble_lines_resolve_to_the_catalog_game():
+    events = EventResolver(_EventCatalog())
+
+    resolved = {
+        (m.market_id[-6:], events.resolve_market(m, SEASON).state, events.resolve_market(m, SEASON).canonical_event_id)
+        for m in _dabble().markets
+    }
+
+    assert {(state, game) for _, state, game in resolved} == {
+        (EventResolutionState.AUTO, "0022600078")
+    }
+    assert len(resolved) == 6
+
+
+def test_dabble_sides_come_from_the_scoreboard_display_order():
+    market = _dabble().markets[0]
+
+    assert (market.event.away_team.abbreviation, market.event.away_team.name) == (
+        "BOS", "Boston Celtics",
+    )
+    assert (market.event.home_team.abbreviation, market.event.home_team.name) == (
+        "DET", "Detroit Pistons",
+    )
+
+
+def test_dabble_gives_no_sides_when_the_title_disagrees_with_the_scoreboard():
+    snapshot = _dabble_with(lambda d: d.update(name="Detroit Pistons @ Boston Celtics"))
+
+    assert {(m.event.away_team, m.event.home_team) for m in snapshot.markets} == {(None, None)}
+
+
+def test_dabble_period_stays_unknown_without_a_market_type():
+    def strip(detail):
+        detail["markets"] = []
+
+    assert _periods(_dabble_with(strip)) == {
+        ("assists", "9.5"): "full_game",  # a known whole-game stat needs no marker
+        ("threes-made", "2.5"): "unknown",
+        ("threes-made", "1.5"): "unknown",
+        ("ft-made", "5.5"): "unknown",
+        ("fg-attempted", "18.5"): "unknown",
+        ("first-quarter-points", "5.5"): "first_quarter",
+    }
+
+
+def test_dabble_period_stays_unknown_for_a_mismatched_market_type():
+    def mismatch(detail):
+        for market in detail["markets"]:
+            if market["resultingType"] == "swish_threes_made":
+                market["resultingType"] = "swish_assists"
+            elif market["resultingType"] == "swish_ft_made":
+                market["resultingType"] = "swish_first_quarter_ft_made"
+            elif market["resultingType"] == "swish_fg_attempted":
+                market["resultingType"] = "swish_to_have_3_plus_threes_made"
+
+    periods = _periods(_dabble_with(mismatch))
+
+    assert periods[("threes-made", "2.5")] == "unknown"
+    assert periods[("ft-made", "5.5")] == "unknown"
+    assert periods[("fg-attempted", "18.5")] == "unknown"
+
+
+def test_dabble_period_qualified_stat_is_never_full_game():
+    def third_quarter(detail):
+        for prop in detail["playerProps"]:
+            if prop["stats"] == ["threes-made"] and prop["value"] == 2.5:
+                prop["stats"] = ["third-quarter-points"]
+        for market in detail["markets"]:
+            if market["resultingType"] == "swish_threes_made":
+                market["resultingType"] = "swish_third_quarter_points"
+
+    assert _periods(_dabble_with(third_quarter))[("third-quarter-points", "2.5")] == "unknown"
+
+
+def test_underdog_titles_without_known_nba_tricodes_give_no_tricodes():
+    payload = _json("underdog", "recorded_2026-10-15.json")
+    for game in payload["games"]:
+        game["abbreviated_title"] = "XXX @ NYK"
+    session = _Session(payload)
+
+    snapshot = UnderdogAdapter(session=session).get_snapshot(NBAMarketQuery(), _context())
+
+    assert {
+        (m.event.away_team.abbreviation, m.event.home_team.abbreviation)
+        for m in snapshot.markets
+    } == {(None, None)}

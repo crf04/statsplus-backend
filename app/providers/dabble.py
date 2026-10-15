@@ -26,6 +26,7 @@ from urllib.parse import quote
 
 import requests
 
+from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
@@ -79,6 +80,16 @@ _STAT_ORDER = {
     "turnovers": 6,
 }
 _ONE_SIDED_VARIANT_LABEL = "one_sided"
+#: Stats Dabble posts for a whole game.  A market type confirms a full game
+#: only for these; a stat carrying a period qualifier is never in the set.
+_WHOLE_GAME_STATS = frozenset(
+    {
+        "points", "rebounds", "assists", "steals", "blocks", "turnovers",
+        "three-pointers-made", "threes-made", "three-attempted",
+        "fg-made", "fg-attempted", "ft-made", "ft-attempted",
+        "two-made", "two-attempted",
+    }
+)
 #: Dabble's spelling of a component the statistic catalog names differently.
 _COMPONENT_ALIASES = {
     "threes-made": "three-pointers-made",
@@ -363,6 +374,8 @@ class _PropIdentity:
     team_provider_id: str | None
     team_name: str | None
     team_abbreviation: str | None
+    away_team: TeamEvidence | None = None
+    home_team: TeamEvidence | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1432,6 +1445,7 @@ class DabbleAdapter:
     ) -> _PropIdentity:
         """Select IDs and labels using Dabble's fallback relationships."""
 
+        away_team, home_team = self._fixture_sides(detail)
         return _PropIdentity(
             fixture_id=str(detail.get("id") or fixture.get("id")),
             market_id=self._optional_id(prop.get("marketId")),
@@ -1462,7 +1476,53 @@ class DabbleAdapter:
             team_provider_id=self._optional_id(prop.get("teamId")),
             team_name=optional_text(prop.get("teamName")),
             team_abbreviation=optional_text(prop.get("teamAbbreviation")),
+            away_team=away_team,
+            home_team=home_team,
         )
+
+    @staticmethod
+    def _fixture_sides(
+        detail: Mapping[str, Any],
+    ) -> tuple[TeamEvidence | None, TeamEvidence | None]:
+        """Return the (away, home) teams of a fixture, or ``(None, None)``.
+
+        Dabble has no home/away field.  Its fixture ``stateSummary.scoreboard``
+        lists the two competitors with a structured ``competitorDisplayOrder``;
+        order 1 is the away side and order 2 the home side (every recorded
+        fixture agrees with its "AWAY @ HOME" title, and PHI @ NYK agrees with
+        Underdog's home team).  The sides are used only when there are exactly
+        two competitors with orders 1 and 2, both carry known NBA tricodes, and
+        the fixture title lists the same two names in the same order, so a
+        fixture the rule does not fit yields no sides rather than a guess.
+        """
+
+        summary = detail.get("stateSummary")
+        scoreboard = summary.get("scoreboard") if isinstance(summary, Mapping) else None
+        if not isinstance(scoreboard, Mapping) or len(scoreboard) != 2:
+            return None, None
+        by_order: dict[int, TeamEvidence] = {}
+        for team_id, entry in scoreboard.items():
+            if not isinstance(entry, Mapping):
+                return None, None
+            order = entry.get("competitorDisplayOrder")
+            tricode = canonical_nba_team_abbreviation(entry.get("abbreviation"))
+            name = optional_text(entry.get("displayName"))
+            if (
+                isinstance(order, bool)
+                or order not in (1, 2)
+                or order in by_order
+                or tricode not in NBA_TEAM_TRICODES
+                or name is None
+            ):
+                return None, None
+            by_order[order] = TeamEvidence(
+                provider_id=str(team_id), name=name, abbreviation=tricode
+            )
+        title = detail.get("name")
+        parts = [part.strip() for part in title.split(" @ ")] if isinstance(title, str) else []
+        if parts != [by_order[1].name, by_order[2].name]:
+            return None, None
+        return by_order[1], by_order[2]
 
     @staticmethod
     def _build_prop_evidence(
@@ -1516,6 +1576,8 @@ class DabbleAdapter:
                 label=identity.event_label,
                 starts_at=identity.starts_at,
                 updated_at=identity.updated_at,
+                home_team=identity.home_team,
+                away_team=identity.away_team,
             ),
             team=evidence.team,
             league=evidence.league,
@@ -1637,6 +1699,8 @@ class DabbleAdapter:
         """
 
         if market_type is None or not market_type.startswith("swish_"):
+            return False
+        if not all(stat in _WHOLE_GAME_STATS for stat in stats):
             return False
         subject = "_".join(stat.replace("-", "_") for stat in stats)
         remainder = market_type.removeprefix("swish_")

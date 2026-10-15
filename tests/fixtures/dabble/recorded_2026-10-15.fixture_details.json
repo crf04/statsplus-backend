@@ -264,6 +264,22 @@
   ],
   "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
   "sportName": "Basketball",
+  "stateSummary": {
+   "scoreboard": {
+    "3bad16cb-b54a-45bf-9981-94d4f1cda888": {
+     "abbreviation": "DET",
+     "competitorDisplayOrder": 2,
+     "competitorType": "team",
+     "displayName": "Detroit Pistons"
+    },
+    "9d9fa24f-81ca-4903-9a8d-8f31d2645345": {
+     "abbreviation": "BOS",
+     "competitorDisplayOrder": 1,
+     "competitorType": "team",
+     "displayName": "Boston Celtics"
+    }
+   }
+  },
   "status": "Open"
  }
 }
