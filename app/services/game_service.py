@@ -82,6 +82,7 @@ class GameService:
         team_filter_rankings=None,
         publication_reader=None,
         athlete_catalog=None,
+        game_log_seasons=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -107,6 +108,9 @@ class GameService:
         self.team_matchups = team_matchups
         self.publication_reader = publication_reader
 
+        # Reads which seasons a Publication can serve game logs for.
+        self.game_log_seasons = game_log_seasons
+
         # Initialize cache
         if redis_client is None:
             redis_client = get_redis_client(self.settings)
@@ -123,6 +127,16 @@ class GameService:
         """
 
         return research_season(self.settings, self.publication_reader)
+
+    def list_seasons(self):
+        """Seasons whose game logs are readable, newest first, and the default."""
+
+        seasons = (
+            list(self.game_log_seasons.published_seasons())
+            if self.game_log_seasons is not None
+            else []
+        )
+        return {"seasons": seasons, "default_season": self.default_season()}
 
     def get_player_id(self, player_name, season):
         # The Athlete Catalog is the governed identity source game-log

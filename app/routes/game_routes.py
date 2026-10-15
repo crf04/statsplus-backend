@@ -14,6 +14,7 @@ from typing import Any
 import requests
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 
 from ..errors import (
     InvalidInputError,
@@ -388,6 +389,16 @@ def _game_log_validation_details(
     if not failed_filters:
         return None
     return {"filters": failed_filters}
+
+
+@game_bp.route("/seasons", methods=["GET"])
+@require_auth
+def get_game_log_seasons():
+    """Return the seasons whose game logs are readable, newest first."""
+    try:
+        return jsonify(game_service.list_seasons())
+    except SQLAlchemyError as error:
+        raise ProviderUnavailableError(detail=error) from error
 
 
 @game_bp.route('/game_logs', methods=['GET'])

@@ -28,6 +28,7 @@ from app.domain.freshness import (
 from app.domain.utc import assume_utc
 from app.errors import raise_if_query_timeout
 from app.models.collection_control import (
+    PublicationPointer,
     PublicationPointerHistory,
     PublicationStream,
     PublicationVersion,
@@ -539,6 +540,62 @@ class PlayerGameLogRepository:
             return rows, self._retained_read(
                 publication_id, int(retained.fence), connection=connection
             )
+
+    def published_seasons(self) -> tuple[str, ...]:
+        """Seasons whose game logs a Publication can serve, newest first.
+
+        A season qualifies through the active pointer (unless its activation
+        was revoked), or through its latest
+        unrevoked, unretired pointer-history row whose version and projection
+        still exist: the rows ``retained_game_read`` can read.  A candidate
+        that never activated has no history row, and a revoked or retired
+        activation is excluded.
+        """
+
+        history = PublicationPointerHistory.__table__
+        projection = PublicationPlayerGameLog.__table__
+        versions = PublicationVersion.__table__
+        pointers = PublicationPointer.__table__
+        with self.engine.connect() as connection:
+            retained = connection.execute(
+                select(history.c.season)
+                .where(
+                    history.c.stream_key == "player_game_logs",
+                    history.c.revoked_at.is_(None),
+                    history.c.retired_at.is_(None),
+                    select(versions.c.publication_id)
+                    .where(versions.c.publication_id == history.c.publication_id)
+                    .exists(),
+                    select(projection.c.publication_id)
+                    .where(projection.c.publication_id == history.c.publication_id)
+                    .exists(),
+                )
+                .distinct()
+            ).scalars()
+            active = connection.execute(
+                select(versions.c.season)
+                .join(
+                    pointers,
+                    pointers.c.active_publication_id == versions.c.publication_id,
+                )
+                .where(
+                    pointers.c.stream_key == "player_game_logs",
+                    ~select(history.c.history_id)
+                    .where(
+                        history.c.publication_id == versions.c.publication_id,
+                        history.c.revoked_at.is_not(None),
+                    )
+                    .exists(),
+                )
+            ).scalars()
+            seasons = {*retained, *active}
+        valid = set()
+        for season in seasons:
+            try:
+                valid.add(validate_canonical_season(season))
+            except ValueError:
+                continue
+        return tuple(sorted(valid, reverse=True))
 
     def _retained_read(
         self, publication_id: str, fence: int, *, connection: Connection
