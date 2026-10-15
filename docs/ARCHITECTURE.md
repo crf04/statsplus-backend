@@ -4369,8 +4369,9 @@ no key and reads `{}` until quotes exist.
 merge and deploy):
 
 1. Create the Odds API plan and read the billing reset day from its dashboard.
-2. Create a new Railway service from this repository with config-as-code file
-   `railway.odds.json` (cron `*/5 * * * *`, start command
+2. Create a new Railway service from this repository and set the service
+   settings recorded in `railway.odds.json` (Railway's API no longer sets a
+   config-as-code path) (cron `*/5 * * * *`, start command
    `python scripts/collect_odds.py`). Give it `DATABASE_URL`, `SENTRY_DSN`,
    `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>`, `ODDS_API_ENABLED=true`
    (optional: `ODDS_API_PLAN_CREDITS`, `ODDS_API_RESERVE_CREDITS`,
@@ -4637,8 +4638,11 @@ transaction-scoped advisory lock before inspecting or changing the migration
 table. Status output masks database passwords.
 
 Production Gunicorn workers never run migrations from `create_app()`. Railway
-owns the deployment boundary: `railway.json` runs `python scripts/migrate.py`
-as a pre-deploy command, and a nonzero result prevents the new application
+owns the deployment boundary: each database-backed service runs
+`python scripts/migrate.py` as a pre-deploy command (recorded in
+`railway.web.json` and set on the service instance, because a root
+`railway.json` would also impose the web `/health` healthcheck on the non-HTTP
+workers and fail their deploys), and a nonzero result prevents the new application
 workers from starting. Local and test app factories retain automatic schema
 initialization for their disposable databases. Migration 031 idempotently
 recreates the five Canonical Game Ledger tables from migration 024, repairing
