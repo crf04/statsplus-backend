@@ -47,7 +47,10 @@ from app.providers.dfs import (
     RetrievalContext,
     ScoringPeriod,
     SnapshotStatus,
+    TeamEvidence,
 )
+from app.providers.kalshi import SERIES_STATISTIC_LABELS, KalshiAdapter
+from app.providers.polymarket import PolymarketAdapter
 from app.providers.prizepicks import PrizePicksAdapter
 from app.providers.registry import (
     PRIZEPICKS_ENTRY_PAYOUT_TABLES,
@@ -69,6 +72,7 @@ from app.services.projection_archive import (
     ProjectionRecordingService,
 )
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
+from tests.providers import novig_recorded
 from tests.providers.fourth_provider import (
     FOURTH_PROVIDER_NAME,
     FourthAdapter,
@@ -252,6 +256,127 @@ def _underdog_failing() -> UnderdogAdapter:
     )
 
 
+def _kalshi_payloads() -> tuple[Any, ...]:
+    """The open-game lookup, then one page per player series, in call order.
+
+    Recorded from Kalshi's historical API for NYK at SAS on 2026-06-13 and
+    reopened; see ``tests/providers/test_kalshi.py`` for the exact recipe.
+    """
+
+    return (
+        _load("kalshi", "open_games.json"),
+        *(_load("kalshi", f"markets.{series}.json") for series in SERIES_STATISTIC_LABELS),
+    )
+
+
+def _kalshi(payloads: tuple[Any, ...] | None = None) -> KalshiAdapter:
+    return KalshiAdapter(
+        session=RecordedSession(*(payloads or _kalshi_payloads())), now=_clock
+    )
+
+
+def _kalshi_empty() -> KalshiAdapter:
+    games, *_series = _kalshi_payloads()
+    return _kalshi(
+        (games, *({"cursor": "", "markets": []} for _ in SERIES_STATISTIC_LABELS))
+    )
+
+
+def _kalshi_partial() -> KalshiAdapter:
+    games, points, *rest = deepcopy(_kalshi_payloads())
+    broken = deepcopy(points["markets"][0])
+    broken["ticker"] = "KXNBAPTS-26JUN13NYKSAS-SASVWEMBANYAMA1-broken"
+    broken["floor_strike"] = "not-a-number"
+    points["markets"].append(broken)
+    return _kalshi((games, points, *rest))
+
+
+def _kalshi_failing() -> KalshiAdapter:
+    return KalshiAdapter(
+        session=RecordedSession(
+            *(
+                requests.ConnectionError("recorded failure")
+                for _ in range(len(SERIES_STATISTIC_LABELS) + 1)
+            )
+        ),
+        now=_clock,
+    )
+
+
+def _polymarket_payload() -> Any:
+    """The recorded listing, with one player's props.
+
+    ``_governed`` below resolves every athlete to the same canonical player, so
+    the archive sees one player per statistic; the full-board behavior (many
+    players, alternate lines) is pinned in ``test_polymarket.py``.
+    """
+
+    payload = _load("polymarket", "conformance.events.json")
+    for event in payload:
+        event["markets"] = [
+            market
+            for market in event["markets"]
+            if market.get("sportsMarketType") not in {"points", "rebounds", "assists"}
+            or market["groupItemTitle"].startswith("Victor Wembanyama")
+        ]
+    return payload
+
+
+def _polymarket(payload: Any = None) -> PolymarketAdapter:
+    return PolymarketAdapter(
+        session=RecordedSession(
+            payload if payload is not None else _polymarket_payload()
+        ),
+        now=_clock,
+    )
+
+
+def _polymarket_empty() -> PolymarketAdapter:
+    # The recorded preseason listing: game events with only game markets.
+    return _polymarket(_load("polymarket", "preseason.events.json"))
+
+
+def _polymarket_partial() -> PolymarketAdapter:
+    payload = _polymarket_payload()
+    markets = payload[0]["markets"]
+    prop = next(m for m in markets if m["sportsMarketType"] == "points")
+    broken = deepcopy(prop)
+    broken["id"] = "market-broken"
+    broken["line"] = "not-a-number"
+    markets.append(broken)
+    return _polymarket(payload)
+
+
+def _polymarket_failing() -> PolymarketAdapter:
+    return PolymarketAdapter(
+        session=RecordedSession(requests.ConnectionError("recorded failure")),
+        now=_clock,
+    )
+
+
+def _novig(session: novig_recorded.ReplaySession | None = None):
+    return novig_recorded.adapter(session)
+
+
+def _novig_empty():
+    return _novig(novig_recorded.ReplaySession(pages=[{"items": []}]))
+
+
+def _novig_partial():
+    session = novig_recorded.ReplaySession()
+    broken = session.pages[0]["items"][0]
+    broken["strike"] = "not-a-number"
+    return _novig(session)
+
+
+def _novig_failing():
+    return _novig(
+        novig_recorded.ReplaySession(
+            failures={"/catalog/markets": requests.ConnectionError("recorded failure")}
+        )
+    )
+
+
 def _fourth_empty() -> FourthAdapter:
     return FourthAdapter(payload={"board": []})
 
@@ -289,6 +414,24 @@ RECORDED_EVIDENCE: dict[str, RecordedEvidence] = {
         empty=_underdog_empty,
         partial=_underdog_partial,
         failing=_underdog_failing,
+    ),
+    "kalshi": RecordedEvidence(
+        complete=_kalshi,
+        empty=_kalshi_empty,
+        partial=_kalshi_partial,
+        failing=_kalshi_failing,
+    ),
+    "polymarket": RecordedEvidence(
+        complete=_polymarket,
+        empty=_polymarket_empty,
+        partial=_polymarket_partial,
+        failing=_polymarket_failing,
+    ),
+    "novig": RecordedEvidence(
+        complete=_novig,
+        empty=_novig_empty,
+        partial=_novig_partial,
+        failing=_novig_failing,
     ),
     FOURTH_PROVIDER_NAME: RecordedEvidence(
         complete=FourthAdapter,
@@ -373,11 +516,12 @@ def _governed(
                     athlete,
                     canonical_id=2544,
                     name=athlete.name or "Recorded Player",
-                    team=replace(
-                        athlete.team, canonical_id=1610612747
-                    )
+                    # The canonical team comes from the catalog, not from
+                    # provider evidence, so a provider that names no team
+                    # (Polymarket, Novig) still reaches a canonical one.
+                    team=replace(athlete.team, canonical_id=1610612747)
                     if athlete.team is not None
-                    else None,
+                    else TeamEvidence(canonical_id=1610612747),
                 ),
                 event=replace(
                     event, canonical_id=_canonical_game_id(event.provider_id)

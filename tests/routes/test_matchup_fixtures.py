@@ -3068,8 +3068,11 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
     assert started.get_json()["freshness"]["pool"]["state"] == "closing"
     assert started.get_json()["freshness"]["pool"]["providers"] == {
         "dabble": {"status": "closing", "retrieved_at": NOW.isoformat()},
+        "novig": {"status": "missing", "retrieved_at": None},
         "prizepicks": {"status": "missing", "retrieved_at": None},
         "underdog": {"status": "missing", "retrieved_at": None},
+        "kalshi": {"status": "missing", "retrieved_at": None},
+        "polymarket": {"status": "missing", "retrieved_at": None},
     }
     assert started_selection.get_json()["freshness"]["player_pool"]["state"] == "closing"
     assert started.get_json()["players"]
@@ -3200,8 +3203,11 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     assert all_disabled_recorder.scopes == {}
     assert {scope.provider for scope in all_disabled_pool.scopes} == {
         "dabble",
+        "novig",
+        "polymarket",
         "prizepicks",
         "underdog",
+        "kalshi",
     }
     assert all_disabled_pool.required_providers == frozenset()
     with engine.connect() as connection:
@@ -3317,8 +3323,11 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     assert set(partially_enabled_recorder.scopes) == {"dabble"}
     assert {scope.provider for scope in partially_enabled_pool.scopes} == {
         "dabble",
+        "novig",
+        "polymarket",
         "prizepicks",
         "underdog",
+        "kalshi",
     }
     assert partially_enabled_pool.required_providers == frozenset({"dabble"})
     partially_enabled_recorder.record_complete_snapshot(

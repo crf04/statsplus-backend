@@ -9,8 +9,10 @@ from .nba_stats import (
     normalize_player_game_logs,
 )
 from .pbp_stats import PBPStatsAdapter, PBPStatsProvider
+from .novig import NovigAdapter
 from .prizepicks import PrizePicksAdapter
 from .underdog import UnderdogAdapter
+from .kalshi import KalshiAdapter
 from .rotowire import RotoWireInjuryProvider
 
 __all__ = [
@@ -18,9 +20,11 @@ __all__ = [
     "NBAStatsAdapter",
     "NBAStatsProvider",
     "PBPStatsAdapter",
+    "NovigAdapter",
     "PBPStatsProvider",
     "PrizePicksAdapter",
     "UnderdogAdapter",
+    "KalshiAdapter",
     "RotoWireInjuryProvider",
     "normalize_archetype_game_logs",
     "normalize_player_roster",

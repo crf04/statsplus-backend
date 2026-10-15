@@ -21,6 +21,9 @@ statistics:
       dabble: [points]
       prizepicks: [Points]
       underdog: [Points]
+      kalshi: [Points]
+      polymarket: [points]
+      novig: [POINTS]
   - id: rebounds
     market_category: REB
     label: Rebounds
@@ -31,6 +34,9 @@ statistics:
       dabble: [rebounds]
       prizepicks: [Rebounds]
       underdog: [Rebounds]
+      kalshi: [Rebounds]
+      polymarket: [rebounds]
+      novig: [REBOUNDS]
   - id: assists
     market_category: AST
     label: Assists
@@ -41,6 +47,9 @@ statistics:
       dabble: [assists]
       prizepicks: [Assists]
       underdog: [Assists]
+      kalshi: [Assists]
+      polymarket: [assists]
+      novig: [ASSISTS]
   - id: three_pointers_made
     market_category: 3PM
     label: Three-Pointers Made
@@ -51,6 +60,8 @@ statistics:
       dabble: [three-pointers-made, threes, 3PM]
       prizepicks: [3-Pointers Made, Three Pointers Made, 3PM]
       underdog: [3-Pointers Made, Three Pointers Made, 3PM]
+      kalshi: [Three Pointers]
+      novig: [THREE_POINTERS_MADE]
   - id: steals
     market_category: STL
     label: Steals
@@ -61,6 +72,8 @@ statistics:
       dabble: [steals]
       prizepicks: [Steals]
       underdog: [Steals]
+      kalshi: [Steals]
+      novig: [STEALS]
   - id: blocks
     market_category: BLK
     label: Blocks
@@ -71,6 +84,8 @@ statistics:
       dabble: [blocks]
       prizepicks: [Blocks]
       underdog: [Blocks]
+      kalshi: [Blocks]
+      novig: [BLOCKS]
   - id: turnovers
     market_category: TOV
     label: Turnovers
@@ -81,6 +96,7 @@ statistics:
       dabble: [turnovers]
       prizepicks: [Turnovers]
       underdog: [Turnovers]
+      novig: [TURNOVERS]
   - id: pra
     market_category: PRA
     label: Points + Rebounds + Assists
@@ -97,6 +113,7 @@ statistics:
         - rebounds+points+assists
       prizepicks: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
       underdog: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
+      novig: [POINTS_REBOUNDS_ASSISTS]
   - id: pa
     market_category: PA
     label: Points + Assists
@@ -107,6 +124,7 @@ statistics:
       dabble: [assists+points, points+assists]
       prizepicks: [PA, Points + Assists, Pts+Asts]
       underdog: [PA, Points + Assists, Pts+Asts]
+      novig: [POINTS_ASSISTS]
   - id: pr
     market_category: PR
     label: Points + Rebounds
@@ -117,6 +135,7 @@ statistics:
       dabble: [points+rebounds, rebounds+points]
       prizepicks: [PR, Points + Rebounds, Pts+Rebs]
       underdog: [PR, Points + Rebounds, Pts+Rebs]
+      novig: [POINTS_REBOUNDS]
   - id: ra
     market_category: RA
     label: Rebounds + Assists
@@ -127,6 +146,7 @@ statistics:
       dabble: [assists+rebounds, rebounds+assists]
       prizepicks: [RA, Rebounds + Assists, Rebs+Asts]
       underdog: [RA, Rebounds + Assists, Rebs+Asts]
+      novig: [REBOUNDS_ASSISTS]
   - id: stks
     market_category: STKS
     label: Steals + Blocks
@@ -137,6 +157,7 @@ statistics:
       dabble: [blocks+steals, steals+blocks]
       prizepicks: [STKS, Steals + Blocks, Blks+Stls]
       underdog: [STKS, Steals + Blocks, Blks+Stls]
+      novig: [STEALS_BLOCKS]
   - id: field_goals_attempted
     market_category: FGA
     label: Field Goals Attempted

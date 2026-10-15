@@ -972,7 +972,7 @@ def test_a_provider_filter_avoids_the_call_entirely():
     assert providers["prizepicks"].calls == 1
     assert board.groups[0].summary.provider_count == 1
     assert [report.provider for report in board.provider_reports] == ["prizepicks"]
-    assert board.disabled_providers == ("dabble", "underdog")
+    assert board.disabled_providers == ("dabble", "kalshi", "novig", "polymarket", "underdog")
 
 
 @pytest.mark.parametrize(
@@ -1088,7 +1088,7 @@ def test_a_refused_board_keeps_the_evidence_it_already_gathered():
     assert [report.freshness.value for report in evidence.provider_reports] == ["fresh"]
     assert evidence.group_count == 1
     assert evidence.unresolved_count == 0
-    assert evidence.disabled_providers == ("prizepicks", "underdog")
+    assert evidence.disabled_providers == ("kalshi", "novig", "polymarket", "prizepicks", "underdog")
 
 
 def test_a_refusal_states_the_providers_it_did_not_read():
@@ -1114,7 +1114,7 @@ def test_a_refusal_states_the_providers_it_did_not_read():
         "dabble",
         "prizepicks",
     ]
-    assert evidence.disabled_providers == ("underdog",)
+    assert evidence.disabled_providers == ("kalshi", "novig", "polymarket", "underdog")
     assert error.value.public_details == {
         "observed_market_count": 2,
         "market_limit": 1,
@@ -1328,7 +1328,7 @@ def test_precedence_does_not_depend_on_the_order_providers_were_read(reversed_or
     assert evidence.market_count == 3
     assert evidence.unresolved_count == 3
     assert evidence.group_count == 0
-    assert evidence.disabled_providers == ("underdog",)
+    assert evidence.disabled_providers == ("kalshi", "novig", "polymarket", "underdog")
 
 
 # -- empty and complete ----------------------------------------------------

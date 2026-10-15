@@ -538,8 +538,8 @@ their ET slate. Output is always ordered by UTC tip and then game ID,
 independently of repository row order.
 
 Each team count is the number of canonical players in the live Player Pool for
-that slate game. The pool is the union of usable PrizePicks, Underdog, and
-Dabble observations. A market qualifies only when it is available, standard,
+that slate game. The pool is the union of usable PrizePicks, Underdog, Dabble,
+Kalshi, Polymarket, and Novig observations. A market qualifies only when it is available, standard,
 full-game, and explicitly mapped to PTS, REB, AST, 3PM, TOV, STL, BLK, PRA, PA,
 PR, RA, STKS, FGA, FG3A, or FG2A. Suspended, alternate, promotional,
 period-specific, fantasy-points, DD2/TD3, unknown-stat, unjoined-player, and
@@ -2648,8 +2648,8 @@ Authorization: Bearer <firebase-id-token>
 ```
 
 One authenticated endpoint exposes the central factual DFS Board. There are no
-provider-specific public routes: Dabble, PrizePicks, and Underdog are reached
-only through this board.
+provider-specific public routes: Dabble, PrizePicks, Underdog, Kalshi,
+Polymarket, and Novig are reached only through this board.
 
 ### Availability
 
@@ -2677,7 +2677,7 @@ twice (`providers=dabble,dabble`) is accepted and collapsed to one.
 | Parameter | Type | Meaning |
 | --- | --- | --- |
 | `season` | canonical NBA season (`2025-26`) | Season to read; defaults to the current season. |
-| `providers` | `dabble`, `prizepicks`, `underdog` | Restrict retrieval; an excluded provider is never called. |
+| `providers` | `dabble`, `prizepicks`, `underdog`, `kalshi`, `polymarket`, `novig` | Restrict retrieval; an excluded provider is never called. |
 | `canonical_athlete_ids` | integer NBA player IDs | Restrict to these Canonical Athletes. |
 | `canonical_event_ids` | NBA game IDs | Restrict to these Canonical Events. |
 | `canonical_statistic_ids` | Statistic Catalog IDs | Restrict to these Canonical Statistics. |

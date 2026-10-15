@@ -258,8 +258,11 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert reader.clock is utc_now
     assert {scope.provider for scope in reader.scopes} == {
         "dabble",
+        "polymarket",
         "prizepicks",
         "underdog",
+        "kalshi",
+        "novig",
     }
     assert dependencies.slate_service.player_pool is reader
     assert dependencies.matchup_service.player_pool is reader
@@ -311,6 +314,8 @@ def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry
         "app.providers.dabble.DabbleAdapter",
         "app.providers.prizepicks.PrizePicksAdapter",
         "app.providers.underdog.UnderdogAdapter",
+        "app.providers.kalshi.KalshiAdapter",
+        "app.providers.novig.NovigAdapter",
     ):
         monkeypatch.setattr(adapter, forbidden_constructor)
 
@@ -331,7 +336,7 @@ def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry
     assert dependencies.projection_player_pool_reader.required_providers == frozenset()
     assert {
         scope.provider for scope in dependencies.projection_player_pool_reader.scopes
-    } == {"dabble", "prizepicks", "underdog"}
+    } == {"dabble", "kalshi", "novig", "polymarket", "prizepicks", "underdog"}
     forbidden_constructor.assert_not_called()
     with pytest.raises(ValueError, match="outside the configured recording scope"):
         dependencies.projection_recorder.record_failed_poll(

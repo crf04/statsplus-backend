@@ -251,7 +251,14 @@ def test_empty_production_board_reports_every_known_provider_disabled():
     board = service.get_board(NBAMarketQuery(), _context())
 
     assert board.provider_outcomes == ()
-    assert board.disabled_providers == ("dabble", "prizepicks", "underdog")
+    assert board.disabled_providers == (
+        "dabble",
+        "kalshi",
+        "novig",
+        "polymarket",
+        "prizepicks",
+        "underdog",
+    )
 
 
 def test_disabled_providers_are_metadata_not_failed_outcomes():
@@ -260,7 +267,7 @@ def test_disabled_providers_are_metadata_not_failed_outcomes():
 
     board = service.get_board(NBAMarketQuery(), _context())
 
-    assert board.disabled_providers == ("prizepicks", "underdog")
+    assert board.disabled_providers == ("kalshi", "novig", "polymarket", "prizepicks", "underdog")
     assert [outcome.provider for outcome in board.provider_outcomes] == ["dabble"]
     assert all(outcome.status is not ProviderOutcomeStatus.FAILED for outcome in board.provider_outcomes)
 
