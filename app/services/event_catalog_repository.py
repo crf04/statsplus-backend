@@ -235,9 +235,6 @@ class EventCatalogRepository:
                 select(column).where(condition).order_by(order).limit(1)
             ).scalar_one_or_none()
 
-    #: Game-ID prefix of All-Star events (``nba_events``): never on a Slate.
-    _ALL_STAR_ID = "003_______"
-
     def list_events_before(
         self,
         season: str,
@@ -251,7 +248,8 @@ class EventCatalogRepository:
         Without ``before_id`` the cursor is the instant ``before`` (exclusive);
         with it, the position ``(before, before_id)`` in (scheduled_at, id)
         order, so a continuation page resumes exactly where the last ended.
-        All-Star game IDs are excluded in the query.
+        Work is linear in the events skipped, assuming few events share a tip
+        time (real data: about 15), so no index beyond (season, scheduled_at).
         """
 
         table = EventCatalogEntry.__table__
@@ -272,7 +270,6 @@ class EventCatalogRepository:
                 .where(
                     table.c.season == season,
                     position,
-                    table.c.nba_game_id.not_like(self._ALL_STAR_ID),
                 )
                 .order_by(table.c.scheduled_at.desc(), table.c.nba_game_id.desc())
                 .limit(limit)
@@ -312,7 +309,6 @@ class EventCatalogRepository:
                 .where(
                     table.c.season == season,
                     position,
-                    table.c.nba_game_id.not_like(self._ALL_STAR_ID),
                 )
                 .order_by(table.c.scheduled_at, table.c.nba_game_id)
                 .limit(limit)

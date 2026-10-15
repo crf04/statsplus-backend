@@ -142,7 +142,7 @@ def test_a_revoked_active_season_is_not_listed(get_seasons, world):
     assert get_seasons().get_json()["seasons"] == ["2025-26"]
 
 
-def test_a_disabled_stream_lists_no_active_season(get_seasons, world):
+def test_a_disabled_stream_lists_no_season(get_seasons, world):
     _publish_logs(world, LAST)
     _publish_logs(world, NEW)
     with world.engine.begin() as connection:
@@ -154,7 +154,7 @@ def test_a_disabled_stream_lists_no_active_season(get_seasons, world):
             {"off": False},
         )
 
-    assert get_seasons().get_json()["seasons"] == ["2025-26"]
+    assert get_seasons().get_json()["seasons"] == []
 
 
 def test_an_active_season_without_its_projection_is_not_listed(get_seasons, world):

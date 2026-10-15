@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError
@@ -208,20 +208,60 @@ def test_skipping_events_on_one_timestamp_reads_each_once(world):
     assert counting.pages == 14  # 13 pages back (12 full), 1 empty page forward
 
 
-def test_all_star_game_ids_are_excluded_by_the_query_itself(world):
+def test_a_non_numeric_003_id_is_a_game_when_its_own_slate_lists_it(world):
     world.store(
         "2025-26",
         _row("0022500001", "2025-26", "2026-02-10T00:00:00+00:00"),
-        *[
-            _row(f"00325{n:05d}", "2025-26", "2026-02-14T01:00:00+00:00", "All-Star Game")
-            for n in range(1, 301)
-        ],
+        # Only a numeric 003 prefix means All-Star; this is a Regular Season game.
+        _row("003ABC0001", "2025-26", "2026-02-14T01:00:00+00:00"),
+        _row("0032500001", "2025-26", "2026-02-15T01:00:00+00:00", "All-Star Game"),
+    )
+
+    assert [g["game_id"] for g in world.slate.get_slate("2026-02-13")["games"]] == [
+        "003ABC0001"
+    ]
+    assert world.neighbours("2026-02-20") == ("2026-02-13", None)
+
+
+def test_skipping_events_on_one_timestamp_forward_reads_each_once(world):
+    same_instant = "2026-02-25T01:00:00+00:00"
+    world.store(
+        "2025-26",
+        _row("0022500001", "2025-26", "2026-02-10T00:00:00+00:00"),
+        *[_unlisted(n, same_instant) for n in range(1, 601)],
+        _row("0022500002", "2025-26", "2026-03-05T00:00:00+00:00"),
     )
     counting = _Counting(world.catalog)
     world.slate.event_catalog = counting
 
-    assert world.neighbours("2026-02-20") == ("2026-02-09", None)
-    assert counting.rows == 1
+    assert world.neighbours("2026-02-20") == ("2026-02-09", "2026-03-04")
+
+    # Forward: 600 excluded events on one instant plus the listed one.
+    assert counting.rows == 1 + 601
+
+
+def test_a_neighbour_search_issues_only_seeks_never_a_season_scan(world):
+    for start in range(2018, 2026):
+        season = f"{start}-{str(start + 1)[-2:]}"
+        world.store(
+            season,
+            _row(f"002{str(start)[2:]}00001", season, f"{start + 1}-01-03T00:00:00+00:00"),
+        )
+    statements = []
+
+    def record(conn, cursor, statement, *rest):
+        statements.append(statement.upper())
+
+    event.listen(world.engine, "before_cursor_execute", record)
+    try:
+        assert world.neighbours("2026-01-10")[0] == "2026-01-02"
+    finally:
+        event.remove(world.engine, "before_cursor_execute", record)
+
+    season_reads = [s for s in statements if s.startswith("SELECT EVENT_CATALOG.SEASON")]
+    assert not any("DISTINCT" in s for s in statements)
+    assert season_reads and all("LIMIT" in s for s in season_reads)
+    assert len(season_reads) <= 4
 
 
 def test_the_season_search_does_not_grow_with_stored_history(world):

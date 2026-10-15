@@ -555,6 +555,25 @@ class PlayerGameLogRepository:
             return None
         return retained.publication_id, int(retained.fence)
 
+    def _retained_season_reads(self, season: str, connection: Connection) -> bool:
+        """Whether a past season's explicit game-log read would succeed.
+
+        ``GameService`` reads a past season through the publication reader's
+        ``retained_snapshot``, so that decides (stream enabled, serving
+        status, projection ready).  Without a reader the retained selection
+        decides.
+        """
+
+        capture = getattr(self._publication_reader, "retained_snapshot", None)
+        if not callable(capture):
+            return self._retained_authority(season, connection) is not None
+        read = capture(
+            ("player_game_logs",),
+            season=season,
+            projection_only_keys=frozenset({"player_game_logs"}),
+        ).read("player_game_logs")
+        return bool(read.available)
+
     def published_seasons(self) -> tuple[str, ...]:
         """Seasons a game-log read can succeed for, newest first.
 
@@ -603,7 +622,7 @@ class PlayerGameLogRepository:
                         if snapshot.read("player_game_logs").available:
                             listed.add(season)
                         continue
-                if self._retained_authority(season, connection) is not None:
+                if self._retained_season_reads(season, connection):
                     listed.add(season)
         return tuple(sorted(listed, reverse=True))
 
