@@ -27,7 +27,7 @@ from app.providers.dfs import (
     SelectionDirection,
     SnapshotStatus,
 )
-from app.providers.novig import PLAYER_STATISTIC_MARKET_TYPES, NovigAdapter, _Pacer
+from app.providers.novig import PLAYER_STATISTIC_MARKET_TYPES, NovigAdapter
 from app.providers.registry import DFSProviderRuntime, build_dfs_provider
 from app.services.statistic_catalog import MatchState, StatisticCatalog
 from app.utils import telemetry
@@ -67,20 +67,34 @@ def _market(snapshot, market_id: str):
 # ---------------------------------------------------------------- ladders
 
 
-def _order(price: str) -> list[dict]:
-    return [{"orderId": "recorded-order", "price": price, "qty": 1000}]
+def _bid(outcome_id: str, market_id: str, price: float) -> dict:
+    return {
+        "id": "recorded-bid",
+        "price": price,
+        "qty": 1000,
+        "originalQty": 1000,
+        "status": "OPEN",
+        "outcomeId": outcome_id,
+        "marketId": market_id,
+        "isBid": True,
+        "currency": "CASH",
+    }
 
 
-def _ladder(lines: dict[str, tuple[str, str] | None]):
-    """One player's POINTS ladder from a recorded row.
+def _ladder(lines: dict[str, tuple[float | None, float | None] | None]):
+    """One player's POINTS ladder built from a recorded catalog row and book.
 
-    ``lines`` maps a strike to its (best Over bid, best Under bid); a missing
-    side is None inside the pair, and None for the whole line means the book
-    fetch fails.  Returns a replay session and the market id of each strike.
+    ``lines`` maps a strike to its (best Over bid, best Under bid); None for a
+    side means no bid, and None for the whole line means the batch that holds
+    it cannot be read.  Returns a replay session and the market id of each
+    strike.
     """
 
     template = market_row(BARNES_24_5)
-    items, books, ids, failures = [], {}, {}, {}
+    book_template = next(
+        e for e in load("batch.json") if e["market"]["id"] == BARNES_24_5
+    )
+    items, batch, ids, unreadable = [], [], {}, set()
     for strike, bids in lines.items():
         market_id = f"ladder-{strike}"
         over_id, under_id = f"over-{strike}", f"under-{strike}"
@@ -95,19 +109,25 @@ def _ladder(lines: dict[str, tuple[str, str] | None]):
         items.append(row)
         ids[strike] = market_id
         if bids is None:
-            failures[f"/markets/{market_id}/book"] = 403
+            unreadable.add(market_id)
             continue
-        orders = {}
-        if bids[0] is not None:
-            orders[over_id] = _order(bids[0])
-        if bids[1] is not None:
-            orders[under_id] = _order(bids[1])
-        books[market_id] = {"marketId": market_id, "seq": 1, "orders": orders}
+        entry = deepcopy(book_template)
+        entry["market"]["id"] = market_id
+        entry["market"]["strike"] = float(strike)
+        entry["market"]["outcomes"] = [
+            {"id": over_id, "index": 0, "description": f"Over {strike}", "marketId": market_id},
+            {"id": under_id, "index": 1, "description": f"Under {strike}", "marketId": market_id},
+        ]
+        entry["ladders"] = {
+            over_id: {"bids": [] if bids[0] is None else [_bid(over_id, market_id, bids[0])], "asks": []},
+            under_id: {"bids": [] if bids[1] is None else [_bid(under_id, market_id, bids[1])], "asks": []},
+        }
+        batch.append(entry)
     session = ReplaySession(
         pages=[{"items": items}],
         events={NYK_EVENT: load("events.json")[NYK_EVENT]},
-        books=books,
-        failures=failures,
+        batch=batch,
+        unreadable=unreadable,
     )
     return session, ids
 
@@ -125,7 +145,7 @@ def test_the_standard_line_is_the_one_whose_over_midpoint_is_nearest_one_half():
     #   24.5 -> (0.40 + 0.55) / 2 = 0.475
     #   29.5 -> (0.55 + 0.70) / 2 = 0.625
     session, ids = _ladder(
-        {"19.5": ("0.15", "0.50"), "24.5": ("0.40", "0.45"), "29.5": ("0.55", "0.30")}
+        {"19.5": (0.15, 0.50), "24.5": (0.40, 0.45), "29.5": (0.55, 0.30)}
     )
 
     snapshot = _snapshot(adapter(session))
@@ -144,12 +164,12 @@ def test_the_standard_line_is_the_one_whose_over_midpoint_is_nearest_one_half():
     [
         # Both midpoints are exactly 0.5.
         (
-            {"24.5": ("0.50", "0.50"), "19.5": ("0.40", "0.40")},
+            {"24.5": (0.50, 0.50), "19.5": (0.40, 0.40)},
             {"19.5": "standard", "24.5": "alternate"},
         ),
         # Midpoints 0.45 and 0.55 are the same distance from 0.5.
         (
-            {"19.5": ("0.50", "0.40"), "14.5": ("0.35", "0.45")},
+            {"19.5": (0.50, 0.40), "14.5": (0.35, 0.45)},
             {"14.5": "standard", "19.5": "alternate"},
         ),
     ],
@@ -161,7 +181,7 @@ def test_a_tie_between_midpoints_goes_to_the_lower_line(lines, expected):
 
 
 def test_a_single_line_without_a_midpoint_is_standard_and_unpriced():
-    session, ids = _ladder({"24.5": (None, "0.55")})
+    session, ids = _ladder({"24.5": (None, 0.55)})
 
     snapshot = _snapshot(adapter(session))
     market = _market(snapshot, ids["24.5"])
@@ -173,7 +193,7 @@ def test_a_single_line_without_a_midpoint_is_standard_and_unpriced():
 
 def test_several_lines_without_any_midpoint_are_all_alternate():
     session, ids = _ladder(
-        {"19.5": (None, "0.55"), "24.5": ("0.10", None), "29.5": (None, None)}
+        {"19.5": (None, 0.55), "24.5": (0.10, None), "29.5": (None, None)}
     )
 
     snapshot = _snapshot(adapter(session))
@@ -185,38 +205,94 @@ def test_several_lines_without_any_midpoint_are_all_alternate():
     }
 
 
-def test_a_failed_book_makes_the_ladder_undetermined_so_no_line_is_standard():
-    session, ids = _ladder(
-        {"19.5": ("0.40", "0.40"), "24.5": None, "29.5": ("0.20", "0.60")}
+def test_an_unread_market_makes_its_game_and_statistic_undetermined():
+    # 151 strikes make two batches (150 + 1); the lone last one cannot be read.
+    session, ids = _ladder({f"{n}.5": (0.40, 0.40) for n in range(1, 152)})
+    session.unreadable = {ids["151.5"]}
+
+    snapshot = _snapshot(adapter(session))
+
+    # The unread market might be any player's line of this statistic, so no
+    # line is standard; the lines that were read still carry their prices.
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert len(snapshot.markets) == 150
+    assert {m.variant.value for m in snapshot.markets} == {"alternate"}
+    assert all(m.is_priced for m in snapshot.markets)
+    # An unread market has no player identity, so it cannot be a market.
+    assert snapshot.coverage.skipped_count == 1
+    assert snapshot.coverage.skipped_reasons == (CoverageCode.FIXTURE_FAILED,)
+    assert snapshot.coverage.warning_codes == (
+        CoverageCode.MALFORMED_RECORD,
+        CoverageCode.FIXTURE_FAILED,
     )
-
-    snapshot = _snapshot(adapter(session))
-
-    assert snapshot.status is SnapshotStatus.PARTIAL
-    assert _variants(snapshot, ids) == {
-        "19.5": "alternate",
-        "24.5": "alternate",
-        "29.5": "alternate",
-    }
-    # The books that were read still price their markets.
-    assert _market(snapshot, ids["19.5"]).is_priced is True
-    assert _market(snapshot, ids["24.5"]).is_priced is False
-
-
-def test_one_line_is_standard_even_when_its_book_failed_and_the_snapshot_is_partial():
-    session, ids = _ladder({"24.5": None})
-
-    snapshot = _snapshot(adapter(session))
-    market = _market(snapshot, ids["24.5"])
-
-    assert market.variant is MarketVariant.STANDARD
-    assert market.is_priced is False
-    assert snapshot.status is SnapshotStatus.PARTIAL
-    assert snapshot.coverage.fanout_complete is False
-    assert snapshot.coverage.warning_codes == (CoverageCode.FIXTURE_FAILED,)
     assert snapshot.coverage.diagnostic_details == (
-        "novig book unavailable for 1 of 1 markets",
+        "market book unavailable",
+        "novig book unavailable for 1 of 151 markets",
     )
+
+
+def test_when_no_market_can_be_read_the_retrieval_fails_as_unavailable():
+    session, _ids = _ladder({"24.5": None})
+
+    with pytest.raises(ProviderUnavailableError, match="Novig could not be reached"):
+        _snapshot(adapter(session))
+
+
+def test_a_stale_market_is_dropped_alone_and_the_rest_of_its_batch_is_read():
+    session, ids = _ladder(
+        {"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)}
+    )
+    session.stale = {ids["24.5"]}
+    session.batch = [e for e in session.batch if e["market"]["id"] != ids["24.5"]]
+
+    snapshot = _snapshot(adapter(session))
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert {m.market_id for m in snapshot.markets} == {ids["19.5"], ids["29.5"]}
+    assert snapshot.coverage.skipped_count == 1
+    assert snapshot.coverage.skipped_reasons == (CoverageCode.INELIGIBLE_STATUS,)
+    # The whole batch answered 404, then each market was asked for alone.
+    batch_calls = [p["marketIds"] for u, p in session.calls if u.endswith("/batch")]
+    assert len(batch_calls) == 1 + 3
+    assert batch_calls[0].count(",") == 2
+    # The line that was dropped is not unread: the others are still decided.
+    assert _variants(snapshot, {"19.5": ids["19.5"], "29.5": ids["29.5"]}) == {
+        "19.5": "standard",
+        "29.5": "alternate",
+    }
+
+
+def test_a_market_the_batch_does_not_return_is_dropped_as_no_longer_open():
+    session, ids = _ladder({"19.5": (0.40, 0.40), "24.5": (0.50, 0.50)})
+    session.batch = [e for e in session.batch if e["market"]["id"] != ids["24.5"]]
+
+    snapshot = _snapshot(adapter(session))
+
+    assert [m.market_id for m in snapshot.markets] == [ids["19.5"]]
+    assert snapshot.coverage.skipped_reasons == (CoverageCode.INELIGIBLE_STATUS,)
+    assert snapshot.status is SnapshotStatus.COMPLETE
+
+
+def test_a_market_without_a_player_is_excluded_as_non_player():
+    session = ReplaySession()
+    entry = next(e for e in session.batch if e["market"]["id"] == BARNES_24_5)
+    entry["market"]["player"] = None
+
+    snapshot = _snapshot(adapter(session))
+
+    assert len(snapshot.markets) == 19
+    assert snapshot.coverage.skipped_count == 8
+    assert snapshot.status is SnapshotStatus.COMPLETE
+
+
+def test_markets_are_read_in_batches_of_at_most_150():
+    session, ids = _ladder({f"{n}.5": (0.40, 0.40) for n in range(1, 152)})
+
+    snapshot = _snapshot(adapter(session))
+
+    batches = [p["marketIds"].split(",") for u, p in session.calls if u.endswith("/batch")]
+    assert sorted(len(b) for b in batches) == [1, 150]
+    assert len(snapshot.markets) == 151
 
 
 # ----------------------------------------------------------------- prices
@@ -260,21 +336,34 @@ def test_a_side_without_an_ask_leaves_both_sides_unpriced():
     assert [s.price_value for s in market.selections] == [None, None]
 
 
+def test_a_two_sided_recorded_book_prices_both_sides():
+    # Brunson 21.5 PR: best Over bid 0.10 and best Under bid 0.10 (a second
+    # level at 0.01 is ignored), so both asks are 0.90.
+    market = _market(_snapshot(), "01a13f9f-78ca-76b0-b6a4-75a115b6cb85")
+
+    assert [s.decimal_price for s in market.selections] == [
+        Decimal("1.111111"),
+        Decimal("1.111111"),
+    ]
+
+
 def test_an_empty_recorded_book_is_unpriced_not_a_failure():
     snapshot = _snapshot()
-    market = _market(snapshot, "01a13f9f-78ca-76b0-b6a4-75a115b6cb85")  # Brunson
+    market = _market(snapshot, "01a1406c-867f-7342-a5a7-2686b16b8b92")  # Barnes 7.5 AST
 
     assert market.is_priced is False
     assert snapshot.status is SnapshotStatus.COMPLETE
 
 
-def test_the_best_bid_is_the_highest_resting_price():
-    session, ids = _ladder({"24.5": ("0.40", "0.45")})
-    book = session.books[ids["24.5"]]
-    book["orders"]["under-24.5"] = [
-        {"orderId": "a", "price": "0.30", "qty": 5},
-        {"orderId": "b", "price": "0.45", "qty": 5},
-        {"orderId": "c", "price": "0.20", "qty": 5},
+def test_the_best_bid_is_the_highest_open_resting_price():
+    session, ids = _ladder({"24.5": (0.40, 0.45)})
+    ladder = session.batch[0]["ladders"]["under-24.5"]
+    ladder["bids"] = [
+        _bid("under-24.5", ids["24.5"], 0.30),
+        _bid("under-24.5", ids["24.5"], 0.45),
+        {**_bid("under-24.5", ids["24.5"], 0.49), "status": "CANCELED"},
+        {**_bid("under-24.5", ids["24.5"], 0.48), "qty": 0},
+        _bid("under-24.5", ids["24.5"], 0.20),
     ]
 
     market = _market(_snapshot(adapter(session)), ids["24.5"])
@@ -326,6 +415,7 @@ def test_exactly_one_line_per_player_statistic_and_game_is_standard():
         ("Jalen Brunson", "POINTS_REBOUNDS", "21.5"),
         ("Karl-Anthony Towns", "POINTS_REBOUNDS", "30.5"),
         ("Kawhi Leonard", "POINTS", "29.5"),
+        ("Kawhi Leonard", "THREE_POINTERS_MADE", "0.5"),
         ("Scottie Barnes", "POINTS", "19.5"),
         ("Tyrese Maxey", "POINTS", "21.5"),
     ]
@@ -391,7 +481,7 @@ def test_every_statistic_label_maps_to_its_market_category():
 def test_athlete_and_event_evidence_are_what_the_resolvers_need():
     market = _market(_snapshot(), BARNES_POINTS_19_5)
 
-    assert market.athlete.provider_id == "scottie-barnes"
+    assert market.athlete.provider_id == "8678a814-8259-4d41-9d35-9c9a599fb6ea"
     assert market.athlete.name == "Scottie Barnes"
     assert market.event.provider_id == NYK_EVENT
     assert market.event.label == "Toronto Raptors @ New York Knicks"
@@ -419,15 +509,20 @@ def test_the_second_event_resolves_from_its_own_event_read():
     assert market.event.starts_at == datetime(2026, 10, 20, 23, 5, tzinfo=timezone.utc)
 
 
-def test_a_player_name_is_normalized_into_the_provider_id():
+def test_the_player_identity_is_the_batch_players_id_and_full_name():
+    market = _market(_snapshot(), BARNES_24_5)
+
+    assert market.athlete.provider_id == "8678a814-8259-4d41-9d35-9c9a599fb6ea"
+    assert market.athlete.name == "Scottie Barnes"
+
+
+def test_the_description_is_never_parsed_for_the_player():
     session = ReplaySession()
-    row = session.pages[0]["items"][0]
-    row["description"] = "Nikola Jokić 24.5 POINTS"
+    session.pages[0]["items"][0]["description"] = "garbled"
 
     market = _market(_snapshot(adapter(session)), BARNES_24_5)
 
-    assert market.athlete.provider_id == "nikola-jokic"
-    assert market.athlete.name == "Nikola Jokić"
+    assert market.athlete.name == "Scottie Barnes"
 
 
 def test_an_event_that_is_not_pregame_excludes_its_markets():
@@ -441,41 +536,39 @@ def test_an_event_that_is_not_pregame_excludes_its_markets():
     assert CoverageCode.INELIGIBLE_EVENT_STATUS in snapshot.coverage.skipped_reasons
     assert snapshot.status is SnapshotStatus.COMPLETE
     # No book is read for a market whose event cannot carry it.
-    assert len(session.urls("/book")) == 15
+    (batch,) = [p["marketIds"] for u, p in session.calls if u.endswith("/batch")]
+    assert len(batch.split(",")) == 15
 
 
 # ----------------------------------------------------- coverage and failures
 
 
-def test_a_row_that_breaks_the_description_pattern_is_malformed_and_partial():
+def test_a_row_with_a_non_numeric_strike_is_malformed_and_partial():
     session = ReplaySession()
-    session.pages[0]["items"][0]["description"] = "Scottie Barnes POINTS"
+    session.pages[0]["items"][0]["strike"] = "n/a"
 
     snapshot = _snapshot(adapter(session))
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert len(snapshot.markets) == 19
-    assert snapshot.coverage.skipped_count == 8
     assert snapshot.coverage.skipped_reasons == (
         CoverageCode.MALFORMED_RECORD,
         CoverageCode.NON_PLAYER_MARKET,
         CoverageCode.NON_PROJECTION_MARKET,
         CoverageCode.NON_GAME_MARKET,
     )
-    assert snapshot.coverage.diagnostic_details == (
-        "description must be '<name> <strike> <market type>'",
-    )
+    assert snapshot.coverage.diagnostic_details == ("strike must be numeric",)
 
 
-def test_a_description_strike_that_disagrees_with_the_strike_is_malformed():
+def test_a_market_without_one_over_and_one_under_is_malformed():
     session = ReplaySession()
-    session.pages[0]["items"][0]["strike"] = "25.5"
+    session.pages[0]["items"][0]["outcomes"][1]["name"] = "Over 24.5"
 
     snapshot = _snapshot(adapter(session))
 
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert snapshot.coverage.diagnostic_details == (
-        "description strike conflicts with strike",
+        "market outcomes must be one Over and one Under",
     )
 
 
@@ -500,56 +593,44 @@ def test_when_no_event_can_be_read_the_retrieval_fails_as_unavailable():
         _snapshot(adapter(session))
 
 
-def test_failed_books_leave_their_markets_unpriced_and_the_snapshot_partial():
-    session = ReplaySession(
-        failures={f"/markets/{KAWHI_POINTS_29_5}/book": requests.ConnectionError("down")}
-    )
+def test_a_batch_that_fails_other_than_by_404_leaves_its_markets_unread_and_partial():
+    session = ReplaySession(failures={"/batch": requests.ConnectionError("down")})
 
-    snapshot = _snapshot(adapter(session))
-    market = _market(snapshot, KAWHI_POINTS_29_5)
-
-    assert snapshot.status is SnapshotStatus.PARTIAL
-    assert len(snapshot.markets) == 20
-    assert market.is_priced is False
-    assert market.variant is MarketVariant.STANDARD  # a lone line stays standard
-    assert snapshot.coverage.warning_codes == (CoverageCode.FIXTURE_FAILED,)
-    assert snapshot.coverage.diagnostic_details == (
-        "novig book unavailable for 1 of 20 markets",
-    )
-    # The other priced market is unaffected.
-    assert _market(snapshot, BARNES_POINTS_19_5).is_priced is True
+    with pytest.raises(ProviderUnavailableError, match="Novig could not be reached"):
+        _snapshot(adapter(session))
 
 
-def test_a_book_naming_an_unknown_outcome_counts_as_a_failed_book():
+def test_a_book_naming_an_unknown_outcome_is_an_unread_market():
     session = ReplaySession()
-    session.books[KAWHI_POINTS_29_5]["orders"] = {
-        "not-an-outcome": [{"orderId": "x", "price": "0.5", "qty": 1}]
+    entry = next(e for e in session.batch if e["market"]["id"] == KAWHI_POINTS_29_5)
+    entry["ladders"]["not-an-outcome"] = {
+        "bids": [{"price": 0.5, "qty": 1, "status": "OPEN"}],
+        "asks": [],
     }
 
     snapshot = _snapshot(adapter(session))
 
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert _market(snapshot, KAWHI_POINTS_29_5).is_priced is False
+    assert KAWHI_POINTS_29_5 not in {m.market_id for m in snapshot.markets}
+    assert snapshot.coverage.skipped_count == 8
 
 
 @pytest.mark.parametrize(
-    "book",
+    "mutate",
     [
-        {"marketId": "m", "seq": 1},
-        {"orders": {"o": [{"price": "1.2", "qty": 5}]}},
-        {"orders": {"o": [{"price": "abc", "qty": 5}]}},
-        {"orders": {"o": "not-a-list"}},
-        ["not", "an", "object"],
+        lambda e: e["ladders"].update({"x": {"asks": []}}),
+        lambda e: e["ladders"].update({"x": {"bids": [{"price": 1.2, "qty": 5}]}}),
+        lambda e: e["ladders"].update({"x": {"bids": [{"price": "abc", "qty": 5}]}}),
+        lambda e: e["market"].update({"player": {"id": "p"}}),
+        lambda e: e.pop("ladders"),
     ],
 )
-def test_a_malformed_book_is_a_failed_book_not_a_failed_retrieval(book):
+def test_a_malformed_batch_is_an_invalid_response(mutate):
     session = ReplaySession()
-    session.books[KAWHI_POINTS_29_5] = book
+    mutate(session.batch[0])
 
-    snapshot = _snapshot(adapter(session))
-
-    assert snapshot.status is SnapshotStatus.PARTIAL
-    assert _market(snapshot, KAWHI_POINTS_29_5).is_priced is False
+    with pytest.raises(ProviderUnavailableError, match="invalid response"):
+        _snapshot(adapter(session))
 
 
 def test_a_later_page_that_fails_keeps_the_earlier_pages_and_is_partial():
@@ -603,7 +684,7 @@ def test_a_venue_with_no_player_markets_is_a_complete_empty_snapshot():
     assert snapshot.status is SnapshotStatus.COMPLETE
     assert snapshot.markets == ()
     assert snapshot.coverage.fetched_count == 0
-    assert session.urls("/book") == []
+    assert session.urls("/batch") == []
 
 
 def test_a_venue_with_only_team_lines_is_a_complete_empty_snapshot():
@@ -631,7 +712,7 @@ def test_an_expired_deadline_reads_nothing_and_fails_as_unavailable():
 # ------------------------------------------------------------- transport
 
 
-def test_requests_state_the_league_page_size_cursor_and_book_depth():
+def test_requests_state_the_league_page_size_cursor_and_batch_ids():
     session = ReplaySession()
 
     _snapshot(adapter(session))
@@ -644,9 +725,10 @@ def test_requests_state_the_league_page_size_cursor_and_book_depth():
             "after": "01a13cfa-9a3e-7830-82f9-5c3f2ac34c94",
         },
     ]
-    book_calls = [call for call in session.calls if call[0].endswith("/book")]
-    assert len(book_calls) == 20
-    assert {params["depth"] for _, params in book_calls if params} == {1}
+    (batch_call,) = [call for call in session.calls if call[0].endswith("/batch")]
+    assert batch_call[0] == "https://api.novig.us/nbx/v1/markets/book/batch"
+    assert batch_call[1]["currency"] == "CASH"
+    assert len(batch_call[1]["marketIds"].split(",")) == 20
     assert len(session.urls(f"/events/{NYK_EVENT}")) == 1
     assert len(session.urls(f"/events/{PHI_EVENT}")) == 1
 
@@ -660,7 +742,7 @@ def test_provider_events_use_the_novig_operation_catalog():
     operations = [e["operation"] for e in events]
     assert operations.count("market_page") == 2
     assert operations.count("event_detail") == 2
-    assert operations.count("market_book") == 20
+    assert operations.count("market_book_batch") == 1
     assert set(operations) <= telemetry.PROVIDER_OPERATION_CATALOG["novig"]
 
 
@@ -671,6 +753,8 @@ def test_the_adapter_sends_browser_like_headers_because_novig_blocks_some_client
 
     assert session.headers["Accept"] == "application/json"
     assert session.headers["User-Agent"].startswith("Mozilla/5.0")
+    assert session.headers["Origin"] == "https://novig.com"
+    assert session.headers["Referer"] == "https://novig.com/"
 
 
 def test_the_registry_builds_the_adapter_with_bounded_concurrency():
@@ -678,13 +762,3 @@ def test_the_registry_builds_the_adapter_with_bounded_concurrency():
 
     assert isinstance(built, NovigAdapter)
     assert built.detail_concurrency == 4
-
-
-def test_the_pacer_spaces_starts_and_refuses_a_slot_past_the_deadline():
-    pacer = _Pacer(10.0)
-
-    assert pacer.reserve(5.0) == 0.0
-    # The next slot opens in ten seconds, which is past a five second budget.
-    assert pacer.reserve(5.0) is None
-    wait = pacer.reserve(60.0)
-    assert wait is not None and 9.0 < wait <= 10.0

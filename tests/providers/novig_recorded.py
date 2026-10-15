@@ -9,9 +9,9 @@
   Its own ``next`` was removed so that pagination ends after two pages, and its
   last row (a championship market) comes from a later real page.
 * ``events.json`` -- ``GET /v3/public/catalog/events/<eventId>``, keyed by id.
-* ``books.json`` -- ``GET /v3/public/catalog/markets/<marketId>/book``, keyed by
-  market id.  Most books are one-sided or empty because that is what the venue
-  returned.
+* ``batch.json`` -- ``GET https://api.novig.us/nbx/v1/markets/book/batch``
+  ``?marketIds=<the 20 player markets above>&currency=CASH``, verbatim.  Most
+  books are one-sided because that is what the venue returned.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ class Response:
         if self.status_code >= 400:
             import requests
 
-            raise requests.HTTPError(f"HTTP {self.status_code}")
+            raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
 
     def json(self) -> object:
         return self._payload
@@ -54,7 +54,9 @@ class Response:
 class ReplaySession:
     """Serve recorded Novig responses by URL, safely from several threads.
 
-    ``failures`` maps a URL suffix to the exception to raise or the HTTP status
+    ``stale`` ids make any batch request containing one answer 404 (what Novig
+    does for a settled or removed market); ``unreadable`` ids make it answer
+    403.  ``failures`` maps a URL suffix to the exception to raise or the HTTP status
     to answer for any request whose URL ends with it; ``later_page_failure``
     does the same for market-list requests that carry an ``after`` cursor.
     """
@@ -64,7 +66,9 @@ class ReplaySession:
         *,
         pages: list[Any] | None = None,
         events: dict[str, Any] | None = None,
-        books: dict[str, Any] | None = None,
+        batch: list[Any] | None = None,
+        stale: set[str] | None = None,
+        unreadable: set[str] | None = None,
         failures: dict[str, BaseException | int] | None = None,
         later_page_failure: BaseException | int | None = None,
     ) -> None:
@@ -73,7 +77,9 @@ class ReplaySession:
             load("markets.page2.json"),
         ]
         self.events = events if events is not None else load("events.json")
-        self.books = books if books is not None else load("books.json")
+        self.batch = batch if batch is not None else load("batch.json")
+        self.stale = stale or set()
+        self.unreadable = unreadable or set()
         self.failures = failures or {}
         self.later_page_failure = later_page_failure
         self.headers: dict[str, str] = {}
@@ -93,14 +99,20 @@ class ReplaySession:
             raise failure
         if failure is not None:
             return Response({"code": "ERROR"}, status_code=failure)
+        if url == NovigAdapter.BATCH_BOOK_URL:
+            ids = params["marketIds"].split(",")
+            if self.unreadable.intersection(ids):
+                return Response({"code": "FORBIDDEN"}, status_code=403)
+            if self.stale.intersection(ids):
+                return Response({"code": "NOT_FOUND"}, status_code=404)
+            wanted = set(ids)
+            return Response([e for e in self.batch if e["market"]["id"] in wanted])
         marker = "/v3/public/catalog/"
         path = url.split(marker, 1)[1]
         if path == "markets":
             return Response(self._page(params or {}))
         if path.startswith("events/"):
             return Response(self.events[path.removeprefix("events/")])
-        if path.startswith("markets/") and path.endswith("/book"):
-            return Response(self.books[path.removeprefix("markets/").removesuffix("/book")])
         raise AssertionError(f"unrecorded request {url}")
 
     def _page(self, params: dict[str, Any]) -> Any:
@@ -117,11 +129,10 @@ class ReplaySession:
 
 
 def adapter(session: ReplaySession | None = None, **overrides: Any) -> NovigAdapter:
-    """A replayed adapter: fixed clock, no request pacing."""
+    """A replayed adapter with a fixed clock."""
 
     options: dict[str, Any] = {
         "session": session or ReplaySession(),
-        "request_interval_seconds": 0,
         "now": lambda: OBSERVED_AT,
     }
     options.update(overrides)

@@ -1,32 +1,31 @@
 """Novig adapter for the shared NBA DFS snapshot contract.
 
 Novig is a prediction exchange.  Its unauthenticated ``/v3/public`` reads give a
-market list (one over/under market per player, statistic, game and strike), an
-event read (teams and start time) and, per market, a resting-order book.
+market list (one over/under market per player, statistic, game and strike) and
+an event read (teams and start time).  The web app's batch book endpoint
+(``api.novig.us/nbx/v1/markets/book/batch``) gives, for up to 150 markets per
+call, each market's player identity and its resting orders per outcome.
 
-Prices are derived from the book as ``docs/ARCHITECTURE.md`` states: the book
+Prices are derived from the bids as ``docs/ARCHITECTURE.md`` states: the book
 lists resting *buys* per outcome, so the ask for a side is one minus the best
 bid on the opposite side, and the selection's decimal price is ``1 / ask``.  A
-market whose book cannot be read, or has no bid on one side, is retained
-unpriced.
+market with no bid on one side is retained unpriced.  A market the batch
+endpoint no longer serves (settled or removed) is excluded; a market whose
+batch could not be read has no player identity and is a malformed record.
 
 An exchange lists a ladder of strikes per player and statistic.  Exactly one
 strike per (player, statistic, game) is the ``standard`` line: the one whose
 Over midpoint ``(best Over bid + Over ask) / 2`` is nearest 0.5, ties to the
 lower strike.  Every other strike is ``alternate``.  When no strike has a
 midpoint a lone strike is standard and several are all alternate, and when a
-book fetch failed the group is undetermined, so no strike is standard: the
-adapter does not guess.
+market of the same game and statistic could not be read the group is
+undetermined, so no strike is standard: the adapter does not guess.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 import logging
-import re
-import threading
-import time
-import unicodedata
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -128,13 +127,13 @@ _NON_GAME_MARKET_TYPES = frozenset(
     }
 )
 
-_DESCRIPTION = re.compile(
-    r"^(?P<name>.+?) (?P<strike>-?\d+(?:\.\d+)?) (?P<type>[A-Z][A-Z0-9_]*)$"
-)
 _PRICE_PLACES = Decimal("0.000001")
 _HALF = Decimal("0.5")
 _ONE = Decimal(1)
 _PREGAME_EVENT_STATUS = "OPEN_PREGAME"
+_BATCH_BOOK_URL = "https://api.novig.us/nbx/v1/markets/book/batch"
+# The batch URL carries every id, and 500 ids answer 414; 200 answer 200.
+_BATCH_SIZE = 150
 
 
 class _MalformedPayload(MalformedProviderResponseError):
@@ -143,12 +142,13 @@ class _MalformedPayload(MalformedProviderResponseError):
 
 @dataclass(frozen=True, slots=True)
 class _Candidate:
-    """One in-scope Novig player market, before event and book evidence."""
+    """One in-scope Novig statistic market from the catalog.
+
+    The player is not here: only the batch book names it.
+    """
 
     market_id: str
     event_id: str
-    player_name: str
-    player_id: str
     statistic_label: str
     strike: Decimal
     strike_text: str
@@ -168,9 +168,18 @@ class _Event:
 
 @dataclass(frozen=True, slots=True)
 class _Book:
-    """The best resting buy per outcome id; an outcome with none is absent."""
+    """One market's player (None for a non-player market) and best bids."""
 
+    player_id: str | None
+    player_name: str | None
     best_bids: Mapping[str, Decimal]
+
+
+class _Dropped:
+    """The batch endpoint no longer serves this market."""
+
+
+_DROPPED = _Dropped()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,40 +195,20 @@ class _Quote:
         return (self.over_bid + self.over_ask) / 2
 
 
-class _Pacer:
-    """Space request starts, because Novig's public bucket is small.
-
-    Probed 2026-10-15: roughly 3 requests per second sustained after a burst of
-    about 12; faster callers get ``429``.  One pacer serves every request an
-    adapter makes, so concurrent board retrievals share it.
-    """
-
-    def __init__(self, interval_seconds: float) -> None:
-        self.interval = float(interval_seconds)
-        self._lock = threading.Lock()
-        self._next_start = 0.0
-
-    def reserve(self, remaining_seconds: float) -> float | None:
-        """Return seconds to wait before starting, or None if past the deadline."""
-
-        if self.interval <= 0:
-            return 0.0
-        with self._lock:
-            now = time.monotonic()
-            start = max(now, self._next_start)
-            if start - now >= remaining_seconds:
-                return None
-            self._next_start = start + self.interval
-            return start - now
-
-
 def _build_session(pool_size: int) -> requests.Session:
     session = requests.Session()
     session.mount(
         "https://",
-        requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=pool_size),
+        requests.adapters.HTTPAdapter(pool_connections=2, pool_maxsize=pool_size),
     )
     return session
+
+
+def _http_status(error: BaseException) -> int | None:
+    cause = error.__cause__
+    response = getattr(cause, "response", None)
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
 
 
 class NovigAdapter:
@@ -231,20 +220,22 @@ class NovigAdapter:
 
     name = "novig"
     BASE_URL = "https://api.novig.com/v3/public"
-    # Novig occasionally answers non-browser clients with 403; a browser-like
-    # agent is what the web app itself sends.
+    BATCH_BOOK_URL = _BATCH_BOOK_URL
+    # Novig answers non-browser clients with 403 where these succeed.
     DEFAULT_HEADERS = {
         "Accept": "application/json",
+        "Origin": "https://novig.com",
+        "Referer": "https://novig.com/",
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
         ),
     }
     DEFAULT_TIMEOUT = (3.0, 8.0)
     PAGE_LIMIT = 200
     MAX_PAGES = 25
+    BATCH_SIZE = _BATCH_SIZE
     MAX_DETAIL_CONCURRENCY = 4
-    DEFAULT_REQUEST_INTERVAL_SECONDS = 0.3
 
     def __init__(
         self,
@@ -252,18 +243,14 @@ class NovigAdapter:
         session: requests.Session | Any | None = None,
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
         detail_concurrency: int = MAX_DETAIL_CONCURRENCY,
-        request_interval_seconds: float = DEFAULT_REQUEST_INTERVAL_SECONDS,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         if detail_concurrency < 1:
             raise ValueError("detail_concurrency must be at least 1")
-        if request_interval_seconds < 0:
-            raise ValueError("request_interval_seconds must not be negative")
         self.detail_concurrency = min(detail_concurrency, self.MAX_DETAIL_CONCURRENCY)
         self.session = session or _build_session(self.detail_concurrency + 1)
         self.timeout = timeout
         self.now = now or (lambda: datetime.now(timezone.utc))
-        self._pacer = _Pacer(request_interval_seconds)
         self.session.headers.update(self.DEFAULT_HEADERS)
 
     # ------------------------------------------------------------------ flow
@@ -282,11 +269,10 @@ class NovigAdapter:
 
         records = _RecordCoverageAccumulator()
         outcomes: list[tuple[Any, _Candidate | Exception]] = []
-        allowed_statuses = query.market_statuses
         for row in rows:
             try:
                 outcomes.append(
-                    (row, self._classify(row, query.sport, allowed_statuses))
+                    (row, self._classify(row, query.market_statuses))
                 )
             except (CoverageRecordExcluded, CoverageRecordMalformed) as error:
                 outcomes.append((row, error))
@@ -300,8 +286,8 @@ class NovigAdapter:
             for candidate in candidates
             if self._event_problem(events.get(candidate.event_id)) is None
         ]
-        books, book_errors = self._fetch_books(context, usable)
-        variants = self._choose_variants(usable, books)
+        books, unread = self._fetch_books(context, usable)
+        variants = self._choose_variants(usable, books, unread)
 
         collection = _SnapshotMarketCollector()
         for row, result in outcomes:
@@ -311,6 +297,7 @@ class NovigAdapter:
                     item[1],
                     events=events,
                     books=books,
+                    unread=unread,
                     variants=variants,
                 ),
                 on_success=collection.add,
@@ -318,11 +305,10 @@ class NovigAdapter:
 
         fanout_codes: list[CoverageCode] = []
         fanout_details: list[str] = []
-        if book_errors:
+        if unread:
             fanout_codes.append(CoverageCode.FIXTURE_FAILED)
             fanout_details.append(
-                f"novig book unavailable for {len(book_errors)} of "
-                f"{len(usable)} markets"
+                f"novig book unavailable for {len(unread)} of {len(usable)} markets"
             )
         batch = _NormalizedBatch.from_accumulator(
             records,
@@ -334,6 +320,8 @@ class NovigAdapter:
                 {candidate.event_id for candidate in candidates}
             ):
                 raise next(iter(event_errors.values()))
+            if unread and len(unread) == len(usable):
+                raise next(iter(unread.values()))
             raise self._invalid_response("no usable Novig player markets")
         return _build_snapshot(
             provider=self.name,
@@ -344,7 +332,7 @@ class NovigAdapter:
             normalized_count=batch.normalized_count,
             skipped_count=batch.skipped_count,
             pagination_complete=pagination_complete,
-            fanout_complete=not batch.malformed_count and not book_errors,
+            fanout_complete=not batch.malformed_count and not unread,
             expected_total=None,
             warning_codes=batch.warning_codes,
             skipped_reasons=batch.skipped_reasons,
@@ -360,7 +348,7 @@ class NovigAdapter:
     def _get(
         self,
         context: RetrievalContext,
-        path: str,
+        url: str,
         *,
         operation: str,
         params: Mapping[str, Any] | None,
@@ -370,7 +358,7 @@ class NovigAdapter:
             return request_json(
                 context=context,
                 session=self.session,
-                url=f"{self.BASE_URL}{path}",
+                url=url,
                 params=params,
                 timeout=self.timeout,
                 now=self._now_utc,
@@ -381,27 +369,6 @@ class NovigAdapter:
             )
         except ProviderResponseError as error:
             raise _MalformedPayload(str(error)) from error
-
-    def _paced_get(
-        self,
-        context: RetrievalContext,
-        path: str,
-        *,
-        operation: str,
-        params: Mapping[str, Any] | None,
-        parse: Callable[[Any], Any],
-    ) -> Any:
-        wait = self._pacer.reserve(context.remaining_seconds(now=self._now_utc()))
-        if wait is None:
-            raise ProviderUnavailableError(
-                _NOVIG_TRANSPORT_POLICY.deadline_message,
-                provider_reason="deadline_exceeded",
-            )
-        if wait > 0:
-            time.sleep(wait)
-        return self._get(
-            context, path, operation=operation, params=params, parse=parse
-        )
 
     def _fetch_catalog(
         self, context: RetrievalContext
@@ -416,7 +383,7 @@ class NovigAdapter:
             try:
                 items, cursor = self._get(
                     context,
-                    "/catalog/markets",
+                    f"{self.BASE_URL}/catalog/markets",
                     operation="market_page",
                     params=params,
                     parse=self._parse_page,
@@ -477,13 +444,11 @@ class NovigAdapter:
         event_ids = list(dict.fromkeys(c.event_id for c in candidates))
         events: dict[str, _Event] = {}
         errors: dict[str, ProviderUnavailableError] = {}
-        if not event_ids:
-            return events, errors
 
         def fetch(event_id: str) -> _Event:
-            return self._paced_get(
+            return self._get(
                 context,
-                f"/catalog/events/{event_id}",
+                f"{self.BASE_URL}/catalog/events/{event_id}",
                 operation="event_detail",
                 params=None,
                 parse=lambda payload: self._parse_event(payload, event_id),
@@ -498,37 +463,69 @@ class NovigAdapter:
 
     def _fetch_books(
         self, context: RetrievalContext, candidates: list[_Candidate]
-    ) -> tuple[dict[str, _Book], dict[str, ProviderUnavailableError]]:
-        books: dict[str, _Book] = {}
-        errors: dict[str, ProviderUnavailableError] = {}
-        # Whole ladders first, so the strikes of one player are priced together
-        # before the deadline cuts the rest off.
-        ordered = sorted(
-            candidates, key=lambda c: (c.event_id, c.player_id, c.statistic_label)
-        )
+    ) -> tuple[dict[str, _Book | _Dropped], dict[str, ProviderUnavailableError]]:
+        """Read every candidate's book in batches.
 
-        def fetch(candidate: _Candidate) -> _Book:
-            return self._paced_get(
+        A market the endpoint does not return, or answers 404 for alone, is
+        ``_DROPPED``.  A market whose request failed any other way is
+        ``unread``: it has no player identity, and its siblings' standard line
+        is therefore unknowable.
+        """
+
+        by_id = {candidate.market_id: candidate for candidate in candidates}
+        ordered = sorted(
+            candidates, key=lambda c: (c.event_id, c.statistic_label, c.strike)
+        )
+        batches = [
+            [c.market_id for c in ordered[start : start + self.BATCH_SIZE]]
+            for start in range(0, len(ordered), self.BATCH_SIZE)
+        ]
+        books: dict[str, _Book | _Dropped] = {}
+        unread: dict[str, ProviderUnavailableError] = {}
+
+        def fetch_batch(ids: list[str]) -> dict[str, _Book]:
+            return self._get(
                 context,
-                f"/catalog/markets/{candidate.market_id}/book",
-                operation="market_book",
-                params={"depth": 1},
-                parse=self._parse_book,
+                self.BATCH_BOOK_URL,
+                operation="market_book_batch",
+                params={"marketIds": ",".join(ids), "currency": "CASH"},
+                parse=self._parse_batch,
             )
 
-        for candidate, result in self._fan_out(ordered, fetch):
-            if isinstance(result, _Book) and not set(result.best_bids) <= {
-                candidate.over_id,
-                candidate.under_id,
-            }:
-                result = self._invalid_response(
-                    "book names an outcome the market does not have"
-                )
-            if isinstance(result, _Book):
-                books[candidate.market_id] = result
-            else:
-                errors[candidate.market_id] = result
-        return books, errors
+        def read(ids: list[str]) -> dict[str, _Book | _Dropped | Exception]:
+            try:
+                served = fetch_batch(ids)
+                return {i: served.get(i, _DROPPED) for i in ids}
+            except ProviderUnavailableError as error:
+                status = _http_status(error)
+                if status != 404:
+                    return {i: error for i in ids}
+                if len(ids) == 1:
+                    return {ids[0]: _DROPPED}
+                # One settled or removed market answers 404 for the whole
+                # batch; asking per market drops only the stale one.
+            except _MalformedPayload as error:
+                return {i: self._invalid_response(error) for i in ids}
+            result: dict[str, _Book | _Dropped | Exception] = {}
+            for market_id in ids:
+                result.update(read([market_id]))
+            return result
+
+        for _, result in self._fan_out(batches, read):
+            for market_id, value in result.items():
+                candidate = by_id[market_id]
+                if isinstance(value, Exception):
+                    unread[market_id] = value
+                elif isinstance(value, _Book) and not set(value.best_bids) <= {
+                    candidate.over_id,
+                    candidate.under_id,
+                }:
+                    unread[market_id] = self._invalid_response(
+                        "book names an outcome the market does not have"
+                    )
+                else:
+                    books[market_id] = value
+        return books, unread
 
     def _fan_out(self, items: list[Any], fetch: Callable[[Any], Any]):
         """Run ``fetch`` over ``items`` with bounded workers, in item order.
@@ -596,36 +593,57 @@ class NovigAdapter:
         )
 
     @staticmethod
-    def _parse_book(payload: Any) -> _Book:
-        if not isinstance(payload, Mapping):
-            raise _MalformedPayload("book must be an object")
-        orders = payload.get("orders")
-        if not isinstance(orders, Mapping):
-            raise _MalformedPayload("book orders must be an object")
-        best: dict[str, Decimal] = {}
-        for outcome_id, levels in orders.items():
-            if not isinstance(levels, list):
-                raise _MalformedPayload("book outcome orders must be a list")
-            for order in levels:
-                if not isinstance(order, Mapping):
-                    raise _MalformedPayload("book order must be an object")
-                price = order.get("price")
-                quantity = order.get("qty")
-                if isinstance(price, bool) or not isinstance(price, (str, int, float)):
-                    raise _MalformedPayload("book price must be numeric")
-                if isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
-                    raise _MalformedPayload("book qty must be numeric")
-                try:
-                    value = Decimal(str(price))
-                except InvalidOperation as error:
-                    raise _MalformedPayload("book price must be numeric") from error
-                if not value.is_finite() or not 0 < value < 1:
-                    raise _MalformedPayload("book price must be between 0 and 1")
-                if quantity <= 0:
-                    continue
-                if value > best.get(str(outcome_id), Decimal(0)):
-                    best[str(outcome_id)] = value
-        return _Book(best_bids=best)
+    def _parse_batch(payload: Any) -> dict[str, _Book]:
+        if not isinstance(payload, list):
+            raise _MalformedPayload("batch book must be a list")
+        served: dict[str, _Book] = {}
+        for entry in payload:
+            if not isinstance(entry, Mapping):
+                raise _MalformedPayload("batch book entry must be an object")
+            market = entry.get("market")
+            ladders = entry.get("ladders")
+            if not isinstance(market, Mapping) or not isinstance(ladders, Mapping):
+                raise _MalformedPayload("batch book entry needs market and ladders")
+            market_id = market.get("id")
+            if not isinstance(market_id, str) or not market_id:
+                raise _MalformedPayload("batch book market id must be present")
+            player = market.get("player")
+            player_id = player_name = None
+            if player is not None:
+                if not isinstance(player, Mapping):
+                    raise _MalformedPayload("batch book player must be an object")
+                player_id = optional_text(player.get("id"))
+                player_name = optional_text(player.get("fullName"))
+                if player_id is None or player_name is None:
+                    raise _MalformedPayload("batch book player needs id and fullName")
+            best: dict[str, Decimal] = {}
+            for outcome_id, ladder in ladders.items():
+                if not isinstance(ladder, Mapping) or not isinstance(
+                    ladder.get("bids"), list
+                ):
+                    raise _MalformedPayload("batch book ladder needs a bids list")
+                for bid in ladder["bids"]:
+                    if not isinstance(bid, Mapping):
+                        raise _MalformedPayload("batch book bid must be an object")
+                    price, quantity = bid.get("price"), bid.get("qty")
+                    if isinstance(price, bool) or not isinstance(price, (int, float, str)):
+                        raise _MalformedPayload("batch book price must be numeric")
+                    if isinstance(quantity, bool) or not isinstance(
+                        quantity, (int, float)
+                    ):
+                        raise _MalformedPayload("batch book qty must be numeric")
+                    try:
+                        value = Decimal(str(price))
+                    except InvalidOperation as error:
+                        raise _MalformedPayload("batch book price must be numeric") from error
+                    if not value.is_finite() or not 0 < value < 1:
+                        raise _MalformedPayload("batch book price must be between 0 and 1")
+                    if quantity <= 0 or bid.get("status", "OPEN") != "OPEN":
+                        continue
+                    if value > best.get(str(outcome_id), Decimal(0)):
+                        best[str(outcome_id)] = value
+            served[market_id] = _Book(player_id, player_name, best)
+        return served
 
     # --------------------------------------------------------- normalization
 
@@ -633,7 +651,6 @@ class NovigAdapter:
     def _classify(
         cls,
         row: Any,
-        expected_sport: str,
         allowed_statuses: tuple[MarketStatus | str, ...],
     ) -> _Candidate:
         if not isinstance(row, Mapping):
@@ -654,22 +671,8 @@ class NovigAdapter:
         if status not in allowed_statuses:
             raise CoverageRecordExcluded(CoverageCode.STATUS_FILTER)
 
-        description = required_text(row, "description")
-        match = _DESCRIPTION.match(description)
-        if match is None or match["type"] != market_type:
-            raise CoverageRecordMalformed(
-                "description must be '<name> <strike> <market type>'"
-            )
         required_number(row, "strike")
         strike_text = str(row["strike"])
-        strike = Decimal(strike_text)
-        if Decimal(match["strike"]) != strike:
-            raise CoverageRecordMalformed("description strike conflicts with strike")
-        player_name = match["name"].strip()
-        player_id = cls._player_id(player_name)
-        if not player_id:
-            raise CoverageRecordMalformed("player name must be present")
-
         outcomes = row.get("outcomes")
         if not isinstance(outcomes, list):
             raise CoverageRecordMalformed("market outcomes must be a list")
@@ -692,10 +695,8 @@ class NovigAdapter:
         return _Candidate(
             market_id=market_id,
             event_id=required_identifier(row, "eventId"),
-            player_name=player_name,
-            player_id=player_id,
             statistic_label=market_type,
-            strike=strike,
+            strike=Decimal(strike_text),
             strike_text=strike_text,
             status=MarketStatus(status),
             status_label=raw_status,
@@ -704,14 +705,6 @@ class NovigAdapter:
             under_id=sides["under"][0],
             under_label=sides["under"][1],
         )
-
-    @staticmethod
-    def _player_id(name: str) -> str:
-        """Novig has no player id, so the provider id is the normalized name."""
-
-        folded = unicodedata.normalize("NFKD", name).casefold()
-        letters = "".join(c for c in folded if not unicodedata.combining(c))
-        return re.sub(r"[^a-z0-9]+", "-", letters).strip("-")
 
     @staticmethod
     def _event_problem(event: _Event | None) -> CoverageCode | None:
@@ -742,18 +735,35 @@ class NovigAdapter:
     def _choose_variants(
         self,
         candidates: list[_Candidate],
-        books: Mapping[str, _Book],
+        books: Mapping[str, _Book | _Dropped],
+        unread: Mapping[str, ProviderUnavailableError],
     ) -> dict[str, MarketVariant]:
-        """Pick the one standard strike per (player, statistic, game)."""
+        """Pick the one standard strike per (player, statistic, game).
 
+        Only markets whose player is known can be grouped.  A market that could
+        not be read might belong to any group of its game and statistic, so
+        those groups are undetermined.
+        """
+
+        undetermined = {
+            (c.event_id, c.statistic_label)
+            for c in candidates
+            if c.market_id in unread
+        }
         groups: dict[tuple[str, str, str], list[_Candidate]] = defaultdict(list)
         for candidate in candidates:
-            groups[
-                (candidate.event_id, candidate.player_id, candidate.statistic_label)
-            ].append(candidate)
+            book = books.get(candidate.market_id)
+            if isinstance(book, _Book) and book.player_id is not None:
+                groups[
+                    (candidate.event_id, book.player_id, candidate.statistic_label)
+                ].append(candidate)
         variants: dict[str, MarketVariant] = {}
-        for members in groups.values():
-            standard = self._standard_member(members, books)
+        for (event_id, _player, label), members in groups.items():
+            standard = (
+                None
+                if (event_id, label) in undetermined
+                else self._standard_member(members, books)
+            )
             for member in members:
                 variants[member.market_id] = (
                     MarketVariant.STANDARD
@@ -765,17 +775,13 @@ class NovigAdapter:
     def _standard_member(
         self,
         members: list[_Candidate],
-        books: Mapping[str, _Book],
+        books: Mapping[str, _Book | _Dropped],
     ) -> _Candidate | None:
         if len(members) == 1:
             return members[0]
         midpoints: dict[str, Decimal] = {}
         for member in members:
-            book = books.get(member.market_id)
-            if book is None:
-                # A book we could not read might have held the standard line.
-                return None
-            quote = self._quote(member, book)
+            quote = self._quote(member, books[member.market_id])  # type: ignore[arg-type]
             if quote is not None:
                 midpoints[member.market_id] = quote.over_midpoint
         if not midpoints:
@@ -790,7 +796,8 @@ class NovigAdapter:
         result: _Candidate | Exception,
         *,
         events: Mapping[str, _Event],
-        books: Mapping[str, _Book],
+        books: Mapping[str, _Book | _Dropped],
+        unread: Mapping[str, ProviderUnavailableError],
         variants: Mapping[str, MarketVariant],
     ) -> PlayerProjectionMarket:
         if isinstance(result, Exception):
@@ -805,16 +812,24 @@ class NovigAdapter:
             raise CoverageRecordExcluded(problem)
         event = events[candidate.event_id].evidence
 
-        book = books.get(candidate.market_id)
-        quote = None if book is None else self._quote(candidate, book)
+        if candidate.market_id in unread:
+            raise CoverageRecordMalformed(
+                "market book unavailable", code=CoverageCode.FIXTURE_FAILED
+            )
+        book = books[candidate.market_id]
+        if isinstance(book, _Dropped):
+            raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS)
+        if book.player_id is None or book.player_name is None:
+            raise CoverageRecordExcluded(CoverageCode.NON_PLAYER_MARKET)
+        quote = self._quote(candidate, book)
         variant = variants[candidate.market_id]
         try:
             return PlayerProjectionMarket(
                 provider=self.name,
                 market_id=candidate.market_id,
                 athlete=AthleteEvidence(
-                    provider_id=candidate.player_id,
-                    name=candidate.player_name,
+                    provider_id=book.player_id,
+                    name=book.player_name,
                 ),
                 event=event,
                 league=LeagueEvidence(label="NBA"),
