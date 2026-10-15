@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ if __package__ in {None, ""}:
 from sqlalchemy import create_engine
 from app.services.player_shooting_refresh import PlayerShootingRefresh, active_manifest_season
 from app.utils.db import _normalize_database_url, is_demo_database_url
+
+logger = logging.getLogger(__name__)
 
 
 def _composer(engine):
@@ -30,6 +33,38 @@ def _composer(engine):
         governance=ActiveManifestLedgerGovernanceReader(engine),
         matchup_materialization=dependencies.ledger_matchup_materialization_service,
     )
+
+
+def _precompute_target_backtests():
+    """Fill the saved-Target Backtest result cache after the tick (#363).
+
+    The tick is the scheduled caller that advances publication pointers, and
+    this step only fills keys that are missing, so running it on every
+    invocation covers this tick's compositions, an operator's or admin
+    route's since the last one, and entries the TTL expired.  It never
+    raises: its failure leaves the tick's output and exit status alone.
+    """
+
+    try:
+        from app.config.settings import load_settings
+        from app.dependencies import build_dependencies
+        from app.services.target_backtest import log_precompute_skipped
+        from app.utils.json_logging import configure_json_logging
+
+        settings = load_settings()
+        configure_json_logging(settings.log_level)
+        # Checked before building dependencies, which ping Redis.
+        if not settings.cache.enabled:
+            log_precompute_skipped("ENABLE_CACHE=false")
+            return
+        if not settings.cache.target_backtest_enabled:
+            log_precompute_skipped("TARGET_BACKTEST_CACHE_ENABLED=false")
+            return
+        build_dependencies(settings).target_backtest_service.precompute(
+            now=datetime.now(timezone.utc)
+        )
+    except Exception:
+        logger.exception("target_backtest_precompute failed")
 
 
 def main(argv=None):
@@ -52,10 +87,11 @@ def main(argv=None):
                 engine, composer_factory=lambda: _composer(engine),
                 clock=lambda: datetime.now(timezone.utc),
             ).tick(season)
-        print(json.dumps(result, sort_keys=True))
+        print(json.dumps(result, sort_keys=True), flush=True)
         return 0
     finally:
         engine.dispose()
+        _precompute_target_backtests()
 
 
 if __name__ == "__main__":

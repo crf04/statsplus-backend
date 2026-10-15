@@ -385,9 +385,19 @@ cannot drive this successful multi-stage handshake.
 
 Inside or outside the issuance window, already accepted queued composition
 jobs use the existing fenced `LedgerRuntime.compose_queued` path. That includes
-already-authorized sibling jobs; it never invokes provider refresh. Idle ticks
-do not construct the application/provider dependency graph. The worker does
-not call NBA endpoints or replace the residential collector.
+already-authorized sibling jobs; it never invokes provider refresh. The tick
+itself never constructs the application/provider dependency graph when idle.
+The worker does not call NBA endpoints or replace the residential collector.
+
+After every tick, whatever its state, the command fills the saved-Target
+Backtest result cache for Targets whose owners logged in within 14 days (#363;
+see `TargetBacktestService.precompute` in [ARCHITECTURE.md](ARCHITECTURE.md)).
+That step builds the dependency graph without calling any provider, stops
+after `TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default 180), and logs one
+`target_backtest_precompute` line. The service needs `REDIS_URL`. A
+`target_backtest_precompute skipped reason=cache_disabled` line means it has
+no cache to fill. A failure of the step leaves the tick's JSON and exit status
+unchanged.
 
 
 ## Governed player Synergy repair

@@ -947,6 +947,34 @@ class UserService:
         )
         return [row.to_dict() for row in rows]
 
+    def list_recently_used_targets(self, since: datetime) -> List[Dict[str, Any]]:
+        """Return every account's Targets whose owner logged in at or after ``since``.
+
+        No Target records when it was last read, so the owner's
+        ``last_login`` stands in: every authenticated read touches it (at
+        most every 15 minutes), so this set includes every Target read since
+        then.  Ordered by the owner's ``last_login``, then the Target's
+        ``updated_at``, newest first -- the order the saved-Target Backtest
+        precompute (#363) fills the result cache in.
+        """
+
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(Target)
+                .join(User, User.firebase_uid == Target.firebase_uid)
+                .filter(User.last_login >= since)
+                .order_by(
+                    User.last_login.desc(),
+                    Target.updated_at.desc(),
+                    Target.id.desc(),
+                )
+                .all()
+            )
+            return [row.to_dict() for row in rows]
+        finally:
+            session.close()
+
     def get_target(self, firebase_uid: str, target_id: int) -> Dict[str, Any]:
         """Return one of the caller's targets, or report it missing."""
 

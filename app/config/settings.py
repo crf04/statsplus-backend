@@ -167,6 +167,9 @@ class CacheSettings(BaseModel):
     # generation, TTL-cleared, and switched off entirely under its own flag.
     target_backtest_enabled: bool = True
     target_backtest_ttl_seconds: int = Field(default=86400, ge=1)
+    # The cron precompute that fills the result cache after a publication
+    # (#363) stops between Targets once this many seconds have passed.
+    target_backtest_precompute_budget_seconds: int = Field(default=180, ge=0)
 
 
 class FeatureSettings(BaseModel):
@@ -834,6 +837,9 @@ def _build_settings(
         ),
         target_backtest_ttl_seconds=reader.integer(
             "TARGET_BACKTEST_CACHE_TTL_SECONDS", 86400
+        ),
+        target_backtest_precompute_budget_seconds=reader.integer(
+            "TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS", 180
         ),
     )
     features = _validated_model(
