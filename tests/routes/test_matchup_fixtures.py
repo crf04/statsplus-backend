@@ -58,6 +58,7 @@ from app.providers.dfs import (
     CoverageEvidence,
     EventEvidence,
     MarketStatus,
+    MarketThreshold,
     MarketVariant,
     NBAMarketQuery,
     PlayerProjectionMarket,
@@ -178,7 +179,7 @@ class TeamMatchupRepository(_ProductionTeamMatchupRepository):
         super().__init__(engine, **kwargs)
 
 
-def _recorded_projection_snapshot(catalog, *, provider="dabble"):
+def _recorded_projection_snapshot(catalog, *, provider="dabble", threshold=None):
     statistic = catalog.by_id["points"]
     evidence = StatisticEvidence(
         provider_id="pts",
@@ -211,6 +212,11 @@ def _recorded_projection_snapshot(catalog, *, provider="dabble"):
                     scoring_period=ScoringPeriod.FULL_GAME,
                     canonical=statistic,
                     provider=provider,
+                ),
+                threshold=(
+                    None
+                    if threshold is None
+                    else MarketThreshold(threshold, "count")
                 ),
                 status=MarketStatus.AVAILABLE,
                 variant=MarketVariant.STANDARD,
@@ -3964,6 +3970,24 @@ def test_authenticated_final_matchup_with_archived_projections_stays_current(
     assert [player["canonical_id"] for player in payload["players"]] == [2544]
     assert payload["players"][0]["player_source"] == "player_pool"
     assert payload["players"][0]["focal_game_line"] is None
+
+
+def test_authenticated_live_matchup_serves_the_recorded_posted_line(
+    projection_route_context,
+):
+    context = projection_route_context
+    context.assembled.projection_recorder.record_complete_snapshot(
+        _recorded_projection_snapshot(context.catalog, threshold="27.5"),
+        query=NBAMarketQuery(season=SEASON),
+        accepted_at=NOW,
+    )
+
+    response = context.client.get(f"/api/games/matchup?game_id={GAME_ID}")
+
+    assert response.status_code == 200
+    (player,) = response.get_json()["players"]
+    assert player["provenance"] == {"dabble": ["PTS"]}
+    assert player["lines"] == {"dabble": {"PTS": 27.5}}
 
 
 def test_authenticated_live_matchup_declares_the_current_experience(

@@ -27,7 +27,7 @@ def test_upgrade_creates_the_four_tables_and_a_rerun_applies_nothing(tmp_path):
     first = run_migrations(engine)
     second = run_migrations(engine)
 
-    assert first.current_version == 63 and "063_sportsbook_odds" in first.applied
+    assert first.current_version == 64 and "063_sportsbook_odds" in first.applied
     assert second.applied == ()
     assert _tables(engine) == TABLES
     columns = {c["name"] for c in inspect(engine).get_columns("sportsbook_prop_latest")}
@@ -63,8 +63,8 @@ def test_downgrade_drops_only_its_tables_and_upgrade_restores_them(tmp_path):
     assert _tables(engine) == set()
     assert "projection_collection_leases" in inspect(engine).get_table_names()
     with engine.connect() as connection:
-        versions = connection.execute(text("SELECT max(version) FROM schema_migrations")).scalar()
-    assert versions == 62
+        versions = set(connection.execute(text("SELECT version FROM schema_migrations")).scalars())
+    assert 63 not in versions and {62, 64} <= versions
     restored = run_migrations(engine)
     assert restored.applied == ("063_sportsbook_odds",)
     assert _tables(engine) == TABLES

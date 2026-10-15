@@ -182,6 +182,17 @@ columns — so a row archived before migration 046 (whose columns were
 backfilled to `unpriced`) keeps the price its document still carries, and its
 targetability, across the replay.
 
+The market's posted line is stored the same way: `projection_observations` and
+`latest_player_projections` carry `line_value`, the market threshold as a
+number when it is non-negative and null otherwise (migration 064, additive and
+never backfilled). Only targetable rows reach Latest and closing membership, so
+the Player Pool reader folds lines from exactly the targetable markets into
+`PoolPlayer.lines` (`{provider: {market: line}}`). A provider with two distinct
+lines for one player and market in the read pool contributes neither, equal
+lines collapse to one, and a row stored before migration 064 contributes none
+until that provider's next changed snapshot rewrites it. A mapping replay
+re-derives the line from the archived source document, as it does the price.
+
 The canonical archive document carries the triple as schema version 2. A
 document is read back and re-encoded in the version it declares, so every
 snapshot archived before this change keeps its exact bytes and therefore its

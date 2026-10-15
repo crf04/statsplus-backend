@@ -377,6 +377,7 @@ class _Participant:
     provenance: Mapping[str, tuple[str, ...]]
     source: str
     focal_game_line: dict[str, Any] | None = None
+    lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -983,6 +984,7 @@ class MatchupService:
                     market_categories=player.market_categories,
                     provenance=player.provenance,
                     source=PLAYER_POOL_SOURCE,
+                    lines=player.lines,
                 )
                 for player in pool_players
                 if player.canonical_player_id not in injury_result.out_player_ids
@@ -1801,6 +1803,10 @@ class MatchupService:
                     "provenance": {
                         provider: list(categories)
                         for provider, categories in sorted(player.provenance.items())
+                    },
+                    "lines": {
+                        provider: dict(sorted(lines.items()))
+                        for provider, lines in sorted(player.lines.items())
                     },
                     "season_scoring": (
                         None if scoring is None else self._number(scoring)

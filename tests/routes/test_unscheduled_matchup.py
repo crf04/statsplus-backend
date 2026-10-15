@@ -517,6 +517,7 @@ def test_unscheduled_matchup_omits_every_per_game_part(tmp_path):
     assert player["tricode"] == "LAL"
     assert player["player_source"] == "athlete_catalog"
     assert player["provenance"] == {}
+    assert player["lines"] == {}
     assert player["stat_categories"] == sorted(player["scores"])
     # Current-mode blend rules: a scored offensive window keeps its blend and
     # defensive markets carry none.

@@ -384,6 +384,7 @@ def _service(
                     LAL,
                     ("PTS", "FGA"),
                     {"prizepicks": ("PTS", "FGA"), "underdog": ("PTS",)},
+                    lines={"prizepicks": {"PTS": 27.5}, "underdog": {"PTS": 28.0}},
                 ),
             ),
             team_counts={LAL: 1},
@@ -553,6 +554,10 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
         "provenance": {
             "prizepicks": ["PTS", "FGA"],
             "underdog": ["PTS"],
+        },
+        "lines": {
+            "prizepicks": {"PTS": 27.5},
+            "underdog": {"PTS": 28.0},
         },
         "season_scoring": 25.4,
         "last_10_minutes": [31.0, 32.0, 33.0],
@@ -2197,6 +2202,7 @@ def test_historical_participants_come_from_game_logs_on_both_sides():
         # Box-score participants carry no posted-market claim.
         assert player["posted_markets"] == []
         assert player["provenance"] == {}
+        assert player["lines"] == {}
         assert player["injury_badge_ref"] is None
         assert set(player["scores"]) == set(player["stat_categories"])
         assert "PTS" in player["stat_categories"]
