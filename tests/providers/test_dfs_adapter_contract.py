@@ -48,6 +48,7 @@ from app.providers.dfs import (
     ScoringPeriod,
     SnapshotStatus,
 )
+from app.providers.kalshi import SERIES_STATISTIC_LABELS, KalshiAdapter
 from app.providers.prizepicks import PrizePicksAdapter
 from app.providers.registry import (
     PRIZEPICKS_ENTRY_PAYOUT_TABLES,
@@ -252,6 +253,53 @@ def _underdog_failing() -> UnderdogAdapter:
     )
 
 
+def _kalshi_payloads() -> tuple[Any, ...]:
+    """The open-game lookup, then one page per player series, in call order.
+
+    Recorded from Kalshi's historical API for NYK at SAS on 2026-06-13 and
+    reopened; see ``tests/providers/test_kalshi.py`` for the exact recipe.
+    """
+
+    return (
+        _load("kalshi", "open_games.json"),
+        *(_load("kalshi", f"markets.{series}.json") for series in SERIES_STATISTIC_LABELS),
+    )
+
+
+def _kalshi(payloads: tuple[Any, ...] | None = None) -> KalshiAdapter:
+    return KalshiAdapter(
+        session=RecordedSession(*(payloads or _kalshi_payloads())), now=_clock
+    )
+
+
+def _kalshi_empty() -> KalshiAdapter:
+    games, *_series = _kalshi_payloads()
+    return _kalshi(
+        (games, *({"cursor": "", "markets": []} for _ in SERIES_STATISTIC_LABELS))
+    )
+
+
+def _kalshi_partial() -> KalshiAdapter:
+    games, points, *rest = deepcopy(_kalshi_payloads())
+    broken = deepcopy(points["markets"][0])
+    broken["ticker"] = "KXNBAPTS-26JUN13NYKSAS-SASVWEMBANYAMA1-broken"
+    broken["floor_strike"] = "not-a-number"
+    points["markets"].append(broken)
+    return _kalshi((games, points, *rest))
+
+
+def _kalshi_failing() -> KalshiAdapter:
+    return KalshiAdapter(
+        session=RecordedSession(
+            *(
+                requests.ConnectionError("recorded failure")
+                for _ in range(len(SERIES_STATISTIC_LABELS) + 1)
+            )
+        ),
+        now=_clock,
+    )
+
+
 def _fourth_empty() -> FourthAdapter:
     return FourthAdapter(payload={"board": []})
 
@@ -289,6 +337,12 @@ RECORDED_EVIDENCE: dict[str, RecordedEvidence] = {
         empty=_underdog_empty,
         partial=_underdog_partial,
         failing=_underdog_failing,
+    ),
+    "kalshi": RecordedEvidence(
+        complete=_kalshi,
+        empty=_kalshi_empty,
+        partial=_kalshi_partial,
+        failing=_kalshi_failing,
     ),
     FOURTH_PROVIDER_NAME: RecordedEvidence(
         complete=FourthAdapter,

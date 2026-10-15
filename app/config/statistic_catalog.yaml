@@ -21,6 +21,7 @@ statistics:
       dabble: [points]
       prizepicks: [Points]
       underdog: [Points]
+      kalshi: [Points]
   - id: rebounds
     market_category: REB
     label: Rebounds
@@ -31,6 +32,7 @@ statistics:
       dabble: [rebounds]
       prizepicks: [Rebounds]
       underdog: [Rebounds]
+      kalshi: [Rebounds]
   - id: assists
     market_category: AST
     label: Assists
@@ -41,6 +43,7 @@ statistics:
       dabble: [assists]
       prizepicks: [Assists]
       underdog: [Assists]
+      kalshi: [Assists]
   - id: three_pointers_made
     market_category: 3PM
     label: Three-Pointers Made
@@ -51,6 +54,7 @@ statistics:
       dabble: [three-pointers-made, threes, 3PM]
       prizepicks: [3-Pointers Made, Three Pointers Made, 3PM]
       underdog: [3-Pointers Made, Three Pointers Made, 3PM]
+      kalshi: [Three Pointers]
   - id: steals
     market_category: STL
     label: Steals
@@ -61,6 +65,7 @@ statistics:
       dabble: [steals]
       prizepicks: [Steals]
       underdog: [Steals]
+      kalshi: [Steals]
   - id: blocks
     market_category: BLK
     label: Blocks
@@ -71,6 +76,7 @@ statistics:
       dabble: [blocks]
       prizepicks: [Blocks]
       underdog: [Blocks]
+      kalshi: [Blocks]
   - id: turnovers
     market_category: TOV
     label: Turnovers

@@ -170,6 +170,12 @@ def _build_underdog(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
     return UnderdogAdapter(timeout=runtime.timeout)
 
 
+def _build_kalshi(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
+    from app.providers.kalshi import KalshiAdapter
+
+    return KalshiAdapter(timeout=runtime.timeout)
+
+
 # PrizePicks publishes its Power Play payouts as a static table on its own site
 # rather than in the projections API, so the reviewed table is configuration
 # here.  An operator updates it when the provider republishes it; no adapter
@@ -198,6 +204,7 @@ _DEFAULT_REGISTRATIONS: tuple[DFSProviderRegistration, ...] = (
         entry_payout_tables=PRIZEPICKS_ENTRY_PAYOUT_TABLES,
     ),
     DFSProviderRegistration(name="underdog", build=_build_underdog),
+    DFSProviderRegistration(name="kalshi", build=_build_kalshi),
 )
 
 _registrations: tuple[DFSProviderRegistration, ...] = _DEFAULT_REGISTRATIONS

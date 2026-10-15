@@ -3070,6 +3070,7 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
         "dabble": {"status": "closing", "retrieved_at": NOW.isoformat()},
         "prizepicks": {"status": "missing", "retrieved_at": None},
         "underdog": {"status": "missing", "retrieved_at": None},
+        "kalshi": {"status": "missing", "retrieved_at": None},
     }
     assert started_selection.get_json()["freshness"]["player_pool"]["state"] == "closing"
     assert started.get_json()["players"]
@@ -3202,6 +3203,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
         "dabble",
         "prizepicks",
         "underdog",
+        "kalshi",
     }
     assert all_disabled_pool.required_providers == frozenset()
     with engine.connect() as connection:
@@ -3319,6 +3321,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
         "dabble",
         "prizepicks",
         "underdog",
+        "kalshi",
     }
     assert partially_enabled_pool.required_providers == frozenset({"dabble"})
     partially_enabled_recorder.record_complete_snapshot(

@@ -267,10 +267,11 @@ not counted twice:
 | Dabble | `DabbleAdapter` (shared DFS snapshot contract) | Competition discovery, fixture fan-out, and fixture details are upstream invocation events (`competition_lookup`, `competition_fixtures`, `fixture_details`); the bounded snapshot normalization/empty-result decision is an explicit local seam (`snapshot_normalization`). Production requests share one pooled Requests session built once per adapter (pool sized for the capped detail fan-out); explicitly injected sessions serialize only their `get` call. The shared DFS transport owns one safe-GET retry. |
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
+| Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |
 | RotoWire | `RotoWireInjuryProvider` | One league-wide injury-table read with the closed operation `get_injuries`; raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically. |
 
 The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
-context)`. Dabble, PrizePicks, and Underdog accept the same pregame NBA query,
+context)`. Dabble, PrizePicks, Underdog, and Kalshi accept the same pregame NBA query,
 eligible market statuses, and absolute retrieval deadline and return immutable,
 market-centric provider snapshots. Canonical athlete, event, and statistic
 filters remain central because provider IDs are only evidence until later
@@ -281,6 +282,20 @@ without guessing missing facts; they expose no provider-specific public routes.
 `NBAMarketQuery` rejects a non-canonical season before any provider call: the
 two-digit end year must be the calendar year after the four-digit start year,
 so `2024-99` fails at construction rather than reaching an adapter.
+
+Kalshi is a prediction market, so its adapter reshapes a ladder rather than
+reading a board: each player prop is one binary market per `N+` threshold
+(`floor_strike` 39.5 is "40+"), whose Yes side is the Over and whose No side is
+the Under. Each side is priced at `decimal_price = 1 / ask` in selection scope;
+an ask that is absent (`1.0000` is Kalshi's empty ask) leaves both sides
+unpriced. Per (game, statistic, player) the line whose Over midpoint
+`(bid + ask) / 2` is nearest 0.5 is `STANDARD` (the lower line on a tie), and
+every other line is `ALTERNATE`; with no midpoint a lone line is standard and
+several are all alternate. The event ticker `<SERIES>-<YYMONDD><AWAY><HOME>`
+orders the teams away then home, and the game's `KXNBAGAME` milestone supplies
+the tip-off, because a market's `occurrence_datetime` is only an estimate
+(hours after the game) that stays inside the six-hour event match window and
+is used when no milestone is open. An empty venue is a complete empty snapshot.
 
 Every provider number — a `MarketThreshold` value, a `SelectionModifier`
 value, and a selection's decimal price — is converted once, at that single

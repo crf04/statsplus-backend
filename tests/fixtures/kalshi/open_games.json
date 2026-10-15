@@ -1,0 +1,120 @@
+{
+ "cursor": "",
+ "events": [
+  {
+   "category": "Sports",
+   "collateral_return_type": "MECNET",
+   "event_ticker": "KXNBAGAME-26JUN13NYKSAS",
+   "exchange_index": 0,
+   "last_updated_ts": "0001-01-01T00:00:00Z",
+   "mutually_exclusive": true,
+   "product_metadata": {
+    "competition": "Pro Basketball (M)",
+    "competition_scope": "Game"
+   },
+   "series_ticker": "KXNBAGAME",
+   "settlement_sources": [
+    {
+     "name": "the Governing League",
+     "url": "https://www.nba.com"
+    }
+   ],
+   "strike_period": "",
+   "sub_title": "NYK at SAS (Jun 13)",
+   "title": "Game 5: New York at San Antonio"
+  }
+ ],
+ "milestones": [
+  {
+   "category": "Sports",
+   "details": {
+    "away_team_id": "67468ecc-b868-43a4-b9dc-751a52894bb0",
+    "home_team_id": "ad36c3e8-4194-4e63-920f-7c50f46191a6",
+    "is_playoffs": true,
+    "league": "NBA",
+    "main_game_event_ticker": "KXNBAGAME-26JUN13NYKSAS",
+    "series_game_number": "Game 5",
+    "status": "scheduled"
+   },
+   "id": "0d87d1ea-c172-4f70-90b5-00a641f92da6",
+   "last_updated_ts": "2026-06-15T17:40:46.179109Z",
+   "notification_message": "The game is about to begin!",
+   "primary_event_tickers": [
+    "KXNBAGAME-26JUN13NYKSAS",
+    "KXNBASPREAD-26JUN13NYKSAS",
+    "KXNBATOTAL-26JUN13NYKSAS",
+    "KXNBATEAMTOTAL-26JUN13NYKSAS",
+    "KXNBAOVERTIME-26JUN13NYKSAS",
+    "KXNBA1HWINNER-26JUN13NYKSAS",
+    "KXNBA2HWINNER-26JUN13NYKSAS",
+    "KXNBA1HSPREAD-26JUN13NYKSAS",
+    "KXNBA1HTOTAL-26JUN13NYKSAS",
+    "KXNBA2HSPREAD-26JUN13NYKSAS",
+    "KXNBA2HTOTAL-26JUN13NYKSAS",
+    "KXNBA1QWINNER-26JUN13NYKSAS",
+    "KXNBA1QSPREAD-26JUN13NYKSAS",
+    "KXNBA1QTOTAL-26JUN13NYKSAS",
+    "KXNBA2QWINNER-26JUN13NYKSAS",
+    "KXNBA2QSPREAD-26JUN13NYKSAS",
+    "KXNBA2QTOTAL-26JUN13NYKSAS",
+    "KXNBA3QWINNER-26JUN13NYKSAS",
+    "KXNBA3QSPREAD-26JUN13NYKSAS",
+    "KXNBA3QTOTAL-26JUN13NYKSAS",
+    "KXNBA4QWINNER-26JUN13NYKSAS",
+    "KXNBA4QSPREAD-26JUN13NYKSAS",
+    "KXNBA4QTOTAL-26JUN13NYKSAS"
+   ],
+   "related_event_tickers": [
+    "KXNBAGAME-26JUN13NYKSAS",
+    "KXNBASPREAD-26JUN13NYKSAS",
+    "KXNBATOTAL-26JUN13NYKSAS",
+    "KXNBATEAMTOTAL-26JUN13NYKSAS",
+    "KXNBAOVERTIME-26JUN13NYKSAS",
+    "KXNBAMENTION-26JUN13NYKSAS",
+    "KXNBA1HWINNER-26JUN13NYKSAS",
+    "KXNBA2HWINNER-26JUN13NYKSAS",
+    "KXNBAPTS-26JUN13NYKSAS",
+    "KXNBAREB-26JUN13NYKSAS",
+    "KXNBAAST-26JUN13NYKSAS",
+    "KXNBASTL-26JUN13NYKSAS",
+    "KXNBABLK-26JUN13NYKSAS",
+    "KXNBA3PT-26JUN13NYKSAS",
+    "KXNBA2D-26JUN13NYKSAS",
+    "KXNBA3D-26JUN13NYKSAS",
+    "KXNBAPTSLEADER-26JUN13NYKSAS",
+    "KXNBA1HSPREAD-26JUN13NYKSAS",
+    "KXNBA1HTOTAL-26JUN13NYKSAS",
+    "KXNBA2HSPREAD-26JUN13NYKSAS",
+    "KXNBA2HTOTAL-26JUN13NYKSAS",
+    "KXNBAH2HPTS-26JUN13LKORNET7JALVARADO5",
+    "KXNBAH2HPTS-26JUN13SCASTLE5OANUNOBY8",
+    "KXNBAFTM-26JUN13NYKSAS",
+    "KXNBAH2HBENCHPTS-26JUN13NYKSAS",
+    "KXNBAFINMVP-26",
+    "KXFINALSATTEND-26JUN14",
+    "KXNBA1QWINNER-26JUN13NYKSAS",
+    "KXNBA1QSPREAD-26JUN13NYKSAS",
+    "KXNBA1QTOTAL-26JUN13NYKSAS",
+    "KXNBA2QWINNER-26JUN13NYKSAS",
+    "KXNBA2QSPREAD-26JUN13NYKSAS",
+    "KXNBA2QTOTAL-26JUN13NYKSAS",
+    "KXNBA3QWINNER-26JUN13NYKSAS",
+    "KXNBA3QSPREAD-26JUN13NYKSAS",
+    "KXNBA3QTOTAL-26JUN13NYKSAS",
+    "KXNBA4QWINNER-26JUN13NYKSAS",
+    "KXNBA4QSPREAD-26JUN13NYKSAS",
+    "KXNBA4QTOTAL-26JUN13NYKSAS"
+   ],
+   "source_id": "e59117c9-b79a-46b2-9cc8-0d05f0224fc5",
+   "source_ids": {
+    "source_2_id": "2026061499ED1D06",
+    "source_3_id": "e59117c9-b79a-46b2-9cc8-0d05f0224fc5",
+    "source_4_id": "70505012",
+    "source_5_id": "sr:match:70505012"
+   },
+   "start_date": "2026-06-14T00:30:00Z",
+   "title": "New York at San Antonio",
+   "type": "basketball_game"
+  }
+ ]
+}

@@ -4,6 +4,7 @@
     "details": {
       "contract_version": "1",
       "disabled_providers": [
+        "kalshi",
         "underdog"
       ],
       "provider_outcomes": [
