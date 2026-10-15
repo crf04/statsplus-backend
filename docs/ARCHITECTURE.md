@@ -479,7 +479,7 @@ The catalog maps full-game points, rebounds, assists, three-pointers made,
 steals, blocks, turnovers, PRA, PA, PR, RA, STKS, and field-goal,
 three-pointer, and two-pointer attempts. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
-the source label order. Dabble, PrizePicks, Underdog, Polymarket, and Novig labels are accepted
+the source label order. Dabble, PrizePicks, Underdog, Kalshi, Polymarket, and Novig labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
 case-insensitively and preserves presentation evidence but does not infer
 meaning. Scoring periods are resolved in one place — the provider adapter seam
