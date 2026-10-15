@@ -72,6 +72,7 @@
   "contract_version": "1",
   "disabled_providers": [
     "kalshi",
+    "novig",
     "polymarket",
     "underdog"
   ],
