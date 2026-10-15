@@ -105,6 +105,8 @@ class ReplaySession:
                 return Response({"code": "FORBIDDEN"}, status_code=403)
             if self.stale.intersection(ids):
                 return Response({"code": "NOT_FOUND"}, status_code=404)
+            if isinstance(self.batch, dict):  # an unusable envelope
+                return Response(self.batch)
             wanted = set(ids)
             return Response([e for e in self.batch if e["market"]["id"] in wanted])
         marker = "/v3/public/catalog/"

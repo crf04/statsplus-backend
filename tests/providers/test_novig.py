@@ -251,10 +251,8 @@ def test_a_stale_market_is_dropped_alone_and_the_rest_of_its_batch_is_read():
     assert {m.market_id for m in snapshot.markets} == {ids["19.5"], ids["29.5"]}
     assert snapshot.coverage.skipped_count == 1
     assert snapshot.coverage.skipped_reasons == (CoverageCode.INELIGIBLE_STATUS,)
-    # The whole batch answered 404, then each market was asked for alone.
     batch_calls = [p["marketIds"] for u, p in session.calls if u.endswith("/batch")]
-    assert len(batch_calls) == 1 + 3
-    assert batch_calls[0].count(",") == 2
+    assert len(batch_calls) == 5
     # The line that was dropped is not unread: the others are still decided.
     assert _variants(snapshot, {"19.5": ids["19.5"], "29.5": ids["29.5"]}) == {
         "19.5": "standard",
@@ -625,12 +623,144 @@ def test_a_book_naming_an_unknown_outcome_is_an_unread_market():
         lambda e: e.pop("ladders"),
     ],
 )
-def test_a_malformed_batch_is_an_invalid_response(mutate):
+def test_one_malformed_batch_entry_costs_only_its_own_market(mutate):
     session = ReplaySession()
-    mutate(session.batch[0])
+    mutate(next(e for e in session.batch if e["market"]["id"] == KAWHI_POINTS_29_5))
+
+    snapshot = _snapshot(adapter(session))
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert len(snapshot.markets) == 19
+    assert KAWHI_POINTS_29_5 not in {m.market_id for m in snapshot.markets}
+    assert snapshot.coverage.skipped_count == 8
+    assert CoverageCode.MALFORMED_RECORD in snapshot.coverage.warning_codes
+    assert _market(snapshot, BARNES_POINTS_19_5).is_priced is True
+
+
+def test_a_malformed_entry_leaves_its_game_and_statistic_undetermined():
+    session, ids = _ladder(
+        {"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)}
+    )
+    session.batch[1].pop("ladders")
+
+    snapshot = _snapshot(adapter(session))
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert {m.market_id: m.variant.value for m in snapshot.markets} == {
+        ids["19.5"]: "alternate",
+        ids["29.5"]: "alternate",
+    }
+
+
+def test_a_batch_that_is_not_a_list_is_an_invalid_response():
+    session = ReplaySession(batch={"unexpected": []})
 
     with pytest.raises(ProviderUnavailableError, match="invalid response"):
         _snapshot(adapter(session))
+
+
+def test_one_stale_id_in_a_batch_of_eight_costs_seven_requests():
+    session, ids = _ladder({f"{n}.5": (0.40, 0.40) for n in range(1, 9)})
+    session.stale = {ids["8.5"]}
+    session.batch = [e for e in session.batch if e["market"]["id"] != ids["8.5"]]
+
+    snapshot = _snapshot(adapter(session))
+
+    # 8 -> 404; halves of 4: one 404, one ok; halves of 2: one 404, one ok;
+    # halves of 1: the stale one 404 (dropped), the other ok.  1 + 2 + 2 + 2.
+    assert len([1 for u, _ in session.calls if u.endswith("/batch")]) == 7
+    assert len(snapshot.markets) == 7
+    assert snapshot.coverage.skipped_reasons == (CoverageCode.INELIGIBLE_STATUS,)
+    assert snapshot.status is SnapshotStatus.COMPLETE
+
+
+def test_a_period_market_is_excluded_not_taken_as_a_full_game_line():
+    session = ReplaySession()
+    session.pages[0]["items"][0]["marketType"] = "POINTS_1Q"
+
+    snapshot = _snapshot(adapter(session))
+
+    assert BARNES_24_5 not in {m.market_id for m in snapshot.markets}
+    assert len(snapshot.markets) == 19
+    assert snapshot.coverage.skipped_reasons == (
+        CoverageCode.NON_PROJECTION_MARKET,
+        CoverageCode.NON_PLAYER_MARKET,
+        CoverageCode.NON_GAME_MARKET,
+    )
+    assert snapshot.status is SnapshotStatus.COMPLETE
+
+
+# ------------------------------------------------- the real resolvers (AC5)
+
+
+class _AthleteCatalog:
+    ROWS = [
+        {"season": "2026-27", "player_id": 1628973, "display_name": "Jalen Brunson",
+         "roster_status": "Active", "is_active": True, "team_id": 1610612752,
+         "team_name": "New York Knicks", "team_abbreviation": "NYK"},
+        {"season": "2026-27", "player_id": 1630567, "display_name": "Scottie Barnes",
+         "roster_status": "Active", "is_active": True, "team_id": 1610612761,
+         "team_name": "Toronto Raptors", "team_abbreviation": "TOR"},
+        {"season": "2026-27", "player_id": 202695, "display_name": "Kawhi Leonard",
+         "roster_status": "Active", "is_active": True, "team_id": 1610612746,
+         "team_name": "Los Angeles Clippers", "team_abbreviation": "LAC"},
+    ]
+
+    def get_catalog(self, season, active_only=False):
+        return [r for r in self.ROWS if r["season"] == season]
+
+
+class _EventCatalog:
+    ROWS = [
+        {"nba_game_id": "0022600001", "season": "2026-27",
+         "scheduled_at": datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
+         "home_team_id": 1610612752, "home_team_name": "New York Knicks",
+         "home_team_tricode": "NYK", "away_team_id": 1610612761,
+         "away_team_name": "Toronto Raptors", "away_team_tricode": "TOR",
+         "status_text": "Scheduled", "status_code": 1, "postponed_status": None,
+         "postponement_evidence": None, "classification": "Regular Season",
+         "is_postponed": False},
+    ]
+
+    def get_events(self, season):
+        return [r for r in self.ROWS if r["season"] == season]
+
+    def get_freshness(self, season):
+        return {"season": season, "fresh": True, "last_success_at": "2026-10-15T12:00:00+00:00"}
+
+
+def test_recorded_markets_resolve_to_the_expected_athlete_and_game():
+    from app.services.athlete_resolver import AthleteResolver, MappingResolutionState
+    from app.services.event_resolver import EventResolutionState, EventResolver
+
+    snapshot = _snapshot()
+    athletes = AthleteResolver(_AthleteCatalog())
+    events = EventResolver(_EventCatalog())
+
+    def resolved(market_id: str):
+        market = _market(snapshot, market_id)
+        return (
+            athletes.resolve_market(market, "2026-27"),
+            events.resolve_market(market, "2026-27"),
+        )
+
+    brunson, brunson_game = resolved("01a13f9f-78ca-76b0-b6a4-75a115b6cb85")
+    assert brunson.state is MappingResolutionState.AUTO
+    assert brunson.canonical_athlete.player_id == 1628973
+    assert brunson_game.state is EventResolutionState.AUTO
+    assert brunson_game.canonical_event_id == "0022600001"
+
+    barnes, barnes_game = resolved(BARNES_POINTS_19_5)
+    assert barnes.canonical_athlete.player_id == 1630567
+    assert barnes_game.canonical_event_id == "0022600001"
+
+    kawhi, _ = resolved(KAWHI_POINTS_29_5)
+    assert kawhi.canonical_athlete.player_id == 202695
+
+    # A game the schedule does not hold does not resolve.
+    _, other_game = resolved("01a13b8c-20ef-7d32-868d-926b7c3400b5")  # PHI @ NYK
+    assert other_game.state is not EventResolutionState.AUTO
+    assert other_game.canonical_event_id is None
 
 
 def test_a_later_page_that_fails_keeps_the_earlier_pages_and_is_partial():

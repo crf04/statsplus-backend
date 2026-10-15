@@ -175,6 +175,13 @@ class _Book:
     best_bids: Mapping[str, Decimal]
 
 
+@dataclass(frozen=True, slots=True)
+class _BadBook:
+    """A batch entry that could not be read as a book; one market's problem."""
+
+    detail: str
+
+
 class _Dropped:
     """The batch endpoint no longer serves this market."""
 
@@ -463,13 +470,20 @@ class NovigAdapter:
 
     def _fetch_books(
         self, context: RetrievalContext, candidates: list[_Candidate]
-    ) -> tuple[dict[str, _Book | _Dropped], dict[str, ProviderUnavailableError]]:
+    ) -> tuple[
+        dict[str, _Book | _Dropped | _BadBook], dict[str, ProviderUnavailableError]
+    ]:
         """Read every candidate's book in batches.
 
         A market the endpoint does not return, or answers 404 for alone, is
-        ``_DROPPED``.  A market whose request failed any other way is
+        ``_DROPPED``; a batch entry that cannot be read is a ``_BadBook`` for
+        that market alone.  A market whose request failed any other way is
         ``unread``: it has no player identity, and its siblings' standard line
         is therefore unknowable.
+
+        A batch that answers 404 holds a settled or removed market, so it is
+        split in halves until the stale market stands alone.  The halves run in
+        the same bounded pool as the first batches.
         """
 
         by_id = {candidate.market_id: candidate for candidate in candidates}
@@ -480,51 +494,62 @@ class NovigAdapter:
             [c.market_id for c in ordered[start : start + self.BATCH_SIZE]]
             for start in range(0, len(ordered), self.BATCH_SIZE)
         ]
-        books: dict[str, _Book | _Dropped] = {}
+        books: dict[str, _Book | _Dropped | _BadBook] = {}
         unread: dict[str, ProviderUnavailableError] = {}
 
-        def fetch_batch(ids: list[str]) -> dict[str, _Book]:
-            return self._get(
-                context,
-                self.BATCH_BOOK_URL,
-                operation="market_book_batch",
-                params={"marketIds": ",".join(ids), "currency": "CASH"},
-                parse=self._parse_batch,
-            )
+        def attempt(ids: list[str]) -> tuple[bool, list[str], dict[str, Any]]:
+            """Return (split?, ids, results by id)."""
 
-        def read(ids: list[str]) -> dict[str, _Book | _Dropped | Exception]:
             try:
-                served = fetch_batch(ids)
-                return {i: served.get(i, _DROPPED) for i in ids}
+                served = self._get(
+                    context,
+                    self.BATCH_BOOK_URL,
+                    operation="market_book_batch",
+                    params={"marketIds": ",".join(ids), "currency": "CASH"},
+                    parse=self._parse_batch,
+                )
+                return False, ids, {i: served.get(i, _DROPPED) for i in ids}
             except ProviderUnavailableError as error:
-                status = _http_status(error)
-                if status != 404:
-                    return {i: error for i in ids}
+                if _http_status(error) != 404:
+                    return False, ids, {i: error for i in ids}
                 if len(ids) == 1:
-                    return {ids[0]: _DROPPED}
-                # One settled or removed market answers 404 for the whole
-                # batch; asking per market drops only the stale one.
+                    return False, ids, {ids[0]: _DROPPED}
+                return True, ids, {}
             except _MalformedPayload as error:
-                return {i: self._invalid_response(error) for i in ids}
-            result: dict[str, _Book | _Dropped | Exception] = {}
-            for market_id in ids:
-                result.update(read([market_id]))
-            return result
+                return False, ids, {i: self._invalid_response(error) for i in ids}
 
-        for _, result in self._fan_out(batches, read):
-            for market_id, value in result.items():
-                candidate = by_id[market_id]
-                if isinstance(value, Exception):
-                    unread[market_id] = value
-                elif isinstance(value, _Book) and not set(value.best_bids) <= {
-                    candidate.over_id,
-                    candidate.under_id,
-                }:
-                    unread[market_id] = self._invalid_response(
-                        "book names an outcome the market does not have"
+        results: dict[str, Any] = {}
+        if batches:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.detail_concurrency
+            ) as executor:
+                pending = {executor.submit(attempt, ids) for ids in batches}
+                while pending:
+                    done, pending = concurrent.futures.wait(
+                        pending, return_when=concurrent.futures.FIRST_COMPLETED
                     )
-                else:
-                    books[market_id] = value
+                    for future in done:
+                        split, ids, result = future.result()
+                        if split:
+                            middle = len(ids) // 2
+                            pending.add(executor.submit(attempt, ids[:middle]))
+                            pending.add(executor.submit(attempt, ids[middle:]))
+                        else:
+                            results.update(result)
+
+        for market_id, value in results.items():
+            candidate = by_id[market_id]
+            if isinstance(value, Exception):
+                unread[market_id] = value
+            elif isinstance(value, _Book) and not set(value.best_bids) <= {
+                candidate.over_id,
+                candidate.under_id,
+            }:
+                books[market_id] = _BadBook(
+                    "book names an outcome the market does not have"
+                )
+            else:
+                books[market_id] = value
         return books, unread
 
     def _fan_out(self, items: list[Any], fetch: Callable[[Any], Any]):
@@ -592,58 +617,68 @@ class NovigAdapter:
             league=optional_text(payload.get("league")),
         )
 
-    @staticmethod
-    def _parse_batch(payload: Any) -> dict[str, _Book]:
+    @classmethod
+    def _parse_batch(cls, payload: Any) -> dict[str, _Book | _BadBook]:
+        """Read each entry on its own; only a non-list envelope is unusable.
+
+        An entry that names no market cannot be attributed, so it is skipped
+        and its market surfaces as not served.
+        """
+
         if not isinstance(payload, list):
             raise _MalformedPayload("batch book must be a list")
-        served: dict[str, _Book] = {}
+        served: dict[str, _Book | _BadBook] = {}
         for entry in payload:
-            if not isinstance(entry, Mapping):
-                raise _MalformedPayload("batch book entry must be an object")
-            market = entry.get("market")
-            ladders = entry.get("ladders")
-            if not isinstance(market, Mapping) or not isinstance(ladders, Mapping):
-                raise _MalformedPayload("batch book entry needs market and ladders")
-            market_id = market.get("id")
+            market = entry.get("market") if isinstance(entry, Mapping) else None
+            market_id = market.get("id") if isinstance(market, Mapping) else None
             if not isinstance(market_id, str) or not market_id:
-                raise _MalformedPayload("batch book market id must be present")
-            player = market.get("player")
-            player_id = player_name = None
-            if player is not None:
-                if not isinstance(player, Mapping):
-                    raise _MalformedPayload("batch book player must be an object")
-                player_id = optional_text(player.get("id"))
-                player_name = optional_text(player.get("fullName"))
-                if player_id is None or player_name is None:
-                    raise _MalformedPayload("batch book player needs id and fullName")
-            best: dict[str, Decimal] = {}
-            for outcome_id, ladder in ladders.items():
-                if not isinstance(ladder, Mapping) or not isinstance(
-                    ladder.get("bids"), list
-                ):
-                    raise _MalformedPayload("batch book ladder needs a bids list")
-                for bid in ladder["bids"]:
-                    if not isinstance(bid, Mapping):
-                        raise _MalformedPayload("batch book bid must be an object")
-                    price, quantity = bid.get("price"), bid.get("qty")
-                    if isinstance(price, bool) or not isinstance(price, (int, float, str)):
-                        raise _MalformedPayload("batch book price must be numeric")
-                    if isinstance(quantity, bool) or not isinstance(
-                        quantity, (int, float)
-                    ):
-                        raise _MalformedPayload("batch book qty must be numeric")
-                    try:
-                        value = Decimal(str(price))
-                    except InvalidOperation as error:
-                        raise _MalformedPayload("batch book price must be numeric") from error
-                    if not value.is_finite() or not 0 < value < 1:
-                        raise _MalformedPayload("batch book price must be between 0 and 1")
-                    if quantity <= 0 or bid.get("status", "OPEN") != "OPEN":
-                        continue
-                    if value > best.get(str(outcome_id), Decimal(0)):
-                        best[str(outcome_id)] = value
-            served[market_id] = _Book(player_id, player_name, best)
+                continue
+            try:
+                served[market_id] = cls._parse_entry(entry)
+            except _MalformedPayload as error:
+                served[market_id] = _BadBook(str(error))
         return served
+
+    @staticmethod
+    def _parse_entry(entry: Mapping[str, Any]) -> _Book:
+        market = entry["market"]
+        ladders = entry.get("ladders")
+        if not isinstance(ladders, Mapping):
+            raise _MalformedPayload("batch book entry needs ladders")
+        player = market.get("player")
+        player_id = player_name = None
+        if player is not None:
+            if not isinstance(player, Mapping):
+                raise _MalformedPayload("batch book player must be an object")
+            player_id = optional_text(player.get("id"))
+            player_name = optional_text(player.get("fullName"))
+            if player_id is None or player_name is None:
+                raise _MalformedPayload("batch book player needs id and fullName")
+        best: dict[str, Decimal] = {}
+        for outcome_id, ladder in ladders.items():
+            if not isinstance(ladder, Mapping) or not isinstance(
+                ladder.get("bids"), list
+            ):
+                raise _MalformedPayload("batch book ladder needs a bids list")
+            for bid in ladder["bids"]:
+                if not isinstance(bid, Mapping):
+                    raise _MalformedPayload("batch book bid must be an object")
+                price, quantity = bid.get("price"), bid.get("qty")
+                if isinstance(price, bool) or not isinstance(price, (int, float, str)):
+                    raise _MalformedPayload("batch book price must be numeric")
+                if isinstance(quantity, bool) or not isinstance(quantity, (int, float)):
+                    raise _MalformedPayload("batch book qty must be numeric")
+                try:
+                    value = Decimal(str(price))
+                except InvalidOperation as error:
+                    raise _MalformedPayload("batch book price must be numeric") from error
+                if not value.is_finite() or not 0 < value < 1:
+                    raise _MalformedPayload("batch book price must be between 0 and 1")
+                if quantity <= 0 or bid.get("status", "OPEN") != "OPEN":
+                    continue
+                if value > best.get(str(outcome_id), Decimal(0)):
+                    best[str(outcome_id)] = value
+        return _Book(player_id, player_name, best)
 
     # --------------------------------------------------------- normalization
 
@@ -735,7 +770,7 @@ class NovigAdapter:
     def _choose_variants(
         self,
         candidates: list[_Candidate],
-        books: Mapping[str, _Book | _Dropped],
+        books: Mapping[str, _Book | _Dropped | _BadBook],
         unread: Mapping[str, ProviderUnavailableError],
     ) -> dict[str, MarketVariant]:
         """Pick the one standard strike per (player, statistic, game).
@@ -748,7 +783,7 @@ class NovigAdapter:
         undetermined = {
             (c.event_id, c.statistic_label)
             for c in candidates
-            if c.market_id in unread
+            if c.market_id in unread or isinstance(books.get(c.market_id), _BadBook)
         }
         groups: dict[tuple[str, str, str], list[_Candidate]] = defaultdict(list)
         for candidate in candidates:
@@ -775,7 +810,7 @@ class NovigAdapter:
     def _standard_member(
         self,
         members: list[_Candidate],
-        books: Mapping[str, _Book | _Dropped],
+        books: Mapping[str, _Book | _Dropped | _BadBook],
     ) -> _Candidate | None:
         if len(members) == 1:
             return members[0]
@@ -796,7 +831,7 @@ class NovigAdapter:
         result: _Candidate | Exception,
         *,
         events: Mapping[str, _Event],
-        books: Mapping[str, _Book | _Dropped],
+        books: Mapping[str, _Book | _Dropped | _BadBook],
         unread: Mapping[str, ProviderUnavailableError],
         variants: Mapping[str, MarketVariant],
     ) -> PlayerProjectionMarket:
@@ -817,6 +852,8 @@ class NovigAdapter:
                 "market book unavailable", code=CoverageCode.FIXTURE_FAILED
             )
         book = books[candidate.market_id]
+        if isinstance(book, _BadBook):
+            raise CoverageRecordMalformed(book.detail)
         if isinstance(book, _Dropped):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS)
         if book.player_id is None or book.player_name is None:
