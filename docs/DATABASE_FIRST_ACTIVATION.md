@@ -374,6 +374,35 @@ supersedes earlier ones, and a delayed earlier-cutoff composition is itself
 superseded rather than displacing the newer one. Same-season auto-advance is
 unchanged, and the hold applies to `player_game_logs` itself.
 
+**Collect.** Two scheduled jobs build a new season's held candidates:
+
+- `player-shooting-refresh` (`python scripts/player_shooting_refresh.py <season>`,
+  every 5 minutes) requests the day's Event and Athlete Catalogs and issues the
+  day's manifest for 03:45-11:00 Central. It copies every scope except its own
+  two player-shooting streams forward from the season's current manifest, so
+  seed the season once with a manifest whose scopes include
+  `canonical_game_ledger` and every collector stream (Synergy, shot types and
+  shot zones, player and opponent). `canonical_game_ledger` is what lets the
+  ledger collect: `LedgerRuntime.read_for_collection` refuses a manifest
+  without it.
+- `ledger-refresh` (settings in `railway.ledger.json`, `LEDGER_SEASON=<season>`,
+  plus `DATABASE_URL`) runs `scripts/ledger_refresh.py --compose` at 10:15,
+  12:15 and 14:15 UTC, inside that window. It accepts the completed games up to
+  the manifest cutoff from pbpstats.com, with the NBA live-data CDN as fallback;
+  Railway egress reaches both, so it needs no residential proxy. It then
+  composes the ledger streams (`player_game_logs`, `player_per36`,
+  `traditional_opponent_*`, `assist_locations_*`, `player_assist_locations`).
+  For a season other than the published one these are held, as below. Season
+  streams compose once all thirty teams have a completed game; L15 streams
+  compose once every team has fifteen. A rerun in the same window fetches only
+  games not yet stored; stored games are rechecked for stat corrections once a
+  day while recent and once a week after that (`daily_recheck_days`,
+  `weekly_recheck_days`).
+
+`statsplus-nightly-refresh` writes the legacy `player_game_logs` tables for the
+calendar season. No reader uses them while the stream is enabled, and the
+cutover does not read them.
+
 **Cutover.** Once the new season's collection is composing nightly:
 
 1. Plan it, which writes nothing:

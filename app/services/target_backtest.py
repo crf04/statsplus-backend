@@ -41,6 +41,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
+from datetime import datetime, timedelta
 from logging import getLogger
 from math import isfinite
 from typing import Any, Callable, Protocol
@@ -90,6 +91,7 @@ from app.services.target_conditions import (
 )
 from app.utils.redis_breaker import RedisCircuitBreaker
 from app.services.backtest_season import (
+    BACKTEST_SEASONS,
     BacktestSeason,
     BacktestSeasons,
     DEFAULT_BACKTEST_SEASON,
@@ -187,6 +189,19 @@ TARGET_BACKTEST_CACHE_SCHEMA = 2
 #: different questions, so the key keeps ``repr`` of the full float. The
 #: prefix carries the schema constant so one knob versions the whole entry.
 _CACHE_KEY_PREFIX_TEMPLATE = "targets:backtest:v{schema}:"
+
+
+#: A saved Target counts as recently used, so worth precomputing after a
+#: publication (#363), while its owner has logged in within this window.
+PRECOMPUTE_RECENT_OWNER_WINDOW = timedelta(days=14)
+
+
+def log_precompute_skipped(cause: str) -> None:
+    """Log that the precompute ran nothing because the result cache is off."""
+
+    logger.info(
+        "target_backtest_precompute skipped reason=cache_disabled cause=%s", cause
+    )
 
 
 #: The safe message a Backtest failure nothing more specific describes is
@@ -287,6 +302,11 @@ class TargetReader(Protocol):
     def get_target_in_session(
         self, session: Session | None, firebase_uid: str, target_id: int
     ) -> Mapping[str, Any]: ...
+
+    # Every account's Targets, for the cron precompute only (#363).
+    def list_recently_used_targets(
+        self, since: datetime
+    ) -> Sequence[Mapping[str, Any]]: ...
 
 
 class PlayerLogReader(Protocol):
@@ -522,6 +542,124 @@ class TargetBacktestService:
             (item["status"] for item in items),
             cache_enabled=generation is not None,
         )
+
+    def precompute(
+        self, *, now: datetime, clock: Callable[[], float] = time.monotonic
+    ) -> dict[str, Any] | None:
+        """Fill the result cache for recently used saved Targets (#363).
+
+        Run by the ``player_shooting_refresh`` cron, never by a web worker.
+        Every saved Target whose owner logged in within
+        ``PRECOMPUTE_RECENT_OWNER_WINDOW`` of ``now`` is looked up under the
+        single read's own key in each ``BACKTEST_SEASONS`` season, the
+        published season first; a season that is ``season_unavailable`` is
+        skipped.  An existing entry costs one ``EXISTS``; a missing one is
+        computed through the single read's path, which writes it.
+
+        The budget (``target_backtest_precompute_budget_seconds``) is checked
+        after each Target, so a spent budget stops the run there and the next
+        run carries on past the entries this one filed.  One Target's failure
+        is logged and counted; it does not stop the run.  Redis being
+        unreachable does: an ``EXISTS`` that fails, or an open circuit, ends
+        the run with the rest counted ``bypassed`` (``remaining`` is only the
+        budget's).
+
+        With the cache off this contacts no Redis, computes nothing, logs
+        the skip, and returns ``None``.  Otherwise it logs and returns the
+        counts.  ``eligible`` and every count are Target-season entries.
+        """
+
+        if not self._cache_enabled:
+            log_precompute_skipped(
+                "no_redis_client"
+                if self._redis is None
+                else "TARGET_BACKTEST_CACHE_ENABLED=false"
+            )
+            return None
+        started = clock()
+        budget = self.settings.cache.target_backtest_precompute_budget_seconds
+        targets = self.targets.list_recently_used_targets(
+            now - PRECOMPUTE_RECENT_OWNER_WINDOW
+        )
+        choices = sorted(
+            (self.seasons.resolve(season) for season in BACKTEST_SEASONS),
+            key=lambda choice: choice.past,
+        )
+        work = []
+        for choice in choices:
+            try:
+                generation = self.seasons.require_streams(
+                    choice,
+                    _PUBLICATION_STREAM_KEYS,
+                    projection_keys=_PROJECTION_ONLY_STREAM_KEYS,
+                )
+            except SeasonUnavailableError:
+                continue
+            if generation is not None:
+                work.append((choice, generation))
+        counts = {
+            "already_cached": 0,
+            "computed": 0,
+            "bypassed": 0,
+            "failed": 0,
+        }
+        entries = [
+            (choice, generation, target)
+            for choice, generation in work
+            for target in targets
+        ]
+        remaining = 0
+        for index, (choice, generation, target) in enumerate(entries):
+            cached = self._cache_exists(
+                self._cache_key(target, choice.season, generation)
+            )
+            if cached is None:
+                logger.warning(
+                    "Target backtest precompute stopped: result cache unavailable"
+                )
+                counts["bypassed"] += len(entries) - index
+                break
+            if cached:
+                counts["already_cached"] += 1
+            else:
+                try:
+                    _body, state = self._backtest_stateful(target, choice=choice)
+                    outcome = {"hit": "already_cached", "miss": "computed"}.get(
+                        state, "bypassed"
+                    )
+                    counts[outcome] += 1
+                except Exception:  # isolated per Target
+                    logger.warning(
+                        "Target backtest precompute failed target_id=%s season=%s",
+                        target.get("id"),
+                        choice.season,
+                        exc_info=True,
+                    )
+                    counts["failed"] += 1
+            if clock() - started >= budget:
+                remaining = len(entries) - index - 1
+                break
+        result = {
+            "seasons": [choice.season for choice, _generation in work],
+            "eligible": len(entries),
+            **counts,
+            "remaining": remaining,
+            "duration_ms": round((clock() - started) * 1000),
+        }
+        logger.info(
+            "target_backtest_precompute seasons=%s eligible=%d "
+            "already_cached=%d computed=%d bypassed=%d failed=%d "
+            "remaining=%d duration_ms=%d",
+            ",".join(result["seasons"]) or "-",
+            result["eligible"],
+            result["already_cached"],
+            result["computed"],
+            result["bypassed"],
+            result["failed"],
+            result["remaining"],
+            result["duration_ms"],
+        )
+        return result
 
     def backtest_target(
         self,
@@ -880,6 +1018,24 @@ class TargetBacktestService:
         except (TypeError, ValueError, zlib.error, json.JSONDecodeError):
             return None
 
+    def _cache_exists(self, key: str) -> bool | None:
+        """Whether an entry exists under ``key``; ``None`` when Redis is down.
+
+        Honors the same circuit breaker as the read and the write: an open
+        circuit skips the call, and a connection or timeout error opens it.
+        """
+
+        if self._breaker.is_open():
+            return None
+        try:
+            return bool(self._redis.exists(key))
+        except (
+            redis.exceptions.ConnectionError,
+            redis.exceptions.TimeoutError,
+        ) as error:
+            self._breaker.record_failure(error)
+            return None
+
     def _cache_write(self, key: str, evidence: Mapping[str, Any]) -> None:
         """Store one result's evidence under its generation key.
 
@@ -1214,6 +1370,8 @@ class TargetBacktestService:
 
 __all__ = [
     "BACKTEST_FAILED_MESSAGE",
+    "PRECOMPUTE_RECENT_OWNER_WINDOW",
     "TargetBacktestService",
     "aggregate_cache_state",
+    "log_precompute_skipped",
 ]
