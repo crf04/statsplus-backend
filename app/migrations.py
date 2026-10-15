@@ -1259,6 +1259,52 @@ def _create_projection_archive_tables(connection: Connection) -> None:
     LatestPlayerProjection.__table__.create(connection, checkfirst=True)
 
 
+def _create_sportsbook_odds_tables(connection: Connection) -> None:
+    """Create the sportsbook player-prop store (#377).  Repeatable."""
+
+    from app.models.sportsbook_odds import (
+        OddsApiPoll,
+        OddsApiQuotaState,
+        SportsbookPropLatest,
+        SportsbookPropQuote,
+    )
+
+    for model in (
+        OddsApiPoll,
+        SportsbookPropQuote,
+        SportsbookPropLatest,
+        OddsApiQuotaState,
+    ):
+        model.__table__.create(connection, checkfirst=True)
+
+
+def downgrade_sportsbook_odds(connection: Connection) -> None:
+    """Reverse ``063_sportsbook_odds``; also forgets its migration record.
+
+    Migrations here are forward-only at runtime.  This exists so the change
+    is provably reversible: it drops only the four tables the migration made
+    and nothing that shares their names with older data.
+    """
+
+    from app.models.sportsbook_odds import (
+        OddsApiPoll,
+        OddsApiQuotaState,
+        SportsbookPropLatest,
+        SportsbookPropQuote,
+    )
+
+    for model in (
+        OddsApiQuotaState,
+        SportsbookPropLatest,
+        SportsbookPropQuote,
+        OddsApiPoll,
+    ):
+        model.__table__.drop(connection, checkfirst=True)
+    connection.execute(
+        _schema_migrations.delete().where(_schema_migrations.c.version == 63)
+    )
+
+
 def _create_projection_collection_tables(connection: Connection) -> None:
     """Create the fenced projection collector lease and provider state."""
 
@@ -2739,6 +2785,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _drop_parity_artifact_publication_foreign_key,
     ),
     Migration(62, "062_user_access_status", _add_user_access_status),
+    Migration(63, "063_sportsbook_odds", _create_sportsbook_odds_tables),
 )
 
 
