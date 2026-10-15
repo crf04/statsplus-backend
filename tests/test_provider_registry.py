@@ -73,6 +73,7 @@ def test_the_registry_names_every_provider_the_application_may_enable():
         "prizepicks",
         "underdog",
         "kalshi",
+        "polymarket",
     )
     assert dfs_provider_name_set() == set(dfs_provider_names())
     assert tuple(
@@ -129,6 +130,7 @@ def test_registering_a_provider_is_all_onboarding_takes(monkeypatch):
         assert dependencies.dfs_board_service.enabled_providers == ("fourth",)
         assert set(dependencies.dfs_board_service.disabled_providers) == {
             "dabble",
+            "polymarket",
             "prizepicks",
             "underdog",
             "kalshi",

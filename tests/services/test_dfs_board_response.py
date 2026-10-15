@@ -323,7 +323,7 @@ def test_catalog_and_provider_freshness_and_disabled_providers_are_explicit():
         catalog["last_success_at"].endswith("+00:00")
         for catalog in availability["catalogs"]
     )
-    assert payload["disabled_providers"] == ["kalshi", "underdog"]
+    assert payload["disabled_providers"] == ["kalshi", "polymarket", "underdog"]
 
 
 def test_collections_are_deterministically_ordered():
@@ -491,7 +491,7 @@ def test_no_usable_snapshot_is_a_sanitized_service_unavailable():
         "upstream_error",
     }
     assert "secret" not in str(details)
-    assert details["disabled_providers"] == ["kalshi", "underdog"]
+    assert details["disabled_providers"] == ["kalshi", "polymarket", "underdog"]
 
 
 def test_a_snapshot_past_the_stale_ceiling_is_not_a_usable_board():

@@ -22,6 +22,7 @@ statistics:
       prizepicks: [Points]
       underdog: [Points]
       kalshi: [Points]
+      polymarket: [points]
   - id: rebounds
     market_category: REB
     label: Rebounds
@@ -33,6 +34,7 @@ statistics:
       prizepicks: [Rebounds]
       underdog: [Rebounds]
       kalshi: [Rebounds]
+      polymarket: [rebounds]
   - id: assists
     market_category: AST
     label: Assists
@@ -44,6 +46,7 @@ statistics:
       prizepicks: [Assists]
       underdog: [Assists]
       kalshi: [Assists]
+      polymarket: [assists]
   - id: three_pointers_made
     market_category: 3PM
     label: Three-Pointers Made

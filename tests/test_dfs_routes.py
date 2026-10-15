@@ -216,7 +216,7 @@ def test_no_provider_specific_public_route_exists(make_board_client):
     assert not any(
         provider in rule
         for rule in rules
-        for provider in ("dabble", "prizepicks", "underdog")
+        for provider in ("dabble", "prizepicks", "underdog", "polymarket")
     )
 
 

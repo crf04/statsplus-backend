@@ -174,6 +174,10 @@ def _build_kalshi(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
     from app.providers.kalshi import KalshiAdapter
 
     return KalshiAdapter(timeout=runtime.timeout)
+def _build_polymarket(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
+    from app.providers.polymarket import PolymarketAdapter
+
+    return PolymarketAdapter(timeout=runtime.timeout)
 
 
 # PrizePicks publishes its Power Play payouts as a static table on its own site
@@ -205,6 +209,7 @@ _DEFAULT_REGISTRATIONS: tuple[DFSProviderRegistration, ...] = (
     ),
     DFSProviderRegistration(name="underdog", build=_build_underdog),
     DFSProviderRegistration(name="kalshi", build=_build_kalshi),
+    DFSProviderRegistration(name="polymarket", build=_build_polymarket),
 )
 
 _registrations: tuple[DFSProviderRegistration, ...] = _DEFAULT_REGISTRATIONS

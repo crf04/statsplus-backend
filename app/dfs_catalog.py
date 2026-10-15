@@ -11,3 +11,4 @@ from __future__ import annotations
 DFS_DABBLE = "dabble"
 DFS_PRIZEPICKS = "prizepicks"
 DFS_UNDERDOG = "underdog"
+DFS_POLYMARKET = "polymarket"

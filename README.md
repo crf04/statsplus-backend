@@ -93,7 +93,7 @@ the most important variables:
 | `MATCHUP_SCORE_<BASE>_MIN_VOLUME_PER_GAME` | No | `1` for play types, shot zones, and assist locations; `4` for shot types |
 | `NBA_API_TIMEOUT_CONNECT` / `NBA_API_TIMEOUT_READ` | No | `10` / `30`; PBP Stats connect/read timeouts |
 | `NBA_API_MAX_RETRIES` | No | `3`; retries for safe PBP Stats requests |
-| `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires the variable explicitly | Comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`, `kalshi`); an explicit empty value disables all providers |
+| `DFS_ENABLED_PROVIDERS` | Empty by default in local/test; production requires the variable explicitly | Comma-separated internal DFS provider registry (`dabble`, `prizepicks`, `underdog`, `kalshi`, `polymarket`); an explicit empty value disables all providers |
 | `DFS_BOARD_DEADLINE_SECONDS` | No | `15`; one absolute internal collector deadline |
 | `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
 | `DFS_COMPARISON_MAX_MARKETS` | No | `10000`; post-filter Comparison Board ceiling |

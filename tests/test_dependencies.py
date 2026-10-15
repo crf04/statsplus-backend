@@ -258,6 +258,7 @@ def test_projection_archive_gate_selects_one_database_reader_for_every_request(m
     assert reader.clock is utc_now
     assert {scope.provider for scope in reader.scopes} == {
         "dabble",
+        "polymarket",
         "prizepicks",
         "underdog",
         "kalshi",
@@ -333,7 +334,7 @@ def test_production_dependencies_boot_with_an_explicit_all_disabled_dfs_registry
     assert dependencies.projection_player_pool_reader.required_providers == frozenset()
     assert {
         scope.provider for scope in dependencies.projection_player_pool_reader.scopes
-    } == {"dabble", "prizepicks", "underdog", "kalshi"}
+    } == {"dabble", "kalshi", "polymarket", "prizepicks", "underdog"}
     forbidden_constructor.assert_not_called()
     with pytest.raises(ValueError, match="outside the configured recording scope"):
         dependencies.projection_recorder.record_failed_poll(
