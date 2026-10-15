@@ -862,6 +862,35 @@ def test_target_resolution_reuses_the_slate_matchup_and_user_services(monkeypatc
     assert resolution.matchups is dependencies.matchup_service
 
 
+def test_slate_edges_compose_the_slate_and_matchup_services_stored_only(monkeypatch):
+    """Slate edges add no seam of their own and read injuries stored-only."""
+
+    from sqlalchemy import create_engine
+
+    from app.dependencies import build_dependencies
+    from app.services.matchup_injuries import StoredMatchupInjuryReader
+
+    engine = create_engine("sqlite:///:memory:")
+    monkeypatch.setattr("app.utils.db.get_engine", Mock(return_value=engine))
+    monkeypatch.setattr(
+        "app.utils.cache_config.get_redis_client", Mock(return_value=None)
+    )
+    dependencies = build_dependencies(
+        RuntimeSettings(
+            environment="testing",
+            auth={"firebase_admin_disabled": True},
+        )
+    )
+
+    edges = dependencies.slate_edges_service
+    assert edges.slates is dependencies.slate_service
+    assert edges.matchups is dependencies.matchup_service
+    assert isinstance(edges.injuries, StoredMatchupInjuryReader)
+    assert edges.injuries.service is dependencies.matchup_service.injuries
+    assert edges.publication_reader is dependencies.target_resolution_service.publication_reader
+    assert edges.settings is dependencies.target_resolution_service.settings
+
+
 # --- Redis eviction policy check (#279) --------------------------------------
 
 

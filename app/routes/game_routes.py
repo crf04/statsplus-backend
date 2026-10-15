@@ -37,6 +37,7 @@ matchups_bp = Blueprint("matchups", __name__)
 
 game_service = CurrentAppService("game")
 slate_service = CurrentAppService("slate")
+slate_edges_service = CurrentAppService("slate_edges")
 matchup_service = CurrentAppService("matchup")
 matchup_selection_service = CurrentAppService("matchup_selection")
 
@@ -64,6 +65,13 @@ def _is_canonical_player_id(value: str) -> bool:
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
     return jsonify(slate_service.get_slate(request.args.get("date")))
+
+
+@game_bp.route("/slate/edges", methods=["GET"])
+@require_auth
+def get_slate_edges():
+    """Return each slate game's biggest points effects and the slate's picks."""
+    return jsonify(slate_edges_service.get_edges(request.args.get("date")))
 
 
 @game_bp.route("/matchup", methods=["GET"])
