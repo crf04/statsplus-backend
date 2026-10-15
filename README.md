@@ -251,8 +251,11 @@ python -m statsplus_collector status
 python -m statsplus_collector run
 ```
 
-Use [docs/RESIDENTIAL_COLLECTOR.md](docs/RESIDENTIAL_COLLECTOR.md) and the
-PowerShell scripts under `scripts/` for Windows Task Scheduler installation,
+Production runs it as the `nba-collector` Railway cron through a residential
+proxy; see "Railway cron service" in
+[docs/RESIDENTIAL_COLLECTOR.md](docs/RESIDENTIAL_COLLECTOR.md). That document
+and the PowerShell scripts under `scripts/` also cover the retired Windows
+Task Scheduler fallback: installation,
 conditional recovery, staged upgrade, rollback, Credential Manager setup, and
 Historical Rehearsal probes. The machine secret is never committed or stored
 in `.env`, the Outbox, release metadata, or diagnostics.
