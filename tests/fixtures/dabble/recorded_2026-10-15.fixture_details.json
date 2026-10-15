@@ -1,0 +1,269 @@
+{
+ "sportFixtureDetail": {
+  "advertisedStart": "2026-10-20T19:05:00.000Z",
+  "competitionId": "090c2877-4d13-4f6e-8faf-886092153c58",
+  "competitionName": "NBA",
+  "id": "01a12518-4599-735f-a212-cf7312c08ceb",
+  "markets": [
+   {
+    "id": "01a137b5-9faa-763d-b887-cef1723d5877",
+    "isDfsAllowed": false,
+    "isDisplayed": true,
+    "isSgmAllowed": true,
+    "isSingleAllowed": true,
+    "multiAllowed": true,
+    "name": "To Have 2+ Threes Made",
+    "resultingType": "swish_to_have_2_plus_threes_made",
+    "status": "open"
+   },
+   {
+    "id": "01a137b5-a0eb-71fb-b11c-7648e07aeb39",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": true,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham - Assists O/U (9.5)",
+    "resultingType": "swish_assists",
+    "status": "open"
+   },
+   {
+    "id": "01a137b5-a0eb-71fb-b11c-7a16d812a9b4",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": true,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham - Threes Made O/U (2.5)",
+    "resultingType": "swish_threes_made",
+    "status": "open"
+   },
+   {
+    "id": "01a137b5-a0eb-71fb-b11c-9750797dca73",
+    "isDfsAllowed": true,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham - Field Goals Attempted O/U (18.5)",
+    "resultingType": "swish_fg_attempted",
+    "status": "open"
+   },
+   {
+    "id": "01a137b5-a0eb-71fb-b11c-7c6cf130c6db",
+    "isDfsAllowed": false,
+    "isDisplayed": true,
+    "isSgmAllowed": true,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham - 1st Quarter Points O/U (5.5)",
+    "resultingType": "swish_first_quarter_points",
+    "status": "open"
+   },
+   {
+    "id": "01a13c9e-5f02-744a-8ee0-1423673a727d",
+    "isDfsAllowed": false,
+    "isDisplayed": true,
+    "isSgmAllowed": false,
+    "isSingleAllowed": false,
+    "multiAllowed": true,
+    "name": "Cade Cunningham - Free Throws Made O/U (5.5)",
+    "resultingType": "swish_ft_made",
+    "status": "open"
+   }
+  ],
+  "name": "Boston Celtics @ Detroit Pistons",
+  "playerProps": [
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a137b5-9faa-763d-b887-cef1723d5877",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a3c5-706f-8831-69a62a381082",
+    "stats": [
+     "threes-made"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 1.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a137b5-a0eb-71fb-b11c-7648e07aeb39",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a17f-70ae-a665-351d1a4d1836",
+    "stats": [
+     "assists"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 9.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a137b5-a0eb-71fb-b11c-7648e07aeb39",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a184-72fc-92a5-0bfc074ad397",
+    "stats": [
+     "assists"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 9.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a137b5-a0eb-71fb-b11c-7a16d812a9b4",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a216-7524-b3b0-3e60843454f4",
+    "stats": [
+     "threes-made"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 2.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a137b5-a0eb-71fb-b11c-7a16d812a9b4",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a21d-73da-a2a9-29ae17c87ffb",
+    "stats": [
+     "threes-made"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 2.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a137b5-a0eb-71fb-b11c-7c6cf130c6db",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a262-7079-b198-5d211acebaea",
+    "stats": [
+     "first-quarter-points"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 5.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a137b5-a0eb-71fb-b11c-7c6cf130c6db",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a267-74bc-a907-ac9ce026c06a",
+    "stats": [
+     "first-quarter-points"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 5.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a137b5-a0eb-71fb-b11c-9750797dca73",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a600-71fc-98e7-c60b927b4b5f",
+    "stats": [
+     "fg-attempted"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 18.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a137b5-a0eb-71fb-b11c-9750797dca73",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a137b5-a604-7449-8ba4-e3c1faff840e",
+    "stats": [
+     "fg-attempted"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 18.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "over",
+    "marketId": "01a13c9e-5f02-744a-8ee0-1423673a727d",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a13c9e-64e7-75aa-a07e-122abbdf5e1d",
+    "stats": [
+     "ft-made"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 5.5
+   },
+   {
+    "isDisplayed": true,
+    "isOptimal": true,
+    "lineType": "under",
+    "marketId": "01a13c9e-5f02-744a-8ee0-1423673a727d",
+    "playerId": "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+    "playerName": "Cade Cunningham",
+    "position": "PG",
+    "selectionId": "01a13c9e-64ec-732c-918a-4a00c6f7f58e",
+    "stats": [
+     "ft-made"
+    ],
+    "teamAbbreviation": "DET",
+    "teamId": "3bad16cb-b54a-45bf-9981-94d4f1cda888",
+    "teamName": "Detroit Pistons",
+    "value": 5.5
+   }
+  ],
+  "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+  "sportName": "Basketball",
+  "status": "Open"
+ }
+}

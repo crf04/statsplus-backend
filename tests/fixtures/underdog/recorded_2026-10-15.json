@@ -1,0 +1,960 @@
+{
+ "appearances": [
+  {
+   "badges": [],
+   "id": "1d1cb1fb-2afe-427c-904e-137667f89ef2",
+   "lineup_status_id": null,
+   "match_id": 211123,
+   "match_type": "Game",
+   "multiple_picks_allowed": true,
+   "player_id": "5b7b59e1-102f-41a7-ac78-fc25a78cbee9",
+   "position_id": "c862cc1a-910a-553e-a6ee-ba9eeaf588d3",
+   "sort_by": -334,
+   "team_id": "4dd50e92-0a87-4a6a-bb5d-31c36d88ae72",
+   "type": "Player"
+  },
+  {
+   "badges": [],
+   "id": "bfa4c00a-3186-4ea0-a5bc-620e3f1a1b4c",
+   "lineup_status_id": null,
+   "match_id": 225768,
+   "match_type": "Game",
+   "multiple_picks_allowed": true,
+   "player_id": "b2dcd9a6-a4d7-453f-8bc0-1d40d15b9f03",
+   "position_id": "381a11a1-1499-5082-ba05-6cb1acaf962c",
+   "sort_by": -827,
+   "team_id": "fd41e35e-7b5d-48c3-be0c-69e958976f6b",
+   "type": "Player"
+  },
+  {
+   "badges": [],
+   "id": "79630a45-daaa-422c-bfd3-0b7e5087028b",
+   "lineup_status_id": null,
+   "match_id": 211123,
+   "match_type": "Game",
+   "multiple_picks_allowed": true,
+   "player_id": "73d4fb27-030d-4c2d-bcc7-ced393ef6322",
+   "position_id": "e058c4e9-dd2c-5fa0-bfdf-50f7019844c6",
+   "sort_by": -59,
+   "team_id": "4dd50e92-0a87-4a6a-bb5d-31c36d88ae72",
+   "type": "Player"
+  },
+  {
+   "badges": [],
+   "id": "1f055193-d4bc-451a-af1d-7377ba253aaf",
+   "lineup_status_id": null,
+   "match_id": 225768,
+   "match_type": "Game",
+   "multiple_picks_allowed": true,
+   "player_id": "81b32151-a7f8-4388-a18c-a2e96c1e8edd",
+   "position_id": "c862cc1a-910a-553e-a6ee-ba9eeaf588d3",
+   "sort_by": -489,
+   "team_id": "fd41e35e-7b5d-48c3-be0c-69e958976f6b",
+   "type": "Player"
+  },
+  {
+   "badges": [],
+   "id": "d7363a11-7f92-4c7e-83a2-1049f70b78c7",
+   "lineup_status_id": null,
+   "match_id": 211123,
+   "match_type": "Game",
+   "multiple_picks_allowed": true,
+   "player_id": "46de5e24-3c33-4ed8-bf93-13cf4ed77705",
+   "position_id": "c862cc1a-910a-553e-a6ee-ba9eeaf588d3",
+   "sort_by": -330,
+   "team_id": "c71a1a59-28ee-4ac6-ba44-d8aeb0d2ac3e",
+   "type": "Player"
+  },
+  {
+   "badges": [],
+   "id": "ae9d3fc9-4136-4996-b130-66146358dc0b",
+   "lineup_status_id": null,
+   "match_id": 211123,
+   "match_type": "Game",
+   "multiple_picks_allowed": true,
+   "player_id": "06df3427-6b4f-4ca0-9a29-59a0ee3957f6",
+   "position_id": "2e88b36c-3c9b-522d-a4c7-a4fda0f8e994",
+   "sort_by": -20,
+   "team_id": "c71a1a59-28ee-4ac6-ba44-d8aeb0d2ac3e",
+   "type": "Player"
+  }
+ ],
+ "games": [
+  {
+   "abbreviated_title": "PHI @ NYK",
+   "away_team_id": "4dd50e92-0a87-4a6a-bb5d-31c36d88ae72",
+   "away_team_score": 0,
+   "full_team_names_title": "Philadelphia 76ers @ New York Knicks",
+   "hide_scoreboard": false,
+   "home_team_id": "c71a1a59-28ee-4ac6-ba44-d8aeb0d2ac3e",
+   "home_team_score": 0,
+   "id": 211123,
+   "manually_created": false,
+   "match_progress": "Tue 07:00pm",
+   "matchup_color_roles": {
+    "away": {
+     "dark_mode": "primary",
+     "light_mode": "primary"
+    },
+    "home": {
+     "dark_mode": "primary",
+     "light_mode": "primary"
+    }
+   },
+   "matchup_text": null,
+   "period": 0,
+   "play_by_play_available": true,
+   "pre_game_data": {
+    "broadcasts": [
+     "NBC/Peacock"
+    ]
+   },
+   "rank": 99,
+   "rescheduled_from": null,
+   "scheduled_at": "2026-10-20T23:00:00Z",
+   "scoreboard": {
+    "broadcasts": [
+     "NBC/Peacock"
+    ],
+    "scheduled_at": "2026-10-20T19:00:00-04:00",
+    "state": "pregame"
+   },
+   "scoreboard_data": null,
+   "season_type": "regular",
+   "short_title": "76ers @ Knicks",
+   "sport_group_id": null,
+   "sport_group_name": null,
+   "sport_id": "NBA",
+   "sport_name": "NBA",
+   "status": "scheduled",
+   "title": "PHI @ NYK",
+   "title_suffix": null,
+   "type": "Game",
+   "updated_at": "2026-10-14T00:07:49Z",
+   "year": 2026
+  },
+  {
+   "abbreviated_title": "TOR @ NYK",
+   "away_team_id": "fd41e35e-7b5d-48c3-be0c-69e958976f6b",
+   "away_team_score": 0,
+   "full_team_names_title": "Toronto Raptors @ New York Knicks",
+   "hide_scoreboard": false,
+   "home_team_id": "c71a1a59-28ee-4ac6-ba44-d8aeb0d2ac3e",
+   "home_team_score": 0,
+   "id": 225768,
+   "manually_created": false,
+   "match_progress": "Thu 07:30pm",
+   "matchup_color_roles": {
+    "away": {
+     "dark_mode": "primary",
+     "light_mode": "primary"
+    },
+    "home": {
+     "dark_mode": "primary",
+     "light_mode": "primary"
+    }
+   },
+   "matchup_text": "NBA Preseason",
+   "period": 0,
+   "play_by_play_available": true,
+   "pre_game_data": {
+    "broadcasts": [
+     "DAZN-MSG"
+    ]
+   },
+   "rank": 99,
+   "rescheduled_from": null,
+   "scheduled_at": "2026-10-15T23:30:00Z",
+   "scoreboard": {
+    "broadcasts": [
+     "DAZN-MSG"
+    ],
+    "matchup_text": "NBA Preseason",
+    "scheduled_at": "2026-10-15T19:30:00-04:00",
+    "state": "pregame"
+   },
+   "scoreboard_data": {
+    "away_team": {
+     "bonus": null,
+     "remaining_timeouts": 6,
+     "total_fouls": null
+    },
+    "home_team": {
+     "bonus": null,
+     "remaining_timeouts": 6,
+     "total_fouls": null
+    },
+    "total_timeouts": 7
+   },
+   "season_type": "pre",
+   "short_title": "Raptors @ Knicks",
+   "sport_group_id": null,
+   "sport_group_name": null,
+   "sport_id": "NBA",
+   "sport_name": "NBA",
+   "status": "scheduled",
+   "title": "TOR @ NYK",
+   "title_suffix": null,
+   "type": "Game",
+   "updated_at": "2026-10-15T17:30:02Z",
+   "year": 2026
+  }
+ ],
+ "over_under_lines": [
+  {
+   "contract_terms_url": null,
+   "contract_url": null,
+   "entry_stable_id": "343769a6-f572-482f-bf7b-138d4312da3d|16.5",
+   "expires_at": null,
+   "id": "2fa5c85c-f7ea-4b06-aa69-dc3ef0d91adf",
+   "line_type": "balanced",
+   "live_event": false,
+   "live_event_stat": null,
+   "non_discounted_stat_value": null,
+   "options": [
+    {
+     "american_price": "-112",
+     "appearance_id": null,
+     "choice": "higher",
+     "choice_display": "Higher",
+     "choice_display_name_shorter": "17+",
+     "choice_display_short": "Higher",
+     "choice_id": "over__",
+     "decimal_price": "1.9",
+     "grouping_id": null,
+     "id": "8003cc7b-1828-454f-b505-6657546e5415",
+     "lookup_id": "2494b0fd-7a4a-5dcc-94a3-8049632c067f",
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "2fa5c85c-f7ea-4b06-aa69-dc3ef0d91adf",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "LeBron James",
+     "selection_subheader": "Higher 16.5 Points",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T19:34:03.370Z"
+    },
+    {
+     "american_price": "-112",
+     "appearance_id": null,
+     "choice": "lower",
+     "choice_display": "Lower",
+     "choice_display_name_shorter": "16-",
+     "choice_display_short": "Lower",
+     "choice_id": "under__",
+     "decimal_price": "1.9",
+     "grouping_id": null,
+     "id": "05b552f6-787b-4aab-90dc-b509ade850d4",
+     "lookup_id": "6ec12640-5728-5a6f-b4cb-1f105eaf02c7",
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "2fa5c85c-f7ea-4b06-aa69-dc3ef0d91adf",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "LeBron James",
+     "selection_subheader": "Lower 16.5 Points",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T19:34:03.370Z"
+    }
+   ],
+   "over_under": {
+    "appearance_stat": {
+     "appearance_id": "1d1cb1fb-2afe-427c-904e-137667f89ef2",
+     "display_stat": "Points",
+     "graded_by": "high_score",
+     "hide_current_stat_value": false,
+     "id": "1d1cb1fb-2afe-427c-904e-137667f89ef2-8d718cf2-1487-401e-88f7-f9f799e85871",
+     "pickem_stat_id": "8d718cf2-1487-401e-88f7-f9f799e85871",
+     "rank": 3,
+     "show_current_stat_value_on_track": false,
+     "stat": "points"
+    },
+    "boost": null,
+    "category": "player_prop",
+    "display_mode": "default",
+    "grid_display_title": "Points",
+    "has_alternates": false,
+    "id": "343769a6-f572-482f-bf7b-138d4312da3d",
+    "multi_provider": false,
+    "option_priority": "none",
+    "prediction_market": false,
+    "scoring_type_id": null,
+    "supercharge_type": null,
+    "team_divider": null,
+    "title": "LeBron James Points O/U"
+   },
+   "over_under_id": "343769a6-f572-482f-bf7b-138d4312da3d",
+   "provider_id": "manual",
+   "provider_type": "probability",
+   "rank": 115199101003099,
+   "sort_by": -328,
+   "stable_id": "343769a6-f572-482f-bf7b-138d4312da3d|balanced",
+   "stat_value": "16.5",
+   "status": "active",
+   "updated_at": "2026-10-15T19:34:03.376Z"
+  },
+  {
+   "contract_terms_url": null,
+   "contract_url": null,
+   "entry_stable_id": null,
+   "expires_at": null,
+   "id": "61d50281-1530-4117-b386-8c3df0fa97bf",
+   "line_type": "balanced",
+   "live_event": false,
+   "live_event_stat": null,
+   "non_discounted_stat_value": null,
+   "options": [
+    {
+     "american_price": "-112",
+     "appearance_id": null,
+     "choice": "higher",
+     "choice_display": "Higher",
+     "choice_display_name_shorter": "27+",
+     "choice_display_short": "Higher",
+     "choice_id": "over__",
+     "decimal_price": "1.9",
+     "grouping_id": null,
+     "id": "18cdcdde-76af-4039-8e91-d6afb36991c9",
+     "lookup_id": null,
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "61d50281-1530-4117-b386-8c3df0fa97bf",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Scottie Barnes",
+     "selection_subheader": "Higher 26.5 Pts + Rebs + Asts",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T15:42:53.604Z"
+    }
+   ],
+   "over_under": {
+    "appearance_stat": {
+     "appearance_id": "bfa4c00a-3186-4ea0-a5bc-620e3f1a1b4c",
+     "display_stat": "Pts + Rebs + Asts",
+     "graded_by": "high_score",
+     "hide_current_stat_value": false,
+     "id": "bfa4c00a-3186-4ea0-a5bc-620e3f1a1b4c-590e7c83-99fc-419f-bdd8-78bb0a691f8b",
+     "pickem_stat_id": "590e7c83-99fc-419f-bdd8-78bb0a691f8b",
+     "rank": 4,
+     "show_current_stat_value_on_track": false,
+     "stat": "pts_rebs_asts"
+    },
+    "boost": null,
+    "category": "player_prop",
+    "display_mode": "default",
+    "grid_display_title": null,
+    "has_alternates": false,
+    "id": "f4e7a0ee-7e60-4eeb-b095-2b5e7e6f0138",
+    "multi_provider": false,
+    "option_priority": "none",
+    "prediction_market": false,
+    "scoring_type_id": null,
+    "supercharge_type": null,
+    "team_divider": null,
+    "title": "Scottie Barnes Pts + Rebs + Asts O/U"
+   },
+   "over_under_id": "f4e7a0ee-7e60-4eeb-b095-2b5e7e6f0138",
+   "provider_id": null,
+   "provider_type": "probability",
+   "rank": 115199101004099,
+   "sort_by": -301,
+   "stable_id": "f4e7a0ee-7e60-4eeb-b095-2b5e7e6f0138|balanced",
+   "stat_value": "26.5",
+   "status": "active",
+   "updated_at": "2026-10-15T15:48:08.877Z"
+  },
+  {
+   "contract_terms_url": null,
+   "contract_url": null,
+   "entry_stable_id": "70113889-6356-4b6d-9ff9-cd3842fa91d7|19.5",
+   "expires_at": null,
+   "id": "057a031d-b6e6-40b6-b417-e66ba2d12964",
+   "line_type": "balanced",
+   "live_event": false,
+   "live_event_stat": null,
+   "non_discounted_stat_value": null,
+   "options": [
+    {
+     "american_price": "-121",
+     "appearance_id": null,
+     "choice": "higher",
+     "choice_display": "Higher",
+     "choice_display_name_shorter": "20+",
+     "choice_display_short": "Higher",
+     "choice_id": "over__",
+     "decimal_price": "1.83",
+     "grouping_id": null,
+     "id": "fb17ad81-e0e4-4b06-9f33-db2e77418384",
+     "lookup_id": "681cd98e-e74a-5b6d-979b-dd6c872fef64",
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "057a031d-b6e6-40b6-b417-e66ba2d12964",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Tyrese Maxey",
+     "selection_subheader": "Higher 19.5 Points",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T18:00:54.155Z"
+    },
+    {
+     "american_price": "-102",
+     "appearance_id": null,
+     "choice": "lower",
+     "choice_display": "Lower",
+     "choice_display_name_shorter": "19-",
+     "choice_display_short": "Lower",
+     "choice_id": "under__",
+     "decimal_price": "1.99",
+     "grouping_id": null,
+     "id": "e93a0972-c3e5-4f2a-bbe6-2580d2f6b7d4",
+     "lookup_id": "dcdb3ea0-d29c-5e72-99b4-bb59f35bfb9f",
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "057a031d-b6e6-40b6-b417-e66ba2d12964",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Tyrese Maxey",
+     "selection_subheader": "Lower 19.5 Points",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T18:00:54.160Z"
+    }
+   ],
+   "over_under": {
+    "appearance_stat": {
+     "appearance_id": "79630a45-daaa-422c-bfd3-0b7e5087028b",
+     "display_stat": "Points",
+     "graded_by": "high_score",
+     "hide_current_stat_value": false,
+     "id": "79630a45-daaa-422c-bfd3-0b7e5087028b-8d718cf2-1487-401e-88f7-f9f799e85871",
+     "pickem_stat_id": "8d718cf2-1487-401e-88f7-f9f799e85871",
+     "rank": 3,
+     "show_current_stat_value_on_track": false,
+     "stat": "points"
+    },
+    "boost": null,
+    "category": "player_prop",
+    "display_mode": "default",
+    "grid_display_title": "Points",
+    "has_alternates": true,
+    "id": "70113889-6356-4b6d-9ff9-cd3842fa91d7",
+    "multi_provider": false,
+    "option_priority": "none",
+    "prediction_market": false,
+    "scoring_type_id": null,
+    "supercharge_type": null,
+    "team_divider": null,
+    "title": "Tyrese Maxey Points O/U"
+   },
+   "over_under_id": "70113889-6356-4b6d-9ff9-cd3842fa91d7",
+   "provider_id": "swish",
+   "provider_type": "probability",
+   "rank": 115199105003099,
+   "sort_by": -54,
+   "stable_id": "70113889-6356-4b6d-9ff9-cd3842fa91d7|balanced",
+   "stat_value": "19.5",
+   "status": "active",
+   "updated_at": "2026-10-15T21:14:52.423Z"
+  },
+  {
+   "contract_terms_url": null,
+   "contract_url": null,
+   "entry_stable_id": null,
+   "expires_at": null,
+   "id": "655696de-0883-47cc-8dd0-481d9c2c7392",
+   "line_type": "balanced",
+   "live_event": false,
+   "live_event_stat": null,
+   "non_discounted_stat_value": null,
+   "options": [
+    {
+     "american_price": "-112",
+     "appearance_id": null,
+     "choice": "higher",
+     "choice_display": "Higher",
+     "choice_display_name_shorter": "26+",
+     "choice_display_short": "Higher",
+     "choice_id": "over__",
+     "decimal_price": "1.9",
+     "grouping_id": null,
+     "id": "f40d1f9a-0959-47d9-8095-24d0198ed75b",
+     "lookup_id": null,
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "655696de-0883-47cc-8dd0-481d9c2c7392",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "RJ Barrett",
+     "selection_subheader": "Higher 25.5 Pts + Rebs + Asts",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T15:42:53.298Z"
+    }
+   ],
+   "over_under": {
+    "appearance_stat": {
+     "appearance_id": "1f055193-d4bc-451a-af1d-7377ba253aaf",
+     "display_stat": "Pts + Rebs + Asts",
+     "graded_by": "high_score",
+     "hide_current_stat_value": false,
+     "id": "1f055193-d4bc-451a-af1d-7377ba253aaf-590e7c83-99fc-419f-bdd8-78bb0a691f8b",
+     "pickem_stat_id": "590e7c83-99fc-419f-bdd8-78bb0a691f8b",
+     "rank": 4,
+     "show_current_stat_value_on_track": false,
+     "stat": "pts_rebs_asts"
+    },
+    "boost": null,
+    "category": "player_prop",
+    "display_mode": "default",
+    "grid_display_title": null,
+    "has_alternates": false,
+    "id": "79511a7e-87c1-4a83-bb6c-e7f65af2401e",
+    "multi_provider": false,
+    "option_priority": "none",
+    "prediction_market": false,
+    "scoring_type_id": null,
+    "supercharge_type": null,
+    "team_divider": null,
+    "title": "RJ Barrett Pts + Rebs + Asts O/U"
+   },
+   "over_under_id": "79511a7e-87c1-4a83-bb6c-e7f65af2401e",
+   "provider_id": null,
+   "provider_type": "probability",
+   "rank": 115199106004099,
+   "sort_by": -178,
+   "stable_id": "79511a7e-87c1-4a83-bb6c-e7f65af2401e|balanced",
+   "stat_value": "25.5",
+   "status": "active",
+   "updated_at": "2026-10-15T15:48:08.877Z"
+  },
+  {
+   "contract_terms_url": null,
+   "contract_url": null,
+   "entry_stable_id": "7754e197-3537-41e6-aa64-8d48bac7994d|13.5",
+   "expires_at": null,
+   "id": "d3a2954e-492b-440b-b0cb-fa42b80fbd15",
+   "line_type": "balanced",
+   "live_event": false,
+   "live_event_stat": null,
+   "non_discounted_stat_value": null,
+   "options": [
+    {
+     "american_price": "-114",
+     "appearance_id": null,
+     "choice": "higher",
+     "choice_display": "Higher",
+     "choice_display_name_shorter": "14+",
+     "choice_display_short": "Higher",
+     "choice_id": "over__",
+     "decimal_price": "1.88",
+     "grouping_id": null,
+     "id": "9545c132-1f8c-4e1f-9205-6e6405951842",
+     "lookup_id": "e7f5a7c4-41a6-5b26-9414-c15651842b39",
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "d3a2954e-492b-440b-b0cb-fa42b80fbd15",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Mikal Bridges",
+     "selection_subheader": "Higher 13.5 Points",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T17:02:14.654Z"
+    },
+    {
+     "american_price": "-108",
+     "appearance_id": null,
+     "choice": "lower",
+     "choice_display": "Lower",
+     "choice_display_name_shorter": "13-",
+     "choice_display_short": "Lower",
+     "choice_id": "under__",
+     "decimal_price": "1.93",
+     "grouping_id": null,
+     "id": "a889719b-0c6f-4547-ba88-ff06137f4b5e",
+     "lookup_id": "950cc3f9-e1b3-5008-b7d4-a09ba9662d41",
+     "odds": {
+      "fantasy": {
+       "american": "-115",
+       "decimal": "1.87",
+       "probability": "50",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "d3a2954e-492b-440b-b0cb-fa42b80fbd15",
+     "payout_multiplier": "1.0",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Mikal Bridges",
+     "selection_subheader": "Lower 13.5 Points",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T17:02:14.659Z"
+    }
+   ],
+   "over_under": {
+    "appearance_stat": {
+     "appearance_id": "d7363a11-7f92-4c7e-83a2-1049f70b78c7",
+     "display_stat": "Points",
+     "graded_by": "high_score",
+     "hide_current_stat_value": false,
+     "id": "d7363a11-7f92-4c7e-83a2-1049f70b78c7-8d718cf2-1487-401e-88f7-f9f799e85871",
+     "pickem_stat_id": "8d718cf2-1487-401e-88f7-f9f799e85871",
+     "rank": 3,
+     "show_current_stat_value_on_track": false,
+     "stat": "points"
+    },
+    "boost": null,
+    "category": "player_prop",
+    "display_mode": "default",
+    "grid_display_title": "Points",
+    "has_alternates": true,
+    "id": "7754e197-3537-41e6-aa64-8d48bac7994d",
+    "multi_provider": false,
+    "option_priority": "none",
+    "prediction_market": false,
+    "scoring_type_id": null,
+    "supercharge_type": null,
+    "team_divider": null,
+    "title": "Mikal Bridges Points O/U"
+   },
+   "over_under_id": "7754e197-3537-41e6-aa64-8d48bac7994d",
+   "provider_id": "swish",
+   "provider_type": "probability",
+   "rank": 115199107003099,
+   "sort_by": -131,
+   "stable_id": "7754e197-3537-41e6-aa64-8d48bac7994d|balanced",
+   "stat_value": "13.5",
+   "status": "active",
+   "updated_at": "2026-10-15T21:14:52.058Z"
+  },
+  {
+   "contract_terms_url": null,
+   "contract_url": null,
+   "entry_stable_id": "65970114-697a-48c9-b7e3-708ebb6c6599|4.5",
+   "expires_at": null,
+   "id": "b8eed623-0a87-4ca6-bf51-1aa4fa9ae0e0",
+   "line_type": "balanced",
+   "live_event": false,
+   "live_event_stat": null,
+   "non_discounted_stat_value": null,
+   "options": [
+    {
+     "american_price": "-150",
+     "appearance_id": null,
+     "choice": "higher",
+     "choice_display": "Higher",
+     "choice_display_name_shorter": "5+",
+     "choice_display_short": "Higher",
+     "choice_id": "over__",
+     "decimal_price": "1.67",
+     "grouping_id": null,
+     "id": "2e867e6b-1ff5-4245-99ad-a2dcd7502d8b",
+     "lookup_id": "b3d47ba3-45c5-5038-b0b2-9a08c6f5d1a2",
+     "odds": {
+      "fantasy": {
+       "american": "-164",
+       "decimal": "1.61",
+       "probability": "59",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "b8eed623-0a87-4ca6-bf51-1aa4fa9ae0e0",
+     "payout_multiplier": "0.85",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Josh Hart",
+     "selection_subheader": "Higher 4.5 Assists",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T18:05:15.033Z"
+    },
+    {
+     "american_price": "+121",
+     "appearance_id": null,
+     "choice": "lower",
+     "choice_display": "Lower",
+     "choice_display_name_shorter": "4-",
+     "choice_display_short": "Lower",
+     "choice_id": "under__",
+     "decimal_price": "2.21",
+     "grouping_id": null,
+     "id": "59a1b6e7-0792-4d1f-8abd-f27798d0503b",
+     "lookup_id": "6bd54ffe-cd5d-5b9c-b158-6b9ade215422",
+     "odds": {
+      "fantasy": {
+       "american": "+104",
+       "decimal": "2.04",
+       "probability": "45",
+       "type": "precision"
+      },
+      "prediction": null,
+      "sportsbook": null
+     },
+     "over_under_line_id": "b8eed623-0a87-4ca6-bf51-1aa4fa9ae0e0",
+     "payout_multiplier": "1.1",
+     "raw_probability": null,
+     "rfq_combinable": true,
+     "selection_header": "Josh Hart",
+     "selection_subheader": "Lower 4.5 Assists",
+     "status": "active",
+     "type": "OverUnderOption",
+     "updated_at": "2026-10-15T18:05:15.036Z"
+    }
+   ],
+   "over_under": {
+    "appearance_stat": {
+     "appearance_id": "ae9d3fc9-4136-4996-b130-66146358dc0b",
+     "display_stat": "Assists",
+     "graded_by": "high_score",
+     "hide_current_stat_value": false,
+     "id": "ae9d3fc9-4136-4996-b130-66146358dc0b-e3bc1aaa-7964-4a84-bcfa-2d92a4d477a2",
+     "pickem_stat_id": "e3bc1aaa-7964-4a84-bcfa-2d92a4d477a2",
+     "rank": 6,
+     "show_current_stat_value_on_track": false,
+     "stat": "assists"
+    },
+    "boost": null,
+    "category": "player_prop",
+    "display_mode": "default",
+    "grid_display_title": null,
+    "has_alternates": true,
+    "id": "65970114-697a-48c9-b7e3-708ebb6c6599",
+    "multi_provider": false,
+    "option_priority": "none",
+    "prediction_market": false,
+    "scoring_type_id": null,
+    "supercharge_type": null,
+    "team_divider": null,
+    "title": "Josh Hart Assists O/U"
+   },
+   "over_under_id": "65970114-697a-48c9-b7e3-708ebb6c6599",
+   "provider_id": "swish",
+   "provider_type": "probability",
+   "rank": 115199107006099,
+   "sort_by": -2,
+   "stable_id": "65970114-697a-48c9-b7e3-708ebb6c6599|balanced",
+   "stat_value": "4.5",
+   "status": "active",
+   "updated_at": "2026-10-15T21:14:51.308Z"
+  }
+ ],
+ "players": [
+  {
+   "action_path": {
+    "behavior": "navigate",
+    "key": "Player:player_id=5b7b59e1-102f-41a7-ac78-fc25a78cbee9",
+    "search": {
+     "enabled": false,
+     "parameters": {}
+    },
+    "url": "https://api.underdogfantasy.com/v1/lobbies/scaffolds/players?player_id=5b7b59e1-102f-41a7-ac78-fc25a78cbee9&tab_id=picks"
+   },
+   "country": null,
+   "dark_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-0afbe608-940a-4d5d-a1f7-468718c67d91.png",
+   "first_name": "LeBron",
+   "id": "5b7b59e1-102f-41a7-ac78-fc25a78cbee9",
+   "image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-0afbe608-940a-4d5d-a1f7-468718c67d91.png",
+   "jersey_number": "23",
+   "last_name": "James",
+   "light_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-0afbe608-940a-4d5d-a1f7-468718c67d91.png",
+   "position_display_name": "Small Forward",
+   "position_id": "c862cc1a-910a-553e-a6ee-ba9eeaf588d3",
+   "position_name": "SF",
+   "sport_id": "NBA",
+   "team_id": "4dd50e92-0a87-4a6a-bb5d-31c36d88ae72"
+  },
+  {
+   "action_path": {
+    "behavior": "navigate",
+    "key": "Player:player_id=b2dcd9a6-a4d7-453f-8bc0-1d40d15b9f03",
+    "search": {
+     "enabled": false,
+     "parameters": {}
+    },
+    "url": "https://api.underdogfantasy.com/v1/lobbies/scaffolds/players?player_id=b2dcd9a6-a4d7-453f-8bc0-1d40d15b9f03&tab_id=picks"
+   },
+   "country": null,
+   "dark_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-1738927f-6ef3-4b23-921d-168b4371f917.png",
+   "first_name": "Scottie",
+   "id": "b2dcd9a6-a4d7-453f-8bc0-1d40d15b9f03",
+   "image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-1738927f-6ef3-4b23-921d-168b4371f917.png",
+   "jersey_number": "4",
+   "last_name": "Barnes",
+   "light_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-1738927f-6ef3-4b23-921d-168b4371f917.png",
+   "position_display_name": "Power Forward",
+   "position_id": "381a11a1-1499-5082-ba05-6cb1acaf962c",
+   "position_name": "PF",
+   "sport_id": "NBA",
+   "team_id": "fd41e35e-7b5d-48c3-be0c-69e958976f6b"
+  },
+  {
+   "action_path": {
+    "behavior": "navigate",
+    "key": "Player:player_id=73d4fb27-030d-4c2d-bcc7-ced393ef6322",
+    "search": {
+     "enabled": false,
+     "parameters": {}
+    },
+    "url": "https://api.underdogfantasy.com/v1/lobbies/scaffolds/players?player_id=73d4fb27-030d-4c2d-bcc7-ced393ef6322&tab_id=picks"
+   },
+   "country": null,
+   "dark_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-75fc46eb-71d8-4d1a-984f-3747ccd7a4c9.png",
+   "first_name": "Tyrese",
+   "id": "73d4fb27-030d-4c2d-bcc7-ced393ef6322",
+   "image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-75fc46eb-71d8-4d1a-984f-3747ccd7a4c9.png",
+   "jersey_number": "0",
+   "last_name": "Maxey",
+   "light_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-75fc46eb-71d8-4d1a-984f-3747ccd7a4c9.png",
+   "position_display_name": "Point Guard",
+   "position_id": "e058c4e9-dd2c-5fa0-bfdf-50f7019844c6",
+   "position_name": "PG",
+   "sport_id": "NBA",
+   "team_id": "4dd50e92-0a87-4a6a-bb5d-31c36d88ae72"
+  },
+  {
+   "action_path": {
+    "behavior": "navigate",
+    "key": "Player:player_id=81b32151-a7f8-4388-a18c-a2e96c1e8edd",
+    "search": {
+     "enabled": false,
+     "parameters": {}
+    },
+    "url": "https://api.underdogfantasy.com/v1/lobbies/scaffolds/players?player_id=81b32151-a7f8-4388-a18c-a2e96c1e8edd&tab_id=picks"
+   },
+   "country": null,
+   "dark_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-42c5f009-dfd2-4a94-a750-0943791e138e.png",
+   "first_name": "RJ",
+   "id": "81b32151-a7f8-4388-a18c-a2e96c1e8edd",
+   "image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-42c5f009-dfd2-4a94-a750-0943791e138e.png",
+   "jersey_number": "9",
+   "last_name": "Barrett",
+   "light_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-42c5f009-dfd2-4a94-a750-0943791e138e.png",
+   "position_display_name": "Small Forward",
+   "position_id": "c862cc1a-910a-553e-a6ee-ba9eeaf588d3",
+   "position_name": "SF",
+   "sport_id": "NBA",
+   "team_id": "fd41e35e-7b5d-48c3-be0c-69e958976f6b"
+  },
+  {
+   "action_path": {
+    "behavior": "navigate",
+    "key": "Player:player_id=46de5e24-3c33-4ed8-bf93-13cf4ed77705",
+    "search": {
+     "enabled": false,
+     "parameters": {}
+    },
+    "url": "https://api.underdogfantasy.com/v1/lobbies/scaffolds/players?player_id=46de5e24-3c33-4ed8-bf93-13cf4ed77705&tab_id=picks"
+   },
+   "country": null,
+   "dark_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-83cc5b28-36a7-43ba-ba20-8347bd1de583.png",
+   "first_name": "Mikal",
+   "id": "46de5e24-3c33-4ed8-bf93-13cf4ed77705",
+   "image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-83cc5b28-36a7-43ba-ba20-8347bd1de583.png",
+   "jersey_number": "25",
+   "last_name": "Bridges",
+   "light_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-83cc5b28-36a7-43ba-ba20-8347bd1de583.png",
+   "position_display_name": "Small Forward",
+   "position_id": "c862cc1a-910a-553e-a6ee-ba9eeaf588d3",
+   "position_name": "SF",
+   "sport_id": "NBA",
+   "team_id": "c71a1a59-28ee-4ac6-ba44-d8aeb0d2ac3e"
+  },
+  {
+   "action_path": {
+    "behavior": "navigate",
+    "key": "Player:player_id=06df3427-6b4f-4ca0-9a29-59a0ee3957f6",
+    "search": {
+     "enabled": false,
+     "parameters": {}
+    },
+    "url": "https://api.underdogfantasy.com/v1/lobbies/scaffolds/players?player_id=06df3427-6b4f-4ca0-9a29-59a0ee3957f6&tab_id=picks"
+   },
+   "country": null,
+   "dark_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-d6fbf8f8-bb4a-43f7-95f6-498a5e042138.png",
+   "first_name": "Josh",
+   "id": "06df3427-6b4f-4ca0-9a29-59a0ee3957f6",
+   "image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-d6fbf8f8-bb4a-43f7-95f6-498a5e042138.png",
+   "jersey_number": "3",
+   "last_name": "Hart",
+   "light_image_url": "https://assets.underdogfantasy.com/player-images/nba/20261008_21-d6fbf8f8-bb4a-43f7-95f6-498a5e042138.png",
+   "position_display_name": "Shooting Guard",
+   "position_id": "2e88b36c-3c9b-522d-a4c7-a4fda0f8e994",
+   "position_name": "SG",
+   "sport_id": "NBA",
+   "team_id": "c71a1a59-28ee-4ac6-ba44-d8aeb0d2ac3e"
+  }
+ ],
+ "solo_games": []
+}

@@ -13,6 +13,7 @@ import concurrent.futures
 import copy
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -44,6 +45,7 @@ from app.providers.dfs import (
     RetrievalContext,
     ScoringPeriod,
     Selection,
+    SelectionDirection,
     SelectionModifier,
     SportEvidence,
     StatisticEvidence,
@@ -76,6 +78,17 @@ _STAT_ORDER = {
     "blocks": 5,
     "turnovers": 6,
 }
+_ONE_SIDED_VARIANT_LABEL = "one_sided"
+#: Dabble's spelling of a component the statistic catalog names differently.
+_COMPONENT_ALIASES = {
+    "threes-made": "three-pointers-made",
+    "fg-attempted": "field-goals-attempted",
+    "three-attempted": "three-pointers-attempted",
+    "two-attempted": "two-pointers-attempted",
+}
+_LADDER_MARKET_TYPE = re.compile(
+    r"to_(?:have|score)_\d+_plus_(?P<subject>.+)"
+)
 _BASKETBALL_LABELS = {"basketball", "nba"}
 _NON_PLAYER_KINDS = {
     "team",
@@ -886,14 +899,27 @@ class DabbleAdapter:
                 accumulator.selections[key]
                 for key in sorted(accumulator.selections, key=str)
             )
+            market = accumulator.market
+            variant = (
+                None
+                if market.variant is MarketVariant.UNKNOWN
+                else market.variant
+            )
+            variant_label = market.variant_label
+            if variant_label is None:
+                # Dabble states no variant.  The line it offers on both sides
+                # is its standard line; an over-only extra is an alternate.
+                directions = {selection.direction for selection in selections}
+                if {SelectionDirection.HIGHER, SelectionDirection.LOWER} <= directions:
+                    variant = MarketVariant.STANDARD
+                else:
+                    variant = MarketVariant.ALTERNATE
+                    variant_label = _ONE_SIDED_VARIANT_LABEL
             market_values.append(
                 replace(
-                    accumulator.market,
-                    variant=(
-                        None
-                        if accumulator.market.variant is MarketVariant.UNKNOWN
-                        else accumulator.market.variant
-                    ),
+                    market,
+                    variant=variant,
+                    variant_label=variant_label,
                     selections=selections,
                 )
             )
@@ -1329,8 +1355,10 @@ class DabbleAdapter:
         if not isinstance(line_type, str) or not line_type.strip():
             raise CoverageRecordMalformed("Dabble lineType is malformed")
         components, scoring_period, period_label = self._statistic_period(
-            normalized_stats
+            normalized_stats,
+            market_type=self._market_type(detail, prop.get("marketId")),
         )
+        components = [_COMPONENT_ALIASES.get(stat, stat) for stat in components]
         return _PropFacts(
             player_name=player_name,
             status=status,
@@ -1585,8 +1613,44 @@ class DabbleAdapter:
         )
 
     @staticmethod
+    def _market_type(detail: Mapping[str, Any], market_id: Any) -> str | None:
+        """Return the ``resultingType`` of the fixture market a prop belongs to."""
+
+        markets = detail.get("markets")
+        if market_id is None or not isinstance(markets, list):
+            return None
+        for market in markets:
+            if isinstance(market, Mapping) and market.get("id") == market_id:
+                return optional_text(market.get("resultingType"))
+        return None
+
+    @staticmethod
+    def _marks_full_game(stats: Sequence[str], market_type: str | None) -> bool:
+        """Report whether Dabble's market type names these stats and no period.
+
+        A prop carries no period field; the period of a quarter or half prop is
+        in its stat label ("first-quarter-points").  The fixture market the prop
+        belongs to restates the stats in its ``resultingType``
+        ("swish_threes_made", "swish_to_have_3_plus_threes_made"), and a
+        period-scoped market restates the period there too.  A whole-game
+        market is one whose type is exactly the stats, with no period.
+        """
+
+        if market_type is None or not market_type.startswith("swish_"):
+            return False
+        subject = "_".join(stat.replace("-", "_") for stat in stats)
+        remainder = market_type.removeprefix("swish_")
+        if remainder == subject:
+            return True
+        match = _LADDER_MARKET_TYPE.fullmatch(remainder)
+        return match is not None and match.group("subject") == subject
+
+    @classmethod
     def _statistic_period(
+        cls,
         stats: Sequence[str],
+        *,
+        market_type: str | None = None,
     ) -> tuple[tuple[str, ...], ScoringPeriod | str, str | None]:
         prefixes = (
             ("first-half-", "first half", ScoringPeriod.FIRST_HALF),
@@ -1597,7 +1661,9 @@ class DabbleAdapter:
         for prefix, label, period in prefixes:
             if all(stat.startswith(prefix) for stat in stats):
                 return tuple(stat.removeprefix(prefix) for stat in stats), period, label
-        if all(stat in _STAT_ORDER for stat in stats):
+        if all(stat in _STAT_ORDER for stat in stats) or cls._marks_full_game(
+            stats, market_type
+        ):
             return tuple(stats), ScoringPeriod.FULL_GAME, None
         return tuple(stats), ScoringPeriod.UNKNOWN, None
 
