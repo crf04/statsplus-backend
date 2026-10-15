@@ -10,7 +10,7 @@ archive.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -71,21 +71,31 @@ class SportsbookQuoteStore:
         quotes: Sequence[ResolvedQuote],
         unresolved_count: int = 0,
         outcome: str = "complete",
+        commence_time: datetime | None = None,
+        replace_latest: bool = True,
+        fence: Callable[[Connection], None] | None = None,
     ) -> PollWrite:
         """Store one successful response in a single transaction.
 
         A repeated identical quote adds no history row but still refreshes
         its latest row.  Latest rows the response no longer carries are
-        removed, but only when the response carried quotes: an empty one is
-        indistinguishable from props not being posted yet.
+        removed (section 4's latest-poll omission rule) -- including when
+        every quote was omitted -- unless ``replace_latest`` is false, which
+        a caller uses for an upstream-empty response that only says props are
+        not posted yet.  ``fence`` runs first inside the transaction and
+        raises when the caller's lease is gone, so a stale worker commits
+        nothing.
         """
 
         observed_at = assume_utc(completed_at)
         with self.engine.begin() as connection:
+            if fence is not None:
+                fence(connection)
             poll_id = connection.execute(
                 insert(OddsApiPoll.__table__).values(
                     odds_event_id=odds_event_id,
                     canonical_game_id=game_id,
+                    commence_time=None if commence_time is None else assume_utc(commence_time),
                     started_at=assume_utc(started_at),
                     completed_at=observed_at,
                     outcome=outcome,
@@ -96,7 +106,7 @@ class SportsbookQuoteStore:
                     unresolved_count=unresolved_count,
                 )
             ).inserted_primary_key[0]
-            if not quotes:
+            if not quotes and not replace_latest:
                 return PollWrite(int(poll_id), 0, 0, 0)
 
             latest = SportsbookPropLatest.__table__
@@ -189,14 +199,19 @@ class SportsbookQuoteStore:
         remaining: int | None = None,
         failure_reason: str | None = None,
         unresolved_count: int = 0,
+        commence_time: datetime | None = None,
+        fence: Callable[[Connection], None] | None = None,
     ) -> None:
         """Record an ``empty`` or ``failed`` poll that stored no quotes."""
 
         with self.engine.begin() as connection:
+            if fence is not None:
+                fence(connection)
             connection.execute(
                 insert(OddsApiPoll.__table__).values(
                     odds_event_id=odds_event_id,
                     canonical_game_id=game_id,
+                    commence_time=None if commence_time is None else assume_utc(commence_time),
                     started_at=assume_utc(started_at),
                     completed_at=None if completed_at is None else assume_utc(completed_at),
                     outcome=outcome,

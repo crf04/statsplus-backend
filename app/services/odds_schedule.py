@@ -20,6 +20,9 @@ CALL_COST = 5
 POLL_WINDOW_OPENS = timedelta(hours=14)
 #: The one extra fetch before tip, stored as the closing snapshot.
 CLOSING_OPENS = timedelta(minutes=10)
+#: The closing fetch is jittered to the beat, so tip-10 to tip-5; a missed one
+#: is not made up later (the last pregame quote stands, unmarked).
+CLOSING_CLOSES = timedelta(minutes=5)
 HOURLY = timedelta(hours=1)
 #: Beats are five minutes apart; a poll is due a little early so latency
 #: jitter never pushes an hourly poll a whole beat late.
@@ -159,7 +162,13 @@ def evaluate_tier(
 
     if remaining is not None and remaining < CALL_COST + MIN_REMAINING_AFTER_CALL:
         return Tier.HALTED, now
-    if evaluated_at is not None and now - evaluated_at < TIER_REEVALUATION:
+    if (
+        evaluated_at is not None
+        and now - evaluated_at < TIER_REEVALUATION
+        # A halted collector re-reads the quota every beat, so a monthly reset
+        # seen in free discovery reopens it without waiting out the hour.
+        and current is not Tier.HALTED
+    ):
         return current, evaluated_at
     target = target_tier(remaining=remaining, reserve=reserve, needs=needs)
     return step_tier(current, target), now
@@ -199,7 +208,9 @@ def plan_cycle(
             event
             for event in events
             if not event.closing_done
-            and event.commence_time - CLOSING_OPENS <= now < event.commence_time
+            and event.commence_time - CLOSING_OPENS
+            <= now
+            < event.commence_time - CLOSING_CLOSES
         ),
         key=lambda event: (event.commence_time, event.odds_event_id),
     )
@@ -237,6 +248,7 @@ def plan_cycle(
 
 __all__ = [
     "CALL_COST",
+    "CLOSING_CLOSES",
     "CLOSING_OPENS",
     "CyclePlan",
     "EventState",

@@ -41,14 +41,14 @@ def plan(now, events, *, tier=Tier.NORMAL, remaining=20000, reserve=1000, evalua
     )
 
 
-def run_one_event(tier):
+def run_one_event(tier, remaining=20000):
     """Calls made for one game over its last 15 hours, beat by beat."""
 
     last, closing_done, made = None, False, []
     now = TIP - timedelta(hours=15)
     while now < TIP + timedelta(hours=1):
         event = EventState("e1", TIP, last, closing_done)
-        for call in plan(now, [event], tier=tier, evaluated=now).calls:
+        for call in plan(now, [event], tier=tier, evaluated=now, remaining=remaining).calls:
             made.append((TIP - now, call.kind))
             last = now
             closing_done = closing_done or call.kind == "closing"
@@ -80,8 +80,17 @@ def test_closing_tier_takes_only_the_closing_snapshot():
     assert run_one_event(Tier.CLOSING) == [(timedelta(minutes=10), "closing")]
 
 
-def test_halted_tier_makes_no_call_at_all():
-    assert run_one_event(Tier.HALTED) == []
+def test_halted_tier_makes_no_call_at_all_while_the_quota_stays_low():
+    assert run_one_event(Tier.HALTED, remaining=5) == []
+
+
+def test_a_halted_collector_reopens_when_the_quota_resets_without_waiting_an_hour():
+    now = TIP - timedelta(hours=3)
+
+    # Halted a minute ago on 5 credits; discovery now reports a fresh month.
+    first = plan(now, [], tier=Tier.HALTED, evaluated=now - timedelta(minutes=1), remaining=20000)
+
+    assert (first.tier, first.tier_evaluated_at) == (Tier.CLOSING, now)
 
 
 def test_no_call_is_planned_at_or_after_tip():
@@ -89,7 +98,21 @@ def test_no_call_is_planned_at_or_after_tip():
 
     assert plan(TIP, [event]).calls == ()
     assert plan(TIP + timedelta(seconds=1), [event]).calls == ()
-    assert len(plan(TIP - timedelta(seconds=1), [event]).calls) == 1
+    assert plan(TIP - timedelta(seconds=1), [event]).calls == ()
+
+
+def test_the_closing_fetch_is_only_allowed_from_tip_minus_10_until_tip_minus_5():
+    event = EventState("e1", TIP, None, False)
+
+    def kinds(offset):
+        return [c.kind for c in plan(TIP - offset, [event]).calls]
+
+    assert kinds(timedelta(minutes=10, seconds=1)) == ["hourly"]
+    assert kinds(timedelta(minutes=10)) == ["closing"]
+    assert kinds(timedelta(minutes=5, seconds=1)) == ["closing"]
+    # A missed closing is not made up in the last five minutes.
+    assert kinds(timedelta(minutes=5)) == []
+    assert kinds(timedelta(minutes=1)) == []
 
 
 def test_the_window_opens_exactly_fourteen_hours_before_tip():

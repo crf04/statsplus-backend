@@ -4329,7 +4329,7 @@ books), `app/services/odds_identity.py` (event and player resolution),
 `downgrade_sportsbook_odds`).
 
 ```text
-beat (every 5 min, inside the projection collector's loop)
+beat (every 5 min, its own Railway cron service: scripts/collect_odds.py)
   → lease row "odds" in projection_collection_leases (own fence)
   → GET /events for the next 36h (free) → EventResolver → canonical game
   → plan_cycle: tier + due calls from poll history and odds_api_quota_state
@@ -4337,13 +4337,19 @@ beat (every 5 min, inside the projection collector's loop)
   → roster-scoped AthleteResolver (provider "oddsapi", ids "name:<folded>")
   → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
     change, plus every closing snapshot) + sportsbook_prop_latest
-Matchup read: MatchupService._book_lines → SportsbookQuoteReader (savepoint)
+Matchup read (only when ODDS_API_ENABLED): MatchupService._book_lines →
+  SportsbookQuoteReader (savepoint)
 ```
 
 Schedule: polling starts 14 hours before tip (an empty response costs
 nothing), hourly in the `normal` tier, with one closing fetch from tip-10
-minutes, and no call at or after tip. The budget guard re-evaluates hourly and
-moves one tier per evaluation: `normal` (hourly), `degraded` (every 2 hours),
+minutes (the closing fetch is only made from tip-10 until tip-5; a missed one
+is not made up, and the last quote stands unmarked), and no call at or after
+tip; a response that crosses tip is paid for but discarded. A postponement
+(a changed `commence_time`) reopens hourly polling and a new closing snapshot. The budget guard re-evaluates hourly and
+moves one tier per evaluation (a halted collector re-reads the quota every
+beat, and free discovery's quota headers feed the guard before any paid call, so a monthly
+reset reopens it): `normal` (hourly), `degraded` (every 2 hours),
 `closing` (closing snapshots only, which may spend the 1,000-credit reserve),
 `halted`. Hourly polls never touch the reserve and no call may leave fewer than
 1 credit, so `x-requests-remaining` never reaches 0 because of this job. A
@@ -4363,29 +4369,38 @@ no key and reads `{}` until quotes exist.
 merge and deploy):
 
 1. Create the Odds API plan and read the billing reset day from its dashboard.
-2. On the existing projection-collector Railway service only (not the web
-   service), set `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>`, and finally
-   `ODDS_API_ENABLED=true`. Optional: `ODDS_API_PLAN_CREDITS` (20000),
-   `ODDS_API_RESERVE_CREDITS` (1000), `ODDS_API_ASSUMED_LEAD_HOURS` (10).
-3. Deploy this change (Railway's `preDeployCommand` runs `scripts/migrate.py`,
-   which applies migration 063) and let the collector restart so the loop picks
-   the variables up. The 2026-27
-   Event Catalog (crf04/statsplus-backend#374, #375) must be in production,
-   or every event is skipped as unmapped.
-4. Run the spikes first with `python scripts/odds_api_spike.py costs`,
+2. Create a new Railway service from this repository with config-as-code file
+   `railway.odds.json` (cron `*/5 * * * *`, start command
+   `python scripts/collect_odds.py`). Give it `DATABASE_URL`, `SENTRY_DSN`,
+   `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>`, `ODDS_API_ENABLED=true`
+   (optional: `ODDS_API_PLAN_CREDITS`, `ODDS_API_RESERVE_CREDITS`,
+   `ODDS_API_ASSUMED_LEAD_HOURS`), plus the variables the collector needs to
+   build the app. The key goes on this service only.
+3. On the **web** service set `ODDS_API_ENABLED=true` only (never the key).
+   With the flag off the Matchup serves `"book_lines": {}` even if quotes are
+   stored.
+4. Deploy this change (Railway's `preDeployCommand` runs `scripts/migrate.py`,
+   which applies migration 063). The 2026-27 Event Catalog
+   (crf04/statsplus-backend#374, #375) must be in production, or every event
+   is skipped as unmapped.
+5. Run the spikes first with `python scripts/odds_api_spike.py costs`,
    `... posting` (re-run hourly across a slate) and `... names --database-url
    $DATABASE_URL`, at most about 100 credits.
-5. Watch the first game day: the cycle line (tier, calls, credits, remaining,
-   unresolved) is logged by `app.services.odds_collection` whenever a call is
-   made. Switch `ODDS_API_ENABLED` to `false` to stop; stored quotes stay.
+6. Watch the first game day: the cycle line (tier, calls, credits, remaining,
+   unresolved) is logged whenever a call is made; tier changes and low quota
+   reach Sentry. Set `ODDS_API_ENABLED=false` on the cron service to stop;
+   stored quotes stay.
 
-The odds beat runs inside the existing collector process, not as its own cron
-service: it adds one free HTTP call per five minutes plus at most a few paid
-per-event calls an hour, has its own lease, quota state and exception boundary
-(`odds_collection.run_once` never raises, so it cannot fail or delay DFS
-collection), needs no new Railway service, and keeps the key out of every
-service except the collector. `scripts/collect_odds.py` runs the same beat
-standalone if isolation is later wanted; the lease makes running both safe.
+The odds beat is its own cron service, not part of the projection collector's
+loop: odds calls are network-bound (up to a dozen events at ~20 s each) and
+running them ahead of a DFS beat would delay it by minutes. A cron run is one
+beat; its lease row (`odds` in `projection_collection_leases`) and write
+fencing make overlapping runs safe: every write transaction re-checks the
+lease owner and fence, so a worker that resumes after its lease expired
+commits nothing. Railway cron cannot fire more often than every five minutes,
+and the closing window is five minutes wide, so a delayed trigger can miss a
+closing snapshot; the spec accepts that (the last pregame quote stands,
+unmarked).
 
 ### Collection control plane
 

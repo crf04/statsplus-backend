@@ -66,10 +66,11 @@ class RosterNameResolver:
     ) -> dict[str, int]:
         """``{name as posted: canonical player id}``; unresolved names absent."""
 
-        resolver = AthleteResolver(
-            _RosterCatalog(self._catalog, team_ids),
-            mapping_repository=self._repository,
-        )
+        roster = _RosterCatalog(self._catalog, team_ids)
+        roster_ids = {
+            int(row["player_id"]) for row in roster.get_catalog(self._season)
+        }
+        resolver = AthleteResolver(roster, mapping_repository=self._repository)
         distinct = sorted({name.strip() for name in names if name and name.strip()})
         identities = [(PROVIDER, athlete_provider_id(name)) for name in distinct]
         board = resolver.for_board(self._season, identities)
@@ -95,7 +96,10 @@ class RosterNameResolver:
                     logger.warning("Could not record one Odds API athlete mapping")
                     continue
                 player_id = outcome.canonical_player_id
-            if player_id is not None:
+            # An approved or overridden mapping names a canonical player
+            # without consulting the roster-scoped catalog, so membership is
+            # checked here: every resolved player is on one of the two rosters.
+            if player_id is not None and int(player_id) in roster_ids:
                 resolved[name] = int(player_id)
         return resolved
 

@@ -1,88 +1,101 @@
-"""The odds beat rides the projection collector's loop without coupling (#377)."""
+"""The odds beat is its own cron service, not part of the DFS loop (#377)."""
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
+import sentry_sdk
+from sentry_sdk.transport import Transport
 
 from app.config.settings import OddsApiSettings
 from app.services import odds_collection
-from scripts import collect_odds, collect_projections, projection_collection_service
+from app.utils import sentry_setup
+from scripts import collect_odds, projection_collection_service
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
-class Stop(Exception):
-    pass
+def test_the_projection_collector_loop_no_longer_references_odds():
+    source = (ROOT / "scripts" / "projection_collection_service.py").read_text()
+
+    assert "odds" not in source.lower()
+    assert not hasattr(projection_collection_service, "odds_collection")
 
 
-def _loop(monkeypatch, *, odds_settings, odds_run, build=None):
-    events = []
-    dfs = SimpleNamespace(run=lambda: events.append("dfs") or SimpleNamespace(status="complete", reason="ok"))
-    settings = SimpleNamespace(nba=SimpleNamespace(current_season="2026-27"), odds_api=odds_settings)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://collector.example/statsplus")
-    monkeypatch.setattr(collect_projections, "load_settings", lambda **_kwargs: settings)
+def test_the_odds_service_is_a_five_minute_cron_running_the_standalone_script():
+    deploy = json.loads((ROOT / "railway.odds.json").read_text())["deploy"]
+
+    assert deploy == {
+        "startCommand": "python scripts/collect_odds.py",
+        "cronSchedule": "*/5 * * * *",
+        "restartPolicyType": "NEVER",
+    }
+    assert (ROOT / "scripts" / "collect_odds.py").is_file()
+
+
+def test_the_script_reads_the_database_url_from_the_environment(monkeypatch, capsys):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://odds.example/statsplus")
+    seen = {}
+    settings = SimpleNamespace(odds_api=OddsApiSettings())
     monkeypatch.setattr(
-        collect_projections, "build_dependencies",
-        lambda _settings: SimpleNamespace(projection_collection_coordinator=dfs),
+        collect_odds, "load_settings", lambda **kw: seen.update(kw) or settings
     )
-    odds = SimpleNamespace(run=lambda: events.append("odds") or odds_run(), settings=odds_settings)
-    monkeypatch.setattr(
-        odds_collection, "build_odds_collection", build or (lambda deps, cfg: odds if cfg.odds_api.enabled else None)
-    )
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
 
-    def sleep(_seconds):
-        if events.count("dfs") == 2:
-            raise Stop
+    assert collect_odds.main([]) == 0
 
-    monkeypatch.setattr(projection_collection_service.time, "sleep", sleep)
-    with pytest.raises(Stop):
-        projection_collection_service.run()
-    return events
+    assert seen == {"overrides": {"DATABASE_URL": "postgresql://odds.example/statsplus"}}
+    assert capsys.readouterr().out == "no_work: ODDS_API_ENABLED is false\n"
 
 
-def test_each_beat_runs_dfs_then_odds_when_enabled(monkeypatch):
-    events = _loop(
-        monkeypatch,
-        odds_settings=OddsApiSettings(enabled=True, api_key="k"),
-        odds_run=lambda: SimpleNamespace(status="no_work", reason="nothing_due"),
-    )
-
-    assert events == ["dfs", "odds", "dfs", "odds"]
-
-
-def test_a_disabled_odds_collector_leaves_the_dfs_loop_untouched(monkeypatch):
-    events = _loop(monkeypatch, odds_settings=OddsApiSettings(), odds_run=lambda: None)
-
-    assert events == ["dfs", "dfs"]
-
-
-def test_an_odds_crash_never_stops_dfs_collection(monkeypatch):
-    def explode():
-        raise RuntimeError("boom")
-
-    events = _loop(monkeypatch, odds_settings=OddsApiSettings(enabled=True, api_key="k"), odds_run=explode)
-
-    assert events == ["dfs", "odds", "dfs", "odds"]
-
-
-def test_enabled_without_a_key_disables_only_odds_and_says_so(monkeypatch, capsys):
-    events = _loop(
-        monkeypatch,
-        odds_settings=OddsApiSettings(enabled=True),
-        odds_run=lambda: None,
-        build=odds_collection.build_odds_collection,
-    )
-
-    assert events == ["dfs", "dfs"]
-    assert "odds collection disabled: ODDS_API_ENABLED is true but ODDS_API_KEY is not set" in capsys.readouterr().out
-
-
-def test_standalone_script_exits_nonzero_without_a_key(monkeypatch, capsys):
+def test_enabled_without_a_key_exits_nonzero_and_says_so(monkeypatch, capsys):
     settings = SimpleNamespace(odds_api=OddsApiSettings(enabled=True))
-    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kwargs: settings)
-    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _settings: object())
+    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: settings)
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
 
     code = collect_odds.main(["--database-url", "postgresql://collector.example/statsplus"])
 
     assert code == 1
     assert capsys.readouterr().out == "failed: ODDS_API_ENABLED is true but ODDS_API_KEY is not set\n"
+
+
+def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
+    events = []
+
+    class Capture(Transport):
+        def capture_envelope(self, envelope):
+            event = envelope.get_event()
+            if event:
+                events.append(event)
+
+    real_init = sentry_setup.init_sentry
+    monkeypatch.setenv("SENTRY_DSN", "https://public@o0.ingest.sentry.io/1")
+    monkeypatch.setattr(
+        collect_odds, "init_sentry", lambda: real_init(transport=Capture())
+    )
+    coordinator = SimpleNamespace(
+        settings=SimpleNamespace(api_key=None),
+        run=lambda: odds_collection._default_notify(
+            logging.ERROR, "Odds API credits below 10% of plan (remaining=1500)"
+        )
+        or SimpleNamespace(
+            status="complete", reason="collected", tier="normal", calls=0,
+            credits=0, unresolved_events=0, unresolved_players=0,
+        ),
+    )
+    monkeypatch.setattr(
+        odds_collection, "build_odds_collection", lambda deps, cfg: coordinator
+    )
+    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: SimpleNamespace())
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
+    try:
+        assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
+    finally:
+        sentry_sdk.get_client().close()
+
+    assert [e["message"] for e in events if e.get("message")] == [
+        "Odds API credits below 10% of plan (remaining=1500)"
+    ]

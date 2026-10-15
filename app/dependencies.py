@@ -726,10 +726,13 @@ def build_dependencies(
             if athlete_catalog_service is not None
             else None
         ),
-        # Always wired in a real database (even with collection off, so the
-        # web service needs no key): an empty store reads as ``{}``.
+        # Wired only when ODDS_API_ENABLED is true (the web service needs the
+        # flag but never the key).  Disabled, the Matchup serves ``{}`` even
+        # if quotes were stored earlier.
         sportsbook_reader=(
-            None if demo_database else SportsbookQuoteReader(engine)
+            SportsbookQuoteReader(engine)
+            if settings.odds_api.enabled and not demo_database
+            else None
         ),
     )
     user_service = UserService(

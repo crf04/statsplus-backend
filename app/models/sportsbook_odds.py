@@ -29,6 +29,9 @@ class OddsApiPoll(Base):
     poll_id = Column(Integer, primary_key=True, autoincrement=True)
     odds_event_id = Column(String(64), nullable=False)
     canonical_game_id = Column(String(32), nullable=False)
+    #: The tip this poll was scheduled against.  A closing poll only closes
+    #: the game while the game still starts then; a postponement reopens it.
+    commence_time = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     #: ``complete`` (quotes stored), ``empty`` (props not posted), ``failed``.

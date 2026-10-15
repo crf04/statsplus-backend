@@ -111,6 +111,10 @@ class ParsedEventOdds:
     dropped_books: frozenset[str]
     #: (book, player, market) groups omitted for posting two distinct lines.
     multi_line_omitted: int
+    #: Bookmaker entries in the response, allowlisted or not.  Zero means the
+    #: upstream answered empty (props not posted); anything else is a real
+    #: snapshot even when every quote in it was dropped or omitted.
+    bookmaker_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +265,9 @@ def parse_event_odds(payload: Any) -> ParsedEventOdds:
                         last_update=last_update,
                     )
                 )
-    return ParsedEventOdds(tuple(quotes), frozenset(dropped), omitted)
+    return ParsedEventOdds(
+        tuple(quotes), frozenset(dropped), omitted, bookmaker_count=len(bookmakers)
+    )
 
 
 class _ApiKeyLogFilter(logging.Filter):

@@ -289,3 +289,13 @@ def test_an_unexpected_failure_in_a_beat_logs_without_the_key(tmp_path, caplog):
     assert (result.status, result.reason) == ("failed", "unexpected_error")
     assert SECRET not in caplog.text
     assert "Odds API collection attempt failed" in caplog.text
+
+
+def test_bookmaker_count_separates_an_empty_answer_from_an_all_omitted_snapshot():
+    omitted = load("event_odds_empty")
+    omitted["bookmakers"] = [load("event_odds_five_markets")["bookmakers"][4]]  # BetRivers: two lines
+
+    assert parse_event_odds(load("event_odds_empty")).bookmaker_count == 0
+    snapshot = parse_event_odds(omitted)
+    assert (len(snapshot.quotes), snapshot.multi_line_omitted, snapshot.bookmaker_count) == (0, 1, 1)
+    assert parse_event_odds(load("event_odds_five_markets")).bookmaker_count == 7

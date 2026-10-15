@@ -27,7 +27,7 @@ from app.config.settings import OddsApiSettings
 from app.errors import redact_public_value
 from app.models.projection_collection import ProjectionCollectionLease
 from app.models.sportsbook_odds import OddsApiPoll, OddsApiQuotaState
-from app.providers.odds_api import OddsApiClient, OddsApiError
+from app.providers.odds_api import OddsApiClient, OddsApiError, OddsQuota
 from app.services.event_resolver import stored_timestamp
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
 from app.services.odds_schedule import (
@@ -50,6 +50,10 @@ BACKOFF_BASE = timedelta(minutes=1)
 BACKOFF_MAX = timedelta(minutes=30)
 _QUOTA_WARN_FRACTION = 0.25
 _QUOTA_ALERT_FRACTION = 0.10
+
+
+class LeaseLost(Exception):
+    """This worker's lease was taken over; its writes must not commit."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +114,7 @@ class OddsCollectionCoordinator:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.owner = owner
         self.notify = notify or _default_notify
+        self._fence: int | None = None
 
     # -- one beat ----------------------------------------------------------
 
@@ -118,10 +123,34 @@ class OddsCollectionCoordinator:
         fence = self._acquire_lease(now)
         if fence is None:
             return OddsRunResult("busy", "lease_held")
+        self._fence = fence
         try:
             return self._run_locked(now, fence)
+        except LeaseLost:
+            return OddsRunResult("failed", "lease_lost")
         finally:
+            self._fence = None
             self._release_lease(fence)
+
+    def _assert_lease(self, connection: Any) -> None:
+        """Fail the transaction unless this worker still holds the lease.
+
+        Runs first in every write transaction, locking the lease row, so a
+        worker that resumes after another took over (the fence moved on)
+        commits nothing -- the same owner-and-fence check ``_renew_lease``
+        makes, but at commit rather than before a long network call.
+        """
+
+        if self._fence is None:
+            return
+        table = ProjectionCollectionLease.__table__
+        row = connection.execute(
+            select(table.c.owner, table.c.fence)
+            .where(table.c.lease_key == LEASE_KEY)
+            .with_for_update()
+        ).one_or_none()
+        if row is None or row.owner != self.owner or int(row.fence) != self._fence:
+            raise LeaseLost()
 
     def _run_locked(self, now: datetime, fence: int) -> OddsRunResult:
         state = self._load_state(now)
@@ -133,6 +162,16 @@ class OddsCollectionCoordinator:
             listed = self.client.list_events(now, now + EVENT_HORIZON)
         except OddsApiError as error:
             return self._failed(now, state, error)
+        if listed.quota.remaining is not None:
+            # Free discovery reports the quota too.  Feeding it to the guard
+            # before any paid call keeps a fresh state with 5 credits from
+            # spending to 0, and lets a halted collector see a monthly reset.
+            self._save_quota(
+                OddsQuota(listed.quota.remaining, listed.quota.used, None),
+                now=self.clock(),
+            )
+            self._warn_on_quota(state["remaining"], listed.quota.remaining)
+            state["remaining"] = listed.quota.remaining
         mapped, unresolved = self.event_mapper.map(listed.events)
 
         by_event = {item.event.event_id: item for item in mapped}
@@ -161,9 +200,14 @@ class OddsCollectionCoordinator:
         status, reason = "no_work", "nothing_due"
         for call in plan.calls:
             item = by_event[call.odds_event_id]
+            tip = item.event.commence_time
             if not self._renew_lease(fence):
                 return OddsRunResult("failed", "lease_lost", tier=plan.tier.value, calls=calls, credits=credits)
             started = self.clock()
+            if started >= tip:
+                # The plan was made earlier in this beat; never call at tip.
+                status, reason = "partial", "tip_passed"
+                continue
             try:
                 result = self.client.event_odds(call.odds_event_id)
             except OddsApiError as error:
@@ -175,6 +219,8 @@ class OddsCollectionCoordinator:
                     outcome="failed",
                     is_closing=call.kind == "closing",
                     failure_reason=error.reason,
+                    commence_time=tip,
+                    fence=self._assert_lease,
                 )
                 if error.reason == "event_not_found":
                     status, reason = "partial", error.reason
@@ -191,9 +237,28 @@ class OddsCollectionCoordinator:
             remaining = (
                 result.quota.remaining if result.quota.remaining is not None else remaining
             )
-            self._save_quota(result.quota, now=self.clock())
+            received = self.clock()
+            self._save_quota(result.quota, now=received)
             self._warn_on_quota(state["remaining"], remaining)
             state["remaining"] = remaining
+            if received >= tip:
+                # Credits were spent, but a response that crossed tip-off is
+                # in-play data and is never stored.
+                self.store.record_unstored_poll(
+                    odds_event_id=call.odds_event_id,
+                    game_id=item.game_id,
+                    started_at=started,
+                    completed_at=received,
+                    outcome="failed",
+                    is_closing=call.kind == "closing",
+                    cost=result.cost,
+                    remaining=remaining,
+                    failure_reason="received_after_tip",
+                    commence_time=tip,
+                    fence=self._assert_lease,
+                )
+                status, reason = "partial", "received_after_tip"
+                continue
 
             parsed = result.parsed
             names = {quote.player_name for quote in parsed.quotes}
@@ -213,7 +278,9 @@ class OddsCollectionCoordinator:
                 for quote in parsed.quotes
                 if quote.player_name in resolved_ids
             ]
-            if not parsed.quotes:
+            if parsed.bookmaker_count == 0:
+                # Upstream answered empty: props are not posted (yet).  Nothing
+                # stored is contradicted, so latest stays as it is.
                 self.store.record_unstored_poll(
                     odds_event_id=call.odds_event_id,
                     game_id=item.game_id,
@@ -223,6 +290,8 @@ class OddsCollectionCoordinator:
                     is_closing=call.kind == "closing",
                     cost=result.cost,
                     remaining=remaining,
+                    commence_time=tip,
+                    fence=self._assert_lease,
                 )
             else:
                 self.store.record_poll(
@@ -235,6 +304,8 @@ class OddsCollectionCoordinator:
                     is_closing=call.kind == "closing",
                     quotes=quotes,
                     unresolved_count=unresolved_names,
+                    commence_time=tip,
+                    fence=self._assert_lease,
                 )
             self._clear_failures(now, unresolved_players=unresolved_names)
             status, reason = "complete", "collected"
@@ -269,6 +340,7 @@ class OddsCollectionCoordinator:
             backoff = min(BACKOFF_MAX, BACKOFF_BASE * (2 ** (failures - 1)))
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
+            self._assert_lease(connection)
             connection.execute(
                 update(table)
                 .where(table.c.state_key == STATE_KEY)
@@ -286,6 +358,7 @@ class OddsCollectionCoordinator:
     def _clear_failures(self, now: datetime, *, unresolved_players: int) -> None:
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
+            self._assert_lease(connection)
             connection.execute(
                 update(table)
                 .where(table.c.state_key == STATE_KEY)
@@ -337,6 +410,7 @@ class OddsCollectionCoordinator:
     ) -> None:
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
+            self._assert_lease(connection)
             connection.execute(
                 update(table)
                 .where(table.c.state_key == STATE_KEY)
@@ -354,6 +428,7 @@ class OddsCollectionCoordinator:
                 values[column] = value
         table = OddsApiQuotaState.__table__
         with self.engine.begin() as connection:
+            self._assert_lease(connection)
             connection.execute(
                 update(table).where(table.c.state_key == STATE_KEY).values(**values)
             )
@@ -383,6 +458,7 @@ class OddsCollectionCoordinator:
                     polls.c.odds_event_id,
                     polls.c.completed_at,
                     polls.c.is_closing,
+                    polls.c.commence_time,
                 ).where(
                     polls.c.odds_event_id.in_(list(by_event)),
                     polls.c.outcome.in_(("complete", "empty")),
@@ -396,7 +472,11 @@ class OddsCollectionCoordinator:
                 row.odds_event_id not in last or completed > last[row.odds_event_id]
             ):
                 last[row.odds_event_id] = completed
-            if row.is_closing:
+            # A closing poll closes the game only for the tip it was taken
+            # against; a postponement moves the tip and reopens collection.
+            if row.is_closing and _utc(row.commence_time) == by_event[
+                row.odds_event_id
+            ].event.commence_time:
                 closing.add(row.odds_event_id)
         return [
             EventState(
@@ -414,9 +494,9 @@ class OddsCollectionCoordinator:
         polls = OddsApiPoll.__table__
         with self.engine.connect() as connection:
             closed = {
-                row[0]
+                (row[0], _utc(row[1]))
                 for row in connection.execute(
-                    select(polls.c.canonical_game_id).where(
+                    select(polls.c.canonical_game_id, polls.c.commence_time).where(
                         polls.c.is_closing.is_(True),
                         polls.c.outcome.in_(("complete", "empty")),
                     )
@@ -427,9 +507,14 @@ class OddsCollectionCoordinator:
             scheduled = _utc(row.get("scheduled_at"))
             if scheduled is None or scheduled <= now:
                 continue
-            games.append(
-                GameClock(scheduled, closing_done=str(row.get("nba_game_id")) in closed)
+            # Closed only for (about) this tip: a postponed game reopens.
+            done = any(
+                game == str(row.get("nba_game_id"))
+                and tip is not None
+                and abs(tip - scheduled) <= timedelta(hours=1)
+                for game, tip in closed
             )
+            games.append(GameClock(scheduled, closing_done=done))
         return games
 
     # -- lease -------------------------------------------------------------

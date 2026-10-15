@@ -179,10 +179,11 @@ def q(player, category, book, line, over, under, stamp="2026-10-21T21:00:00Z"):
                          datetime.fromisoformat(stamp.replace("Z", "+00:00")))
 
 
-def poll(store, quotes, *, at=T0, closing=False, event="evt"):
+def poll(store, quotes, *, at=T0, closing=False, event="evt", replace_latest=True):
     return store.writer.record_poll(
         odds_event_id=event, game_id=GAME, started_at=at, completed_at=at,
         cost=5, remaining=19990, is_closing=closing, quotes=quotes,
+        replace_latest=replace_latest,
     )
 
 
@@ -269,13 +270,23 @@ def test_quotes_a_later_response_no_longer_carries_are_removed_from_latest(store
     assert count(store, SportsbookPropQuote) == 3  # history is kept
 
 
-def test_a_response_without_quotes_leaves_latest_untouched(store):
+def test_an_upstream_empty_response_leaves_latest_untouched(store):
     poll(store, BASE, at=T0)
 
-    write = poll(store, [], at=T0 + timedelta(hours=1))
+    write = poll(store, [], at=T0 + timedelta(hours=1), replace_latest=False)
 
     assert (write.history_rows, write.latest_rows, write.removed_rows) == (0, 0, 0)
     assert count(store, SportsbookPropLatest) == 3
+
+
+def test_a_snapshot_whose_every_quote_was_omitted_clears_the_stale_lines(store):
+    poll(store, BASE, at=T0)
+
+    write = poll(store, [], at=T0 + timedelta(hours=1), replace_latest=True)
+
+    assert (write.history_rows, write.removed_rows) == (0, 3)
+    assert store.reader.book_lines(GAME) == {}
+    assert count(store, SportsbookPropQuote) == 3  # history is kept
 
 
 def test_reader_returns_only_that_games_players_and_empty_for_unknown_games(store):
@@ -299,3 +310,13 @@ def test_reader_drops_a_stored_offshore_row_defensively(store):
     books = [b["book"] for b in store.reader.book_lines(GAME)[2544]["PTS"]["books"]]
 
     assert books == ["draftkings", "fanduel"]
+
+
+def test_a_null_side_does_not_make_the_only_quoted_side_best():
+    # Over is quoted by one book only, so it is never flagged; counting books
+    # (two) instead of non-null prices (one) would wrongly flag it.
+    entry = build_market_entry(
+        [row("draftkings", 27.5, -120, -105), row("fanduel", 27.5, None, -110)]
+    )
+
+    assert flags(entry) == [("draftkings", False, True), ("fanduel", False, False)]

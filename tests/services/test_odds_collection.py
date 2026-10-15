@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+from datetime import timezone
 
 import pytest
 from sqlalchemy import select
@@ -15,7 +16,7 @@ from app.models.sportsbook_odds import (
     SportsbookPropLatest,
     SportsbookPropQuote,
 )
-from app.providers.odds_api import OddsApiError
+from app.providers.odds_api import OddsApiError, OddsQuota
 from app.services.sportsbook_quotes import SportsbookQuoteReader
 from tests.support.odds_world import (
     CURRY,
@@ -310,3 +311,153 @@ def test_the_closing_call_may_spend_the_reserve_but_never_to_zero(world):
     assert (state["remaining"], state["tier"]) == (5, "halted")
     world.clock[0] = TIP - timedelta(minutes=8)
     assert coordinator.run().calls == 0
+
+
+# -- review fixes (#378) ------------------------------------------------------
+
+
+def _latest_over(world, book="draftkings"):
+    lines = SportsbookQuoteReader(world.engine).book_lines(GAME_ID)
+    entry = lines.get(LEBRON, {}).get("PTS")
+    if entry is None:
+        return None
+    return [b["over"] for b in entry["books"] if b["book"] == book][0]
+
+
+def test_discovery_quota_stops_a_fresh_state_from_spending_the_last_credits(world):
+    client = FakeClient(remaining=5)
+    client.discovery_quota = OddsQuota(remaining=5, used=19995, last_cost=0)
+    world.clock[0] = TIP - timedelta(minutes=9)  # a closing is due
+
+    result = world.coordinator(client).run()
+
+    assert (result.status, result.calls, result.tier) == ("no_work", 0, "halted")
+    assert client.event_calls == []
+    (state,) = _rows(world, OddsApiQuotaState)
+    assert (state["remaining"], state["used"], state["tier"]) == (5, 19995, "halted")
+
+
+def test_a_halted_collector_notices_the_monthly_reset_from_free_discovery(world):
+    client = FakeClient()
+    coordinator = world.coordinator(client)
+    client.discovery_quota = OddsQuota(remaining=5, used=19995, last_cost=0)
+    coordinator.run()
+    assert _rows(world, OddsApiQuotaState)[0]["tier"] == "halted"
+
+    client.discovery_quota = OddsQuota(remaining=20000, used=0, last_cost=0)
+    world.clock[0] = NOW + timedelta(minutes=5)
+    coordinator.run()
+
+    (state,) = _rows(world, OddsApiQuotaState)
+    assert (state["remaining"], state["tier"]) == (20000, "closing")  # off halt, one step
+
+
+def test_a_call_is_not_made_when_discovery_runs_past_tip(world):
+    client = FakeClient()
+    world.clock[0] = TIP - timedelta(minutes=7)  # closing is due when the beat starts
+    client.on_list = lambda: world.clock.__setitem__(0, TIP + timedelta(seconds=1))
+
+    result = world.coordinator(client).run()
+
+    assert client.event_calls == []
+    assert (result.status, result.reason, result.calls) == ("partial", "tip_passed", 0)
+    assert _rows(world, OddsApiPoll) == []
+
+
+def test_a_response_that_crosses_tip_off_is_paid_for_but_never_stored(world):
+    client = FakeClient()
+    world.clock[0] = TIP - timedelta(minutes=7)
+    client.on_odds = lambda: world.clock.__setitem__(0, TIP + timedelta(seconds=1))
+
+    result = world.coordinator(client).run()
+
+    assert (result.status, result.reason, result.credits) == ("partial", "received_after_tip", 5)
+    (poll,) = _rows(world, OddsApiPoll)
+    assert (poll["outcome"], poll["failure_reason"], poll["cost"], poll["quote_count"]) == (
+        "failed", "received_after_tip", 5, 0,
+    )
+    assert _rows(world, SportsbookPropLatest) == []
+    assert _rows(world, OddsApiQuotaState)[0]["remaining"] == 19995
+
+
+def test_a_worker_that_lost_its_lease_cannot_overwrite_newer_quotes(world):
+    stale = load("event_odds_five_markets")  # DraftKings Over -115
+    fresh = load("event_odds_five_markets")
+    fresh["bookmakers"][0]["markets"][0]["outcomes"][0]["price"] = -120
+    worker_a = FakeClient(odds=stale)
+    worker_b_client = FakeClient(odds=fresh)
+    a = world.coordinator(worker_a)
+    b = world.coordinator(worker_b_client)
+
+    def a_pauses_past_expiry_while_b_takes_over():
+        world.clock[0] = NOW + timedelta(minutes=6)
+        assert b.run().status == "complete"
+
+    worker_a.on_odds = a_pauses_past_expiry_while_b_takes_over
+
+    result = a.run()
+
+    assert (result.status, result.reason) == ("failed", "lease_lost")
+    assert _latest_over(world) == -120
+    assert len(_rows(world, OddsApiPoll)) == 1  # only B's poll committed
+    assert _rows(world, OddsApiQuotaState)[0]["remaining"] == 19995
+
+
+def test_a_postponement_reopens_hourly_polling_and_a_new_closing_snapshot(world):
+    client = FakeClient()
+    coordinator = world.coordinator(client)
+    world.clock[0] = TIP - timedelta(minutes=9)
+    coordinator.run()
+    assert [p["is_closing"] for p in _rows(world, OddsApiPoll)] == [True]
+
+    later = TIP + timedelta(hours=2)
+    client.events[0]["commence_time"] = later.strftime("%Y-%m-%dT%H:%M:%SZ")
+    world.clock[0] = TIP + timedelta(hours=1)
+    reopened = coordinator.run()
+    world.clock[0] = later - timedelta(minutes=9)
+    closed_again = coordinator.run()
+
+    assert (reopened.calls, closed_again.calls) == (1, 1)
+    polls = _rows(world, OddsApiPoll)
+    assert [(p["is_closing"], p["commence_time"].replace(tzinfo=timezone.utc)) for p in polls] == [
+        (True, TIP), (False, later), (True, later),
+    ]
+    world.clock[0] = later - timedelta(minutes=8)
+    assert coordinator.run().calls == 0  # closed for the new tip
+
+
+def test_a_snapshot_whose_every_quote_is_omitted_removes_the_stale_line(world):
+    client = FakeClient()
+    coordinator = world.coordinator(client)
+    coordinator.run()
+    assert _latest_over(world) == -115
+
+    ambiguous = load("event_odds_empty")
+    draftkings = load("event_odds_five_markets")["bookmakers"][0]
+    draftkings["markets"] = [
+        {"key": "player_points", "last_update": "2026-10-21T22:00:00Z", "outcomes": [
+            {"name": "Over", "description": "LeBron James", "price": -110, "point": 27.5},
+            {"name": "Over", "description": "LeBron James", "price": -110, "point": 28.5},
+        ]}
+    ]
+    ambiguous["bookmakers"] = [draftkings]
+    client.odds = ambiguous
+    world.clock[0] = NOW + timedelta(hours=1)
+    coordinator.run()
+
+    assert SportsbookQuoteReader(world.engine).book_lines(GAME_ID) == {}
+    (state,) = [p for p in _rows(world, OddsApiPoll)][-1:]
+    assert (state["outcome"], state["quote_count"]) == ("complete", 0)
+
+
+def test_an_approved_mapping_outside_the_two_rosters_is_still_refused(world):
+    world.athlete_repository.approve(
+        "oddsapi", "name:stephencurry", CURRY, season="2026-27",
+        operator_id="op", reason="correct Warriors mapping",
+    )
+
+    lakers_nuggets = world.name_resolver.resolve(["Stephen Curry"], (LAL, 1610612743))
+    warriors_clippers = world.name_resolver.resolve(["Stephen Curry"], (1610612744, 1610612746))
+
+    assert lakers_nuggets == {}
+    assert warriors_clippers == {"Stephen Curry": CURRY}

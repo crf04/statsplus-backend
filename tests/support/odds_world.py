@@ -81,12 +81,20 @@ class FakeClient:
         self.list_calls = 0
         self.error: OddsApiError | None = None
         self.odds_error: OddsApiError | None = None
+        self.discovery_quota = OddsQuota()
+        #: Called after discovery / after a paid response is built, to move a
+        #: test clock or run another worker while this call is "in flight".
+        self.on_list = None
+        self.on_odds = None
 
     def list_events(self, commence_from, commence_to):
         self.list_calls += 1
         if self.error is not None:
             raise self.error
-        return EventsResult(parse_events(self.events), OddsQuota())
+        result = EventsResult(parse_events(self.events), self.discovery_quota)
+        if self.on_list is not None:
+            self.on_list()
+        return result
 
     def event_odds(self, event_id):
         self.event_calls.append(event_id)
@@ -98,9 +106,12 @@ class FakeClient:
         )
         cost = 5 if parsed.quotes else 0
         self.remaining -= cost
-        return EventOddsResult(
+        result = EventOddsResult(
             parsed, OddsQuota(self.remaining, 20000 - self.remaining, cost), cost
         )
+        if self.on_odds is not None:
+            self.on_odds()
+        return result
 
 
 def _athlete(season, player_id, name, team_id, abbreviation):

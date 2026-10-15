@@ -67,6 +67,23 @@ def setup_logging():
     logging.basicConfig(level=logging.DEBUG)
     
 @pytest.fixture(autouse=True)
+def reset_firebase_admin_app():
+    """Forget a Firebase app a test initialized for the rest of the worker.
+
+    ``get_firebase_app`` caches its first successful initialization in a
+    module global.  On a machine with gcloud application-default credentials,
+    any test that builds an app without ``SKIP_FIREBASE_INIT`` initializes a
+    real app, and every later route test in that worker then sees a configured
+    Firebase and answers 401 instead of using the local bypass.
+    """
+    from app.utils import firebase_admin as firebase_admin_utils
+
+    before = firebase_admin_utils._firebase_app
+    yield
+    firebase_admin_utils._firebase_app = before
+
+
+@pytest.fixture(autouse=True)
 def reset_route_service_proxies():
     """Drop attributes a test patched onto a module-level route service proxy.
 

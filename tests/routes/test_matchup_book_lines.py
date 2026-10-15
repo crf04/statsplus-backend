@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.config.settings import OddsApiSettings
+from app.dependencies import build_dependencies
 from app.providers.dfs import NBAMarketQuery
 from app.services.sportsbook_quotes import (
     ResolvedQuote,
@@ -160,3 +162,17 @@ def test_a_store_failure_never_fails_the_matchup(projection_route_context, caplo
     assert response.status_code == 200
     assert _lebron(response)[1]["book_lines"] == {}
     assert "Sportsbook book_lines read failed" in caplog.text
+
+
+def test_the_sportsbook_reader_is_wired_only_when_odds_api_is_enabled(projection_route_context):
+    context = projection_route_context
+    assert context.settings.odds_api.enabled is False
+
+    disabled = context.assembled.matchup_service.sportsbook_reader
+    enabled_settings = context.settings.model_copy(
+        update={"odds_api": OddsApiSettings(enabled=True)}  # no key: the web needs none
+    )
+    enabled = build_dependencies(enabled_settings).matchup_service.sportsbook_reader
+
+    assert disabled is None
+    assert isinstance(enabled, SportsbookQuoteReader)
