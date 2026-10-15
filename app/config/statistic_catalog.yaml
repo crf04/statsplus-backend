@@ -156,7 +156,7 @@ statistics:
     provider_mappings:
       dabble: [blocks+steals, steals+blocks]
       prizepicks: [STKS, Steals + Blocks, Blks+Stls]
-      underdog: [STKS, Steals + Blocks, Blks+Stls]
+      underdog: [STKS, Steals + Blocks, Blks+Stls, Blocks + Steals]
       novig: [STEALS_BLOCKS]
   - id: field_goals_attempted
     market_category: FGA
@@ -167,7 +167,7 @@ statistics:
     provider_mappings:
       dabble: [field-goals-attempted, fg-attempted, FGA]
       prizepicks: [Field Goals Attempted, FGA]
-      underdog: [Field Goals Attempted, FGA]
+      underdog: [Field Goals Attempted, FGA, FG Attempted]
   - id: three_pointers_attempted
     market_category: FG3A
     label: Three-Pointers Attempted
@@ -177,7 +177,7 @@ statistics:
     provider_mappings:
       dabble: [three-pointers-attempted, threes-attempted, three-attempted, FG3A]
       prizepicks: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
-      underdog: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
+      underdog: [3-Pointers Attempted, Three Pointers Attempted, FG3A, 3s Attempted]
   - id: two_pointers_attempted
     market_category: FG2A
     label: Two-Pointers Attempted

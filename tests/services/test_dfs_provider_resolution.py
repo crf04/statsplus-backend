@@ -226,6 +226,10 @@ def test_underdog_lines_resolve_to_their_game_player_and_statistic():
         ("Pts + Asts", "pa"),
         ("Pts + Rebs", "pr"),
         ("Rebs + Asts", "ra"),
+        # Spellings in the live Underdog board on 2026-10-15.
+        ("3s Attempted", "three_pointers_attempted"),
+        ("FG Attempted", "field_goals_attempted"),
+        ("Blocks + Steals", "stks"),
     ],
 )
 def test_underdog_spaced_combo_labels_map_to_their_statistic(label, canonical_id):
