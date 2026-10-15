@@ -47,8 +47,10 @@ from app.providers.dfs import (
     RetrievalContext,
     ScoringPeriod,
     SnapshotStatus,
+    TeamEvidence,
 )
 from app.providers.kalshi import SERIES_STATISTIC_LABELS, KalshiAdapter
+from app.providers.polymarket import PolymarketAdapter
 from app.providers.prizepicks import PrizePicksAdapter
 from app.providers.registry import (
     PRIZEPICKS_ENTRY_PAYOUT_TABLES,
@@ -300,6 +302,57 @@ def _kalshi_failing() -> KalshiAdapter:
     )
 
 
+def _polymarket_payload() -> Any:
+    """The recorded listing, with one player's props.
+
+    ``_governed`` below resolves every athlete to the same canonical player, so
+    the archive sees one player per statistic; the full-board behavior (many
+    players, alternate lines) is pinned in ``test_polymarket.py``.
+    """
+
+    payload = _load("polymarket", "conformance.events.json")
+    for event in payload:
+        event["markets"] = [
+            market
+            for market in event["markets"]
+            if market.get("sportsMarketType") not in {"points", "rebounds", "assists"}
+            or market["groupItemTitle"].startswith("Victor Wembanyama")
+        ]
+    return payload
+
+
+def _polymarket(payload: Any = None) -> PolymarketAdapter:
+    return PolymarketAdapter(
+        session=RecordedSession(
+            payload if payload is not None else _polymarket_payload()
+        ),
+        now=_clock,
+    )
+
+
+def _polymarket_empty() -> PolymarketAdapter:
+    # The recorded preseason listing: game events with only game markets.
+    return _polymarket(_load("polymarket", "preseason.events.json"))
+
+
+def _polymarket_partial() -> PolymarketAdapter:
+    payload = _polymarket_payload()
+    markets = payload[0]["markets"]
+    prop = next(m for m in markets if m["sportsMarketType"] == "points")
+    broken = deepcopy(prop)
+    broken["id"] = "market-broken"
+    broken["line"] = "not-a-number"
+    markets.append(broken)
+    return _polymarket(payload)
+
+
+def _polymarket_failing() -> PolymarketAdapter:
+    return PolymarketAdapter(
+        session=RecordedSession(requests.ConnectionError("recorded failure")),
+        now=_clock,
+    )
+
+
 def _fourth_empty() -> FourthAdapter:
     return FourthAdapter(payload={"board": []})
 
@@ -343,6 +396,12 @@ RECORDED_EVIDENCE: dict[str, RecordedEvidence] = {
         empty=_kalshi_empty,
         partial=_kalshi_partial,
         failing=_kalshi_failing,
+    ),
+    "polymarket": RecordedEvidence(
+        complete=_polymarket,
+        empty=_polymarket_empty,
+        partial=_polymarket_partial,
+        failing=_polymarket_failing,
     ),
     FOURTH_PROVIDER_NAME: RecordedEvidence(
         complete=FourthAdapter,
@@ -427,11 +486,12 @@ def _governed(
                     athlete,
                     canonical_id=2544,
                     name=athlete.name or "Recorded Player",
-                    team=replace(
-                        athlete.team, canonical_id=1610612747
-                    )
+                    # The canonical team comes from the athlete mapping, not
+                    # from provider evidence, so a provider that names no team
+                    # (Polymarket) still reaches a canonical one.
+                    team=replace(athlete.team, canonical_id=1610612747)
                     if athlete.team is not None
-                    else None,
+                    else TeamEvidence(canonical_id=1610612747),
                 ),
                 event=replace(
                     event, canonical_id=_canonical_game_id(event.provider_id)

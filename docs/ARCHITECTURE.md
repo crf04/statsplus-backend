@@ -142,7 +142,8 @@ provider that passes it with no application code naming it.
 ### Comparable Projection prices
 
 Providers publish prices in different shapes: Underdog quotes American odds per
-selection, Dabble a payout multiplier, PrizePicks nothing at all in its API.
+selection, Dabble a payout multiplier, Polymarket decimal prices derived from
+its Yes/No asks, PrizePicks nothing at all in its API.
 Every `Selection` therefore states one canonical triple, additive to the
 existing `american_price`/`decimal_price` fields, which are unchanged:
 
@@ -268,10 +269,11 @@ not counted twice:
 | PrizePicks | `PrizePicksAdapter` (shared DFS snapshot contract) | Projection pagination remains inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Underdog | `UnderdogAdapter` (shared DFS snapshot contract) | Appearance, player, and game joins remain inside the adapter; the closed telemetry operation is `get_snapshot`. No retry strategy is configured. |
 | Kalshi | `KalshiAdapter` (shared DFS snapshot contract) | One open-game lookup (`open_games`: the `KXNBAGAME` events with their milestones, which carry the exact tip-off) and one paginated read per player series (`series_markets`: `KXNBAPTS`, `KXNBAREB`, `KXNBAAST`, `KXNBA3PT`, `KXNBABLK`, `KXNBASTL`). The shared DFS transport owns one safe-GET retry. A failed series makes the snapshot partial; a failed game lookup keeps Kalshi's estimated start times and also makes it partial. |
+| Polymarket | `PolymarketAdapter` (shared DFS snapshot contract) | A prediction market, read from the unauthenticated Gamma `/events?tag_slug=nba&closed=false` listing (100 events per page, bounded page count); each player prop is one Yes (Over) / No (Under) market inside a game event. Over is priced at `1 / bestAsk` and Under at `1 / (1 - bestBid)` as decimal prices rounded to six places at selection scope, and a market missing either ask prices neither side. Per player, statistic and game, the line whose Over midpoint is nearest 0.5 is the one `standard` line (ties to the lower line); every other line is `alternate`, and several lines with no midpoint are all `alternate`. Game, period-scoped, futures and unmapped markets are excluded with typed coverage. The closed telemetry operation is `get_snapshot`; no retry strategy is configured. |
 | RotoWire | `RotoWireInjuryProvider` | One league-wide injury-table read with the closed operation `get_injuries`; raw statuses are retained and only Probable, Questionable, Doubtful, and Out normalize canonically. |
 
 The DFS provider seam is `ProviderSnapshotProvider.get_snapshot(query,
-context)`. Dabble, PrizePicks, Underdog, and Kalshi accept the same pregame NBA query,
+context)`. Dabble, PrizePicks, Underdog, Kalshi, and Polymarket accept the same pregame NBA query,
 eligible market statuses, and absolute retrieval deadline and return immutable,
 market-centric provider snapshots. Canonical athlete, event, and statistic
 filters remain central because provider IDs are only evidence until later
@@ -477,7 +479,7 @@ The catalog maps full-game points, rebounds, assists, three-pointers made,
 steals, blocks, turnovers, PRA, PA, PR, RA, STKS, and field-goal,
 three-pointer, and two-pointer attempts. Composite identities use
 the reviewed component order (`PRA` is points, rebounds, assists) regardless of
-the source label order. Dabble, PrizePicks, and Underdog labels are accepted
+the source label order. Dabble, PrizePicks, Underdog, and Polymarket labels are accepted
 only when explicitly listed in the definition; provider evidence is matched
 case-insensitively and preserves presentation evidence but does not infer
 meaning. Scoring periods are resolved in one place — the provider adapter seam
@@ -4825,9 +4827,10 @@ used to repair the fixture.
   `parse_recorded_player_diet` and
   `PBPTotalsAdapter.parse_player_diet_totals`; these fixtures pin canonical
   player IDs and raw Season share, volume, and game fields without network.
-- DFS provider contracts: run each Dabble, PrizePicks, and Underdog adapter
-  against its recorded fixtures through `get_snapshot`; the shared compliance
-  suite verifies the same immutable `ProviderSnapshot` boundary for all three.
+- DFS provider contracts: run each Dabble, PrizePicks, Underdog, and Polymarket
+  adapter against its recorded fixtures through `get_snapshot`; the shared
+  compliance suite verifies the same immutable `ProviderSnapshot` boundary for
+  all four.
 - `PBPTotalsAdapter.parse_totals` validates the operation-specific columns
   consumed by the existing PBP Season publication/assist transforms. The #57
   rolling matchup path separately requires `TeamId`, `SecondsPlayed`, and

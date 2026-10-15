@@ -3071,6 +3071,7 @@ def test_authenticated_projection_routes_use_immutable_closing_state_after_start
         "prizepicks": {"status": "missing", "retrieved_at": None},
         "underdog": {"status": "missing", "retrieved_at": None},
         "kalshi": {"status": "missing", "retrieved_at": None},
+        "polymarket": {"status": "missing", "retrieved_at": None},
     }
     assert started_selection.get_json()["freshness"]["player_pool"]["state"] == "closing"
     assert started.get_json()["players"]
@@ -3201,6 +3202,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     assert all_disabled_recorder.scopes == {}
     assert {scope.provider for scope in all_disabled_pool.scopes} == {
         "dabble",
+        "polymarket",
         "prizepicks",
         "underdog",
         "kalshi",
@@ -3319,6 +3321,7 @@ def test_authenticated_projection_routes_preserve_disabled_history_and_expiry(
     assert set(partially_enabled_recorder.scopes) == {"dabble"}
     assert {scope.provider for scope in partially_enabled_pool.scopes} == {
         "dabble",
+        "polymarket",
         "prizepicks",
         "underdog",
         "kalshi",
