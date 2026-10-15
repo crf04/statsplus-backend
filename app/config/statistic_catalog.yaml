@@ -57,7 +57,7 @@ statistics:
     scoring_periods: [full_game]
     components: [three_pointers_made]
     provider_mappings:
-      dabble: [three-pointers-made, threes, 3PM]
+      dabble: [three-pointers-made, threes, threes-made, 3PM]
       prizepicks: [3-Pointers Made, Three Pointers Made, 3PM]
       underdog: [3-Pointers Made, Three Pointers Made, 3PM]
       kalshi: [Three Pointers]
@@ -112,7 +112,7 @@ statistics:
         - rebounds+assists+points
         - rebounds+points+assists
       prizepicks: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
-      underdog: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts]
+      underdog: [PRA, Points + Rebounds + Assists, Pts+Rebs+Asts, Pts + Rebs + Asts]
       novig: [POINTS_REBOUNDS_ASSISTS]
   - id: pa
     market_category: PA
@@ -123,7 +123,7 @@ statistics:
     provider_mappings:
       dabble: [assists+points, points+assists]
       prizepicks: [PA, Points + Assists, Pts+Asts]
-      underdog: [PA, Points + Assists, Pts+Asts]
+      underdog: [PA, Points + Assists, Pts+Asts, Pts + Asts]
       novig: [POINTS_ASSISTS]
   - id: pr
     market_category: PR
@@ -134,7 +134,7 @@ statistics:
     provider_mappings:
       dabble: [points+rebounds, rebounds+points]
       prizepicks: [PR, Points + Rebounds, Pts+Rebs]
-      underdog: [PR, Points + Rebounds, Pts+Rebs]
+      underdog: [PR, Points + Rebounds, Pts+Rebs, Pts + Rebs]
       novig: [POINTS_REBOUNDS]
   - id: ra
     market_category: RA
@@ -145,7 +145,7 @@ statistics:
     provider_mappings:
       dabble: [assists+rebounds, rebounds+assists]
       prizepicks: [RA, Rebounds + Assists, Rebs+Asts]
-      underdog: [RA, Rebounds + Assists, Rebs+Asts]
+      underdog: [RA, Rebounds + Assists, Rebs+Asts, Rebs + Asts]
       novig: [REBOUNDS_ASSISTS]
   - id: stks
     market_category: STKS
@@ -165,7 +165,7 @@ statistics:
     scoring_periods: [full_game]
     components: [field_goals_attempted]
     provider_mappings:
-      dabble: [field-goals-attempted, FGA]
+      dabble: [field-goals-attempted, fg-attempted, FGA]
       prizepicks: [Field Goals Attempted, FGA]
       underdog: [Field Goals Attempted, FGA]
   - id: three_pointers_attempted
@@ -175,7 +175,7 @@ statistics:
     scoring_periods: [full_game]
     components: [three_pointers_attempted]
     provider_mappings:
-      dabble: [three-pointers-attempted, threes-attempted, FG3A]
+      dabble: [three-pointers-attempted, threes-attempted, three-attempted, FG3A]
       prizepicks: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
       underdog: [3-Pointers Attempted, Three Pointers Attempted, FG3A]
   - id: two_pointers_attempted
@@ -185,6 +185,6 @@ statistics:
     scoring_periods: [full_game]
     components: [two_pointers_attempted]
     provider_mappings:
-      dabble: [two-pointers-attempted, FG2A]
+      dabble: [two-pointers-attempted, two-attempted, FG2A]
       prizepicks: [2-Pointers Attempted, Two Pointers Attempted, FG2A]
       underdog: [2-Pointers Attempted, Two Pointers Attempted, FG2A]

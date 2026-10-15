@@ -3305,6 +3305,11 @@ a player has to meet, plus an optional note. It stores no defensive reading and
 has no season. Every route requires Firebase auth and operates only on the
 caller's own rows.
 
+The first sign-in that creates an account also gives it the default Targets
+(`DEFAULT_TARGETS` in `app/services/user_service.py`). They are ordinary rows
+the owner can edit or delete; nothing re-adds a deleted one, and accounts
+created before them never receive them.
+
 ```http
 GET    /api/user/targets
 POST   /api/user/targets

@@ -1,0 +1,229 @@
+{
+ "data": [
+  {
+   "actualStart": null,
+   "advertisedStart": "2026-10-20T19:05:00.000Z",
+   "competition": {
+    "country": "USA",
+    "created": "2021-11-23T04:53:27.112Z",
+    "date": "2021-11-22T04:53:27.088Z",
+    "displayName": "NBA",
+    "id": "090c2877-4d13-4f6e-8faf-886092153c58",
+    "location": 1,
+    "name": "NBA",
+    "sportId": "01408294-cb34-4cc0-8ab1-504f5c4c6e1f",
+    "state": "",
+    "updated": "2026-03-04T03:14:53.236Z"
+   },
+   "competitionId": "090c2877-4d13-4f6e-8faf-886092153c58",
+   "competitionName": "NBA",
+   "country": "USA",
+   "created": "2026-10-10T09:15:10.105Z",
+   "displayName": "BCE @ DPI",
+   "id": "01a12518-4599-735f-a212-cf7312c08ceb",
+   "inplayAvailable": false,
+   "isDisplayed": true,
+   "name": "Boston Celtics @ Detroit Pistons",
+   "prices": [
+    {
+     "created": "2026-10-10T09:15:13.111Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a12518-5158-725a-8e0e-02e24e28dd6c",
+     "marketId": "01a12518-49a2-77aa-aa2f-34b31e184aa8",
+     "price": 1.82,
+     "selectionId": "01a12518-4a65-7778-b4cb-4db333a35f7f",
+     "updated": "2026-10-11T21:45:08.340Z"
+    },
+    {
+     "created": "2026-10-10T09:15:13.111Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a12518-5158-725a-8e0e-079dff793ea3",
+     "marketId": "01a12518-49a2-77aa-aa2f-34b31e184aa8",
+     "price": 2.02,
+     "selectionId": "01a12518-4a76-736f-8dab-21cad8c8a9e1",
+     "updated": "2026-10-11T21:45:08.340Z"
+    },
+    {
+     "created": "2026-10-14T00:00:10.940Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a137b5-9abc-73dd-aa64-3103f6aa1030",
+     "marketId": "01a137b5-9a01-71db-a62a-5a21da9216a5",
+     "price": 1.85,
+     "selectionId": "01a12518-4a65-7778-b4cb-4db333a35f7f",
+     "updated": "2026-10-14T22:52:55.648Z"
+    },
+    {
+     "created": "2026-10-14T00:00:10.940Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a137b5-9abc-73dd-aa64-356bcf4efc7b",
+     "marketId": "01a137b5-9a01-71db-a62a-5a21da9216a5",
+     "price": 2,
+     "selectionId": "01a12518-4a76-736f-8dab-21cad8c8a9e1",
+     "updated": "2026-10-14T22:53:06.522Z"
+    },
+    {
+     "created": "2026-10-14T00:00:12.275Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a137b5-9ff3-7099-b57a-c9f212866b08",
+     "marketId": "01a137b5-9a01-71db-a62a-67fb85d7b333",
+     "price": 1.88,
+     "selectionId": "01a12518-4a2a-723e-ab12-d9bfc7edcefb",
+     "updated": "2026-10-14T22:52:55.736Z"
+    },
+    {
+     "created": "2026-10-14T00:00:12.275Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a137b5-9ff3-7099-b57a-c73678f00cd7",
+     "marketId": "01a137b5-9a01-71db-a62a-67fb85d7b333",
+     "price": 1.92,
+     "selectionId": "01a12518-49f2-724d-bfab-db418e9097ff",
+     "updated": "2026-10-14T22:52:55.736Z"
+    }
+   ],
+   "selections": [
+    {
+     "barrierNumber": -1,
+     "country": "",
+     "created": "2026-10-10T09:15:11.218Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a12518-49f2-724d-bfab-db418e9097ff",
+     "isDisplayed": true,
+     "isScratched": false,
+     "jockey": "",
+     "name": "Detroit Pistons -1.5",
+     "placeDeduction": null,
+     "saddleNumber": -1,
+     "trainer": "",
+     "updated": "2026-10-10T09:15:11.218Z",
+     "winDeduction": null
+    },
+    {
+     "barrierNumber": -1,
+     "country": "",
+     "created": "2026-10-10T09:15:11.274Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a12518-4a2a-723e-ab12-d9bfc7edcefb",
+     "isDisplayed": true,
+     "isScratched": false,
+     "jockey": "",
+     "name": "Boston Celtics +1.5",
+     "placeDeduction": null,
+     "saddleNumber": -1,
+     "trainer": "",
+     "updated": "2026-10-10T09:15:11.274Z",
+     "winDeduction": null
+    },
+    {
+     "barrierNumber": -1,
+     "country": "",
+     "created": "2026-10-10T09:15:11.333Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a12518-4a65-7778-b4cb-4db333a35f7f",
+     "isDisplayed": true,
+     "isScratched": false,
+     "jockey": "",
+     "name": "Detroit Pistons",
+     "placeDeduction": null,
+     "saddleNumber": -1,
+     "trainer": "",
+     "updated": "2026-10-10T09:15:11.333Z",
+     "winDeduction": null
+    },
+    {
+     "barrierNumber": -1,
+     "country": "",
+     "created": "2026-10-10T09:15:11.350Z",
+     "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+     "id": "01a12518-4a76-736f-8dab-21cad8c8a9e1",
+     "isDisplayed": true,
+     "isScratched": false,
+     "jockey": "",
+     "name": "Boston Celtics",
+     "placeDeduction": null,
+     "saddleNumber": -1,
+     "trainer": "",
+     "updated": "2026-10-10T09:15:11.350Z",
+     "winDeduction": null
+    }
+   ],
+   "selfMultiExtension": {
+    "allowSelfMulti": false
+   },
+   "state": "",
+   "stateSummary": {
+    "clock": "1st 12:00",
+    "currentState": {
+     "clock": {
+      "clockCountDirection": "down",
+      "clockStatus": "inactive",
+      "lastClockTime": {
+       "minutes": 12,
+       "seconds": 0
+      },
+      "lastClockUpdateAtTs": "2026-10-10T16:54:24Z"
+     },
+     "period": "Q1",
+     "status": "paused"
+    },
+    "fixtureId": "01a12518-4599-735f-a212-cf7312c08ceb",
+    "scoreboard": {
+     "3bad16cb-b54a-45bf-9981-94d4f1cda888": {
+      "abbreviation": "DPI",
+      "competitorDisplayOrder": 2,
+      "competitorType": "team",
+      "displayName": "Detroit Pistons",
+      "match": "0",
+      "scores": [
+       {
+        "name": "Q1",
+        "value": "0"
+       },
+       {
+        "name": "Q2",
+        "value": ""
+       },
+       {
+        "name": "Q3",
+        "value": ""
+       },
+       {
+        "name": "Q4",
+        "value": ""
+       }
+      ],
+      "sport": "basketball"
+     },
+     "9d9fa24f-81ca-4903-9a8d-8f31d2645345": {
+      "abbreviation": "BCE",
+      "competitorDisplayOrder": 1,
+      "competitorType": "team",
+      "displayName": "Boston Celtics",
+      "match": "0",
+      "scores": [
+       {
+        "name": "Q1",
+        "value": "0"
+       },
+       {
+        "name": "Q2",
+        "value": ""
+       },
+       {
+        "name": "Q3",
+        "value": ""
+       },
+       {
+        "name": "Q4",
+        "value": ""
+       }
+      ],
+      "sport": "basketball"
+     }
+    },
+    "sport": "basketball"
+   },
+   "status": "Open",
+   "updated": "2026-10-10T09:15:10.105Z"
+  }
+ ]
+}
