@@ -11,7 +11,10 @@ from typing import Any
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.domain.nba_teams import canonical_nba_team_abbreviation
+from app.domain.nba_teams import (
+    NBA_TEAM_FULL_NAME_TO_TRICODE,
+    canonical_nba_team_abbreviation,
+)
 from app.providers.dfs import (
     AthleteEvidence,
     PlayerProjectionMarket,
@@ -737,15 +740,20 @@ class AthleteResolver:
         # available to establish identity.
         if provider_team.canonical_id is not None and canonical.team_id is not None:
             return provider_team.canonical_id != canonical.team_id
-        if provider_team.name and canonical.team_name:
-            if normalize_athlete_name(provider_team.name) != normalize_athlete_name(
-                canonical.team_name
-            ):
-                return True
-        if provider_team.abbreviation and canonical.team_abbreviation:
+        # When both sides state a tricode, the tricodes alone decide: a provider
+        # may spell the full name ("Detroit Pistons") where the catalog stores
+        # the nickname ("Pistons").  A full NBA team name counts as its tricode.
+        provider_tricode = provider_team.abbreviation or NBA_TEAM_FULL_NAME_TO_TRICODE.get(
+            provider_team.name or ""
+        )
+        if provider_tricode and canonical.team_abbreviation:
             return normalize_team_abbreviation(
-                provider_team.abbreviation
+                provider_tricode
             ) != normalize_team_abbreviation(canonical.team_abbreviation)
+        if provider_team.name and canonical.team_name:
+            return normalize_athlete_name(provider_team.name) != normalize_athlete_name(
+                canonical.team_name
+            )
         return False
 
     @staticmethod

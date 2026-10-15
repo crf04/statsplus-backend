@@ -9,6 +9,7 @@ from typing import Any
 
 import requests
 
+from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 from app.errors import ProviderUnavailableError
 from app.providers.dfs import (
     AthleteEvidence,
@@ -304,6 +305,7 @@ class UnderdogAdapter:
         player_name = cls._player_name(player)
         team = cls._team_from_mapping(player, fallback_id=appearance.get("team_id"))
         event = cls._event_from_match(match_id, match)
+        team = cls._team_from_event(team, event)
         variant_label = optional_text(row.get("line_type"))
         variant = normalize_market_variant(variant_label)
         updated_at = row.get("updated_at")
@@ -428,8 +430,8 @@ class UnderdogAdapter:
                 status_label=status_label,
                 starts_at=starts_at,
                 updated_at=updated_at,
-                home_team=cls._team_from_mapping(match, prefix="home_team") if match else None,
-                away_team=cls._team_from_mapping(match, prefix="away_team") if match else None,
+                home_team=cls._match_team(match, "home") if match else None,
+                away_team=cls._match_team(match, "away") if match else None,
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
@@ -442,14 +444,70 @@ class UnderdogAdapter:
     ) -> TeamEvidence | None:
         if match is None:
             return None
-        home = cls._team_from_mapping(match, prefix="home_team")
-        away = cls._team_from_mapping(match, prefix="away_team")
+        home = cls._match_team(match, "home")
+        away = cls._match_team(match, "away")
         if player_team is not None and player_team.provider_id is not None:
             if home is not None and home.provider_id == player_team.provider_id:
                 return away
             if away is not None and away.provider_id == player_team.provider_id:
                 return home
         return None
+
+    @staticmethod
+    def _team_from_event(
+        team: TeamEvidence | None, event: EventEvidence | None
+    ) -> TeamEvidence | None:
+        """Give a player's team the tricode of the game side whose id matches."""
+
+        if team is None or team.provider_id is None or event is None:
+            return team
+        for side in (event.home_team, event.away_team):
+            if side is not None and side.provider_id == team.provider_id:
+                return TeamEvidence(
+                    provider_id=team.provider_id,
+                    name=team.name or side.name,
+                    abbreviation=team.abbreviation or side.abbreviation,
+                )
+        return team
+
+    @classmethod
+    def _match_team(cls, match: Mapping[str, Any], side: str) -> TeamEvidence | None:
+        """Return one side of a game, enriched from its ``AWAY @ HOME`` titles.
+
+        Underdog states only team UUIDs on the game, but ``abbreviated_title``
+        ("PHI @ NYK") carries both tricodes and ``full_team_names_title`` both
+        names.  The tricodes are used only when both are known NBA tricodes, so
+        a malformed or non-NBA title never invents a team.
+        """
+
+        team = cls._team_from_mapping(match, prefix=f"{side}_team")
+        abbreviations = cls._split_title(match.get("abbreviated_title"))
+        if abbreviations is None:
+            return team
+        away_abbreviation, home_abbreviation = (
+            canonical_nba_team_abbreviation(part) for part in abbreviations
+        )
+        if not {away_abbreviation, home_abbreviation} <= NBA_TEAM_TRICODES:
+            return team
+        abbreviation = home_abbreviation if side == "home" else away_abbreviation
+        names = cls._split_title(match.get("full_team_names_title"))
+        name = None
+        if names is not None:
+            name = names[1] if side == "home" else names[0]
+        return TeamEvidence(
+            provider_id=team.provider_id if team is not None else None,
+            name=name or (team.name if team is not None else None),
+            abbreviation=abbreviation,
+        )
+
+    @staticmethod
+    def _split_title(value: Any) -> tuple[str, str] | None:
+        if not isinstance(value, str):
+            return None
+        parts = [part.strip() for part in value.split(" @ ")]
+        if len(parts) != 2 or not all(parts):
+            return None
+        return parts[0], parts[1]
 
     @classmethod
     def _team_from_mapping(

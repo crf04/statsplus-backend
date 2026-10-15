@@ -113,8 +113,12 @@ def test_get_snapshot_hides_discovery_and_groups_actual_selections():
     assert first.selections[0].modifiers[0].kind == "payout_multiplier"
     assert first.selections[0].modifiers[0].scope == "selection"
     assert first.selections[0].modifiers[0].label is None
-    assert first.variant.value == "unknown"
-    assert first.variant_label is None
+    assert first.variant.value == "standard"
+    assert first.variant_label == "standard"
+    over_only = snapshot.markets[1]
+    assert over_only.market_id == "market-2"
+    assert over_only.variant.value == "alternate"
+    assert over_only.variant_label == "one_sided"
 
     paths = [call.args[0] for call in session.get.call_args_list]
     assert paths == [
