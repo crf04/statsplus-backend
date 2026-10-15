@@ -574,7 +574,8 @@ For production:
 
 - Set `DATABASE_URL` to your managed database if you are not using SQLite.
 - Run schema migrations before application workers start; Railway uses the
-  checked-in `railway.json` pre-deploy command for this.
+  `python scripts/migrate.py` pre-deploy command recorded in `railway.web.json`
+  and set on each database-backed service.
 - Set Firebase credentials so protected and admin routes enforce real tokens and claims.
 - Keep `FIREBASE_ADMIN_DISABLED=false`; the bypass is accepted only in development/tests. Never enable it in a deployed environment.
 - Set `OPENAI_API_KEY` only if LLM fallback should be enabled.

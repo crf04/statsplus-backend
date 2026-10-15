@@ -182,6 +182,17 @@ columns — so a row archived before migration 046 (whose columns were
 backfilled to `unpriced`) keeps the price its document still carries, and its
 targetability, across the replay.
 
+The market's posted line is stored the same way: `projection_observations` and
+`latest_player_projections` carry `line_value`, the market threshold as a
+number when it is non-negative and null otherwise (migration 064, additive and
+never backfilled). Only targetable rows reach Latest and closing membership, so
+the Player Pool reader folds lines from exactly the targetable markets into
+`PoolPlayer.lines` (`{provider: {market: line}}`). A provider with two distinct
+lines for one player and market in the read pool contributes neither, equal
+lines collapse to one, and a row stored before migration 064 contributes none
+until that provider's next changed snapshot rewrites it. A mapping replay
+re-derives the line from the archived source document, as it does the price.
+
 The canonical archive document carries the triple as schema version 2. A
 document is read back and re-encoded in the version it declares, so every
 snapshot archived before this change keeps its exact bytes and therefore its
@@ -4369,8 +4380,9 @@ no key and reads `{}` until quotes exist.
 merge and deploy):
 
 1. Create the Odds API plan and read the billing reset day from its dashboard.
-2. Create a new Railway service from this repository with config-as-code file
-   `railway.odds.json` (cron `*/5 * * * *`, start command
+2. Create a new Railway service from this repository and set the service
+   settings recorded in `railway.odds.json` (Railway's API no longer sets a
+   config-as-code path) (cron `*/5 * * * *`, start command
    `python scripts/collect_odds.py`). Give it `DATABASE_URL`, `SENTRY_DSN`,
    `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>`, `ODDS_API_ENABLED=true`
    (optional: `ODDS_API_PLAN_CREDITS`, `ODDS_API_RESERVE_CREDITS`,
@@ -4637,8 +4649,11 @@ transaction-scoped advisory lock before inspecting or changing the migration
 table. Status output masks database passwords.
 
 Production Gunicorn workers never run migrations from `create_app()`. Railway
-owns the deployment boundary: `railway.json` runs `python scripts/migrate.py`
-as a pre-deploy command, and a nonzero result prevents the new application
+owns the deployment boundary: each database-backed service runs
+`python scripts/migrate.py` as a pre-deploy command (recorded in
+`railway.web.json` and set on the service instance, because a root
+`railway.json` would also impose the web `/health` healthcheck on the non-HTTP
+workers and fail their deploys), and a nonzero result prevents the new application
 workers from starting. Local and test app factories retain automatic schema
 initialization for their disposable databases. Migration 031 idempotently
 recreates the five Canonical Game Ledger tables from migration 024, repairing

@@ -1851,3 +1851,40 @@ def test_postgres_reader_uses_one_snapshot_across_latest_and_poll_health(
         event.remove(reader_engine, "after_cursor_execute", pause_after_latest)
         reader_engine.dispose()
         writer_engine.dispose()
+
+
+def test_postgres_line_value_migration_is_additive_and_rerunnable(
+    projection_pg_engine,
+):
+    catalog = StatisticCatalog.load_default()
+    archive = ProjectionArchive(projection_pg_engine, catalog)
+    query = NBAMarketQuery(season=SEASON)
+    archive.ingest_complete_snapshot(
+        _snapshot(catalog, OBSERVED_AT, "27.5"), query=query, accepted_at=OBSERVED_AT
+    )
+    reader = LatestProjectionPlayerPoolReader(
+        projection_pg_engine,
+        ProjectionArchiveReadScope(provider="dabble", query=query),
+        clock=lambda: OBSERVED_AT + timedelta(minutes=10),
+    )
+    (written,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert written.lines == {"dabble": {"PTS": 27.5}}
+    with projection_pg_engine.begin() as connection:
+        for table in ("projection_observations", "latest_player_projections"):
+            connection.execute(text(f"ALTER TABLE {table} DROP COLUMN line_value"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 64"))
+
+    assert run_migrations(projection_pg_engine).applied == (
+        "064_projection_line_values",
+    )
+    assert run_migrations(projection_pg_engine).applied == ()
+
+    (stored_before,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert stored_before.provenance == {"dabble": ("PTS",)}
+    assert stored_before.lines == {}
+    later = OBSERVED_AT + timedelta(minutes=2)
+    archive.ingest_complete_snapshot(
+        _snapshot(catalog, later, "26.5"), query=query, accepted_at=later
+    )
+    (rewritten,) = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players
+    assert rewritten.lines == {"dabble": {"PTS": 26.5}}

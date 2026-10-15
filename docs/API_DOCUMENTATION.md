@@ -435,6 +435,15 @@ midnights to a half-open UTC query window, including across DST transitions,
 so it does not read the whole season per request. Games are ordered by tip
 time, then `game_id`.
 
+When neither that season nor the one before has stored events (a date whose
+season was never collected, such as `2024-12-25` or `2027-10-25` against a
+catalog holding only 2025-26), the route returns `404 resource_not_found` with
+message `No NBA schedule is stored for the <season> season.` and
+`error.details.season` set to the date's own season (`"2024-25"`), or to the
+pinned season when `NBA_CURRENT_SEASON` pins one without a stored schedule;
+retrying cannot change it. `503 provider_unavailable` remains only for an unconfigured
+Event Catalog.
+
 A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and
 `teams[]`) is a string or `null`. It is the stored catalog name, else the NBA's
 name for `team_id`, else `null`; it is never the string `"None"`.
@@ -912,6 +921,10 @@ Each stored pool player has this shape:
     "prizepicks": ["FGA", "PTS"],
     "underdog": ["PTS"]
   },
+  "lines": {
+    "prizepicks": { "FGA": 19.5, "PTS": 27.5 },
+    "underdog": { "PTS": 27.5 }
+  },
   "season_scoring": 25.4,
   "last_10_minutes": [35.0, 36.0],
   "diet_shares": {
@@ -977,6 +990,19 @@ Each stored pool player has this shape:
   "book_lines": {}
 }
 ```
+
+`lines` is additive and always present: each provider's posted line per
+market, keyed like `provenance`. A provider's markets are a subset of its
+`provenance` markets, and each value is a finite number of at least 0: the
+standard full-game line, from the same markets that make a player targetable
+(available, standard variant, full game, priced; alternates and other periods
+never appear). A provider with no known line is absent. When one provider
+posts more than one distinct line for the same player and market in the pool
+being served, that market is omitted for that provider rather than choosing
+one; equal duplicates collapse to the one value. Projection rows stored before
+lines were recorded carry no line, so such a provider is absent until its next
+changed board. Game-log participants (historical mode, and the Unscheduled
+Matchup) carry `"lines": {}`.
 
 `player_source`, `stat_categories`, and `focal_game_line` are additive and
 always present. `player_source` is `player_pool` for a stored pool player and
@@ -1295,8 +1321,8 @@ complete canonical player-log rows for that exact game, one row per player who
 appeared, and carries no inferred DNP or inactive roster. Each participant has
 the same shape as a stored pool player, with these differences:
 
-- `player_source` is `game_logs`, `posted_markets` is `[]`, and `provenance` is
-  `{}`. There is no posted-market claim, and both
+- `player_source` is `game_logs`, `posted_markets` is `[]`, and `provenance`
+  and `lines` are `{}`. There is no posted-market claim, and both
   `game.away_team.targetable_player_count` and
   `game.home_team.targetable_player_count` are `0`.
 - `team_id` and `tricode` are the identity recorded for that game. A later
@@ -1477,7 +1503,7 @@ game-log appearance chose these players. `freshness.schedule`, `pool`, and
 `injuries` are absent for the same reason. Each player row omits
 `focal_game_line`, `posted_markets`, and `injury_badge_ref`: there is no focal
 game, no posted line, and no injury report. Nothing per-game is invented in
-their place.
+their place. `provenance` and `lines` stay present and empty (`{}`).
 
 `experience`:
 

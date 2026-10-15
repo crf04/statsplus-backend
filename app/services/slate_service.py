@@ -26,7 +26,11 @@ from app.domain.nba_events import (
     resolve_stored_event_classification,
 )
 from app.domain.utc import assume_utc, parse_utc_iso
-from app.errors import InvalidInputError, ProviderUnavailableError
+from app.errors import (
+    InvalidInputError,
+    ProviderUnavailableError,
+    ResourceNotFoundError,
+)
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
@@ -94,8 +98,11 @@ class SlateService:
 
         observed_at = assume_utc(self._clock())
         if self.event_catalog.count_events(season) == 0:
-            raise ProviderUnavailableError(
-                "The NBA schedule is not available. Please try again later."
+            # Neither the date's season nor the one before was ever collected;
+            # retrying cannot change that, so it is a definite answer.
+            raise ResourceNotFoundError(
+                f"No NBA schedule is stored for the {season} season.",
+                public_details={"season": season},
             )
         freshness = self.event_catalog.get_freshness(season, now=observed_at)
         retrieved_at = freshness.get("last_success_at")
