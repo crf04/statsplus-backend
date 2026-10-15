@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -247,6 +248,8 @@ _TEAM_MODE_PARTICIPANTS_BASIS = {
 }
 #: "Use the service's own": the compose path resolves its snapshot and reads
 #: its injuries itself unless a caller hands it either.
+logger = logging.getLogger(__name__)
+
 _OWN = object()
 
 
@@ -336,6 +339,12 @@ class AthleteCatalogReader(Protocol):
 
 class StatsFreshnessReader(Protocol):
     def get(self) -> StatsFreshness: ...
+
+
+class SportsbookBookLinesReader(Protocol):
+    def book_lines(
+        self, game_id: str, *, connection: Connection | None = None
+    ) -> Mapping[int, Mapping[str, Any]]: ...
 
 
 class MatchupInjuryReader(Protocol):
@@ -545,8 +554,12 @@ class MatchupService:
         publication_reader: DatabaseFirstPublicationReader | None = None,
         engine: Engine | None = None,
         athlete_catalog: AthleteCatalogReader | None = None,
+        sportsbook_reader: SportsbookBookLinesReader | None = None,
     ) -> None:
         self.event_catalog = event_catalog
+        # Sportsbook odds (#377) are reference data beside the DFS evidence:
+        # never part of provenance, the pool, or Targets.
+        self.sportsbook_reader = sportsbook_reader
         self.player_pool = player_pool
         self.player_logs = player_logs
         self.player_diets = player_diets
@@ -619,6 +632,7 @@ class MatchupService:
                 injuries=injuries,
                 compose_cache=compose_cache,
                 season=season,
+                with_book_lines=False,
             )
 
     def get_unscheduled_matchup(
@@ -902,6 +916,7 @@ class MatchupService:
         injuries: Any = _OWN,
         compose_cache: MatchupComposeCache | None = None,
         season: str | None = None,
+        with_book_lines: bool = True,
     ) -> dict[str, Any]:
         # Evidence (logs, Diets, windows) is the published season's; the
         # game's own schedule facts (event, pool, injuries) are its season's,
@@ -1073,6 +1088,11 @@ class MatchupService:
                 metric_indexes,
                 availability,
                 {} if historical else injury_result.badge_refs,
+                book_lines=(
+                    {}
+                    if historical or not with_book_lines
+                    else self._book_lines(game_id, connection)
+                ),
             ),
             "injuries": dict(injury_result.block),
             "freshness": {
@@ -1684,6 +1704,7 @@ class MatchupService:
         metric_indexes: Mapping[str, _WindowMetricIndex | None],
         availability: Mapping[str, Mapping[str, Mapping[str, Any]]],
         injury_badges: Mapping[int, str],
+        book_lines: Mapping[int, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         """Compose every player row, scored against ``opponent_of(player)``.
 
@@ -1801,6 +1822,9 @@ class MatchupService:
                     "injury_badge_ref": injury_badges.get(
                         player.canonical_player_id
                     ),
+                    "book_lines": dict(
+                        (book_lines or {}).get(player.canonical_player_id, {})
+                    ),
                 }
             )
         rows.sort(
@@ -1811,6 +1835,29 @@ class MatchupService:
             )
         )
         return rows
+
+    def _book_lines(
+        self, game_id: str, connection: Connection | None
+    ) -> Mapping[int, Mapping[str, Any]]:
+        """Latest sportsbook lines for a game; never fails the Matchup.
+
+        The read runs in a savepoint so a store error cannot poison the
+        request's shared connection, and it yields nothing (``{}`` on every
+        row) with a log line when it fails.
+        """
+
+        if self.sportsbook_reader is None:
+            return {}
+        try:
+            if connection is None:
+                return self.sportsbook_reader.book_lines(game_id)
+            with connection.begin_nested():
+                return self.sportsbook_reader.book_lines(
+                    game_id, connection=connection
+                )
+        except Exception:
+            logger.exception("Sportsbook book_lines read failed for game %s", game_id)
+            return {}
 
     def _scores(
         self,

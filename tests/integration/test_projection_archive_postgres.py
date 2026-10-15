@@ -1872,10 +1872,10 @@ def test_postgres_line_value_migration_is_additive_and_rerunnable(
     with projection_pg_engine.begin() as connection:
         for table in ("projection_observations", "latest_player_projections"):
             connection.execute(text(f"ALTER TABLE {table} DROP COLUMN line_value"))
-        connection.execute(text("DELETE FROM schema_migrations WHERE version = 63"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 64"))
 
     assert run_migrations(projection_pg_engine).applied == (
-        "063_projection_line_values",
+        "064_projection_line_values",
     )
     assert run_migrations(projection_pg_engine).applied == ()
 

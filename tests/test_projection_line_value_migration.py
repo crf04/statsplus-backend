@@ -1,4 +1,4 @@
-"""Migration 063: projection rows gain a nullable line value, never backfilled."""
+"""Migration 064: projection rows gain a nullable line value, never backfilled."""
 
 from __future__ import annotations
 
@@ -99,15 +99,15 @@ def test_existing_rows_keep_a_null_line_and_rerun_is_a_noop(tmp_path):
         "projection_observations": [27.5],
         "latest_player_projections": [27.5],
     }
-    # The pre-063 shape: the same rows without the column.
+    # The pre-064 shape: the same rows without the column.
     with engine.begin() as connection:
         for table in _TABLES:
             connection.execute(text(f"ALTER TABLE {table} DROP COLUMN line_value"))
-        connection.execute(text("DELETE FROM schema_migrations WHERE version = 63"))
+        connection.execute(text("DELETE FROM schema_migrations WHERE version = 64"))
 
     first = run_migrations(engine)
 
-    assert first.applied == ("063_projection_line_values",)
+    assert first.applied == ("064_projection_line_values",)
     assert _line_values(engine) == {
         "projection_observations": [None],
         "latest_player_projections": [None],

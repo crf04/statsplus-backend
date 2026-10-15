@@ -200,7 +200,7 @@ class ProjectionObservation(Base):
     )
     targetable = Column(Boolean, nullable=False, default=False, server_default="0")
     #: The market's posted line (its threshold), when the provider stated a
-    #: finite, non-negative one.  Null on rows written before migration 063.
+    #: finite, non-negative one.  Null on rows written before migration 064.
     line_value = Column(Float, nullable=True)
     resolution_state = Column(
         String(32), nullable=False, default="resolved", server_default="resolved"
@@ -315,7 +315,7 @@ class LatestPlayerProjection(Base):
     canonical_statistic_id = Column(String(128), nullable=False)
     market_category = Column(String(32), nullable=False)
     #: The offering's posted line, copied from its observation; null when the
-    #: row was written before migration 063 or the provider stated none.
+    #: row was written before migration 064 or the provider stated none.
     line_value = Column(Float, nullable=True)
     observed_at = Column(DateTime(timezone=True), nullable=False)
     confirmed_at = Column(DateTime(timezone=True), nullable=False)

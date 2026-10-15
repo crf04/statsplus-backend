@@ -1895,7 +1895,7 @@ class ProjectionArchive:
         )
         rematerialized["price_scope"] = source_market.price_scope.value
         # Like the price, the line is a fact of the source document, so a row
-        # written before migration 063 recovers it on replay.
+        # written before migration 064 recovers it on replay.
         rematerialized["line_value"] = _posted_line(source_market)
         rematerialized["targetable"] = bool(
             rematerialized["market_status"] == MarketStatus.AVAILABLE.value
@@ -3274,7 +3274,7 @@ class LatestProjectionPlayerPoolReader:
             entry["providers"].setdefault(str(row["provider"]), set()).add(
                 str(row["market_category"])
             )
-            # A row stored before migration 063 has no line and adds none.
+            # A row stored before migration 064 has no line and adds none.
             if row["line_value"] is not None:
                 entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
                     str(row["market_category"]), set()

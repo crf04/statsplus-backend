@@ -1,0 +1,341 @@
+{
+  "id": "9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12",
+  "sport_key": "basketball_nba",
+  "sport_title": "NBA",
+  "commence_time": "2026-10-22T00:30:00Z",
+  "home_team": "Denver Nuggets",
+  "away_team": "Los Angeles Lakers",
+  "bookmakers": [
+    {
+      "key": "draftkings",
+      "title": "DraftKings",
+      "last_update": "2026-10-21T21:02:40Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:02:40Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -115,
+              "point": 27.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -105,
+              "point": 27.5
+            },
+            {
+              "name": "Over",
+              "description": "Nikola Jokić",
+              "price": -110,
+              "point": 26.5
+            },
+            {
+              "name": "Under",
+              "description": "Nikola Jokić",
+              "price": -110,
+              "point": 26.5
+            },
+            {
+              "name": "Over",
+              "description": "Austin Reaves",
+              "price": -120,
+              "point": 15.5
+            },
+            {
+              "name": "Under",
+              "description": "Austin Reaves",
+              "price": 100,
+              "point": 15.5
+            },
+            {
+              "name": "Over",
+              "description": "Stephen Curry",
+              "price": -110,
+              "point": 29.5
+            },
+            {
+              "name": "Under",
+              "description": "Stephen Curry",
+              "price": -110,
+              "point": 29.5
+            },
+            {
+              "name": "Over",
+              "description": "Kasparas Jakucionis",
+              "price": -110,
+              "point": 8.5
+            },
+            {
+              "name": "Under",
+              "description": "Kasparas Jakucionis",
+              "price": -110,
+              "point": 8.5
+            }
+          ]
+        },
+        {
+          "key": "player_rebounds",
+          "last_update": "2026-10-21T21:02:40Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -105,
+              "point": 7.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -115,
+              "point": 7.5
+            }
+          ]
+        },
+        {
+          "key": "player_assists",
+          "last_update": "2026-10-21T21:02:40Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": 120,
+              "point": 7.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -150,
+              "point": 7.5
+            }
+          ]
+        },
+        {
+          "key": "player_threes",
+          "last_update": "2026-10-21T21:02:40Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": 110,
+              "point": 2.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -135,
+              "point": 2.5
+            }
+          ]
+        },
+        {
+          "key": "player_points_rebounds_assists",
+          "last_update": "2026-10-21T21:02:40Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -110,
+              "point": 42.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -110,
+              "point": 42.5
+            }
+          ]
+        },
+        {
+          "key": "player_blocks",
+          "last_update": "2026-10-21T21:02:40Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -200,
+              "point": 0.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": 160,
+              "point": 0.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "fanduel",
+      "title": "FanDuel",
+      "last_update": "2026-10-21T21:03:02Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:03:02Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -110,
+              "point": 27.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -110,
+              "point": 27.5
+            },
+            {
+              "name": "Over",
+              "description": "Nikola Jokic",
+              "price": -105,
+              "point": 26.5
+            },
+            {
+              "name": "Under",
+              "description": "Nikola Jokic",
+              "price": -115,
+              "point": 26.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "betmgm",
+      "title": "BetMGM",
+      "last_update": "2026-10-21T21:04:11Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:04:11Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": 100,
+              "point": 28.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": -125,
+              "point": 28.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "williamhill_us",
+      "title": "Caesars",
+      "last_update": "2026-10-21T21:03:02Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:03:02Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -105,
+              "point": 27.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "betrivers",
+      "title": "BetRivers",
+      "last_update": "2026-10-21T21:03:02Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:03:02Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "Austin Reaves",
+              "price": -125,
+              "point": 14.5
+            },
+            {
+              "name": "Under",
+              "description": "Austin Reaves",
+              "price": 105,
+              "point": 14.5
+            },
+            {
+              "name": "Over",
+              "description": "Austin Reaves",
+              "price": 115,
+              "point": 15.5
+            },
+            {
+              "name": "Under",
+              "description": "Austin Reaves",
+              "price": -135,
+              "point": 15.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "bovada",
+      "title": "Bovada",
+      "last_update": "2026-10-21T21:03:02Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:03:02Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -120,
+              "point": 27.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": 100,
+              "point": 27.5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "betonline_ag",
+      "title": "BetOnline.ag",
+      "last_update": "2026-10-21T21:03:02Z",
+      "markets": [
+        {
+          "key": "player_points",
+          "last_update": "2026-10-21T21:03:02Z",
+          "outcomes": [
+            {
+              "name": "Over",
+              "description": "LeBron James",
+              "price": -125,
+              "point": 27.5
+            },
+            {
+              "name": "Under",
+              "description": "LeBron James",
+              "price": 105,
+              "point": 27.5
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
