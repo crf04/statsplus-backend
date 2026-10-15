@@ -106,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                           "nba_proxy": "configured" if config.nba_proxy_url else "none"}, sort_keys=True))
         return 0
     if args.command == "credential-check":
-        default_credential_provider(config.environment).get_secret(config.identity_id)
+        default_credential_provider().get_secret(config.identity_id)
         print(json.dumps({"status": "available", "identity_id": config.identity_id}, sort_keys=True))
         return 0
     if args.command == "status":
@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.season or not args.cutoff or config.environment == "production":
             parser.error("railway-rehearsal requires season/cutoff and a non-production environment")
         metadata = release_metadata(_release_root(), version=config.release_version)
-        credential = default_credential_provider(config.environment)
+        credential = default_credential_provider()
         client = RailwayClient(
             config.railway_url, identity_id=config.identity_id, environment=config.environment,
             timeout=config.http_timeout_seconds, release_version=config.release_version,

@@ -205,6 +205,7 @@ def test_malformed_proxy_is_rejected_without_echoing_it(bad):
 
 def test_control_plane_requests_bypass_a_configured_proxy_through_run_once(tmp_path, monkeypatch, wire):
     monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
+    monkeypatch.setenv("COLLECTOR_NBA_PROXY_URL", PROXY)
     with contextlib.redirect_stdout(io.StringIO()):
         cli.run_once(_config(tmp_path, nba_proxy_url=PROXY))  # real RequestsTransport
     assert wire, "the control plane was never contacted"
@@ -226,12 +227,12 @@ def test_only_collector_secret_set_lets_run_succeed_in_a_non_production_environm
     assert json.loads(capsys.readouterr().out.splitlines()[-1])["status"] in {"no_work", "complete"}
 
 
-def test_a_proxy_failure_is_retryable_and_leaks_neither_stdout_nor_the_log(tmp_path, monkeypatch, capsys, caplog):
+def _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, expected_code):
     from app.services.collection_control import _collector_scope_descriptors
 
     def refuse(self, method, url, **kwargs):
         if "nba.com" in url:
-            raise requests.exceptions.ProxyError(f"Unable to connect to proxy {PROXY} for {url}")
+            raise failure
         return _Reply()
 
     monkeypatch.setattr(requests.Session, "request", refuse)
@@ -255,10 +256,96 @@ def test_a_proxy_failure_is_retryable_and_leaks_neither_stdout_nor_the_log(tmp_p
         for handler in list(shared.handlers):
             handler.close()
             shared.removeHandler(handler)
-    assert code == 10  # retryable, not non_retryable/provider_schema_changed
+    assert code == expected_code
     output = capsys.readouterr()
     log = config.log_path.read_text() if config.log_path.exists() else ""
     reported = json.dumps(transport.calls, default=str)
     for text in (output.out, output.err, log, caplog.text, reported):
         assert "proxy-pass-7731" not in text and "proxy.example" not in text
-    assert "provider_unavailable" in output.out + log + reported
+    return output.out + log + reported
+
+
+def test_a_proxy_failure_is_retryable_and_leaks_neither_stdout_nor_the_log(tmp_path, monkeypatch, capsys, caplog):
+    failure = requests.exceptions.ProxyError(f"Unable to connect to proxy {PROXY}")
+    evidence = _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, 10)
+    assert "provider_unavailable" in evidence  # retryable, not provider_schema_changed
+
+
+def test_an_unexpected_nba_exception_carrying_the_proxy_url_leaks_nowhere(tmp_path, monkeypatch, capsys, caplog):
+    failure = ValueError(f"unexpected reply via {PROXY}")
+    _run_with_nba_failure(tmp_path, monkeypatch, capsys, caplog, failure, 20)
+
+
+def test_credential_check_and_railway_rehearsal_still_fall_back_to_keyring_outside_production(
+    tmp_path, monkeypatch, capsys,
+):
+    asked = []
+
+    class FakeKeyring:
+        @staticmethod
+        def get_password(service, user):
+            asked.append((service, user))
+            return "keyring-secret"
+
+    monkeypatch.setitem(__import__("sys").modules, "keyring", FakeKeyring)
+    for key, value in {**BASE_ENV, "COLLECTOR_ENVIRONMENT": "testing",
+                       "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3")}.items():
+        monkeypatch.setenv(key, value)
+    assert cli.main(["credential-check"]) == 0
+    assert asked == [("StatsPlus/Collector/railway-cron", "machine")]
+
+    exchanged = []
+
+    class StopAfterExchange(Exception):
+        pass
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exchange_token(self, secret):
+            exchanged.append(secret)
+            raise StopAfterExchange
+
+    monkeypatch.setattr(cli, "RailwayClient", FakeClient)
+    with pytest.raises(StopAfterExchange):
+        cli.main(["railway-rehearsal", "--season", "2026-27", "--cutoff", "2026-10-20T00:00:00+00:00"])
+    assert exchanged == ["keyring-secret"]
+
+
+def _cron_runs_per_day(expression: str) -> int:
+    minutes, hours, day, month, weekday = expression.split()
+    assert (day, month, weekday) == ("*", "*", "*")
+
+    def count(field: str, low: int, high: int) -> int:
+        total = 0
+        for part in field.split(","):
+            if part == "*":
+                total += high - low + 1
+            elif part.startswith("*/"):
+                total += len(range(low, high + 1, int(part[2:])))
+            elif "-" in part:
+                start, end = part.split("-")
+                total += int(end) - int(start) + 1
+            else:
+                total += 1
+        return total
+
+    return count(minutes, 0, 59) * count(hours, 0, 23)
+
+
+def test_cron_cadence_stays_within_the_control_plane_poll_budget(tmp_path, monkeypatch):
+    from app.services.collection_control import USAGE_MAX_POLLS
+
+    monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
+    transport = _Transport()
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli.run_once(_config(tmp_path), transport=transport)
+    # A no-work run: every authenticated call except the token exchange is a poll.
+    polls_per_run = len([c for c in transport.calls if not c[1].endswith("/api/collector/token")])
+    assert polls_per_run >= 2
+
+    schedule = json.loads((Path(__file__).resolve().parents[1] / "railway.collector.json").read_text())
+    runs = _cron_runs_per_day(schedule["deploy"]["cronSchedule"])
+    # Half the budget stays free for manual runs and manifest reads.
+    assert runs * polls_per_run <= USAGE_MAX_POLLS // 2, (runs, polls_per_run)

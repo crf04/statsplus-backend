@@ -96,7 +96,7 @@ through a residential proxy (`stats.nba.com` blocks datacenter addresses). It
 is the same one-shot command: `python -m app.collector run` performs one
 invocation and exits with the codes above, so a Railway cron run ends when the
 tick does. The service's config file is `railway.collector.json`
-(`startCommand` `python -m app.collector run`, `cronSchedule` `*/30 * * * *`,
+(`startCommand` `python -m app.collector run`, `cronSchedule` `0,30 9-15 * * *`,
 `restartPolicyType` `NEVER`). It has no pre-deploy migration and no health
 check; it never reads `DATABASE_URL`.
 
@@ -123,9 +123,17 @@ Variables on the service:
 | `COLLECTOR_NBA_PROXY_URL` | the residential proxy URL |
 | `COLLECTOR_RELEASE_VERSION` | optional; defaults to `0.1.0` |
 
-The hosted ticks expect collection every 30 minutes and Event/Athlete Catalogs
-younger than 72 hours, which `*/30 * * * *` satisfies. Railway skips a start
-while the previous run is still going, so a slow tick cannot overlap itself.
+The hosted ticks issue work between 03:45 and 11:00 Central, and the Windows
+task ran from 04:00 every 30 minutes for six hours. The cron keeps that
+cadence in UTC: every 30 minutes from 09:00 to 15:30 UTC (04:00-10:30 CDT,
+03:00-09:30 CST), 14 runs a day. A successful run spends 3 of the control
+plane's 100 daily polls (start status, discovery, terminal status), so this uses
+about 42; a round-the-clock `*/30` would use 144 and get 429 on discovery after
+33 runs. Keep headroom for manual runs and extra manifest reads, and do not
+schedule faster than hourly all day. Catalogs are requested daily, well under
+72 hours. Railway skips a start while the previous run is still going, so a
+slow tick cannot overlap itself. After the DST change the window shifts one hour
+against Central; widen the hours if the last stage lands late.
 Exit `10`/`11` are normal between handshake stages; exit `20` needs an operator.
 
 The container filesystem is ephemeral, so the SQLite Outbox, lease and
@@ -163,7 +171,7 @@ One-time operator steps:
    ```
 
    A surface the identity lacks is refused with `scope_denied` on upload, and
-   a new surface needs a new identity or rotation.
+   a new surface needs a new identity (`rotate` changes credentials only).
 2. Create a service from this repository with the config-as-code path
    `/railway.collector.json`, and set the variables above.
 3. Run `python -m app.collector validate-config` and `credential-check` from the

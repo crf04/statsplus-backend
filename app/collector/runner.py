@@ -93,9 +93,10 @@ class WindowsCredentialProvider:
 def default_credential_provider(environment: str = "production", environ: Mapping[str, str] | None = None) -> Any:
     """Pick the one credential source every command shares.
 
-    ``COLLECTOR_SECRET`` (a container) wins everywhere.  Otherwise the
-    non-production environments read ``COLLECTOR_MACHINE_SECRET`` and
-    production reads Credential Manager.
+    ``COLLECTOR_SECRET`` (a container) wins everywhere.  Otherwise ``run``
+    passes its environment, and the non-production ones read
+    ``COLLECTOR_MACHINE_SECRET``; ``credential-check`` and ``railway-rehearsal``
+    pass nothing and keep reading Credential Manager, as they always did.
     """
 
     values = os.environ if environ is None else environ
