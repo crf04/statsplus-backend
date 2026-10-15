@@ -63,6 +63,7 @@ from app.services.event_mapping_repository import (
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
 from app.services.slate_service import SlateService
 from app.config.settings import NBASeasonSettings, RuntimeSettings
+from tests.support.slate_catalog import NoNeighbourEvents
 
 
 NOW = datetime(2026, 1, 2, 12, tzinfo=timezone.utc)
@@ -1348,7 +1349,7 @@ def test_authenticated_slate_route_serves_real_governed_player_and_event_joins(
         ),
     )
 
-    class Catalog:
+    class Catalog(NoNeighbourEvents):
         def count_events(self, season):
             return 1
 

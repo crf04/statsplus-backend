@@ -30,6 +30,7 @@ from app.errors import InvalidInputError, ProviderUnavailableError
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.player_pool import PlayerPool, PlayerPoolReader, PoolPlayer
 from app.services.research_season import schedule_season
+from app.services.slate_neighbors import neighbouring_game_dates
 from app.services.response_provenance import (
     UNAVAILABLE_SOURCE,
     least_fresh,
@@ -182,8 +183,13 @@ class SlateService:
             ),
             "retrieved_at": retrieved_at,
         }
+        previous_game_date, next_game_date = neighbouring_game_dates(
+            self.settings, self.event_catalog, slate_date
+        )
         return {
             "slate_date": slate_date.isoformat(),
+            "previous_game_date": previous_game_date,
+            "next_game_date": next_game_date,
             "freshness": {
                 "schedule": schedule_freshness,
                 "pool": pool_freshness,

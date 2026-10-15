@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.freshness import exact_seconds
@@ -214,6 +214,104 @@ class EventCatalogRepository:
                     table.c.scheduled_at < assume_utc(ends_at),
                 )
                 .order_by(table.c.scheduled_at, table.c.nba_game_id)
+            ).mappings()
+            return [self._serialize(row) for row in rows]
+
+    def adjacent_season(
+        self, season: str, *, below: bool, inclusive: bool = False
+    ) -> str | None:
+        """The stored season nearest ``season`` on one side, by one index seek."""
+
+        table = EventCatalogEntry.__table__
+        column = table.c.season
+        if below:
+            condition = column <= season if inclusive else column < season
+            order = column.desc()
+        else:
+            condition = column >= season if inclusive else column > season
+            order = column.asc()
+        with self.engine.connect() as connection:
+            return connection.execute(
+                select(column).where(condition).order_by(order).limit(1)
+            ).scalar_one_or_none()
+
+    def list_events_before(
+        self,
+        season: str,
+        before: datetime,
+        limit: int,
+        *,
+        before_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Up to ``limit`` events before a keyset cursor, newest first.
+
+        Without ``before_id`` the cursor is the instant ``before`` (exclusive);
+        with it, the position ``(before, before_id)`` in (scheduled_at, id)
+        order, so a continuation page resumes exactly where the last ended.
+        Work is linear in the events skipped, assuming few events share a tip
+        time (real data: about 15), so no index beyond (season, scheduled_at).
+        """
+
+        table = EventCatalogEntry.__table__
+        bound = assume_utc(before)
+        if before_id is None:
+            position = table.c.scheduled_at < bound
+        else:
+            position = or_(
+                table.c.scheduled_at < bound,
+                and_(
+                    table.c.scheduled_at == bound,
+                    table.c.nba_game_id < before_id,
+                ),
+            )
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.season == season,
+                    position,
+                )
+                .order_by(table.c.scheduled_at.desc(), table.c.nba_game_id.desc())
+                .limit(limit)
+            ).mappings()
+            return [self._serialize(row) for row in rows]
+
+    def list_events_after(
+        self,
+        season: str,
+        after: datetime,
+        limit: int,
+        *,
+        after_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Up to ``limit`` events from a keyset cursor, oldest first.
+
+        Without ``after_id`` the cursor is the instant ``after`` (inclusive);
+        with it, strictly after ``(after, after_id)`` in (scheduled_at, id)
+        order.  All-Star game IDs are excluded in the query.
+        """
+
+        table = EventCatalogEntry.__table__
+        bound = assume_utc(after)
+        if after_id is None:
+            position = table.c.scheduled_at >= bound
+        else:
+            position = or_(
+                table.c.scheduled_at > bound,
+                and_(
+                    table.c.scheduled_at == bound,
+                    table.c.nba_game_id > after_id,
+                ),
+            )
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.season == season,
+                    position,
+                )
+                .order_by(table.c.scheduled_at, table.c.nba_game_id)
+                .limit(limit)
             ).mappings()
             return [self._serialize(row) for row in rows]
 

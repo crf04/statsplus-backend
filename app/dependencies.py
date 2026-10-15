@@ -675,6 +675,7 @@ def build_dependencies(
         team_matchups=team_matchup_query_service,
         team_filter_rankings=season_rankings,
         publication_reader=research_publications,
+        game_log_seasons=player_game_log_repository,
         # Read-only Catalog access bound to the engine directly: the full
         # service owns a provider-backed refresh, so injecting it -- or a
         # wrapper around it -- would leave that adapter reachable from here.

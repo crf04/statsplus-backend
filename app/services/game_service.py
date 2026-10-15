@@ -82,6 +82,7 @@ class GameService:
         team_filter_rankings=None,
         publication_reader=None,
         athlete_catalog=None,
+        game_log_seasons=None,
     ):
         self.engine = db_engine
         self.settings = settings or get_runtime_settings()
@@ -107,6 +108,9 @@ class GameService:
         self.team_matchups = team_matchups
         self.publication_reader = publication_reader
 
+        # Reads which seasons a Publication can serve game logs for.
+        self.game_log_seasons = game_log_seasons
+
         # Initialize cache
         if redis_client is None:
             redis_client = get_redis_client(self.settings)
@@ -123,6 +127,16 @@ class GameService:
         """
 
         return research_season(self.settings, self.publication_reader)
+
+    def list_seasons(self):
+        """Seasons whose game logs are readable, newest first, and the default."""
+
+        seasons = (
+            list(self.game_log_seasons.published_seasons())
+            if self.game_log_seasons is not None
+            else []
+        )
+        return {"seasons": seasons, "default_season": self.default_season()}
 
     def get_player_id(self, player_name, season):
         # The Athlete Catalog is the governed identity source game-log
@@ -581,7 +595,33 @@ class GameService:
             keyword["projection_only_keys"] = _PROJECTION_ONLY_STREAM_KEYS
         if accepts_keyword(snapshot, "decoded_only_keys"):
             keyword["decoded_only_keys"] = _DECODED_ONLY_STREAM_KEYS
-        return snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
+        live = snapshot(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
+        return self._retained_for_past_season(live, season, keyword)
+
+    def _retained_for_past_season(self, live, season, keyword):
+        """Swap a live capture for the season's retained one when it is earlier.
+
+        An explicit ``season_filter`` naming a season before the active
+        Publication's season reads that season's latest retained, unrevoked
+        Publication of every stream (the authority ``/seasons`` lists and
+        ``retained_game_read`` serves), so the logs, Diets and rankings of one
+        response come from one retained generation.  Anything else, including
+        the active season and an omitted season, keeps the live capture.
+        """
+
+        retained = getattr(self.publication_reader, "retained_snapshot", None)
+        read_of = getattr(live, "read", None)
+        if season is None or not callable(retained) or not callable(read_of):
+            return live
+        logs = read_of("player_game_logs")
+        active_season = getattr(logs, "season", None)
+        if (
+            getattr(logs, "unavailable_reason", None) != "publication_season_mismatch"
+            or not isinstance(active_season, str)
+            or season >= active_season
+        ):
+            return live
+        return retained(_PUBLICATION_STREAM_KEYS, season=season, **keyword)
 
     def filter_teams(self, team_filter, rank_filter, season):
         """Select opponents by Season Rankings: the first N, last N, or a rank range.

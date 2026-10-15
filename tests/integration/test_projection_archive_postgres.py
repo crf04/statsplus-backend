@@ -58,6 +58,7 @@ from app.services.projection_archive import (
 )
 from app.services.matchup import MatchupService
 from app.services.matchup_selection import MatchupSelectionService
+from tests.support.slate_catalog import NoNeighbourEvents
 from app.services.player_game_log_repository import PlayerGameLogReadFreshness
 from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
@@ -816,7 +817,7 @@ def test_postgres_committed_failure_fences_waiting_preaccepted_evidence(
         ingestion_engine.dispose()
 
 
-class _PostgresRouteEventCatalog:
+class _PostgresRouteEventCatalog(NoNeighbourEvents):
     def __init__(self, clock):
         self.clock = clock
 
@@ -1430,7 +1431,7 @@ def test_authenticated_postgres_slate_uses_attempt_chronology_and_transition_fen
         required_providers=("dabble",),
     )
 
-    class EventCatalog:
+    class EventCatalog(NoNeighbourEvents):
         @staticmethod
         def count_events(season):
             assert season == SEASON

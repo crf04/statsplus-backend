@@ -31,9 +31,47 @@ class RecordedCatalog:
         assert season == "2025-26"
         return len(self.events)
 
+    def get_adjacent_season(self, season, *, below, inclusive=False):
+        return "2025-26" if inclusive and season == "2025-26" else None
+
+    def get_events_before(self, season, before, limit, *, before_id=None):
+        assert season == "2025-26"
+        return _keyset_before(self.events, season, before, limit, before_id)
+
+    def get_events_after(self, season, after, limit, *, after_id=None):
+        assert season == "2025-26"
+        return _keyset_after(self.events, season, after, limit, after_id)
+
     def get_freshness(self, season, *, now=None):
         assert season == "2025-26"
         return dict(self.freshness)
+
+
+def _keyset_before(events, season, before, limit, before_id):
+    def earlier(event):
+        at = datetime.fromisoformat(event["scheduled_at"])
+        if before_id is None:
+            return at < before
+        return (at, event["nba_game_id"]) < (before, before_id)
+
+    found = [dict(e, season=season) for e in events if earlier(e)]
+    found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]), reverse=True)
+    return found[:limit]
+
+
+def _keyset_after(events, season, after, limit, after_id):
+    found = [
+        dict(e, season=season)
+        for e in events
+        if datetime.fromisoformat(e["scheduled_at"]) >= after
+        and (
+            after_id is None
+            or (datetime.fromisoformat(e["scheduled_at"]), e["nba_game_id"])
+            > (after, after_id)
+        )
+    ]
+    found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
+    return found[:limit]
 
 
 def _event(game_id, scheduled_at, *, classification="Regular Season", **overrides):
@@ -590,6 +628,24 @@ class SeasonCatalog:
             if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
         ]
 
+    def get_adjacent_season(self, season, *, below, inclusive=False):
+        stored = sorted(k for k, events in self.events_by_season.items() if events)
+        if below:
+            options = [k for k in stored if k < season or (inclusive and k == season)]
+            return options[-1] if options else None
+        options = [k for k in stored if k > season or (inclusive and k == season)]
+        return options[0] if options else None
+
+    def get_events_before(self, season, before, limit, *, before_id=None):
+        return _keyset_before(
+            self.events_by_season.get(season, ()), season, before, limit, before_id
+        )
+
+    def get_events_after(self, season, after, limit, *, after_id=None):
+        return _keyset_after(
+            self.events_by_season.get(season, ()), season, after, limit, after_id
+        )
+
 
 def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):
     """A Slate on 2026-10-01, the day the calendar starts 2026-27."""
@@ -746,3 +802,19 @@ def test_slate_treats_a_stored_none_string_or_blank_as_a_missing_name(stored):
 
     assert game["away_team"]["name"] == "Detroit Pistons"
     assert game["home_team"]["name"] is None
+
+
+def test_slate_carries_the_nearest_game_days_on_either_side():
+    service = _service(
+        [
+            _event("001", "2025-12-30T00:00:00+00:00"),  # Dec 29 ET
+            _event("002", "2026-01-03T00:00:00+00:00"),  # Jan 2 ET
+            _event("003", "2026-01-09T00:00:00+00:00"),  # Jan 8 ET
+        ]
+    )
+
+    payload = service.get_slate("2026-01-05")
+
+    assert payload["games"] == []
+    assert payload["previous_game_date"] == "2026-01-02"
+    assert payload["next_game_date"] == "2026-01-08"

@@ -21,7 +21,7 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -445,6 +445,8 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
 ```json
 {
   "slate_date": "2026-01-02",
+  "previous_game_date": "2026-01-01",
+  "next_game_date": "2026-01-04",
   "freshness": {
     "schedule": {
       "status": "fresh",
@@ -496,6 +498,19 @@ block: an empty `generation` and the `schedule`, `pool` and `injuries` sources.
   ]
 }
 ```
+
+`previous_game_date` and `next_game_date` (crf04/statsplus#368) are present on
+every `200`: `"YYYY-MM-DD"` US Eastern Slate Dates, or `null` when none is
+stored. `previous_game_date` is the latest Slate Date strictly before
+`slate_date` whose Slate lists at least one game, and `next_game_date` the
+earliest strictly after it. Requesting `?date=` with either value returns a
+non-empty `games` list: a candidate counts only if the Slate of its own ET date
+would list it (the season that date reads, per the rule above, and not an
+All-Star event), so a game of a season that date's Slate does not read, such as
+a next-season preseason game on a date still read from the previous season, is
+skipped. With an `NBA_CURRENT_SEASON` pin only the pinned season's events
+count. Each side is a short, indexed read of the Event Catalog, never a season
+scan.
 
 `status.state` is `scheduled`, `postponed`, or `final`; `status.label` retains
 the Event Catalog label. `classification` is `null` for an ordinary Regular
@@ -1668,6 +1683,40 @@ acquires a refresh lease or invokes a DFS provider.
 | No contract-valid stored Player Pool contains the valid game | `503 provider_unavailable` |
 | Stored Player Pool category is absent from the current Statistic Catalog | `503 provider_unavailable` |
 
+### Get Seasons
+
+```http
+GET /api/games/seasons
+```
+
+Requires Firebase bearer authentication, the same as
+[Get Game Logs](#get-game-logs). It takes no parameters and lists the seasons
+whose `player_game_logs` can be read through a published Publication
+(crf04/statsplus#368).
+
+```json
+{
+  "seasons": ["2026-27", "2025-26"],
+  "default_season": "2025-26"
+}
+```
+
+- `seasons`: each season a game-log read can succeed for: the active
+  Publication's season when the reader serves it (stream enabled, projection
+  ready), and any other season whose latest retained, unrevoked, unretired
+  Publication still has its projection; newest first, no
+  duplicates, each a valid `season_filter` value. A candidate that never
+  activated and a revoked or retired Publication are not listed.
+- `default_season`: the season `GET /api/games/game_logs` reads when
+  `season_filter` is omitted (the active Publication's season; an
+  `NBA_CURRENT_SEASON` pin wins).
+
+| Case | Response |
+| --- | --- |
+| No season is published | `200` with `"seasons": []` and the `default_season` |
+| Authentication is missing or invalid | existing `401` authentication error contract |
+| The publication store cannot be read | `503 provider_unavailable` |
+
 ### Get Game Logs
 
 ```http
@@ -1862,7 +1911,7 @@ Query parameters:
 | `opponent_tricode` | No | One NBA team tricode (for example `OKC`; surrounding whitespace and letter case are normalized) that keeps only games played against that opponent. Unlike `teams_against[]` it names a team rather than ranking one, and the two compose as a conjunction: a game must be against the named opponent *and* against a ranked opponent. A value that is not an NBA tricode is rejected with `400` `invalid_input` |
 | `location_filter` | No | `Home`, `Away`, or `Both`. Default `Both` |
 | `game_filter` | No | Last N games |
-| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season |
+| `season_filter` | No | Canonical NBA season in `YYYY-YY` form, with `YY` equal to the following calendar year's final two digits (for example, `2024-25`). Whitespace is trimmed. Default is the current season. A season before the active Publication's season is read from that season's latest retained, unrevoked, unretired Publication (the seasons [`GET /api/games/seasons`](#get-seasons) lists): the logs, averages, `season_game_count`, Diets, rankings and `provenance` all come from that one retained generation. A revoked, retired, pruned or projection-less season, or a disabled stream, reads no games with an unavailable `provenance` entry. The active season and an omitted `season_filter` are unchanged |
 | `playstyle_RTG_min` | No | Finite numeric lower bound on `PLAYTYPE_RTG`. Default `0` |
 | `playstyle_RTG_max` | No | Finite numeric upper bound on `PLAYTYPE_RTG`. Default `200` |
 | `self_filters[STAT]` | No | Ordered inclusive stat range as `min,max` (normalized to a typed `between` filter); repeat the parameter to combine multiple constraints for one stat. Supported stats include `MIN`, `PTS`, `REB`, `AST`, `FGM`, `FGA`, `FG_PCT`, `FG3M`, `FG3A`, `FTM`, `FTA`, `OREB`, `DREB`, `TOV`, `STL`, `BLK`, `PF`, `PRA`, `PA`, `PR`, `RA`, `STKS`, and `FD_PTS`. `PLUS_MINUS` is not supported per the #66 contract amendment |
