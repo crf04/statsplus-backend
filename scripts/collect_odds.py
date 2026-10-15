@@ -23,6 +23,7 @@ from app.config.settings import load_settings  # noqa: E402
 from app.dependencies import build_dependencies  # noqa: E402
 from app.services import odds_collection  # noqa: E402
 from app.utils.db import is_demo_database_url  # noqa: E402
+from app.utils.json_logging import configure_json_logging  # noqa: E402
 from app.utils.sentry_setup import init_sentry  # noqa: E402
 
 
@@ -44,6 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     init_sentry()
     try:
         settings = load_settings(overrides={"DATABASE_URL": args.database_url})
+        # Cron logs show the cycle's INFO lines (tier, calls, remaining=...),
+        # in the same JSON format the web app writes.
+        configure_json_logging(settings.log_level)
         try:
             coordinator = odds_collection.build_odds_collection(
                 build_dependencies(settings), settings
@@ -57,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         result = odds_collection.run_once(coordinator)
         print(
             f"{result.status}: {result.reason} tier={result.tier} calls={result.calls} "
-            f"credits={result.credits} unresolved_events={result.unresolved_events} "
+            f"credits={result.credits} remaining={result.remaining} unresolved_events={result.unresolved_events} "
             f"unresolved_players={result.unresolved_players}"
         )
         return 0 if result.status in {"complete", "partial", "no_work", "busy", "backoff"} else 1

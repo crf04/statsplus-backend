@@ -39,7 +39,7 @@ def test_the_odds_service_is_a_five_minute_cron_running_the_standalone_script():
 def test_the_script_reads_the_database_url_from_the_environment(monkeypatch, capsys):
     monkeypatch.setenv("DATABASE_URL", "postgresql://odds.example/statsplus")
     seen = {}
-    settings = SimpleNamespace(odds_api=OddsApiSettings())
+    settings = SimpleNamespace(odds_api=OddsApiSettings(), log_level="INFO")
     monkeypatch.setattr(
         collect_odds, "load_settings", lambda **kw: seen.update(kw) or settings
     )
@@ -52,7 +52,7 @@ def test_the_script_reads_the_database_url_from_the_environment(monkeypatch, cap
 
 
 def test_enabled_without_a_key_exits_nonzero_and_says_so(monkeypatch, capsys):
-    settings = SimpleNamespace(odds_api=OddsApiSettings(enabled=True))
+    settings = SimpleNamespace(odds_api=OddsApiSettings(enabled=True), log_level="INFO")
     monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: settings)
     monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
 
@@ -82,14 +82,16 @@ def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
             logging.ERROR, "Odds API credits below 10% of plan (remaining=1500)"
         )
         or SimpleNamespace(
-            status="complete", reason="collected", tier="normal", calls=0,
+            status="complete", reason="collected", tier="normal", calls=0, remaining=1500,
             credits=0, unresolved_events=0, unresolved_players=0,
         ),
     )
     monkeypatch.setattr(
         odds_collection, "build_odds_collection", lambda deps, cfg: coordinator
     )
-    monkeypatch.setattr(collect_odds, "load_settings", lambda **_kw: SimpleNamespace())
+    monkeypatch.setattr(
+        collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO")
+    )
     monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
     try:
         assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
@@ -99,3 +101,39 @@ def test_sentry_is_initialized_so_the_guard_alerts_are_delivered(monkeypatch):
     assert [e["message"] for e in events if e.get("message")] == [
         "Odds API credits below 10% of plan (remaining=1500)"
     ]
+
+
+def test_cron_logs_show_the_cycle_line_and_the_summary_carries_remaining_credits(
+    monkeypatch, capsys
+):
+    root = logging.getLogger()
+    saved = (list(root.handlers), root.level)
+    root.handlers[:] = []
+    root.setLevel(logging.WARNING)  # what a bare cron process would have
+    coordinator = SimpleNamespace(
+        settings=SimpleNamespace(api_key=None),
+        run=lambda: logging.getLogger("app.services.odds_collection").info(
+            "Odds API cycle tier=normal calls=2 credits=10 remaining=4000"
+        )
+        or SimpleNamespace(
+            status="complete", reason="collected", tier="normal", calls=2,
+            credits=10, unresolved_events=0, unresolved_players=0, remaining=4000,
+        ),
+    )
+    monkeypatch.setattr(odds_collection, "build_odds_collection", lambda d, c: coordinator)
+    monkeypatch.setattr(
+        collect_odds, "load_settings", lambda **_kw: SimpleNamespace(log_level="INFO")
+    )
+    monkeypatch.setattr(collect_odds, "build_dependencies", lambda _s: object())
+    try:
+        assert collect_odds.main(["--database-url", "postgresql://x.example/db"]) == 0
+    finally:
+        root.handlers[:] = saved[0]
+        root.setLevel(saved[1])
+
+    out = capsys.readouterr().out
+    assert '"message": "Odds API cycle tier=normal calls=2 credits=10 remaining=4000"' in out
+    assert (
+        "complete: collected tier=normal calls=2 credits=10 remaining=4000 "
+        "unresolved_events=0 unresolved_players=0"
+    ) in out

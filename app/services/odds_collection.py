@@ -31,6 +31,10 @@ from app.providers.odds_api import OddsApiClient, OddsApiError, OddsQuota
 from app.services.event_resolver import stored_timestamp
 from app.services.odds_identity import OddsEventMapper, RosterNameResolver
 from app.services.odds_schedule import (
+    CALL_COST,
+    CLOSING_CLOSES,
+    CLOSING_OPENS,
+    POLL_WINDOW_OPENS,
     EventState,
     GameClock,
     Tier,
@@ -67,6 +71,7 @@ class OddsRunResult:
     credits: int = 0
     unresolved_events: int = 0
     unresolved_players: int = 0
+    remaining: int | None = None
 
 
 def _utc(value: datetime | str | None) -> datetime | None:
@@ -208,6 +213,22 @@ class OddsCollectionCoordinator:
                 # The plan was made earlier in this beat; never call at tip.
                 status, reason = "partial", "tip_passed"
                 continue
+            # Eligibility is re-checked at dispatch: discovery latency can
+            # carry a call planned inside a window out of it, and a closing
+            # flag must never be stored outside tip-10m..tip-5m.
+            if call.kind == "closing":
+                eligible = tip - CLOSING_OPENS <= started < tip - CLOSING_CLOSES
+            else:
+                eligible = tip - POLL_WINDOW_OPENS <= started < tip - CLOSING_OPENS
+            if not eligible:
+                status, reason = "partial", "window_passed"
+                continue
+            # The guard reads the quota as of the previous response (and any
+            # shared-key spend it revealed) before every paid call.
+            floor = 1 if call.kind == "closing" else max(self.settings.reserve_credits, 1)
+            if remaining is not None and remaining - CALL_COST < floor:
+                status, reason = "partial", "quota_floor"
+                continue
             try:
                 result = self.client.event_odds(call.odds_event_id)
             except OddsApiError as error:
@@ -324,6 +345,7 @@ class OddsCollectionCoordinator:
         return OddsRunResult(
             status, reason, tier=plan.tier.value, calls=calls, credits=credits,
             unresolved_events=len(unresolved), unresolved_players=players_unresolved,
+            remaining=remaining,
         )
 
     # -- failures ----------------------------------------------------------
