@@ -2173,10 +2173,7 @@ def test_parity_migration_preserves_activated_publication_audit_after_pruning(
         ))
     assert inspect(engine).get_foreign_keys(table.name)[0]["options"]["ondelete"] == "CASCADE"
 
-    assert run_migrations(engine).applied == (
-        "061_parity_artifact_outlives_payload",
-        "062_user_access_status",
-    )
+    assert run_migrations(engine).applied == ("061_parity_artifact_outlives_payload",)
     assert run_migrations(engine).applied == ()
     second = _compose(publications, "2025-26", points=11, expected_fence=first.fence)
     third = _compose(publications, "2025-26", points=12, expected_fence=second.fence)
