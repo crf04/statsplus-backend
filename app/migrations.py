@@ -73,6 +73,28 @@ def _create_users_table(connection: Connection) -> None:
     User.__table__.create(connection, checkfirst=True)
 
 
+def _add_user_access_status(connection: Connection) -> None:
+    """Add ``users.access_status`` and the ``app_settings`` table.
+
+    Every existing row becomes ``active`` through the column default, so
+    pausing sign-ups later can never lock out someone who already has an
+    account.  No setting row is seeded: an absent ``signups_open`` means open.
+    Rerun-safe: the column is added only when missing, and a fresh database
+    already has both from migrations that create tables from the models.
+    """
+    from app.models.app_setting import AppSetting
+
+    AppSetting.__table__.create(connection, checkfirst=True)
+    existing = {column["name"] for column in inspect(connection).get_columns("users")}
+    if "access_status" not in existing:
+        connection.execute(
+            text(
+                "ALTER TABLE users ADD COLUMN access_status VARCHAR(16) "
+                "NOT NULL DEFAULT 'active'"
+            )
+        )
+
+
 def _create_data_refresh_jobs_table(connection: Connection) -> None:
     """Create the durable ``data_refresh_jobs`` table."""
     from app.models.job import DataRefreshJob
@@ -2713,6 +2735,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         "061_parity_artifact_outlives_payload",
         _drop_parity_artifact_publication_foreign_key,
     ),
+    Migration(62, "062_user_access_status", _add_user_access_status),
 )
 
 

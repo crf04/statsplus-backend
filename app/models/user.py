@@ -10,6 +10,10 @@ from sqlalchemy.sql import func
 from datetime import datetime, timezone
 from . import Base
 
+ACCESS_ACTIVE = "active"
+ACCESS_WAITLISTED = "waitlisted"
+
+
 class User(Base):
     """
     User model for storing Firebase user account information.
@@ -50,6 +54,17 @@ class User(Base):
         comment="Whether the user account is active"
     )
     
+    # Beta access: ``active`` or ``waitlisted``.  This is separate from
+    # ``is_active`` (deactivation).  The server default is ``active`` so a row
+    # written by code that predates the column can never start out waitlisted.
+    access_status = Column(
+        String(16),
+        nullable=False,
+        default=ACCESS_ACTIVE,
+        server_default=ACCESS_ACTIVE,
+        comment="Beta access: active or waitlisted",
+    )
+
     # Add indexes for performance
     __table_args__ = (
         Index('idx_users_email', 'email'),

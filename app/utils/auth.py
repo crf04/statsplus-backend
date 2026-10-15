@@ -15,9 +15,11 @@ from app.errors import (
     AuthorizationError,
     InvalidTokenError,
     ProviderUnavailableError,
+    WaitlistedError,
 )
 from app.config.settings import RuntimeSettings
 from app.dependencies import get_dependencies
+from app.models.user import ACCESS_WAITLISTED
 from app.services.user_service import UserService as UserService
 from app.utils.db import is_demo_database_url
 
@@ -215,6 +217,23 @@ def _sync_firebase_user(
     return current_user
 
 
+def _refuse_waitlisted(current_user: dict[str, Any]) -> None:
+    """Refuse a waitlisted account, except an administrator.
+
+    Administrators are exempt so the switch and the waitlist stay reachable
+    even if an admin's own first sign-in landed while sign-ups were paused.
+    """
+
+    db_user = current_user.get("db_user")
+    if (
+        getattr(db_user, "access_status", None) == ACCESS_WAITLISTED
+        and not _user_is_admin(current_user)
+    ):
+        raise WaitlistedError(
+            detail=f"Waitlisted user {current_user.get('uid')} refused"
+        )
+
+
 def _authenticate_request() -> None:
     """Authenticate the current request or raise a safe application error."""
 
@@ -261,6 +280,7 @@ def _authenticate_request() -> None:
         decoded_token = verify_firebase_token(token)
 
         current_user = _sync_firebase_user(decoded_token)
+        _refuse_waitlisted(current_user)
 
         logger.info(
             "Authenticated user: %s (%s)",

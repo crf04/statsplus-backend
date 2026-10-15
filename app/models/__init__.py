@@ -61,6 +61,7 @@ def create_all_tables():
 
 # Import all models here to ensure they're registered with Base.metadata
 from .user import User  # noqa: E402
+from .app_setting import AppSetting  # noqa: E402
 from .saved_filter_set import SavedFilterSet  # noqa: E402
 from .target import Target, TargetQualifier  # noqa: E402
 from .job import DataRefreshJob  # noqa: E402
@@ -151,6 +152,7 @@ __all__ = [
     'get_session',
     'create_all_tables',
     'User',
+    'AppSetting',
     'SavedFilterSet',
     'Target',
     'TargetQualifier',

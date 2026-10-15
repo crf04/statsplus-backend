@@ -327,6 +327,16 @@ class AuthorizationError(AppError):
     default_message = "You do not have permission to access this resource."
 
 
+class WaitlistedError(AuthorizationError):
+    """The caller's account is on the beta waitlist and cannot use the API yet."""
+
+    code = "waitlisted"
+    default_message = (
+        "The beta is full right now. You're on the waitlist and we'll let you in "
+        "soon."
+    )
+
+
 class OperationFailedError(AppError):
     """A requested application operation could not be completed safely."""
 
