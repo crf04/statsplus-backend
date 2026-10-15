@@ -1,0 +1,518 @@
+{
+  "items": [
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-2744d6b4f51a",
+      "description": "Scottie Barnes 24.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "24.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2750ea21c1e8",
+          "name": "Over 24.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-276760661686",
+          "name": "Under 24.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-271fe0519cd9",
+      "description": "Kawhi Leonard 3.5 THREE_POINTERS_MADE",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "THREE_POINTERS_MADE",
+      "strike": "3.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2724fa376321",
+          "name": "Over 3.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2733e7bda791",
+          "name": "Under 3.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-2686b16b8b92",
+      "description": "Scottie Barnes 7.5 ASSISTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "ASSISTS",
+      "strike": "7.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2693d81a90ad",
+          "name": "Over 7.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-26a0c83b7257",
+          "name": "Under 7.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-2654a74d9a06",
+      "description": "Kawhi Leonard 29.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "29.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2661356f8f37",
+          "name": "Over 29.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-26761970450b",
+          "name": "Under 29.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-25cb707eb88e",
+      "description": "Scottie Barnes 9.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "9.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-25d736ffe135",
+          "name": "Over 9.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-25e285f8b596",
+          "name": "Under 9.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-256efaca0be8",
+      "description": "Kawhi Leonard 0.5 THREE_POINTERS_MADE",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "THREE_POINTERS_MADE",
+      "strike": "0.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2576cf388afc",
+          "name": "Over 0.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-258b558d1c2d",
+          "name": "Under 0.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-2500e0ce8906",
+      "description": "Scottie Barnes 29.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "29.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2512eecd0e8e",
+          "name": "Over 29.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2525143173d5",
+          "name": "Under 29.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-244fcc1a0fe4",
+      "description": "Scottie Barnes 14.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "14.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-24547e7e1893",
+          "name": "Over 14.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2463e5256f40",
+          "name": "Under 14.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1406c-867f-7342-a5a7-235d8b6a12e4",
+      "description": "Kawhi Leonard 1.5 THREE_POINTERS_MADE",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "THREE_POINTERS_MADE",
+      "strike": "1.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-236af65fb302",
+          "name": "Over 1.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1406c-867f-7342-a5a7-2378208a488a",
+          "name": "Under 1.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1405e-4d7a-7362-9d7a-5d097e543e1a",
+      "description": "Scottie Barnes 5.5 ASSISTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "ASSISTS",
+      "strike": "5.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1405e-4d7a-7362-9d7a-5d136e6d266e",
+          "name": "Over 5.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1405e-4d7a-7362-9d7a-5d2e266c38e1",
+          "name": "Under 5.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a1405e-4d7a-7362-9d7a-5cd2767a45cb",
+      "description": "Scottie Barnes 19.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "19.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a1405e-4d7a-7362-9d7a-5ce88f02d571",
+          "name": "Over 19.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a1405e-4d7a-7362-9d7a-5cf398afa9c7",
+          "name": "Under 19.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13fa6-760a-7971-b82d-79be8a97e5b9",
+      "description": "Kawhi Leonard 2.5 THREE_POINTERS_MADE",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "THREE_POINTERS_MADE",
+      "strike": "2.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13fa6-760a-7971-b82d-79c777a88214",
+          "name": "Over 2.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13fa6-760a-7971-b82d-79d574858e94",
+          "name": "Under 2.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13fa1-7aaa-7eb1-bd2d-496db7fd16d6",
+      "description": "Scottie Barnes 3.5 ASSISTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "ASSISTS",
+      "strike": "3.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13fa1-7aaa-7eb1-bd2d-497c9a75e01a",
+          "name": "Over 3.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13fa1-7aaa-7eb1-bd2d-498761dad198",
+          "name": "Under 3.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13f9f-78ca-76b0-b6a4-75a115b6cb85",
+      "description": "Jalen Brunson 21.5 POINTS_REBOUNDS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS_REBOUNDS",
+      "strike": "21.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13f9f-78ca-76b0-b6a4-75b6e8fd1e71",
+          "name": "Over 21.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13f9f-78ca-76b0-b6a4-75cd50b452d2",
+          "name": "Under 21.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13f9e-e61b-78d2-a3c9-48c5e72c9f8d",
+      "description": "Scottie Barnes 17.5 POINTS",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "POINTS",
+      "strike": "17.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13f9e-e61b-78d2-a3c9-48d13d7f9149",
+          "name": "Over 17.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13f9e-e61b-78d2-a3c9-48e1ed9a9b85",
+          "name": "Under 17.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a14086-2074-7a83-8fc8-794dbd4a2775",
+      "description": "OKC @ HOU t230.5",
+      "eventId": "01a13a6d-8396-79e2-acc1-15861fd51b33",
+      "marketType": "TOTAL",
+      "strike": "230.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792110900000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a14086-2074-7a83-8fc8-795bf11eab93",
+          "name": "Over 230.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a14086-2074-7a83-8fc8-796f1678a478",
+          "name": "Under 230.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13d60-0186-7470-9349-4ae7874170b6",
+      "description": "NYK -10.5",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "SPREAD",
+      "strike": "-10.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13d60-0186-7470-9349-4af7ea4580a2",
+          "name": "NYK -10.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13d60-0186-7470-9349-4b035f71823a",
+          "name": "TOR +10.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a140d9-d17b-7d83-9dd9-2aba2778ec3f",
+      "description": "New York Knicks 117.5 TEAM_TOTAL",
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "marketType": "TEAM_TOTAL",
+      "strike": "117.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792107300000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a140d9-d17b-7d83-9dd9-2acc61fd246b",
+          "name": "Over 117.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a140d9-d17b-7d83-9dd9-2ad8cda0f4b1",
+          "name": "Under 117.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13d53-3637-7843-9814-948f085d64a4",
+      "description": "HOU",
+      "eventId": "01a13a6d-8396-79e2-acc1-15861fd51b33",
+      "marketType": "MONEY",
+      "strike": "0",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792110900000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13d53-3637-7843-9814-949bb14a1bde",
+          "name": "HOU",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13d53-3637-7843-9814-94a3c41da082",
+          "name": "OKC",
+          "status": "TBD"
+        }
+      ]
+    }
+  ],
+  "next": "01a13cfa-9a3e-7830-82f9-5c3f2ac34c94"
+}

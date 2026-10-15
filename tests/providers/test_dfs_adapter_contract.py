@@ -72,6 +72,7 @@ from app.services.projection_archive import (
     ProjectionRecordingService,
 )
 from app.services.statistic_catalog import StatisticCatalog, StatisticResolver
+from tests.providers import novig_recorded
 from tests.providers.fourth_provider import (
     FOURTH_PROVIDER_NAME,
     FourthAdapter,
@@ -353,6 +354,29 @@ def _polymarket_failing() -> PolymarketAdapter:
     )
 
 
+def _novig(session: novig_recorded.ReplaySession | None = None):
+    return novig_recorded.adapter(session)
+
+
+def _novig_empty():
+    return _novig(novig_recorded.ReplaySession(pages=[{"items": []}]))
+
+
+def _novig_partial():
+    session = novig_recorded.ReplaySession()
+    broken = session.pages[0]["items"][0]
+    broken["strike"] = "not-a-number"
+    return _novig(session)
+
+
+def _novig_failing():
+    return _novig(
+        novig_recorded.ReplaySession(
+            failures={"/catalog/markets": requests.ConnectionError("recorded failure")}
+        )
+    )
+
+
 def _fourth_empty() -> FourthAdapter:
     return FourthAdapter(payload={"board": []})
 
@@ -402,6 +426,12 @@ RECORDED_EVIDENCE: dict[str, RecordedEvidence] = {
         empty=_polymarket_empty,
         partial=_polymarket_partial,
         failing=_polymarket_failing,
+    ),
+    "novig": RecordedEvidence(
+        complete=_novig,
+        empty=_novig_empty,
+        partial=_novig_partial,
+        failing=_novig_failing,
     ),
     FOURTH_PROVIDER_NAME: RecordedEvidence(
         complete=FourthAdapter,
@@ -486,9 +516,9 @@ def _governed(
                     athlete,
                     canonical_id=2544,
                     name=athlete.name or "Recorded Player",
-                    # The canonical team comes from the athlete mapping, not
-                    # from provider evidence, so a provider that names no team
-                    # (Polymarket) still reaches a canonical one.
+                    # The canonical team comes from the catalog, not from
+                    # provider evidence, so a provider that names no team
+                    # (Polymarket, Novig) still reaches a canonical one.
                     team=replace(athlete.team, canonical_id=1610612747)
                     if athlete.team is not None
                     else TeamEvidence(canonical_id=1610612747),

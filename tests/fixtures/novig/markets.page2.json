@@ -1,0 +1,220 @@
+{
+  "items": [
+    {
+      "marketId": "01a13c38-22a3-71f2-a828-ba3578e49552",
+      "description": "Josh Hart 12.5 REBOUNDS_ASSISTS",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "REBOUNDS_ASSISTS",
+      "strike": "12.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13c38-22a3-71f2-a828-ba4657919a67",
+          "name": "Over 12.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13c38-22a3-71f2-a828-ba5f10a07c5a",
+          "name": "Under 12.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13c38-1e25-70f3-b156-1f086000e3a5",
+      "description": "Josh Hart 14.5 REBOUNDS_ASSISTS",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "REBOUNDS_ASSISTS",
+      "strike": "14.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13c38-1e25-70f3-b156-1f1cea38183a",
+          "name": "Over 14.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13c38-1e25-70f3-b156-1f26cd5e6e34",
+          "name": "Under 14.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13b8c-20ef-7d32-868d-926b7c3400b5",
+      "description": "Tyrese Maxey 21.5 POINTS",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "POINTS",
+      "strike": "21.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13b8c-20ef-7d32-868d-92712c98d4d0",
+          "name": "Over 21.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13b8c-20ef-7d32-868d-928538e48914",
+          "name": "Under 21.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13744-921c-7af0-83ce-616f1620eb76",
+      "description": "Josh Hart 13.5 REBOUNDS_ASSISTS",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "REBOUNDS_ASSISTS",
+      "strike": "13.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13744-921c-7af0-83ce-6170934c9197",
+          "name": "Over 13.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13744-921c-7af0-83ce-6181865c70a0",
+          "name": "Under 13.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13718-9e54-7b11-8ab9-1bb682727990",
+      "description": "Karl-Anthony Towns 30.5 POINTS_REBOUNDS",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "POINTS_REBOUNDS",
+      "strike": "30.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13718-9e54-7b11-8ab9-1bcec4e3c404",
+          "name": "Over 30.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13718-9e54-7b11-8ab9-1bde019b6748",
+          "name": "Under 30.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13751-0fb1-7641-82eb-8df70b4301f7",
+      "description": "Josh Hart 0.5 TRIPLE_DOUBLE",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "TRIPLE_DOUBLE",
+      "strike": "0.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13751-0fb1-7641-82eb-8e0d1b356546",
+          "name": "Over 0.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13751-0fb1-7641-82eb-8e1bf5a8cf31",
+          "name": "Under 0.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a13751-0fb1-7641-82eb-8b5a26f700d0",
+      "description": "Josh Hart 0.5 DOUBLE_DOUBLE",
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "marketType": "DOUBLE_DOUBLE",
+      "strike": "0.5",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1792537500000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.5",
+        "charged": "WHEN_LIVE"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a13751-0fb1-7641-82eb-8b6b76dab44f",
+          "name": "Over 0.5",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a13751-0fb1-7641-82eb-8b7ae122da5f",
+          "name": "Under 0.5",
+          "status": "TBD"
+        }
+      ]
+    },
+    {
+      "marketId": "01a11a00-7ff4-7480-ac64-32d408fd2d22",
+      "description": "Phoenix Suns CHAMPIONSHIP_WINNER",
+      "eventId": "019fcbf2-2788-7251-8588-2592af86a7a9",
+      "marketType": "CHAMPIONSHIP_WINNER",
+      "strike": "0",
+      "status": "OPEN",
+      "voids": "FMV",
+      "startsTs": 1813365600000,
+      "fee": {
+        "coefficient": "0.06",
+        "makerCredit": "0.7",
+        "charged": "ALWAYS"
+      },
+      "outcomes": [
+        {
+          "outcomeId": "01a11a00-7ff4-7480-ac64-32e05e3b629c",
+          "name": "Yes",
+          "status": "TBD"
+        },
+        {
+          "outcomeId": "01a11a00-7ff4-7480-ac64-32fa77175b8c",
+          "name": "No",
+          "status": "TBD"
+        }
+      ]
+    }
+  ]
+}

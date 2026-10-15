@@ -44,6 +44,7 @@ PROVIDER_PRIZEPICKS = "prizepicks"
 PROVIDER_UNDERDOG = "underdog"
 PROVIDER_KALSHI = "kalshi"
 PROVIDER_POLYMARKET = "polymarket"
+PROVIDER_NOVIG = "novig"
 PROVIDER_ROTOWIRE = "rotowire"
 
 # Keep provider operation names in one place.  These names are part of the
@@ -103,6 +104,7 @@ PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 KALSHI_OPERATIONS = frozenset({"series_markets", "open_games"})
 POLYMARKET_OPERATIONS = frozenset({"get_snapshot"})
+NOVIG_OPERATIONS = frozenset({"market_page", "event_detail", "market_book"})
 ROTOWIRE_OPERATIONS = frozenset({"get_injuries"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,
@@ -113,6 +115,7 @@ PROVIDER_OPERATION_CATALOG = {
     PROVIDER_UNDERDOG: UNDERDOG_OPERATIONS,
     PROVIDER_KALSHI: KALSHI_OPERATIONS,
     PROVIDER_POLYMARKET: POLYMARKET_OPERATIONS,
+    PROVIDER_NOVIG: NOVIG_OPERATIONS,
     PROVIDER_ROTOWIRE: ROTOWIRE_OPERATIONS,
 }
 
@@ -1065,6 +1068,7 @@ __all__ = [
     "PROVIDER_UNDERDOG",
     "PROVIDER_KALSHI",
     "PROVIDER_POLYMARKET",
+    "PROVIDER_NOVIG",
     "PROVIDER_ROTOWIRE",
     "NBA_STATS_OPERATIONS",
     "NBA_LIVE_DATA_OPERATIONS",
@@ -1073,6 +1077,7 @@ __all__ = [
     "UNDERDOG_OPERATIONS",
     "KALSHI_OPERATIONS",
     "POLYMARKET_OPERATIONS",
+    "NOVIG_OPERATIONS",
     "ROTOWIRE_OPERATIONS",
     "PROVIDER_OPERATION_CATALOG",
     "ProviderEvent",

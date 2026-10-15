@@ -74,6 +74,7 @@ def test_the_registry_names_every_provider_the_application_may_enable():
         "underdog",
         "kalshi",
         "polymarket",
+        "novig",
     )
     assert dfs_provider_name_set() == set(dfs_provider_names())
     assert tuple(
@@ -134,6 +135,7 @@ def test_registering_a_provider_is_all_onboarding_takes(monkeypatch):
             "prizepicks",
             "underdog",
             "kalshi",
+            "novig",
         }
 
     # The registration is gone, and so is the configuration that named it.

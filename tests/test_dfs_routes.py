@@ -570,7 +570,7 @@ def test_a_refused_oversized_read_is_observed_with_the_evidence_it_gathered(
     assert event["provider_status_counts"] == {"complete": 2}
     assert event["freshness_counts"] == {"fresh": 2}
     assert event["cache_counts"] == {"unset": 2}
-    assert event["disabled_provider_count"] == 3
+    assert event["disabled_provider_count"] == 4
     assert event["group_count"] == 1
     assert event["unresolved_count"] == 0
 
