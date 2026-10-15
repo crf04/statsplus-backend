@@ -29,8 +29,10 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.domain.slate_time import slate_date_for_instant  # noqa: E402
 from app.domain.utc import assume_utc  # noqa: E402
-from app.models.canonical_game_ledger import CanonicalGameLedgerGame  # noqa: E402
 from app.models.collection_control import PublicationVersion  # noqa: E402
+from app.services.ledger_runtime import ActiveManifestLedgerGovernanceReader  # noqa: E402
+from app.services.publication_authority import verify_publication_authority  # noqa: E402
+from app.services.team_matchup_publications import PublicationGovernanceUnavailable  # noqa: E402
 from app.services.database_first_activation import (  # noqa: E402
     _decode_known_publication_payload,
     decode_player_game_logs,
@@ -245,16 +247,19 @@ def _nba_rows(
     return rows
 
 
-def _ledger_game_dates(session: Session, season: str) -> dict[str, date]:
-    return {
-        str(game_id): game_date
-        for game_id, game_date in session.execute(select(
-            CanonicalGameLedgerGame.game_id, CanonicalGameLedgerGame.game_date,
-        ).where(
-            CanonicalGameLedgerGame.season == season,
-            CanonicalGameLedgerGame.season_type == "Regular Season",
-        ))
-    }
+def governance_for(session: Session, candidate: PublicationVersion):
+    """The candidate's own governed games, from its bound manifest and Event
+    Catalog (the resolution ``cutover_season`` applies), or ``None``."""
+
+    try:
+        verify_publication_authority(session, candidate)
+        return ActiveManifestLedgerGovernanceReader(
+            session.get_bind()
+        ).read_for_composition(
+            candidate.season, assume_utc(candidate.cutoff), candidate.manifest_id,
+        )
+    except PublicationGovernanceUnavailable:
+        return None
 
 
 def verify_stream(
@@ -282,9 +287,20 @@ def verify_stream(
         )
         return {**result, "status": "no_reference", "rows": len(rows), "passed": True}
 
+    # The reference window comes from the governed games, never from the
+    # payload under audit: a candidate that omits a slate must not shrink it.
+    governance = governance_for(session, candidate)
+    if governance is None:
+        return {**result, "status": "ungoverned", "passed": False}
+    date_to = max(
+        slate_date_for_instant(event["scheduled_at"]) for event in governance.events
+    )
+    # (team, game) or game identities the payload lacks / the governance lacks.
     if stream_key == "player_game_logs":
         logs = decode_player_game_logs(payload, season=season)
-        date_to = max(log.game_date for log in logs)
+        covered = {log.game_id for log in logs}
+        missing = governance.expected_game_ids - covered
+        ungoverned = covered - governance.expected_game_ids
         ledger = {
             f"{log.player_id}:{log.game_id}": {
                 field: float(getattr(log, field)) for field in LOG_FIELDS
@@ -296,49 +312,55 @@ def verify_stream(
             lambda r: f"{int(r['PLAYER_ID'])}:{r['GAME_ID']}", LOG_FIELDS,
         )
         tolerance = LOG_TOLERANCE
+    elif stream_key == "player_per36":
+        # The payload names no games, so only the window is bound here.
+        missing = ungoverned = set()
+        facts = decode_player_per36(payload, season=season)
+        ledger = {
+            str(fact.player_id): {
+                **{field: getattr(fact, field) for field in PER36_FIELDS},
+                "game_count": float(fact.game_count),
+            }
+            for fact in facts
+        }
+        reference = _nba_rows(
+            nba.player_per36(season, date_to),
+            lambda r: str(int(r["PLAYER_ID"])), PER36_FIELDS, {"game_count": "GP"},
+        )
+        tolerance = PER36_TOLERANCE
     else:
-        dates = _ledger_game_dates(session, season)
-        if stream_key == "player_per36":
-            facts = decode_player_per36(payload, season=season)
-            date_to = max(
-                (d for d in dates.values() if d <= slate_date_for_instant(cutoff)),
-            )
-            ledger = {
-                str(fact.player_id): {
-                    **{field: getattr(fact, field) for field in PER36_FIELDS},
-                    "game_count": float(fact.game_count),
-                }
-                for fact in facts
+        _decode_known_publication_payload(
+            stream_key, payload, season=season, retrieved_at=cutoff,
+        )
+        team_rows = payload["rows"] if isinstance(payload, dict) else payload
+        expected = (
+            governance.expected_l15_game_ids if stream_key.endswith("_l15")
+            else governance.expected_season_game_ids
+        )
+        held = {
+            (int(row["team_id"]), str(g)) for row in team_rows for g in row["game_ids"]
+        }
+        wanted = {(team, g) for team, games in expected.items() for g in games}
+        missing = {f"{team}:{g}" for team, g in wanted - held}
+        ungoverned = {f"{team}:{g}" for team, g in held - wanted}
+        ledger = {
+            str(row["team_id"]): {
+                **{field: float(row["counts"][field]) for field in TEAM_FIELDS
+                   if field in row["counts"]},
+                "game_count": float(row["game_count"]),
             }
-            reference = _nba_rows(
-                nba.player_per36(season, date_to),
-                lambda r: str(int(r["PLAYER_ID"])), PER36_FIELDS, {"game_count": "GP"},
-            )
-            tolerance = PER36_TOLERANCE
-        else:
-            _decode_known_publication_payload(
-                stream_key, payload, season=season, retrieved_at=cutoff,
-            )
-            team_rows = payload["rows"] if isinstance(payload, dict) else payload
-            date_to = max(dates[str(g)] for row in team_rows for g in row["game_ids"])
-            ledger = {
-                str(row["team_id"]): {
-                    **{field: float(row["counts"][field]) for field in TEAM_FIELDS
-                       if field in row["counts"]},
-                    "game_count": float(row["game_count"]),
-                }
-                for row in team_rows
-            }
-            # The v1 taxonomy has no rebound split; compare what the row carries.
-            columns = {f: c for f, c in TEAM_FIELDS.items()
-                       if f in next(iter(ledger.values()))}
-            reference = _nba_rows(
-                nba.team_opponent_totals(
-                    season, date_to, 15 if stream_key.endswith("_l15") else 0,
-                ),
-                lambda r: str(int(r["TEAM_ID"])), columns, {"game_count": "GP"},
-            )
-            tolerance = {}
+            for row in team_rows
+        }
+        # The v1 taxonomy has no rebound split; compare what the row carries.
+        columns = {f: c for f, c in TEAM_FIELDS.items()
+                   if f in next(iter(ledger.values()))}
+        reference = _nba_rows(
+            nba.team_opponent_totals(
+                season, date_to, 15 if stream_key.endswith("_l15") else 0,
+            ),
+            lambda r: str(int(r["TEAM_ID"])), columns, {"game_count": "GP"},
+        )
+        tolerance = {}
     comparison = compare_rows(ledger, reference, tolerance)
     return {
         **result,
@@ -350,6 +372,8 @@ def verify_stream(
         "mismatch_count": len(comparison.mismatches),
         "ledger_only": list(comparison.ledger_only),
         "nba_only": list(comparison.nba_only),
+        "missing_governed_games": sorted(missing),
+        "ungoverned_games": sorted(ungoverned),
         "match_rate": comparison.match_rate,
         "top_mismatches": list(comparison.mismatches[:TOP_MISMATCHES]),
     }
@@ -362,7 +386,11 @@ def build_report(
     for stream_key in REFERENCE_STREAMS + NO_REFERENCE_STREAMS:
         result = verify_stream(session, stream_key, season, nba)
         if result["status"] == "compared":
-            result["passed"] = result["match_rate"] >= threshold
+            result["passed"] = (
+                result["match_rate"] >= threshold
+                and not result["missing_governed_games"]
+                and not result["ungoverned_games"]
+            )
         streams.append(result)
     return {
         "season": season,

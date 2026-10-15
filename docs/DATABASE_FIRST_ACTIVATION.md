@@ -412,12 +412,14 @@ python scripts/season_verify.py --season 2026-27 [--database-url …] \
 ```
 
 For each ledger stream it takes the newest held candidate (the one the dry run
-would move) and bounds NBA.com to that candidate's last game date, Regular
+would move) and bounds NBA.com to the US-Eastern date of the latest game its
+bound manifest and Event Catalog govern (never the payload's own games), Regular
 Season: `player_game_logs` per player-game against PlayerGameLogs, `player_per36`
 against LeagueDashPlayerStats `Per36`, and `traditional_opponent_*` team counts
 against LeagueDashTeamStats `Opponent` totals (`LastNGames=15` for L15). It
 reports rows compared, exact and within-tolerance matches, ledger-only and
-NBA-only identities, and the ten largest mismatches with both values. Assist
+NBA-only identities, governed games the payload lacks or that it holds without
+governance (either fails the stream), and the ten largest mismatches with both values. Assist
 streams have no NBA.com reference and are reported as `no_reference`. It exits 1
 unless every reference stream matches every identity (`--threshold` lowers the
 required match rate). stats.nba.com blocks datacenter IPs: run it from a
