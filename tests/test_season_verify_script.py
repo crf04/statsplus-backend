@@ -152,6 +152,7 @@ class FakeNba:
 
 def _seed_authority(
     engine, *, cutoff=CUTOFF, scheduled=None, manifest_id="manifest-new", games=NEW_GAMES,
+    created_at=None,
 ):
     """An Event Catalog and manifest governing NEW_GAMES, all final."""
 
@@ -180,7 +181,8 @@ def _seed_authority(
             collect_before=cutoff + timedelta(days=1), accepted_versions="[1]",
             scopes='["canonical_game_ledger"]', checksum=manifest_id,
             event_catalog_publication_id=f"catalog-{manifest_id}",
-            event_catalog_checksum=checksum, status="active", created_at=cutoff,
+            event_catalog_checksum=checksum, status="active",
+            created_at=created_at or cutoff,
         ))
     return {
         "manifest_id": manifest_id,
@@ -328,12 +330,12 @@ def test_per36_accepts_nba_one_decimal_rounding_but_not_a_real_difference(world,
 def test_games_played_disagreement_is_reported(world, capsys):
     engine, logs, per36, teams = world
     reference = _nba_teams(teams)
-    reference[5]["GP"] = 2
+    reference[5]["GP"] = 0
 
     code, report = _run(engine, FakeNba(_nba_logs(logs), _nba_per36(per36), reference), capsys)
 
     top = _stream(report, L15_STREAM)["top_mismatches"][0]
-    assert code == 1 and (top["field"], top["ledger"], top["nba"]) == ("game_count", 1.0, 2.0)
+    assert code == 1 and (top["field"], top["ledger"], top["nba"]) == ("game_count", 1.0, 0.0)
 
 
 def test_a_candidate_missing_the_latest_slate_fails_instead_of_shrinking_the_window(
@@ -574,7 +576,8 @@ def test_a_logs_game_outside_the_governed_set_fails(world, capsys):
     code, report = _run(engine, nba, capsys)
 
     stream = _stream(report, "player_game_logs")
-    assert code == 1 and stream["exact"] == 31
+    assert code == 1 and stream["exact"] == 30
+    assert stream["ledger_only"] == ["5000:0029999999"]
     assert (stream["ungoverned_games"], stream["passed"]) == (["0029999999"], False)
 
 
@@ -602,3 +605,149 @@ def test_l15_coverage_is_the_last_fifteen_governed_games_per_team(tmp_path, caps
     stream = _stream(report, L15_STREAM)
     assert (stream["missing_governed_games"], stream["ungoverned_games"]) == ([], [])
     assert stream["rows_compared"] == 2 and stream["passed"] is True
+
+
+def test_per36_games_played_below_the_candidates_is_a_mismatch(world, capsys):
+    engine, logs, per36, teams = world
+    reference = _nba_per36(per36)
+    reference[0]["GP"] = 9
+
+    code, report = _run(engine, FakeNba(_nba_logs(logs), reference, _nba_teams(teams)), capsys)
+
+    top = _stream(report, "player_per36")["top_mismatches"]
+    assert code == 1 and len(top) == 1
+    assert (top[0]["identity"], top[0]["field"], top[0]["ledger"], top[0]["nba"]) == (
+        "1", "game_count", 10.0, 9.0,
+    )
+
+
+def test_minutes_within_the_tolerance_are_matches_not_mismatches(world, capsys):
+    engine, logs, per36, teams = world
+    reference = _nba_logs(logs)
+    reference[0]["MIN"] += 0.05
+
+    code, report = _run(engine, FakeNba(reference, _nba_per36(per36), _nba_teams(teams)), capsys)
+
+    stream = _stream(report, "player_game_logs")
+    assert code == 0
+    assert (stream["exact"], stream["within_tolerance"], stream["mismatch_count"]) == (29, 1, 0)
+
+
+def test_top_mismatches_are_the_ten_largest_differences_first(world, capsys):
+    engine, logs, per36, teams = world
+    reference = _nba_logs(logs)
+    for index in range(12):
+        reference[index]["PTS"] += index + 1
+
+    _code, report = _run(engine, FakeNba(reference, _nba_per36(per36), _nba_teams(teams)), capsys)
+
+    stream = _stream(report, "player_game_logs")
+    assert stream["mismatch_count"] == 12
+    assert [item["difference"] for item in stream["top_mismatches"]] == [
+        float(n) for n in range(12, 2, -1)
+    ]
+    assert [item["identity"] for item in stream["top_mismatches"]] == [
+        f"{logs[i]['player_id']}:{logs[i]['game_id']}" for i in range(11, 1, -1)
+    ]
+
+
+def test_reference_games_outside_the_governed_set_are_dropped_not_compared(world, capsys):
+    engine, logs, per36, teams = world
+    reference = _nba_logs(logs) + [
+        {**_nba_logs(logs)[0], "GAME_ID": "0022699999", "PTS": 99},
+        {**_nba_logs(logs)[1], "GAME_ID": "0022699999"},
+    ]
+
+    code, report = _run(engine, FakeNba(reference, _nba_per36(per36), _nba_teams(teams)), capsys)
+
+    stream = _stream(report, "player_game_logs")
+    assert code == 0
+    assert (stream["reference_outside_window"], stream["nba_only"], stream["exact"]) == (2, [], 30)
+
+
+def test_a_reference_with_more_games_than_governed_is_an_incomparable_window(world, capsys):
+    engine, logs, per36, teams = world
+    reference = _nba_teams(teams)
+    reference[0]["GP"] = 2
+    reference[0]["OPP_PTS"] += 40
+    per36_reference = _nba_per36(per36)
+    per36_reference[1]["GP"] = 11
+    per36_reference[1]["PTS"] += 5
+
+    code, report = _run(
+        engine, FakeNba(_nba_logs(logs), per36_reference, reference), capsys,
+    )
+
+    team_stream = _stream(report, SEASON_STREAM)
+    assert code == 1 and team_stream["passed"] is False
+    assert team_stream["status"] == "window_incomparable"
+    assert team_stream["incomparable"] == [
+        {"identity": str(teams[0]["team_id"]), "nba_games": 2, "governed_games": 1},
+    ]
+    assert (team_stream["mismatch_count"], team_stream["rows_compared"]) == (0, 29)
+    player_stream = _stream(report, "player_per36")
+    assert player_stream["status"] == "window_incomparable"
+    assert player_stream["incomparable"] == [
+        {"identity": "2", "nba_games": 11, "governed_games": 10},
+    ]
+    assert (player_stream["mismatch_count"], player_stream["rows_compared"]) == (0, 1)
+
+
+def test_a_null_nba_statistic_is_rejected_not_matched(world, capsys, monkeypatch):
+    engine, logs, per36, teams = world
+    records = _nba_logs(logs)
+    records[2]["PTS"] = None
+
+    def build(**kwargs):
+        return SimpleNamespace(get_data_frames=lambda: [pd.DataFrame(records)])
+
+    monkeypatch.setattr(season_verify.endpoints, "PlayerGameLogs", build)
+
+    code = main(["--season", NEW, "--database-url", str(engine.url)])
+
+    captured = capsys.readouterr()
+    assert code == 2 and captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": "NBA.com response has a non-numeric statistic",
+    }
+
+
+def test_the_candidates_own_manifest_governs_when_manifests_compete(tmp_path, capsys):
+    engine = create_engine(f"sqlite:///{tmp_path / 'compete.sqlite3'}")
+    run_migrations(engine)
+    earlier = CUTOFF - timedelta(hours=1)
+    mine = _seed_authority(engine, manifest_id="mine", created_at=earlier)
+    # Newer, at the same cutoff, governing a day earlier: a lookup that
+    # ignores the candidate's manifest would pick this one.
+    _seed_authority(
+        engine, manifest_id="rival", created_at=CUTOFF,
+        scheduled={g: CUTOFF - timedelta(days=1, hours=6) for g, _h, _a in NEW_GAMES},
+    )
+    with Session(engine) as session, session.begin():
+        _add(session, "player_game_logs", {"rows": _logs(NEW_GAMES)}, mine)
+    nba = FakeNba(_nba_logs(_logs(NEW_GAMES)))
+
+    _run(engine, nba, capsys)
+
+    assert nba.calls[0] == ("logs", NEW, GAME_DATE)
+
+
+@pytest.mark.parametrize("corrupt", [
+    {"manifest_id": "rival"},
+    {"event_catalog_checksum": "0" * 64},
+    {"event_catalog_publication_id": "catalog-rival"},
+])
+def test_a_candidate_whose_authority_binding_is_not_exact_is_ungoverned(
+    tmp_path, capsys, corrupt,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'binding.sqlite3'}")
+    run_migrations(engine)
+    binding = _seed_authority(engine)
+    _seed_authority(engine, manifest_id="rival", created_at=CUTOFF - timedelta(hours=1))
+    with Session(engine) as session, session.begin():
+        _add(session, "player_game_logs", {"rows": _logs(NEW_GAMES)}, {**binding, **corrupt})
+
+    code, report = _run(engine, FakeNba(_nba_logs(_logs(NEW_GAMES))), capsys)
+
+    stream = _stream(report, "player_game_logs")
+    assert code == 1 and (stream["status"], stream["passed"]) == ("ungoverned", False)

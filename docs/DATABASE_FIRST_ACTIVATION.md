@@ -422,7 +422,10 @@ NBA-only identities, governed games the payload lacks or that it holds without
 governance (either fails the stream), and the ten largest mismatches with both values. Assist
 streams have no NBA.com reference and are reported as `no_reference`. It exits 1
 unless every reference stream matches every identity (`--threshold` lowers the
-required match rate). stats.nba.com blocks datacenter IPs: run it from a
+required match rate). NBA.com games outside the governed set are dropped from
+the game-log reference; an aggregate whose NBA.com games-played exceeds the
+governed count is reported `window_incomparable` (also exit 1) rather than as
+stat mismatches, and a null NBA.com statistic aborts the run (exit 2). stats.nba.com blocks datacenter IPs: run it from a
 residential machine or pass `--proxy-url`, which is never printed. Attach the
 report to the cutover issue.
 

@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -241,9 +242,11 @@ def _nba_rows(
         missing = [column for column in columns.values() if column not in record]
         if missing:
             raise NbaReferenceError(f"NBA.com response lacks columns {missing}")
-        rows[identity(record)] = {
-            field: float(record[column]) for field, column in columns.items()
-        }
+        values = {field: float(record[column]) for field, column in columns.items()}
+        if not all(math.isfinite(value) for value in values.values()):
+            # A null cell reads as NaN, which no tolerance check would catch.
+            raise NbaReferenceError("NBA.com response has a non-numeric statistic")
+        rows[identity(record)] = values
     return rows
 
 
@@ -296,6 +299,8 @@ def verify_stream(
         slate_date_for_instant(event["scheduled_at"]) for event in governance.events
     )
     # (team, game) or game identities the payload lacks / the governance lacks.
+    outside_window = 0
+    governed_counts: dict[str, int] | None = None
     if stream_key == "player_game_logs":
         logs = decode_player_game_logs(payload, season=season)
         covered = {log.game_id for log in logs}
@@ -307,8 +312,15 @@ def verify_stream(
             }
             for log in logs
         }
+        # Date-bounded NBA.com can hold games the candidate does not govern
+        # (a same-day game that finished later); only governed games compare.
+        records = nba.player_game_logs(season, date_to)
+        governed_records = [
+            r for r in records if str(r["GAME_ID"]) in governance.expected_game_ids
+        ]
+        outside_window = len(records) - len(governed_records)
         reference = _nba_rows(
-            nba.player_game_logs(season, date_to),
+            governed_records,
             lambda r: f"{int(r['PLAYER_ID'])}:{r['GAME_ID']}", LOG_FIELDS,
         )
         tolerance = LOG_TOLERANCE
@@ -328,6 +340,8 @@ def verify_stream(
             lambda r: str(int(r["PLAYER_ID"])), PER36_FIELDS, {"game_count": "GP"},
         )
         tolerance = PER36_TOLERANCE
+        # The payload names no games: its own count is the governed count.
+        governed_counts = {i: int(row["game_count"]) for i, row in ledger.items()}
     else:
         _decode_known_publication_payload(
             stream_key, payload, season=season, retrieved_at=cutoff,
@@ -361,10 +375,26 @@ def verify_stream(
             lambda r: str(int(r["TEAM_ID"])), columns, {"game_count": "GP"},
         )
         tolerance = {}
+        governed_counts = {
+            str(team): len(games) for team, games in expected.items()
+        }
+    # NBA.com saw more games than the candidate governs: its window is not
+    # the candidate's, so those identities cannot be compared stat by stat.
+    incomparable = [
+        {"identity": i, "nba_games": int(reference[i]["game_count"]),
+         "governed_games": count}
+        for i, count in sorted((governed_counts or {}).items())
+        if i in reference and reference[i]["game_count"] > count
+    ]
+    for entry in incomparable:
+        ledger.pop(entry["identity"], None)
+        reference.pop(entry["identity"])
     comparison = compare_rows(ledger, reference, tolerance)
     return {
         **result,
-        "status": "compared",
+        "status": "window_incomparable" if incomparable else "compared",
+        "incomparable": incomparable,
+        "reference_outside_window": outside_window,
         "date_to": date_to.isoformat(),
         "rows_compared": comparison.compared,
         "exact": comparison.exact,
@@ -385,9 +415,10 @@ def build_report(
     streams = []
     for stream_key in REFERENCE_STREAMS + NO_REFERENCE_STREAMS:
         result = verify_stream(session, stream_key, season, nba)
-        if result["status"] == "compared":
+        if result["status"] in {"compared", "window_incomparable"}:
             result["passed"] = (
-                result["match_rate"] >= threshold
+                result["status"] == "compared"
+                and result["match_rate"] >= threshold
                 and not result["missing_governed_games"]
                 and not result["ungoverned_games"]
             )
