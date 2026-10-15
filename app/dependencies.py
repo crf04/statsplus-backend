@@ -768,6 +768,7 @@ def build_dependencies(
         publication_reader=research_publications,
         injuries=StoredMatchupInjuryReader(matchup_injury_service),
         settings=settings,
+        redis_client=redis_client,
     )
     # The backtest reaches past the Matchup because its question is not about
     # one game: it composes the league-wide game-log rows against the

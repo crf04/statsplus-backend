@@ -170,6 +170,11 @@ class CacheSettings(BaseModel):
     # The cron precompute that fills the result cache after a publication
     # (#363) stops between Targets once this many seconds have passed.
     target_backtest_precompute_budget_seconds: int = Field(default=180, ge=0)
+    # The slate-edges response cache (#402): keyed on the Publication
+    # generation and the slate's game states; the TTL bounds how long a stored
+    # injury or Player Pool change (neither moves the generation) can be missed.
+    slate_edges_enabled: bool = True
+    slate_edges_ttl_seconds: int = Field(default=300, ge=1)
 
 
 class FeatureSettings(BaseModel):
@@ -841,6 +846,8 @@ def _build_settings(
         target_backtest_precompute_budget_seconds=reader.integer(
             "TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS", 180
         ),
+        slate_edges_enabled=reader.boolean("SLATE_EDGES_CACHE_ENABLED", True),
+        slate_edges_ttl_seconds=reader.integer("SLATE_EDGES_CACHE_TTL_SECONDS", 300),
     )
     features = _validated_model(
         FeatureSettings,

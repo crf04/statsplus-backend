@@ -766,9 +766,18 @@ DFS provider and writes nothing.
 - A game whose Matchup cannot be read (a refused or incomplete stored read)
   contributes `effects: []`, `scores: []` and no pick; the response is still
   `200`.
-- The response is composed per request; nothing is cached, because the Matchup
-  documents it composes are themselves uncached, so any stored copy could only
-  be staler than them.
+- The per-game Matchups are composed concurrently (at most four at once, from
+  the one Publication snapshot, after the first has filled the shared
+  league-wide memo). With Redis enabled (`ENABLE_CACHE`, and
+  `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
+  cached under `slate:edges:v1:<sha256>`, keyed on the slate date, the
+  evidence season, the Publication generation (live pointers and retained
+  history rows), each game's id, status and tip time, and the score
+  thresholds, so a new publication or a game starting or finishing misses.
+  The key has no user: the response is the same for every caller. A stored
+  injury or Player Pool change moves none of those, so an entry also expires
+  after `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300), which is the longest
+  such a change can go unseen here. A Redis failure is a miss, never an error.
 
 ### Get Matchup
 

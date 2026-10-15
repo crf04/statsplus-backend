@@ -19,9 +19,14 @@ response still succeeds.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import zlib
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import redis
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.settings import RuntimeSettings
@@ -36,12 +41,19 @@ from app.services.matchup_snapshot import (
 )
 from app.services.research_season import published_capture
 from app.services.target_resolution import MatchupReader, SlateReader
+from app.utils.redis_breaker import RedisCircuitBreaker
 
 #: Players below this many Season points per game are not worth a ticker cell.
 EFFECT_MIN_SCORING = 8
 #: A spotlight pick has to be a player the reader has heard of.
 SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
+#: Bumped whenever the selection rules or the response shape change, so a
+#: stored response of the old rules is never served.
+SLATE_EDGES_CACHE_SCHEMA = 1
+#: Matchups composed at once.  Each worker holds one whole Matchup document
+#: while it reduces it to the game's entry, so this also bounds peak memory.
+MAX_CONCURRENT_MATCHUPS = 4
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -60,6 +72,8 @@ class SlateEdgesService:
         publication_reader: Any | None = None,
         injuries: Any | None = None,
         settings: RuntimeSettings | None = None,
+        redis_client: Any | None = None,
+        max_workers: int = MAX_CONCURRENT_MATCHUPS,
     ) -> None:
         self.slates = slates
         self.matchups = matchups
@@ -69,6 +83,18 @@ class SlateEdgesService:
         self.publication_reader = publication_reader
         self.injuries = injuries
         self.settings = settings
+        self.max_workers = max_workers
+        # The response cache is off, never an error, without a client, without
+        # settings or with its flag off.
+        self._redis = redis_client
+        self._cache_enabled = (
+            redis_client is not None
+            and settings is not None
+            and settings.cache.slate_edges_enabled
+        )
+        self._breaker = RedisCircuitBreaker(
+            message="Slate edges cache unavailable (%s); bypassing for %ss"
+        )
 
     def get_edges(self, requested_date: str | None = None) -> dict[str, Any]:
         """The date is the Slate's own: absent is the current ET Slate Date and
@@ -76,43 +102,157 @@ class SlateEdgesService:
 
         slate = self.slates.get_slate(requested_date)
         slate_games = list(slate["games"])
-        matchups = self._request_matchups() if slate_games else self.matchups
+        if not slate_games:
+            return self._response(slate["slate_date"], [], [])
+        matchups = self._request_matchups()
+        key = self._cache_key(slate, matchups)
+        cached = None if key is None else self._cache_read(key)
+        if cached is not None:
+            return cached
 
-        games: list[dict[str, Any]] = []
-        candidates: list[dict[str, Any]] = []
-        for game in slate_games:
-            try:
-                matchup = matchups.get_matchup(game_id=game["game_id"])
-                players = self._scored_players(matchup)
-            except _UNREADABLE:
-                players = []
-            games.append(
-                {
-                    "game_id": game["game_id"],
-                    "effects": self._effects(players),
-                    "scores": [
-                        {
-                            "canonical_id": int(entry["player"]["canonical_id"]),
-                            "value": entry["cell"]["value"],
-                        }
-                        for entry in players
-                    ],
-                }
+        # The first game is composed alone: it fills the shared league-wide
+        # window and Diet baseline memo, which the rest then only read instead
+        # of every worker rebuilding the same one at once.
+        first = self._compose_game(matchups, slate_games[0])
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            rest = list(
+                pool.map(lambda game: self._compose_game(matchups, game), slate_games[1:])
             )
-            candidates.extend(
-                self._spotlight_candidate(game, matchup, player)
-                for player in players
-                if self._is_spotlight_eligible(player)
-            )
-        picks = [pick for pick in candidates if pick is not None]
+        composed = [first, *rest]
+        response = self._response(
+            slate["slate_date"],
+            [entry for entry, _ in composed],
+            [pick for _, picks in composed for pick in picks],
+        )
+        if key is not None:
+            self._cache_write(key, response)
+        return response
+
+    def _compose_game(
+        self, matchups: MatchupReader, game: Mapping[str, Any]
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """One game's entry and its spotlight candidates, from its Matchup.
+
+        The Matchup is reduced here, so a worker never holds more than the one
+        document it is reading.
+        """
+
+        try:
+            matchup = matchups.get_matchup(game_id=game["game_id"])
+            players = self._scored_players(matchup)
+            picks = [
+                pick
+                for entry in players
+                if self._is_spotlight_eligible(entry)
+                for pick in (self._spotlight_candidate(game, matchup, entry),)
+                if pick is not None
+            ]
+        except _UNREADABLE:
+            players, picks = [], []
+        return (
+            {
+                "game_id": game["game_id"],
+                "effects": self._effects(players),
+                "scores": [
+                    {
+                        "canonical_id": int(entry["player"]["canonical_id"]),
+                        "value": entry["cell"]["value"],
+                    }
+                    for entry in players
+                ],
+            },
+            picks,
+        )
+
+    def _response(
+        self,
+        slate_date: str,
+        games: list[dict[str, Any]],
+        picks: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
         return {
-            "slate_date": slate["slate_date"],
+            "slate_date": slate_date,
             "games": games,
             "spotlight": {
                 "best": self._extreme(picks, sign=1),
                 "toughest": self._extreme(picks, sign=-1),
             },
         }
+
+    # -- result cache (modelled on the Targets backtest cache, #279) ---------
+
+    def _cache_key(self, slate: Mapping[str, Any], matchups: MatchupReader) -> str | None:
+        """``slate:edges:v<schema>:<sha256>``, or ``None`` when nothing is cached.
+
+        The body is the slate date, the evidence season, the Publication
+        generation the Matchups will be composed from (live pointers and any
+        retained history rows), each game's
+        id and status, and the score thresholds.  A new publication, or a game
+        starting or finishing, changes the key.  The user is not in it: the
+        response is the same for everyone.
+        """
+
+        if not self._cache_enabled or not isinstance(matchups, SnapshotMatchups):
+            return None
+        snapshot = matchups.snapshot
+        generation = getattr(snapshot, "generation", None)
+        if not generation:
+            return None
+        settings = self.settings
+        body = {
+            "schema": SLATE_EDGES_CACHE_SCHEMA,
+            "slate_date": slate["slate_date"],
+            "season": matchups.season,
+            # Both: a capture can mix live pointers with retained history rows.
+            "generation": [list(entry) for entry in generation],
+            "retained_history": [
+                list(entry) for entry in getattr(snapshot, "retained_history", ())
+            ],
+            "games": [
+                [game["game_id"], game["status"]["state"], game["scheduled_at"]]
+                for game in slate["games"]
+            ],
+            "thresholds": {
+                "min_games": settings.matchup_scores.min_games,
+                "diet_min_games": settings.player_diet_baseline.min_games,
+            },
+        }
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        return f"slate:edges:v{SLATE_EDGES_CACHE_SCHEMA}:{digest}"
+
+    def _cache_read(self, key: str) -> dict[str, Any] | None:
+        """A stored response, or ``None``: every failure is a miss, never a 5xx."""
+
+        if self._breaker.is_open():
+            return None
+        try:
+            payload = self._redis.get(key)
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as error:
+            self._breaker.record_failure(error)
+            return None
+        except Exception:
+            return None
+        if not payload:
+            return None
+        try:
+            return json.loads(zlib.decompress(payload).decode("utf-8"))
+        except (TypeError, ValueError, zlib.error):
+            return None
+
+    def _cache_write(self, key: str, response: Mapping[str, Any]) -> None:
+        if self._breaker.is_open():
+            return
+        try:
+            payload = zlib.compress(
+                json.dumps(response, separators=(",", ":")).encode("utf-8"), 6
+            )
+            self._redis.setex(key, self.settings.cache.slate_edges_ttl_seconds, payload)
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as error:
+            self._breaker.record_failure(error)
+        except Exception:
+            pass
 
     def _request_matchups(self) -> MatchupReader:
         composer = self.matchups

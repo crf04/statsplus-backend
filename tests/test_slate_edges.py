@@ -21,6 +21,8 @@ AWAY_TRI, HOME_TRI = "AWY", "HOM"
 def _game(game_id="G1", away=(AWAY, AWAY_TRI), home=(HOME, HOME_TRI)):
     return {
         "game_id": game_id,
+        "status": {"state": "scheduled", "label": "7:00 pm ET"},
+        "scheduled_at": "2026-04-10T23:00:00+00:00",
         "away_team": {"team_id": away[0], "tricode": away[1], "name": None},
         "home_team": {"team_id": home[0], "tricode": home[1], "name": None},
     }
@@ -456,6 +458,192 @@ def test_an_invalid_date_is_the_slates_invalid_input():
 
     with pytest.raises(InvalidInputError, match="YYYY-MM-DD"):
         service.get_edges("04-10-2026")
+
+
+# --- the result cache and the concurrent compose ------------------------------
+
+import threading  # noqa: E402
+import time  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from app.config.settings import RuntimeSettings  # noqa: E402
+
+GENERATION = (("player_game_logs", "pub-1", 1, 7),)
+
+
+class DictRedis:
+    """The few Redis calls the cache makes, with the TTL it was given."""
+
+    def __init__(self):
+        self.values = {}
+        self.ttls = {}
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def setex(self, key, ttl, payload):
+        self.values[key] = payload
+        self.ttls[key] = ttl
+
+
+class SnapshotComposer:
+    """Composes from a snapshot, recording how many ran at once."""
+
+    def __init__(self, payloads, delay=0.0):
+        self.payloads = payloads
+        self.delay = delay
+        self.calls = []
+        self._live = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def get_matchup_from_snapshot(
+        self, *, game_id, publication_snapshot, injuries, compose_cache=None, season=None
+    ):
+        with self._lock:
+            self.calls.append(game_id)
+            self._live += 1
+            self.peak = max(self.peak, self._live)
+        try:
+            time.sleep(self.delay)
+            return self.payloads[game_id]
+        finally:
+            with self._lock:
+                self._live -= 1
+
+
+class Publications:
+    def __init__(self, generation=GENERATION):
+        self.generation = generation
+
+    def snapshot(self, stream_keys, *, season, **_):
+        return SimpleNamespace(generation=self.generation, retained_history=())
+
+
+def _cached_service(composer, redis_client, games, *, publications=None, workers=4):
+    return SlateEdgesService(
+        slates=FakeSlate(games),
+        matchups=composer,
+        publication_reader=publications or Publications(),
+        injuries=object(),
+        settings=RuntimeSettings(
+            environment="testing", nba={"current_season": "2025-26"}
+        ),
+        redis_client=redis_client,
+        max_workers=workers,
+    )
+
+
+def _two_games():
+    payloads = {
+        "G1": _matchup([_blend_player(1, "A", 0.05)], {HOME: HOME_DEFENSE}),
+        "G2": _matchup([_blend_player(2, "B", -0.04)], {HOME: HOME_DEFENSE}),
+    }
+    return [_game("G1"), _game("G2")], payloads
+
+
+def test_a_cached_response_is_returned_without_composing_any_matchup():
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    first = SnapshotComposer(payloads)
+    cold = _cached_service(first, redis_client, games).get_edges("2026-04-10")
+    second = SnapshotComposer(payloads)
+
+    warm = _cached_service(second, redis_client, games).get_edges("2026-04-10")
+
+    assert first.calls == ["G1", "G2"]
+    assert second.calls == []
+    assert warm == cold
+    assert warm["spotlight"]["best"]["canonical_id"] == 1
+    assert list(redis_client.ttls.values()) == [300]
+
+
+def test_a_new_publication_generation_misses_the_cache():
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("d")
+    composer = SnapshotComposer(payloads)
+    changed = Publications((("player_game_logs", "pub-2", 1, 8),))
+
+    _cached_service(composer, redis_client, games, publications=changed).get_edges("d")
+
+    assert composer.calls == ["G1", "G2"]
+    assert len(redis_client.values) == 2
+
+
+def test_a_game_changing_state_misses_the_cache():
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("d")
+    finished = [dict(game, status={"state": "final"}) for game in games]
+    composer = SnapshotComposer(payloads)
+
+    _cached_service(composer, redis_client, finished).get_edges("d")
+
+    assert composer.calls == ["G1", "G2"]
+
+
+def test_a_different_slate_date_misses_the_cache():
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("2026-04-10")
+    composer = SnapshotComposer(payloads)
+
+    _cached_service(composer, redis_client, games).get_edges("2026-04-11")
+
+    assert composer.calls == ["G1", "G2"]
+
+
+def test_a_disabled_flag_or_missing_client_never_caches():
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    off = _cached_service(SnapshotComposer(payloads), redis_client, games)
+    off._cache_enabled = False
+    off.get_edges("d")
+    off.get_edges("d")
+    no_client = _cached_service(SnapshotComposer(payloads), None, games)
+    no_client.get_edges("d")
+
+    assert redis_client.values == {}
+
+
+def test_a_redis_failure_is_a_miss_not_an_error():
+    import redis as redis_package
+
+    class Down(DictRedis):
+        def get(self, key):
+            raise redis_package.exceptions.ConnectionError("down")
+
+        def setex(self, key, ttl, payload):
+            raise redis_package.exceptions.ConnectionError("down")
+
+    games, payloads = _two_games()
+
+    edges = _cached_service(SnapshotComposer(payloads), Down(), games).get_edges("d")
+
+    assert [game["game_id"] for game in edges["games"]] == ["G1", "G2"]
+
+
+def test_matchups_compose_concurrently_but_never_more_than_the_worker_bound():
+    games = [_game(f"G{i}") for i in range(12)]
+    payloads = {f"G{i}": _matchup([_blend_player(i, f"P{i}", 0.01 * i)]) for i in range(12)}
+    composer = SnapshotComposer(payloads, delay=0.05)
+
+    edges = _cached_service(composer, None, games, workers=3).get_edges("d")
+
+    assert composer.peak == 3
+    assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(12)]
+
+
+def test_the_first_game_composes_alone_before_the_workers_start():
+    games = [_game(f"G{i}") for i in range(5)]
+    payloads = {f"G{i}": _matchup([]) for i in range(5)}
+    composer = SnapshotComposer(payloads, delay=0.05)
+
+    _cached_service(composer, None, games, workers=4).get_edges("d")
+
+    assert composer.calls[0] == "G0"
+    assert composer.peak == 4
 
 
 # --- the HTTP seam -------------------------------------------------------------
