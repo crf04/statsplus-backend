@@ -439,8 +439,9 @@ When neither that season nor the one before has stored events (a date whose
 season was never collected, such as `2024-12-25` or `2027-10-25` against a
 catalog holding only 2025-26), the route returns `404 resource_not_found` with
 message `No NBA schedule is stored for the <season> season.` and
-`error.details.season` set to the date's own season (`"2024-25"`); retrying
-cannot change it. `503 provider_unavailable` remains only for an unconfigured
+`error.details.season` set to the date's own season (`"2024-25"`), or to the
+pinned season when `NBA_CURRENT_SEASON` pins one without a stored schedule;
+retrying cannot change it. `503 provider_unavailable` remains only for an unconfigured
 Event Catalog.
 
 A team's `name` (on Slate and Matchup `game.away_team`, `game.home_team`, and

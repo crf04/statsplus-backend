@@ -724,8 +724,12 @@ def test_a_pin_without_a_schedule_is_not_found():
     })
     service = _rollover_service(catalog, nba=NBASeasonSettings(current_season="2026-27"))
 
-    with pytest.raises(ResourceNotFoundError):
+    with pytest.raises(ResourceNotFoundError) as raised:
         service.get_slate("2026-04-10")
+
+    # The pin is the season read, so it is the season the 404 names.
+    assert str(raised.value) == "No NBA schedule is stored for the 2026-27 season."
+    assert raised.value.public_details == {"season": "2026-27"}
 
 
 def test_an_unpinned_slate_without_either_seasons_schedule_is_not_found():

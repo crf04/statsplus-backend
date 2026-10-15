@@ -66,7 +66,7 @@ class _World:
     def listed(self, on: str) -> bool:
         try:
             return bool(self.slate.get_slate(on)["games"])
-        except ProviderUnavailableError:
+        except ResourceNotFoundError:
             return False
 
     def assert_matches_the_slate_itself(self, first: str, last: str) -> None:
