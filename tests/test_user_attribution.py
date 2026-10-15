@@ -284,3 +284,76 @@ def test_the_exemption_is_only_for_this_route(client):
         response = client.get(path, headers=_as("waiting"))
         assert response.status_code == 403, path
         assert response.get_json()["error"]["code"] == "waitlisted"
+
+
+def test_a_utc_offset_is_normalized_to_utc(client, engine):
+    client.post(
+        "/api/user/attribution",
+        json={"landed_at": "2026-10-15T12:00:00-04:00"},
+        headers=_as("u1"),
+    )
+
+    [row] = _stored(engine, "u1")
+    assert str(row["landed_at"]).startswith("2026-10-15 16:00:00")
+
+
+@pytest.mark.parametrize(
+    "landed_at",
+    [
+        "0001-01-01T00:00:00+01:00",
+        "9999-12-31T23:59:59-01:00",
+    ],
+)
+def test_a_timestamp_that_overflows_utc_conversion_is_stored_null(
+    client, engine, landed_at
+):
+    response = client.post(
+        "/api/user/attribution",
+        json={"ref": "abc", "landed_at": landed_at},
+        headers=_as("u1"),
+    )
+
+    assert response.status_code == 201
+    [row] = _stored(engine, "u1")
+    assert row["landed_at"] is None
+    assert row["ref"] == "abc"
+
+
+def test_the_earliest_representable_utc_timestamp_is_kept(client, engine):
+    response = client.post(
+        "/api/user/attribution",
+        json={"landed_at": "0001-01-01T00:00:00+00:00"},
+        headers=_as("u1"),
+    )
+
+    assert response.status_code == 201
+    assert str(_stored(engine, "u1")[0]["landed_at"]).startswith("0001-01-01 00:00:00")
+
+
+def test_losing_the_insert_race_reports_not_recorded_and_keeps_the_winner(
+    client, engine, monkeypatch
+):
+    from sqlalchemy.orm import Session
+
+    from app.models.user_attribution import UserAttribution
+
+    client.post("/api/user/attribution", json={"ref": "winner"}, headers=_as("u1"))
+    real_get = Session.get
+    calls = []
+
+    def blind_first_lookup(self, entity, ident, *args, **kwargs):
+        calls.append(entity)
+        if entity is UserAttribution and len(calls) == 1:
+            return None  # the pre-check misses; the insert then hits the PK
+        return real_get(self, entity, ident, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "get", blind_first_lookup)
+
+    response = client.post(
+        "/api/user/attribution", json={"ref": "loser"}, headers=_as("u1")
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"recorded": False}
+    assert _stored(engine, "u1")[0]["ref"] == "winner"
+    assert _count(engine) == 1

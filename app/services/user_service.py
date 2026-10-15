@@ -107,11 +107,12 @@ def _attribution_landed_at(value: Any) -> Optional[datetime]:
         return None
     try:
         parsed = datetime.fromisoformat(text)
-    except ValueError:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        # An offset can push the instant outside the representable range.
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def normalize_attribution(body: Any) -> Dict[str, Any]:
