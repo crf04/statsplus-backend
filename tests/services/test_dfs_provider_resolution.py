@@ -389,3 +389,24 @@ def test_underdog_titles_without_known_nba_tricodes_give_no_tricodes():
         (m.event.away_team.abbreviation, m.event.home_team.abbreviation)
         for m in snapshot.markets
     } == {(None, None)}
+
+
+def test_dabble_gives_no_sides_for_a_scoreboard_tricode_that_is_not_an_nba_team():
+    def foreign(detail):
+        for entry in detail["stateSummary"]["scoreboard"].values():
+            if entry["abbreviation"] == "BOS":
+                entry["abbreviation"] = "XXX"
+
+    snapshot = _dabble_with(foreign)
+
+    assert {(m.event.away_team, m.event.home_team) for m in snapshot.markets} == {(None, None)}
+
+
+def test_dabble_gives_no_sides_when_both_competitors_share_a_display_order():
+    def duplicate(detail):
+        for entry in detail["stateSummary"]["scoreboard"].values():
+            entry["competitorDisplayOrder"] = 1
+
+    snapshot = _dabble_with(duplicate)
+
+    assert {(m.event.away_team, m.event.home_team) for m in snapshot.markets} == {(None, None)}
