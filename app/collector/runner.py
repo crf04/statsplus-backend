@@ -90,6 +90,15 @@ class WindowsCredentialProvider:
         return secret
 
 
+def default_credential_provider(environ: Mapping[str, str] | None = None) -> Any:
+    """Container secret when ``COLLECTOR_SECRET`` is set, Credential Manager otherwise."""
+
+    values = os.environ if environ is None else environ
+    if str(values.get("COLLECTOR_SECRET", "")).strip():
+        return EnvironmentCredentialProvider(variable="COLLECTOR_SECRET", environ=values)
+    return WindowsCredentialProvider()
+
+
 def _now(clock: Any) -> datetime:
     value = clock()
     if not isinstance(value, datetime):

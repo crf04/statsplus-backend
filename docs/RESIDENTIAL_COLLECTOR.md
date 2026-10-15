@@ -89,6 +89,65 @@ Restarting the process reopens the same file and replays pending items. A stale
 process lease expires and can be recovered; a live lease prevents overlapping
 instances. The product database remains Railway Postgres.
 
+## Railway cron service
+
+The collector can instead run as a Railway cron service whose NBA requests leave
+through a residential proxy (`stats.nba.com` blocks datacenter addresses). It
+is the same one-shot command: `python -m app.collector run` performs one
+invocation and exits with the codes above, so a Railway cron run ends when the
+tick does. The service's config file is `railway.collector.json`
+(`startCommand` `python -m app.collector run`, `cronSchedule` `*/30 * * * *`,
+`restartPolicyType` `NEVER`). It has no pre-deploy migration and no health
+check; it never reads `DATABASE_URL`.
+
+Two optional settings make this possible without changing the Windows path:
+
+- `COLLECTOR_NBA_PROXY_URL` (`http://user:pass@host:port`) is passed as
+  `proxy=` to every nba_api endpoint. Only NBA traffic uses it; the calls to
+  the StatsPlus control plane go direct. The URL carries credentials: it is
+  never logged, and `validate-config` prints only `"nba_proxy": "configured"`
+  or `"none"`. Unset, NBA requests go direct as before.
+- `COLLECTOR_SECRET` supplies the machine secret when there is no Credential
+  Manager. When it is set it is used; when unset the secret is read from
+  Credential Manager (keyring service `StatsPlus/Collector/<identity-id>`, user
+  `machine`) exactly as before. It is read only for the token exchange.
+
+Variables on the service:
+
+| Variable | Value |
+| --- | --- |
+| `COLLECTOR_RAILWAY_URL` | the production API origin (HTTPS) |
+| `COLLECTOR_ENVIRONMENT` | `production` |
+| `COLLECTOR_IDENTITY_ID` | the minted identity id |
+| `COLLECTOR_SECRET` | that identity's secret |
+| `COLLECTOR_NBA_PROXY_URL` | the residential proxy URL |
+| `COLLECTOR_RELEASE_VERSION` | optional; defaults to `0.1.0` |
+
+The hosted ticks expect collection every 30 minutes and Event/Athlete Catalogs
+younger than 72 hours, which `*/30 * * * *` satisfies. Railway skips a start
+while the previous run is still going, so a slow tick cannot overlap itself.
+Exit `10`/`11` are normal between handshake stages; exit `20` needs an operator.
+
+The container filesystem is ephemeral, so the SQLite Outbox, lease and
+instruction cache do not survive between runs, and the rotating file log is not
+visible in Railway's log view (the one-line JSON result printed to stdout is).
+Anything spooled but not yet uploaded is simply collected again on the next
+tick. To keep the Outbox across runs, attach a volume and set
+`COLLECTOR_OUTBOX_PATH` (and `COLLECTOR_LOG_PATH`) beneath its mount path.
+
+One-time operator steps:
+
+1. Mint a collector identity with `CollectorTokenService.create_identity`
+   (owner `residential_collector`, provider `nba`, the collector's observation
+   surfaces, scope `ingest`) against the production control database. The
+   secret is shown once. The old PC's identity can be reused only if its secret
+   is still known.
+2. Create a service from this repository with the config-as-code path
+   `/railway.collector.json`, and set the variables above.
+3. Run `python -m app.collector validate-config` and `credential-check` from the
+   service shell, then trigger one run and read the stdout JSON.
+4. Disable the Windows scheduled task so two collectors do not compete.
+
 ## Windows installation and operations
 
 Run `install_collector.ps1` under a dedicated non-admin account. It registers

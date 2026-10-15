@@ -18,7 +18,7 @@ from .outbox import OutboxRepository
 from .provider import NBAStatsProviderAdapter
 from .release import release_metadata
 from .rehearsal import NBA_TEAM_IDS, ResidentialCompatibilityProbes, SanitizedFixtureProvider
-from .runner import EnvironmentCredentialProvider, ResidentialCollector, WindowsCredentialProvider
+from .runner import EnvironmentCredentialProvider, ResidentialCollector, default_credential_provider
 
 
 def _release_root() -> Path:
@@ -72,10 +72,10 @@ def run_once(
             elif config.environment in {"testing", "test", "development", "historical_rehearsal"}:
                 credential_provider = EnvironmentCredentialProvider()
             else:
-                credential_provider = WindowsCredentialProvider()
+                credential_provider = default_credential_provider()
         collector = ResidentialCollector(
             client=client, outbox=outbox,
-            provider=provider if provider is not None else NBAStatsProviderAdapter(),
+            provider=provider if provider is not None else NBAStatsProviderAdapter(proxy=config.nba_proxy_url),
             identity_id=config.identity_id, environment=config.environment,
             credential_provider=credential_provider, secret=secret,
             release_version=config.release_version,
@@ -107,10 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     except (CollectorConfigurationError, ValueError) as error:
         parser.error(str(error))
     if args.command == "validate-config":
-        print(json.dumps({"status": "valid", "environment": config.environment, "identity_id": config.identity_id}, sort_keys=True))
+        print(json.dumps({"status": "valid", "environment": config.environment, "identity_id": config.identity_id,
+                          "nba_proxy": "configured" if config.nba_proxy_url else "none"}, sort_keys=True))
         return 0
     if args.command == "credential-check":
-        WindowsCredentialProvider().get_secret(config.identity_id)
+        default_credential_provider().get_secret(config.identity_id)
         print(json.dumps({"status": "available", "identity_id": config.identity_id}, sort_keys=True))
         return 0
     if args.command == "status":
@@ -131,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rehearsal":
         if not args.season or not args.cutoff:
             parser.error("rehearsal requires --season and --cutoff")
-        provider = NBAStatsProviderAdapter() if args.live else SanitizedFixtureProvider()
+        provider = NBAStatsProviderAdapter(proxy=config.nba_proxy_url) if args.live else SanitizedFixtureProvider()
         probes = ResidentialCompatibilityProbes(provider)
         results = tuple(
             result
@@ -147,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.season or not args.cutoff or config.environment == "production":
             parser.error("railway-rehearsal requires season/cutoff and a non-production environment")
         metadata = release_metadata(_release_root(), version=config.release_version)
-        credential = WindowsCredentialProvider()
+        credential = default_credential_provider()
         client = RailwayClient(
             config.railway_url, identity_id=config.identity_id, environment=config.environment,
             timeout=config.http_timeout_seconds, release_version=config.release_version,
