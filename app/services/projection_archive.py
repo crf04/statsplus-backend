@@ -394,22 +394,31 @@ def _posted_line(market: PlayerProjectionMarket) -> float | None:
 
 def _resolved_lines(
     observed: Mapping[str, Mapping[str, set[float]]],
-) -> dict[str, dict[str, float]]:
+    conflicted: Mapping[str, set[str]] | None = None,
+) -> tuple[dict[str, dict[str, float]], dict[str, tuple[str, ...]]]:
     """One line per provider and market, omitting any market posted at two.
 
-    Equal duplicates have already collapsed in the set; a provider whose
-    markets all conflict, or who stated no line, is absent.
+    Equal duplicates have already collapsed in the set.  ``conflicted`` names
+    markets an earlier fold already dropped, so combining pools never revives
+    one.  Returns the lines, where a provider with none is absent, and every
+    conflicted market per provider for the next fold.
     """
 
-    resolved = {
-        provider: {
-            category: next(iter(values))
-            for category, values in sorted(markets.items())
-            if len(values) == 1
-        }
-        for provider, markets in sorted(observed.items())
+    conflicts: dict[str, set[str]] = {
+        provider: set(markets) for provider, markets in (conflicted or {}).items()
     }
-    return {provider: lines for provider, lines in resolved.items() if lines}
+    lines: dict[str, dict[str, float]] = {}
+    for provider, markets in sorted(observed.items()):
+        for category, values in sorted(markets.items()):
+            if len(values) > 1:
+                conflicts.setdefault(provider, set()).add(category)
+            elif category not in conflicts.get(provider, ()):
+                lines.setdefault(provider, {})[category] = next(iter(values))
+    return lines, {
+        provider: tuple(sorted(markets))
+        for provider, markets in sorted(conflicts.items())
+        if markets
+    }
 
 
 def _projection_closing_start_fence(
@@ -3017,6 +3026,7 @@ class LatestProjectionPlayerPoolReader:
                         "categories": set(),
                         "provenance": {},
                         "lines": {},
+                        "line_conflicts": {},
                     },
                 )
                 entry["categories"].update(player.market_categories)
@@ -3026,6 +3036,10 @@ class LatestProjectionPlayerPoolReader:
                     markets = entry["lines"].setdefault(provider, {})
                     for category, value in lines.items():
                         markets.setdefault(category, set()).add(value)
+                for provider, categories in player.line_conflicts.items():
+                    entry["line_conflicts"].setdefault(provider, set()).update(
+                        categories
+                    )
         players = tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3036,9 +3050,13 @@ class LatestProjectionPlayerPoolReader:
                     provider: tuple(sorted(categories))
                     for provider, categories in sorted(entry["provenance"].items())
                 },
-                lines=_resolved_lines(entry["lines"]),
+                lines=lines,
+                line_conflicts=line_conflicts,
             )
             for player_id, entry in sorted(contributions.items())
+            for lines, line_conflicts in (
+                _resolved_lines(entry["lines"], entry["line_conflicts"]),
+            )
         )
         for player in players:
             team_counts[player.team_id] = team_counts.get(player.team_id, 0) + 1
@@ -3279,9 +3297,11 @@ class LatestProjectionPlayerPoolReader:
                     provider: tuple(sorted(categories))
                     for provider, categories in sorted(entry["providers"].items())
                 },
-                lines=_resolved_lines(entry["lines"]),
+                lines=lines,
+                line_conflicts=line_conflicts,
             )
             for player_id, entry in sorted(contributions.items())
+            for lines, line_conflicts in (_resolved_lines(entry["lines"]),)
         )
 
     def _pool_freshness(

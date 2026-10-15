@@ -3076,6 +3076,7 @@ def _line_market(
     scoring_period: ScoringPeriod = ScoringPeriod.FULL_GAME,
     selections=_PRICED_SELECTIONS,
     game_id: str = GAME_ID,
+    status: MarketStatus = MarketStatus.AVAILABLE,
 ):
     statistic = catalog.by_id[statistic_id]
     evidence = StatisticEvidence(provider_id=statistic_id, canonical_id=statistic.id)
@@ -3098,7 +3099,7 @@ def _line_market(
             provider=provider,
         ),
         threshold=MarketThreshold(threshold, "count"),
-        status=MarketStatus.AVAILABLE,
+        status=status,
         variant=variant,
         scoring_period=scoring_period,
         selections=selections,
@@ -3150,6 +3151,10 @@ def test_pool_players_carry_each_providers_standard_full_game_lines(tmp_path):
                 _line_market(catalog, provider="prizepicks", market_id="ast-unpriced",
                              statistic_id="assists", threshold="7.5",
                              selections=()),
+                # A priced standard full-game market the provider suspended.
+                _line_market(catalog, provider="prizepicks", market_id="blk-suspended",
+                             statistic_id="blocks", threshold="1.5",
+                             status=MarketStatus.SUSPENDED),
                 # A negative threshold is not a line: targetable, but no value.
                 _line_market(catalog, provider="prizepicks", market_id="stl-negative",
                              statistic_id="steals", threshold="-0.5"),
@@ -3259,7 +3264,7 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(tmp_pa
             "dabble",
             (
                 _line_market(catalog, provider="dabble", market_id="pts-closing",
-                             statistic_id="points", threshold="27.5"),
+                             statistic_id="points", threshold="26.5"),
                 _line_market(catalog, provider="dabble", market_id="reb-closing",
                              statistic_id="rebounds", threshold="7.5"),
             ),
@@ -3286,8 +3291,13 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(tmp_pa
         _line_snapshot(
             "dabble",
             (
-                _line_market(catalog, provider="dabble", market_id="pts-live",
-                             statistic_id="points", threshold="30.5",
+                # Two live lines already conflict; the closing 26.5 must not
+                # resurrect a PTS line once the two parts are combined.
+                _line_market(catalog, provider="dabble", market_id="pts-live-a",
+                             statistic_id="points", threshold="27.5",
+                             game_id=live_game_id),
+                _line_market(catalog, provider="dabble", market_id="pts-live-b",
+                             statistic_id="points", threshold="28.5",
                              game_id=live_game_id),
                 _line_market(catalog, provider="dabble", market_id="reb-live",
                              statistic_id="rebounds", threshold="7.5",

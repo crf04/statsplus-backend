@@ -88,6 +88,9 @@ class PoolPlayer:
     #: Each provider's standard full-game line per market, where it posted
     #: exactly one; a provider with no known line is absent.
     lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
+    #: Markets omitted from ``lines`` because one provider posted two distinct
+    #: lines, kept so combining pools never revives one.  Not served.
+    line_conflicts: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
