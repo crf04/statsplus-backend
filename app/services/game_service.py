@@ -545,6 +545,10 @@ class GameService:
         if not season_logs.empty:
             season_averages = season_logs[average_columns].mean().round(2)
             season_average_rows = _records(season_averages.to_frame().T)
+        # The NBA person id, so the client can show the player's headshot.
+        player_id = None
+        if 'PLAYER_ID' in full_game_logs and not full_game_logs.empty:
+            player_id = int(full_game_logs['PLAYER_ID'].iloc[0])
         filtered_logs.drop(['PLAYER_NAME', 'PLAYER_ID', 'GAME_ID', 'NBA_FANTASY_PTS', 'FT_PCT', 'PLUS_MINUS', '+/-', 'MIN_SEC', 'TEAM_ID', 'TEAM_ABBREVIATION'], axis=1, inplace=True, errors='ignore')
         filtered_logs['GAME_DATE'] = filtered_logs['GAME_DATE'].astype(str)
 
@@ -554,6 +558,7 @@ class GameService:
             season_averages=season_average_rows,
             season_game_count=len(season_logs),
             next_game=self._get_team_name_by_id(next_team),
+            player_id=player_id,
             # Every stream the capture holds feeds this response: the logs,
             # the Diets and the Season Defense Sheet behind PLAYTYPE_RTG and
             # any Team Filter ranking.

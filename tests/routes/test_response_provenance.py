@@ -421,8 +421,8 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
         "sources": {},
     }
     assert sorted(body) == [
-        "averages", "game_logs", "next_game", "provenance", "season_averages",
-        "season_game_count",
+        "averages", "game_logs", "next_game", "player_id", "provenance",
+        "season_averages", "season_game_count",
     ]
     assert reader.captures == 1
 
