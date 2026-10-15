@@ -8,7 +8,7 @@ loaded from a credential provider immediately before token exchange.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -34,6 +34,8 @@ class CollectorConfig:
     retry_window_seconds: int = 6 * 60 * 60
     retry_interval_seconds: int = 30 * 60
     allow_insecure_localhost: bool = False
+    # Carries credentials: never log it, repr it, or echo it in validate-config.
+    nba_proxy_url: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         try:
@@ -47,6 +49,14 @@ class CollectorConfig:
         local_hosts = {"localhost", "127.0.0.1", "::1"}
         if endpoint.scheme == "http" and not (self.allow_insecure_localhost and hostname.casefold() in local_hosts):
             raise CollectorConfigurationError("collector endpoint must use HTTPS")
+        if self.nba_proxy_url is not None:
+            try:
+                proxy = urlsplit(self.nba_proxy_url)
+                _ = proxy.port
+            except ValueError as error:
+                raise CollectorConfigurationError("COLLECTOR_NBA_PROXY_URL is malformed") from error
+            if proxy.scheme not in {"http", "https"} or not proxy.hostname:
+                raise CollectorConfigurationError("COLLECTOR_NBA_PROXY_URL must be an http(s) proxy URL")
         if self.environment not in {"development", "testing", "test", "staging", "production", "historical_rehearsal"}:
             raise CollectorConfigurationError("unsupported collector environment")
         if not self.identity_id.strip():
@@ -104,6 +114,7 @@ def load_collector_config(env: Mapping[str, str] | None = None) -> CollectorConf
         outbox_max_item_bytes=_integer(values, "COLLECTOR_OUTBOX_MAX_ITEM_BYTES", 2 * 1024 * 1024),
         retry_window_seconds=_integer(values, "COLLECTOR_RETRY_WINDOW_SECONDS", 6 * 60 * 60),
         retry_interval_seconds=_integer(values, "COLLECTOR_RETRY_INTERVAL_SECONDS", 30 * 60),
+        nba_proxy_url=_value(values, "COLLECTOR_NBA_PROXY_URL"),
         allow_insecure_localhost=(str(_value(values, "COLLECTOR_ALLOW_INSECURE_LOCALHOST", "false")).casefold() in {"1", "true", "yes", "on"}),
     )
 

@@ -9,6 +9,8 @@ import math
 import os
 from typing import Any, Iterator, Protocol
 
+import requests
+
 from .contracts import (
     NormalizedObservation,
     ProviderContractError,
@@ -312,8 +314,10 @@ class _StandaloneNBAProvider:
     provider frame to the collector normalizer and retains no response object.
     """
 
-    def __init__(self, *, timeout: float = 10.0) -> None:
+    def __init__(self, *, timeout: float = 10.0, proxy: str | None = None) -> None:
         self.timeout = max(1.0, min(float(timeout), 120.0))
+        # Passed to every nba_api endpoint; the control plane never sees it.
+        self.proxy = proxy or None
 
     @staticmethod
     def _frame(endpoint: Any, *, index: int = 0) -> Any:
@@ -327,6 +331,10 @@ class _StandaloneNBAProvider:
             return self._frame(factory())
         except ProviderContractError:
             raise
+        except requests.exceptions.RequestException:
+            # Includes ProxyError, ConnectionError and Timeout.  The message
+            # can carry the proxy URL, so it is never kept.
+            raise ProviderTransientError("provider_unavailable") from None
         except Exception as error:
             name = type(error).__name__.casefold()
             if any(marker in name for marker in (
@@ -384,6 +392,7 @@ class _StandaloneNBAProvider:
             "per_mode_detailed": "Totals",
             "league_id_nullable": "00",
             "timeout": self.timeout,
+            "proxy": self.proxy,
         }
         if measure_type is not None:
             parameters["measure_type_detailed_defense"] = measure_type
@@ -391,12 +400,12 @@ class _StandaloneNBAProvider:
 
     def fetch_whole_season_schedule(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
-        return self._request(lambda: endpoints.ScheduleLeagueV2(season=season, timeout=self.timeout))
+        return self._request(lambda: endpoints.ScheduleLeagueV2(season=season, timeout=self.timeout, proxy=self.proxy))
 
     def get_player_roster(self, *, season: str) -> Any:
         from nba_api.stats import endpoints
         return self._request(lambda: endpoints.commonallplayers.CommonAllPlayers(
-            is_only_current_season=0, season=season, timeout=self.timeout,
+            is_only_current_season=0, season=season, timeout=self.timeout, proxy=self.proxy,
         ))
 
     def fetch_synergy_play_types(
@@ -413,7 +422,7 @@ class _StandaloneNBAProvider:
             season_type_all_star=season_type,
             per_mode_simple=per_mode_simple,
             league_id="00",
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
         if player_or_team_abbreviation != "T":
             return frame
@@ -422,7 +431,7 @@ class _StandaloneNBAProvider:
             season_type_all_star=season_type,
             per_mode_detailed="Totals",
             league_id_nullable="00",
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
         return self._bind_synergy_window(frame, minutes)
 
@@ -461,7 +470,7 @@ class _StandaloneNBAProvider:
             season_type_all_star=season_type,
             per_mode_simple="Totals",
             league_id="00",
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
 
     def fetch_player_shooting_zone(
@@ -476,7 +485,7 @@ class _StandaloneNBAProvider:
             date_to_nullable=date_to,
             season=season,
             season_type_all_star=season_type,
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
 
     def fetch_player_season_totals(
@@ -499,7 +508,7 @@ class _StandaloneNBAProvider:
             season=season,
             season_type_all_star=season_type,
             league_id_nullable="00",
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
 
     def fetch_opponent_shot_chart(
@@ -518,7 +527,7 @@ class _StandaloneNBAProvider:
             last_n_games_nullable=last_n_games,
             per_mode_simple=per_mode_simple,
             league_id="00",
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
         frame = self._collapse_opponent_breakdown(frame, team_id=team_id)
         evidence = self._team_window_evidence(
@@ -579,7 +588,7 @@ class _StandaloneNBAProvider:
             team_id_nullable=team_id,
             last_n_games=last_n_games,
             league_id_nullable="00",
-            timeout=self.timeout,
+            timeout=self.timeout, proxy=self.proxy,
         ))
         evidence = self._team_window_evidence(
             season=season, season_type=season_type, team_id=team_id,
@@ -619,7 +628,7 @@ class _StandaloneNBAProvider:
 class NBAStatsProviderAdapter:
     """Lazy standalone provider; constructing it never starts Flask or opens DB."""
 
-    def __init__(self, provider: Any | None = None, *, settings: Any | None = None) -> None:
+    def __init__(self, provider: Any | None = None, *, settings: Any | None = None, proxy: str | None = None) -> None:
         if provider is not None:
             self.provider = provider
             return
@@ -629,7 +638,7 @@ class NBAStatsProviderAdapter:
             timeout = float(raw_timeout)
         except (TypeError, ValueError):
             timeout = 10.0
-        self.provider = _StandaloneNBAProvider(timeout=timeout)
+        self.provider = _StandaloneNBAProvider(timeout=timeout, proxy=proxy)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.provider, name)

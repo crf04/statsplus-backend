@@ -285,6 +285,15 @@ def normalize_whole_season_schedule(
                 "NBA Stats returned a schedule row for a different season."
             )
 
+        if all(
+            pd.to_numeric(row.get(f"{side}Team_teamId"), errors="coerce") == 0
+            and not _text_value(row.get(f"{side}Team_teamTricode"))
+            for side in ("home", "away")
+        ):
+            # Bracket not set yet (NBA Cup knockout rows list team ID 0 and no
+            # tricode): a matchup that does not exist yet, not a malformed row.
+            continue
+
         team_values: dict[str, object] = {}
         for side in ("home", "away"):
             team_id = pd.to_numeric(row.get(f"{side}Team_teamId"), errors="coerce")

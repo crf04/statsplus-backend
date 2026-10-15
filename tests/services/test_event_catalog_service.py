@@ -23,6 +23,7 @@ from app.models.event_catalog import EventCatalogEntry
 from app.services.event_catalog_service import EventCatalogService
 from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.nba_stats_adapter import normalize_whole_season_schedule
+from app.utils.telemetry import ProviderResponseError
 from app.services.slate_service import SlateService
 
 
@@ -596,3 +597,23 @@ def test_null_team_names_ingested_into_the_catalog_serialise_without_the_string_
     # Ingestion accepts only real NBA team ids, so both resolve; the unknown-id
     # null is covered by the serialiser tests.
     assert game["home_team"]["name"] == "Charlotte Hornets"
+
+
+def test_whole_season_schedule_skips_undetermined_cup_rows_but_rejects_half_known_teams():
+    frame = _frame()
+    tbd = frame.iloc[[0]].copy()
+    tbd["gameId"] = "0022601201"
+    for column in ("homeTeam_teamId", "awayTeam_teamId"):
+        tbd[column] = 0
+    for column in ("homeTeam_teamName", "homeTeam_teamTricode", "awayTeam_teamName", "awayTeam_teamTricode"):
+        tbd[column] = None
+    mixed = pd.concat([tbd, frame], ignore_index=True)
+
+    canonical = normalize_whole_season_schedule(mixed, season="2025-26")
+
+    assert list(canonical["nba_game_id"]) == ["0022500001", "0022500002"]
+
+    half_known = tbd.copy()
+    half_known["homeTeam_teamId"] = 1610612747
+    with pytest.raises(ProviderResponseError):
+        normalize_whole_season_schedule(half_known, season="2025-26")
