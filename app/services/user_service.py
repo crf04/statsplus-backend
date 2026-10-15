@@ -124,6 +124,66 @@ TARGET_DUPLICATE_MESSAGE = (
     "A target for that opponent already has those qualifiers."
 )
 _TARGET_OPPONENT_MESSAGE = "A target needs one NBA team as its opponent."
+
+#: The Targets every new account starts with, in the order the list shows
+#: them (newest first).  They are ordinary Targets owned by the account, so
+#: the owner edits or deletes them like any other; nothing re-adds one.
+DEFAULT_TARGETS: tuple[Dict[str, Any], ...] = (
+    {
+        "opponent": "POR",
+        "note": "CLINGAN drop",
+        "qualifiers": [
+            {"base": "play_types", "slice_key": "PRRollMan", "comparator": "at_or_above", "threshold": 0.104},
+            {"base": "shot_types", "slice_key": "Catch and Shoot", "comparator": "at_or_above", "threshold": 0.225},
+        ],
+        "conditions": {
+            "defender": {"player_id": 1642270, "comparator": "at_least", "minutes": 10},
+            "from": None,
+            "to": None,
+            "player_minutes": 15,
+        },
+        "stat_preferences": {
+            "columns": ["PTS", "FGA", "PTS/36", "FGA/36", "3PA", "3PA/36"],
+            "graded_by": "PTS",
+        },
+    },
+    {
+        "opponent": "IND",
+        "note": None,
+        "qualifiers": [
+            {"base": "play_types", "slice_key": "PRBallHandler", "comparator": "at_or_above", "threshold": 0.298},
+            {"base": "play_types", "slice_key": "Isolation", "comparator": "at_or_above", "threshold": 0.074},
+        ],
+        "conditions": {"defender": None, "from": None, "to": None, "player_minutes": 10},
+        "stat_preferences": None,
+    },
+    {
+        "opponent": "ORL",
+        "note": None,
+        "qualifiers": [
+            {"base": "shot_types", "slice_key": "Catch and Shoot", "comparator": "at_or_above", "threshold": 0.42},
+            {"base": "play_types", "slice_key": "Spotup", "comparator": "at_or_above", "threshold": 0.302},
+        ],
+        "conditions": {"defender": None, "from": None, "to": None, "player_minutes": 10},
+        "stat_preferences": {
+            "columns": ["PTS", "PTS/36", "FGA", "FGA/36", "3PA/36"],
+            "graded_by": "PTS",
+        },
+    },
+    {
+        "opponent": "NYK",
+        "note": None,
+        "qualifiers": [
+            {"base": "play_types", "slice_key": "PRRollMan", "comparator": "at_or_above", "threshold": 0.18},
+            {"base": "play_types", "slice_key": "Spotup", "comparator": "at_or_below", "threshold": 0.2},
+        ],
+        "conditions": {"defender": None, "from": None, "to": None, "player_minutes": 15},
+        "stat_preferences": {
+            "columns": ["PTS", "FGA", "PTS/36", "FGA/36"],
+            "graded_by": "PTS",
+        },
+    },
+)
 _TARGET_QUALIFIER_MESSAGE = (
     "A qualifier needs a known diet base, a slice of that base, a comparator "
     "of at_or_above or at_or_below, and a threshold share between 0 and 1."
@@ -230,6 +290,36 @@ def _validated_target_note(value: Any) -> Optional[str]:
             f"A target note may be at most {TARGET_NOTE_MAX_LENGTH} characters."
         )
     return note
+
+
+def _default_targets(firebase_uid: str, now: datetime) -> List[Target]:
+    """Build a new account's ``DEFAULT_TARGETS`` rows.
+
+    Each definition passes the same shape validators ``create_target`` applies.
+    The defender check that reads game logs is left to the owner's own edits;
+    a signup does not wait on it.  Creation times step back one microsecond
+    per row so the newest-first list shows them in ``DEFAULT_TARGETS`` order.
+    """
+
+    rows = []
+    for index, definition in enumerate(DEFAULT_TARGETS):
+        qualifiers = _validated_target_qualifiers(definition["qualifiers"])
+        created_at = now - timedelta(microseconds=index)
+        rows.append(Target(
+            firebase_uid=firebase_uid,
+            opponent=_validated_target_opponent(definition["opponent"]),
+            note=_validated_target_note(definition["note"]),
+            conditions=validate_conditions(definition["conditions"]),
+            stat_preferences=validate_stat_preferences(definition["stat_preferences"]),
+            qualifier_signature=target_qualifier_signature(qualifiers),
+            created_at=created_at,
+            updated_at=created_at,
+            qualifiers=[
+                TargetQualifier(position=position, **qualifier)
+                for position, qualifier in enumerate(qualifiers)
+            ],
+        ))
+    return rows
 
 
 def _days_since(timestamp: Optional[datetime]) -> int:
@@ -356,6 +446,11 @@ class UserService:
                 )
                 session.add(new_user)
                 try:
+                    # The user row first: the default Targets reference it.
+                    session.flush()
+                    session.add_all(_default_targets(
+                        firebase_uid, datetime.now(timezone.utc)
+                    ))
                     session.commit()
                 except IntegrityError:
                     # A concurrent first request for the same uid won the
