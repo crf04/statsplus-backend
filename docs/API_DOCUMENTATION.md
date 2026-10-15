@@ -51,7 +51,10 @@ read.
 
   Users with an admin claim are exempt, so the admin endpoints below stay
   reachable even for an admin whose own first sign-in landed while paused.
-  Optional-auth routes serve public data and do not apply the check.
+  Optional-auth routes apply the same check whenever a valid token is sent. If
+  the user row could not be synced, the stored status (or, with no row, the
+  sign-up switch) decides; only a database outage on an optional route lets the
+  request through.
 - The switch is read from the database only when a first sign-in creates a user
   and by the admin endpoints (at most once per request); there is no
   per-process cache, so a change takes effect immediately.

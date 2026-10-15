@@ -58,6 +58,7 @@ def gate_client(app, dependencies, engine, runtime_settings, monkeypatch):
     )
     client = app.test_client()
     client.service = service
+    client.claims = claims_by_token
     return client
 
 
@@ -335,3 +336,19 @@ def test_first_admin_request_reads_the_signup_setting_once(gate_client, engine):
 
     assert response.status_code == 200
     assert len(reads) == 1
+
+
+def test_optional_auth_route_refuses_a_waitlisted_user_whose_sync_failed(gate_client, engine):
+    """The stored waitlisted status decides even when this request's sync stored nothing."""
+    gate_client.service.set_signups_open(False)
+    gate_client.get("/api/user/profile", headers=_as("moved"))  # stored: waitlisted
+    gate_client.service.set_signups_open(True)
+    gate_client.get("/api/user/profile", headers=_as("veteran"))
+    # The next token carries an email another uid already owns, so sync stores nothing.
+    gate_client.claims["moved"] = {"email": "veteran@example.com"}
+    assert _status(engine, "moved") == "waitlisted"
+
+    response = gate_client.post("/api/user/activity/ping", headers=_as("moved"))
+
+    assert response.status_code == 403
+    assert response.get_json() == WAITLISTED_BODY

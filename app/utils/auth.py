@@ -218,7 +218,7 @@ def _sync_firebase_user(
 
 
 def _refuse_waitlisted(
-    current_user: dict[str, Any], *, resolve_missing_row: bool = True
+    current_user: dict[str, Any], *, tolerate_lookup_errors: bool = False
 ) -> None:
     """Refuse a waitlisted account, except an administrator.
 
@@ -230,8 +230,8 @@ def _refuse_waitlisted(
     skipped: ``resolve_access_status`` answers from the stored row, or, with no
     row, from the sign-up switch, so a paused beta never admits an
     unprovisioned user.  Optional authentication passes
-    ``resolve_missing_row=False`` so a database outage cannot make a public
-    route unavailable.
+    ``tolerate_lookup_errors=True`` so a database outage cannot make a public
+    route unavailable; a lookup that answers is still enforced.
     """
 
     if _user_is_admin(current_user):
@@ -239,12 +239,16 @@ def _refuse_waitlisted(
     db_user = current_user.get("db_user")
     if db_user is not None:
         status = getattr(db_user, "access_status", None)
-    elif resolve_missing_row and isinstance(
-        user_service := get_dependencies().user_service, UserService
-    ):
+    elif isinstance(user_service := get_dependencies().user_service, UserService):
         # Only the real service can answer; the offline suite's stand-ins have
         # no access policy to apply.
-        status = user_service.resolve_access_status(current_user.get("uid"))
+        try:
+            status = user_service.resolve_access_status(current_user.get("uid"))
+        except Exception as error:
+            if not tolerate_lookup_errors:
+                raise
+            logger.warning("Could not resolve access status: %s", error)
+            return
     else:
         return
     if status == ACCESS_WAITLISTED:
@@ -439,7 +443,7 @@ def _authenticate_optionally() -> None:
             # Optional auth must not turn a public route into an outage.
             return
         # Outside the guard above: a waitlisted caller is refused here too.
-        _refuse_waitlisted(synced, resolve_missing_row=False)
+        _refuse_waitlisted(synced, tolerate_lookup_errors=True)
 
 
 def require_auth_optional(f: Callable[..., Any]) -> Callable[..., Any]:
