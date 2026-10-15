@@ -18,6 +18,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     Integer,
     MetaData,
     String,
@@ -1551,6 +1552,8 @@ def _rebuild_projection_transition_tables_sqlite(
                 expressions.append("'selection' AS price_scope")
             elif column == "is_replay":
                 expressions.append("0 AS is_replay")
+            elif column == "line_value":
+                expressions.append("NULL AS line_value")
             else:
                 raise RuntimeError(
                     f"migration 041 cannot backfill projection column {column}"
@@ -2571,6 +2574,37 @@ def _add_publication_player_game_log_game_index(connection: Connection) -> None:
     )
 
 
+def _add_projection_line_values(connection: Connection) -> None:
+    """Add the nullable posted-line column to projection observations and Latest.
+
+    Additive and never backfilled: rows written before this migration keep a
+    null line, and the next changed provider snapshot writes its lines.  A
+    fresh database already has both columns from the model-created tables, so
+    each column is added only when missing and a rerun is a no-op.  Reverse
+    by dropping ``line_value`` from both tables; older code never reads it.
+    """
+
+    from app.models.projection_archive import (
+        LatestPlayerProjection,
+        ProjectionObservation,
+    )
+
+    preparer = connection.dialect.identifier_preparer
+    float_type = Float().compile(dialect=connection.dialect)
+    for table in (ProjectionObservation.__table__, LatestPlayerProjection.__table__):
+        if not inspect(connection).has_table(table.name):
+            continue
+        existing = {
+            column["name"] for column in inspect(connection).get_columns(table.name)
+        }
+        if "line_value" in existing:
+            continue
+        connection.execute(text(
+            f"ALTER TABLE {preparer.quote(table.name)} ADD COLUMN "
+            f"{preparer.quote('line_value')} {float_type}"
+        ))
+
+
 MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, "001_create_users", _create_users_table),
     Migration(2, "002_create_data_refresh_jobs", _create_data_refresh_jobs_table),
@@ -2739,6 +2773,7 @@ MIGRATIONS: Final[tuple[Migration, ...]] = (
         _drop_parity_artifact_publication_foreign_key,
     ),
     Migration(62, "062_user_access_status", _add_user_access_status),
+    Migration(63, "063_projection_line_values", _add_projection_line_values),
 )
 
 

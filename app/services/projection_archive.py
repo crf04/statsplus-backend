@@ -379,6 +379,39 @@ def _materialization_checksum(rows: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
+def _posted_line(market: PlayerProjectionMarket) -> float | None:
+    """The market's threshold as a wire number, or None when it states none.
+
+    A negative threshold is not a line anyone posts, so it is stored as none
+    rather than served.
+    """
+
+    if market.threshold is None:
+        return None
+    value = float(market.threshold.value)
+    return value if value >= 0 else None
+
+
+def _resolved_lines(
+    observed: Mapping[str, Mapping[str, set[float]]],
+) -> dict[str, dict[str, float]]:
+    """One line per provider and market, omitting any market posted at two.
+
+    Equal duplicates have already collapsed in the set; a provider whose
+    markets all conflict, or who stated no line, is absent.
+    """
+
+    resolved = {
+        provider: {
+            category: next(iter(values))
+            for category, values in sorted(markets.items())
+            if len(values) == 1
+        }
+        for provider, markets in sorted(observed.items())
+    }
+    return {provider: lines for provider, lines in resolved.items() if lines}
+
+
 def _projection_closing_start_fence(
     event: Mapping[str, Any],
 ) -> datetime | None:
@@ -1852,6 +1885,9 @@ class ProjectionArchive:
             else str(source_market.price_value)
         )
         rematerialized["price_scope"] = source_market.price_scope.value
+        # Like the price, the line is a fact of the source document, so a row
+        # written before migration 063 recovers it on replay.
+        rematerialized["line_value"] = _posted_line(source_market)
         rematerialized["targetable"] = bool(
             rematerialized["market_status"] == MarketStatus.AVAILABLE.value
             and rematerialized["market_variant"] == MarketVariant.STANDARD.value
@@ -2481,6 +2517,7 @@ class ProjectionArchive:
                     ),
                     "price_scope": market.price_scope.value,
                     "targetable": targetable,
+                    "line_value": _posted_line(market),
                     "resolution_state": (
                         "resolved" if not unresolved_identities else "unresolved"
                     ),
@@ -2602,6 +2639,7 @@ class ProjectionArchive:
             "canonical_player_name": row["canonical_player_name"],
             "canonical_statistic_id": row["canonical_statistic_id"],
             "market_category": row["market_category"],
+            "line_value": row["line_value"],
             "observed_at": row["observed_at"],
             "confirmed_at": confirmed_at or row["observed_at"],
         }
@@ -2978,11 +3016,16 @@ class LatestProjectionPlayerPoolReader:
                         "team_id": player.team_id,
                         "categories": set(),
                         "provenance": {},
+                        "lines": {},
                     },
                 )
                 entry["categories"].update(player.market_categories)
                 for provider, categories in player.provenance.items():
                     entry["provenance"].setdefault(provider, set()).update(categories)
+                for provider, lines in player.lines.items():
+                    markets = entry["lines"].setdefault(provider, {})
+                    for category, value in lines.items():
+                        markets.setdefault(category, set()).add(value)
         players = tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -2993,6 +3036,7 @@ class LatestProjectionPlayerPoolReader:
                     provider: tuple(sorted(categories))
                     for provider, categories in sorted(entry["provenance"].items())
                 },
+                lines=_resolved_lines(entry["lines"]),
             )
             for player_id, entry in sorted(contributions.items())
         )
@@ -3085,6 +3129,7 @@ class LatestProjectionPlayerPoolReader:
                             observation_table.c.canonical_team_id,
                             observation_table.c.canonical_statistic_id,
                             observation_table.c.market_category,
+                            observation_table.c.line_value,
                             observation_table.c.observed_at.label("confirmed_at"),
                         )
                         .select_from(
@@ -3205,11 +3250,17 @@ class LatestProjectionPlayerPoolReader:
                     "name": str(row["canonical_player_name"]),
                     "team_id": int(row["canonical_team_id"]),
                     "providers": {},
+                    "lines": {},
                 },
             )
             entry["providers"].setdefault(str(row["provider"]), set()).add(
                 str(row["market_category"])
             )
+            # A row stored before migration 063 has no line and adds none.
+            if row["line_value"] is not None:
+                entry["lines"].setdefault(str(row["provider"]), {}).setdefault(
+                    str(row["market_category"]), set()
+                ).add(float(row["line_value"]))
         return tuple(
             PoolPlayer(
                 canonical_player_id=player_id,
@@ -3228,6 +3279,7 @@ class LatestProjectionPlayerPoolReader:
                     provider: tuple(sorted(categories))
                     for provider, categories in sorted(entry["providers"].items())
                 },
+                lines=_resolved_lines(entry["lines"]),
             )
             for player_id, entry in sorted(contributions.items())
         )

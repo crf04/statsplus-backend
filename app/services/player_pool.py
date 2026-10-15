@@ -85,6 +85,9 @@ class PoolPlayer:
     team_id: int
     market_categories: tuple[str, ...]
     provenance: Mapping[str, tuple[str, ...]]
+    #: Each provider's standard full-game line per market, where it posted
+    #: exactly one; a provider with no known line is absent.
+    lines: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
