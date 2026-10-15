@@ -501,36 +501,11 @@ class PlayerGameLogRepository:
         """
 
         canonical_season = validate_canonical_season(season)
-        history = PublicationPointerHistory.__table__
-        projection = PublicationPlayerGameLog.__table__
-        versions = PublicationVersion.__table__
         with read_connection(self.engine, connection) as connection:
-            retained = connection.execute(
-                select(history.c.publication_id, history.c.fence)
-                .where(
-                    history.c.stream_key == "player_game_logs",
-                    history.c.season == canonical_season,
-                    history.c.revoked_at.is_(None),
-                    history.c.retired_at.is_(None),
-                    # A pruned publication can never serve; it must not shadow
-                    # the season's latest version that still exists.
-                    select(versions.c.publication_id)
-                    .where(versions.c.publication_id == history.c.publication_id)
-                    .exists(),
-                )
-                .order_by(history.c.fence.desc())
-                .limit(1)
-            ).first()
+            retained = self._retained_authority(canonical_season, connection)
             if retained is None:
                 return None
-            publication_id = retained.publication_id
-            projected = connection.execute(
-                select(projection.c.publication_id)
-                .where(projection.c.publication_id == publication_id)
-                .limit(1)
-            ).first()
-            if projected is None:
-                return None
+            publication_id, fence = retained
             rows = self._projected_game_rows(
                 publication_id,
                 canonical_season,
@@ -538,64 +513,99 @@ class PlayerGameLogRepository:
                 connection=connection,
             )
             return rows, self._retained_read(
-                publication_id, int(retained.fence), connection=connection
+                publication_id, fence, connection=connection
             )
 
-    def published_seasons(self) -> tuple[str, ...]:
-        """Seasons whose game logs a Publication can serve, newest first.
+    def _retained_authority(
+        self, season: str, connection: Connection
+    ) -> tuple[str, int] | None:
+        """``(publication_id, fence)`` a past season's retained read serves.
 
-        A season qualifies through the active pointer (unless its activation
-        was revoked), or through its latest
-        unrevoked, unretired pointer-history row whose version and projection
-        still exist: the rows ``retained_game_read`` can read.  A candidate
-        that never activated has no history row, and a revoked or retired
-        activation is excluded.
+        The latest unrevoked, unretired pointer-history row whose version still
+        exists; ``None`` when there is none or its projection is absent.
         """
 
         history = PublicationPointerHistory.__table__
         projection = PublicationPlayerGameLog.__table__
         versions = PublicationVersion.__table__
+        retained = connection.execute(
+            select(history.c.publication_id, history.c.fence)
+            .where(
+                history.c.stream_key == "player_game_logs",
+                history.c.season == season,
+                history.c.revoked_at.is_(None),
+                history.c.retired_at.is_(None),
+                # A pruned publication can never serve; it must not shadow
+                # the season's latest version that still exists.
+                select(versions.c.publication_id)
+                .where(versions.c.publication_id == history.c.publication_id)
+                .exists(),
+            )
+            .order_by(history.c.fence.desc())
+            .limit(1)
+        ).first()
+        if retained is None:
+            return None
+        projected = connection.execute(
+            select(projection.c.publication_id)
+            .where(projection.c.publication_id == retained.publication_id)
+            .limit(1)
+        ).first()
+        if projected is None:
+            return None
+        return retained.publication_id, int(retained.fence)
+
+    def published_seasons(self) -> tuple[str, ...]:
+        """Seasons a game-log read can succeed for, newest first.
+
+        The season the active pointer names is judged by the publication
+        reader's own snapshot (stream enabled, serving status, projection
+        ready); every other season by the retained read's own selection
+        (``_retained_authority``).  A season is listed only when its read
+        would succeed, so a revoked, retired, pruned or projection-less
+        publication, or a candidate that never activated, is not.
+        """
+
+        history = PublicationPointerHistory.__table__
+        versions = PublicationVersion.__table__
         pointers = PublicationPointer.__table__
         with self.engine.connect() as connection:
-            retained = connection.execute(
-                select(history.c.season)
-                .where(
-                    history.c.stream_key == "player_game_logs",
-                    history.c.revoked_at.is_(None),
-                    history.c.retired_at.is_(None),
-                    select(versions.c.publication_id)
-                    .where(versions.c.publication_id == history.c.publication_id)
-                    .exists(),
-                    select(projection.c.publication_id)
-                    .where(projection.c.publication_id == history.c.publication_id)
-                    .exists(),
-                )
-                .distinct()
-            ).scalars()
-            active = connection.execute(
+            candidates = set(
+                connection.execute(
+                    select(history.c.season)
+                    .where(
+                        history.c.stream_key == "player_game_logs",
+                        history.c.revoked_at.is_(None),
+                        history.c.retired_at.is_(None),
+                    )
+                    .distinct()
+                ).scalars()
+            )
+            active_season = connection.execute(
                 select(versions.c.season)
                 .join(
                     pointers,
                     pointers.c.active_publication_id == versions.c.publication_id,
                 )
-                .where(
-                    pointers.c.stream_key == "player_game_logs",
-                    ~select(history.c.history_id)
-                    .where(
-                        history.c.publication_id == versions.c.publication_id,
-                        history.c.revoked_at.is_not(None),
-                    )
-                    .exists(),
-                )
-            ).scalars()
-            seasons = {*retained, *active}
-        valid = set()
-        for season in seasons:
-            try:
-                valid.add(validate_canonical_season(season))
-            except ValueError:
-                continue
-        return tuple(sorted(valid, reverse=True))
+                .where(pointers.c.stream_key == "player_game_logs")
+            ).scalar_one_or_none()
+            if active_season is not None:
+                candidates.add(active_season)
+            listed = set()
+            for candidate in candidates:
+                try:
+                    season = validate_canonical_season(candidate)
+                except ValueError:
+                    continue
+                if candidate == active_season:
+                    snapshot = self.read_publication_snapshot(season)
+                    if snapshot is not None:
+                        if snapshot.read("player_game_logs").available:
+                            listed.add(season)
+                        continue
+                if self._retained_authority(season, connection) is not None:
+                    listed.add(season)
+        return tuple(sorted(listed, reverse=True))
 
     def _retained_read(
         self, publication_id: str, fence: int, *, connection: Connection

@@ -55,10 +55,7 @@ def test_neighbours_across_a_season_boundary_on_postgres(engine):
 def test_neighbours_skip_all_star_events_beyond_one_page_on_postgres(engine):
     world = neighbours._World(engine)
     exhibitions = [
-        neighbours._row(
-            f"00325{n:05d}", "2025-26", f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00",
-            "All-Star Game",
-        )
+        neighbours._unlisted(n, f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00")
         for n in range(1, 130)
     ]
     world.store(

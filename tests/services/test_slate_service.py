@@ -31,30 +31,47 @@ class RecordedCatalog:
         assert season == "2025-26"
         return len(self.events)
 
-    def get_seasons(self):
-        return ["2025-26"]
+    def get_adjacent_season(self, season, *, below, inclusive=False):
+        return "2025-26" if inclusive and season == "2025-26" else None
 
-    def get_events_before(self, season, before, limit, *, inclusive=False):
+    def get_events_before(self, season, before, limit, *, before_id=None):
         assert season == "2025-26"
-        stamped = [dict(e, season=season) for e in self.events]
-        found = [
-            e for e in stamped
-            if (datetime.fromisoformat(e["scheduled_at"]) <= before
-                if inclusive else datetime.fromisoformat(e["scheduled_at"]) < before)
-        ]
-        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]), reverse=True)
-        return found[:limit]
+        return _keyset_before(self.events, season, before, limit, before_id)
 
-    def get_events_after(self, season, after, limit):
+    def get_events_after(self, season, after, limit, *, after_id=None):
         assert season == "2025-26"
-        stamped = [dict(e, season=season) for e in self.events]
-        found = [e for e in stamped if datetime.fromisoformat(e["scheduled_at"]) >= after]
-        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
-        return found[:limit]
+        return _keyset_after(self.events, season, after, limit, after_id)
 
     def get_freshness(self, season, *, now=None):
         assert season == "2025-26"
         return dict(self.freshness)
+
+
+def _keyset_before(events, season, before, limit, before_id):
+    def earlier(event):
+        at = datetime.fromisoformat(event["scheduled_at"])
+        if before_id is None:
+            return at < before
+        return (at, event["nba_game_id"]) < (before, before_id)
+
+    found = [dict(e, season=season) for e in events if earlier(e)]
+    found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]), reverse=True)
+    return found[:limit]
+
+
+def _keyset_after(events, season, after, limit, after_id):
+    found = [
+        dict(e, season=season)
+        for e in events
+        if datetime.fromisoformat(e["scheduled_at"]) >= after
+        and (
+            after_id is None
+            or (datetime.fromisoformat(e["scheduled_at"]), e["nba_game_id"])
+            > (after, after_id)
+        )
+    ]
+    found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
+    return found[:limit]
 
 
 def _event(game_id, scheduled_at, *, classification="Regular Season", **overrides):
@@ -611,27 +628,23 @@ class SeasonCatalog:
             if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
         ]
 
-    def get_seasons(self):
-        return sorted(season for season, events in self.events_by_season.items() if events)
+    def get_adjacent_season(self, season, *, below, inclusive=False):
+        stored = sorted(k for k, events in self.events_by_season.items() if events)
+        if below:
+            options = [k for k in stored if k < season or (inclusive and k == season)]
+            return options[-1] if options else None
+        options = [k for k in stored if k > season or (inclusive and k == season)]
+        return options[0] if options else None
 
-    def get_events_before(self, season, before, limit, *, inclusive=False):
-        found = [
-            dict(event, season=season)
-            for event in self.events_by_season.get(season, ())
-            if datetime.fromisoformat(event["scheduled_at"]) < before
-            or (inclusive and datetime.fromisoformat(event["scheduled_at"]) == before)
-        ]
-        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]), reverse=True)
-        return found[:limit]
+    def get_events_before(self, season, before, limit, *, before_id=None):
+        return _keyset_before(
+            self.events_by_season.get(season, ()), season, before, limit, before_id
+        )
 
-    def get_events_after(self, season, after, limit):
-        found = [
-            dict(event, season=season)
-            for event in self.events_by_season.get(season, ())
-            if datetime.fromisoformat(event["scheduled_at"]) >= after
-        ]
-        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
-        return found[:limit]
+    def get_events_after(self, season, after, limit, *, after_id=None):
+        return _keyset_after(
+            self.events_by_season.get(season, ()), season, after, limit, after_id
+        )
 
 
 def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):

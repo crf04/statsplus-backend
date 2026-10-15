@@ -141,10 +141,15 @@ def test_an_all_star_only_day_is_not_a_game_day(world):
     assert world.slate.get_slate("2026-02-15")["games"] == []
 
 
+def _unlisted(n: int, at: str):
+    """An All-Star event the SQL prefix filter cannot see (an unknown ID prefix)."""
+
+    return _row(f"ASG{n:07d}", "2025-26", at, "All-Star Game")
+
+
 def test_a_long_run_of_unlisted_events_does_not_hide_the_nearest_game_day(world):
     exhibitions = [
-        _row(f"00325{n:05d}", "2025-26", f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00",
-             "All-Star Game")
+        _unlisted(n, f"2026-02-{15 + n // 60:02d}T0{n % 6}:00:00+00:00")
         for n in range(1, 130)
     ]
     world.store(
@@ -155,6 +160,120 @@ def test_a_long_run_of_unlisted_events_does_not_hide_the_nearest_game_day(world)
     )
 
     assert world.neighbours("2026-02-20") == ("2026-02-09", "2026-02-24")
+
+
+class _Counting:
+    """A catalog proxy that counts the rows and seeks a search reads."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.rows = 0
+        self.pages = 0
+        self.seasons = 0
+
+    def get_events_before(self, *args, **kwargs):
+        page = self.inner.get_events_before(*args, **kwargs)
+        self.pages += 1
+        self.rows += len(page)
+        return page
+
+    def get_events_after(self, *args, **kwargs):
+        page = self.inner.get_events_after(*args, **kwargs)
+        self.pages += 1
+        self.rows += len(page)
+        return page
+
+    def get_adjacent_season(self, *args, **kwargs):
+        self.seasons += 1
+        return self.inner.get_adjacent_season(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def test_skipping_events_on_one_timestamp_reads_each_once(world):
+    same_instant = "2026-02-14T01:00:00+00:00"
+    world.store(
+        "2025-26",
+        _row("0022500001", "2025-26", "2026-02-10T00:00:00+00:00"),
+        *[_unlisted(n, same_instant) for n in range(1, 601)],
+    )
+    counting = _Counting(world.catalog)
+    world.slate.event_catalog = counting
+
+    assert world.neighbours("2026-02-20") == ("2026-02-09", None)
+
+    # 600 excluded events, one listed: each is fetched once, 50 to a page.
+    assert counting.rows == 601
+    assert counting.pages == 14  # 13 pages back (12 full), 1 empty page forward
+
+
+def test_all_star_game_ids_are_excluded_by_the_query_itself(world):
+    world.store(
+        "2025-26",
+        _row("0022500001", "2025-26", "2026-02-10T00:00:00+00:00"),
+        *[
+            _row(f"00325{n:05d}", "2025-26", "2026-02-14T01:00:00+00:00", "All-Star Game")
+            for n in range(1, 301)
+        ],
+    )
+    counting = _Counting(world.catalog)
+    world.slate.event_catalog = counting
+
+    assert world.neighbours("2026-02-20") == ("2026-02-09", None)
+    assert counting.rows == 1
+
+
+def test_the_season_search_does_not_grow_with_stored_history(world):
+    for start in range(2018, 2026):
+        season = f"{start}-{str(start + 1)[-2:]}"
+        world.store(
+            season,
+            _row(f"00{str(start)[2:]}00001".ljust(10, "0")[:10], season, f"{start + 1}-01-03T00:00:00+00:00"),
+        )
+    counting = _Counting(world.catalog)
+    world.slate.event_catalog = counting
+
+    assert world.neighbours("2026-01-10")[0] == "2026-01-02"
+    assert counting.seasons <= 4
+
+
+def test_summer_events_bucket_on_daylight_time(world):
+    world.store(
+        "2025-26",
+        # 12:30 am EDT June 15 and June 20: a fixed UTC-5 would say the 14th and 19th.
+        _row("0042500001", "2025-26", "2026-06-15T04:30:00+00:00"),
+        _row("0042500002", "2025-26", "2026-06-20T04:30:00+00:00"),
+    )
+
+    assert world.neighbours("2026-06-16") == ("2026-06-15", "2026-06-20")
+    assert [g["game_id"] for g in world.slate.get_slate("2026-06-15")["games"]] == [
+        "0042500001"
+    ]
+
+
+def test_neighbours_across_the_spring_forward_day(world):
+    world.store(
+        "2025-26",
+        _row("0022500001", "2025-26", "2026-03-07T04:30:00+00:00"),  # Mar 6, 11:30 pm EST
+        _row("0022500002", "2025-26", "2026-03-09T04:30:00+00:00"),  # Mar 9, 12:30 am EDT
+    )
+
+    assert world.neighbours("2026-03-08") == ("2026-03-06", "2026-03-09")
+    world.assert_matches_the_slate_itself("2026-03-05", "2026-03-10")
+
+
+def test_neighbours_across_the_fall_back_day(world):
+    world.store(
+        "2026-27",
+        _row("0022600001", "2026-27", "2026-11-01T03:30:00+00:00"),  # Oct 31, 11:30 pm EDT
+        _row("0022600002", "2026-27", "2026-11-02T04:30:00+00:00"),  # Nov 1, 11:30 pm EST
+        _row("0022600003", "2026-27", "2026-11-04T01:00:00+00:00"),  # Nov 3, 8 pm EST
+    )
+
+    assert world.neighbours("2026-11-02") == ("2026-11-01", "2026-11-03")
+    assert world.neighbours("2026-11-01") == ("2026-10-31", "2026-11-03")
+    world.assert_matches_the_slate_itself("2026-10-29", "2026-11-05")
 
 
 def test_across_a_season_boundary_each_neighbour_is_listed_by_its_own_slate(world):

@@ -183,8 +183,12 @@ class EventCatalogService:
             assume_utc(ends_at),
         )
 
-    def get_seasons(self) -> list[str]:
-        return self.repository.list_seasons()
+    def get_adjacent_season(
+        self, season: str, *, below: bool, inclusive: bool = False
+    ) -> str | None:
+        return self.repository.adjacent_season(
+            validate_canonical_season(season), below=below, inclusive=inclusive
+        )
 
     def get_events_before(
         self,
@@ -192,20 +196,28 @@ class EventCatalogService:
         before: datetime,
         limit: int,
         *,
-        inclusive: bool = False,
+        before_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return self.repository.list_events_before(
             validate_canonical_season(season),
             assume_utc(before),
             limit,
-            inclusive=inclusive,
+            before_id=before_id,
         )
 
     def get_events_after(
-        self, season: str, after: datetime, limit: int
+        self,
+        season: str,
+        after: datetime,
+        limit: int,
+        *,
+        after_id: str | None = None,
     ) -> list[dict[str, Any]]:
         return self.repository.list_events_after(
-            validate_canonical_season(season), assume_utc(after), limit
+            validate_canonical_season(season),
+            assume_utc(after),
+            limit,
+            after_id=after_id,
         )
 
     def get_freshness(

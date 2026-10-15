@@ -10,7 +10,7 @@ stops at the first listed event.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from typing import Any
 
@@ -29,7 +29,7 @@ from app.services.research_season import (
 
 _PAGE = 50
 
-_Fetch = Callable[[str, "datetime | None", int], "list[dict[str, Any]]"]
+_Fetch = Callable[[str, "tuple[datetime, str] | None"], "list[dict[str, Any]]"]
 
 
 class _CountMemo:
@@ -52,16 +52,30 @@ def neighbouring_game_dates(
 
     counts = _CountMemo(catalog)
     start, end = slate_day_bounds_utc(slate_date)
+    containing = current_nba_season(slate_date)
+
+    def seasons_down(first: str, *, inclusive: bool):
+        season = catalog.get_adjacent_season(first, below=True, inclusive=inclusive)
+        while season is not None:
+            yield season
+            season = catalog.get_adjacent_season(season, below=True)
+
+    def seasons_up(first: str, *, inclusive: bool):
+        season = catalog.get_adjacent_season(first, below=False, inclusive=inclusive)
+        while season is not None:
+            yield season
+            season = catalog.get_adjacent_season(season, below=False)
+
     if season_is_pinned(settings):
-        earlier = later = [settings.nba.current_season]
+        earlier, later = (
+            iter([settings.nba.current_season]),
+            iter([settings.nba.current_season]),
+        )
     else:
-        stored = sorted(catalog.get_seasons())
-        containing = current_nba_season(slate_date)
         # A listed event of date d is in current_nba_season(d) or the season
         # before it, and d lies on the requested side of the Slate Date.
-        earlier = [s for s in reversed(stored) if s <= containing]
-        floor = previous_nba_season(containing)
-        later = [s for s in stored if s >= floor]
+        earlier = seasons_down(containing, inclusive=True)
+        later = seasons_up(previous_nba_season(containing), inclusive=True)
 
     def listed(event: dict[str, Any]) -> date | None:
         classification = resolve_stored_event_classification(
@@ -75,33 +89,27 @@ def neighbouring_game_dates(
             return None
         return day
 
-    def search(seasons: list[str], fetch: _Fetch) -> str | None:
+    def search(seasons: Iterable[str], fetch: _Fetch) -> str | None:
         for season in seasons:
-            seen: set[str] = set()
-            bound: datetime | None = None
+            cursor: tuple[datetime, str] | None = None
             while True:
-                limit = _PAGE + len(seen)
-                page = fetch(season, bound, limit)
-                fresh = [e for e in page if e["nba_game_id"] not in seen]
-                for event in fresh:
-                    seen.add(event["nba_game_id"])
+                page = fetch(season, cursor)
+                for event in page:
                     day = listed(event)
                     if day is not None:
                         return day.isoformat()
-                if not fresh or len(page) < limit:
+                if len(page) < _PAGE:
                     break
-                bound = parse_utc_iso(str(page[-1]["scheduled_at"]))
+                last = page[-1]
+                cursor = (parse_utc_iso(str(last["scheduled_at"])), last["nba_game_id"])
         return None
 
-    def before(season: str, bound: datetime | None, limit: int):
-        return catalog.get_events_before(
-            season, start if bound is None else bound, limit,
-            inclusive=bound is not None,
-        )
+    def before(season: str, cursor: tuple[datetime, str] | None):
+        at, game_id = (start, None) if cursor is None else cursor
+        return catalog.get_events_before(season, at, _PAGE, before_id=game_id)
 
-    def after(season: str, bound: datetime | None, limit: int):
-        return catalog.get_events_after(
-            season, end if bound is None else bound, limit
-        )
+    def after(season: str, cursor: tuple[datetime, str] | None):
+        at, game_id = (end, None) if cursor is None else cursor
+        return catalog.get_events_after(season, at, _PAGE, after_id=game_id)
 
     return search(earlier, before), search(later, after)

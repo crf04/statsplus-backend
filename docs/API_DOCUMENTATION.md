@@ -1701,8 +1701,10 @@ whose `player_game_logs` can be read through a published Publication
 }
 ```
 
-- `seasons`: each season served by the active Publication or by a retained,
-  unrevoked, unretired one whose projection still exists; newest first, no
+- `seasons`: each season a game-log read can succeed for: the active
+  Publication's season when the reader serves it (stream enabled, projection
+  ready), and any other season whose latest retained, unrevoked, unretired
+  Publication still has its projection; newest first, no
   duplicates, each a valid `season_filter` value. A candidate that never
   activated and a revoked or retired Publication are not listed.
 - `default_season`: the season `GET /api/games/game_logs` reads when

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.freshness import exact_seconds
@@ -217,15 +217,26 @@ class EventCatalogRepository:
             ).mappings()
             return [self._serialize(row) for row in rows]
 
-    def list_seasons(self) -> list[str]:
-        """Every season with at least one stored event, oldest first."""
+    def adjacent_season(
+        self, season: str, *, below: bool, inclusive: bool = False
+    ) -> str | None:
+        """The stored season nearest ``season`` on one side, by one index seek."""
 
         table = EventCatalogEntry.__table__
+        column = table.c.season
+        if below:
+            condition = column <= season if inclusive else column < season
+            order = column.desc()
+        else:
+            condition = column >= season if inclusive else column > season
+            order = column.asc()
         with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(table.c.season).distinct().order_by(table.c.season)
-            )
-            return [str(row[0]) for row in rows]
+            return connection.execute(
+                select(column).where(condition).order_by(order).limit(1)
+            ).scalar_one_or_none()
+
+    #: Game-ID prefix of All-Star events (``nba_events``): never on a Slate.
+    _ALL_STAR_ID = "003_______"
 
     def list_events_before(
         self,
@@ -233,25 +244,35 @@ class EventCatalogRepository:
         before: datetime,
         limit: int,
         *,
-        inclusive: bool = False,
+        before_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """The ``limit`` latest events before ``before``, newest first.
+        """Up to ``limit`` events before a keyset cursor, newest first.
 
-        Reads through the (season, scheduled_at) index, so a neighbour search
-        never decodes a season.  ``inclusive`` admits events scheduled exactly
-        at ``before`` (a continuation page).
+        Without ``before_id`` the cursor is the instant ``before`` (exclusive);
+        with it, the position ``(before, before_id)`` in (scheduled_at, id)
+        order, so a continuation page resumes exactly where the last ended.
+        All-Star game IDs are excluded in the query.
         """
 
         table = EventCatalogEntry.__table__
         bound = assume_utc(before)
+        if before_id is None:
+            position = table.c.scheduled_at < bound
+        else:
+            position = or_(
+                table.c.scheduled_at < bound,
+                and_(
+                    table.c.scheduled_at == bound,
+                    table.c.nba_game_id < before_id,
+                ),
+            )
         with self.engine.connect() as connection:
             rows = connection.execute(
                 select(table)
                 .where(
                     table.c.season == season,
-                    table.c.scheduled_at <= bound
-                    if inclusive
-                    else table.c.scheduled_at < bound,
+                    position,
+                    table.c.nba_game_id.not_like(self._ALL_STAR_ID),
                 )
                 .order_by(table.c.scheduled_at.desc(), table.c.nba_game_id.desc())
                 .limit(limit)
@@ -263,16 +284,35 @@ class EventCatalogRepository:
         season: str,
         after: datetime,
         limit: int,
+        *,
+        after_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """The ``limit`` earliest events at or after ``after``, oldest first."""
+        """Up to ``limit`` events from a keyset cursor, oldest first.
+
+        Without ``after_id`` the cursor is the instant ``after`` (inclusive);
+        with it, strictly after ``(after, after_id)`` in (scheduled_at, id)
+        order.  All-Star game IDs are excluded in the query.
+        """
 
         table = EventCatalogEntry.__table__
+        bound = assume_utc(after)
+        if after_id is None:
+            position = table.c.scheduled_at >= bound
+        else:
+            position = or_(
+                table.c.scheduled_at > bound,
+                and_(
+                    table.c.scheduled_at == bound,
+                    table.c.nba_game_id > after_id,
+                ),
+            )
         with self.engine.connect() as connection:
             rows = connection.execute(
                 select(table)
                 .where(
                     table.c.season == season,
-                    table.c.scheduled_at >= assume_utc(after),
+                    position,
+                    table.c.nba_game_id.not_like(self._ALL_STAR_ID),
                 )
                 .order_by(table.c.scheduled_at, table.c.nba_game_id)
                 .limit(limit)

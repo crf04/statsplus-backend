@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -41,8 +41,10 @@ def get_seasons(client, dependencies, authenticate, world):
     return get
 
 
-def _publish_logs(world, season):
-    world.compose("player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=1)})
+def _publish_logs(world, season, okc_games=1):
+    world.compose(
+        "player_game_logs", season, {"rows": seasons._season_logs(season, okc_games=okc_games)}
+    )
 
 
 def test_no_publication_lists_no_season_and_still_names_the_default(get_seasons):
@@ -84,12 +86,98 @@ def test_a_retired_retained_season_is_not_listed(get_seasons, world):
     assert get_seasons().get_json()["seasons"] == ["2026-27"]
 
 
+def _latest_publication(world, season):
+    with world.engine.connect() as connection:
+        return connection.execute(
+            text(
+                "SELECT publication_id FROM publication_pointer_history "
+                "WHERE stream_key = 'player_game_logs' AND season = :season "
+                "ORDER BY fence DESC LIMIT 1"
+            ),
+            {"season": season},
+        ).scalar_one()
+
+
+def _history_ids(world, season):
+    with world.engine.connect() as connection:
+        return connection.execute(
+            text(
+                "SELECT publication_id FROM publication_pointer_history "
+                "WHERE stream_key = 'player_game_logs' AND season = :season "
+                "ORDER BY fence"
+            ),
+            {"season": season},
+        ).scalars().all()
+
+
+def _projected(world, publication_id):
+    with world.engine.connect() as connection:
+        return connection.execute(
+            text("SELECT count(*) FROM publication_player_game_logs WHERE publication_id = :p"),
+            {"p": publication_id},
+        ).scalar_one()
+
+
+def _drop_projection(world, publication_id):
+    with world.engine.begin() as connection:
+        connection.execute(
+            text("DELETE FROM publication_player_game_logs WHERE publication_id = :p"),
+            {"p": publication_id},
+        )
+
+
 def test_a_revoked_active_season_is_not_listed(get_seasons, world):
     _publish_logs(world, LAST)
     _publish_logs(world, NEW)
     world.revoke("player_game_logs", NEW)
+    # A real revocation also clears the pointer it withdrew.
+    with world.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_pointers SET active_publication_id = NULL "
+                "WHERE stream_key = 'player_game_logs'"
+            )
+        )
 
     assert get_seasons().get_json()["seasons"] == ["2025-26"]
+
+
+def test_a_disabled_stream_lists_no_active_season(get_seasons, world):
+    _publish_logs(world, LAST)
+    _publish_logs(world, NEW)
+    with world.engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE publication_streams SET enabled = :off "
+                "WHERE stream_key = 'player_game_logs'"
+            ),
+            {"off": False},
+        )
+
+    assert get_seasons().get_json()["seasons"] == ["2025-26"]
+
+
+def test_an_active_season_without_its_projection_is_not_listed(get_seasons, world):
+    _publish_logs(world, LAST)
+    _publish_logs(world, NEW)
+    _drop_projection(world, _latest_publication(world, NEW))
+
+    assert get_seasons().get_json()["seasons"] == ["2025-26"]
+
+
+def test_a_retained_season_whose_latest_version_lost_its_projection_is_not_listed(
+    get_seasons, world
+):
+    _publish_logs(world, LAST, okc_games=2)
+    _publish_logs(world, LAST, okc_games=1)
+    _publish_logs(world, NEW)
+    older, newer = _history_ids(world, LAST)
+    assert older != newer
+    # The retained reader serves the newest 2025-26 version, not the older one.
+    _drop_projection(world, newer)
+    assert _projected(world, older)
+
+    assert get_seasons().get_json()["seasons"] == ["2026-27"]
 
 
 def test_a_candidate_that_never_activated_is_not_listed(get_seasons, world):
