@@ -17,9 +17,8 @@ An exchange lists a ladder of strikes per player and statistic.  Exactly one
 strike per (player, statistic, game) is the ``standard`` line: the one whose
 Over midpoint ``(best Over bid + Over ask) / 2`` is nearest 0.5, ties to the
 lower strike.  Every other strike is ``alternate``.  When no strike has a
-midpoint a lone strike is standard and several are all alternate, and when a
-market of the same game and statistic could not be read the group is
-undetermined, so no strike is standard: the adapter does not guess.
+midpoint a lone strike is standard and several are all alternate.  A market
+that could not be read is a malformed record and simply has no midpoint.
 """
 
 from __future__ import annotations
@@ -176,10 +175,19 @@ class _Book:
 
 
 @dataclass(frozen=True, slots=True)
+class _Served:
+    """One batch response: the attributable entries and the count of others."""
+
+    books: Mapping[str, Any]
+    unattributed: int
+
+
+@dataclass(frozen=True, slots=True)
 class _BadBook:
     """A batch entry that could not be read as a book; one market's problem."""
 
     detail: str
+    code: CoverageCode = CoverageCode.MALFORMED_RECORD
 
 
 class _Dropped:
@@ -294,7 +302,7 @@ class NovigAdapter:
             if self._event_problem(events.get(candidate.event_id)) is None
         ]
         books, unread = self._fetch_books(context, usable)
-        variants = self._choose_variants(usable, books, unread)
+        variants = self._choose_variants(usable, books)
 
         collection = _SnapshotMarketCollector()
         for row, result in outcomes:
@@ -508,7 +516,17 @@ class NovigAdapter:
                     params={"marketIds": ",".join(ids), "currency": "CASH"},
                     parse=self._parse_batch,
                 )
-                return False, ids, {i: served.get(i, _DROPPED) for i in ids}
+                # An omitted id is stale only when every returned entry could be
+                # attributed; otherwise the omitted market may be one of them.
+                absent: Any = (
+                    _BadBook(
+                        "batch entry without a market id",
+                        CoverageCode.FIXTURE_FAILED,
+                    )
+                    if served.unattributed
+                    else _DROPPED
+                )
+                return False, ids, {i: served.books.get(i, absent) for i in ids}
             except ProviderUnavailableError as error:
                 if _http_status(error) != 404:
                     return False, ids, {i: error for i in ids}
@@ -618,26 +636,28 @@ class NovigAdapter:
         )
 
     @classmethod
-    def _parse_batch(cls, payload: Any) -> dict[str, _Book | _BadBook]:
+    def _parse_batch(cls, payload: Any) -> _Served:
         """Read each entry on its own; only a non-list envelope is unusable.
 
-        An entry that names no market cannot be attributed, so it is skipped
-        and its market surfaces as not served.
+        An entry that names no market cannot be attributed.  It is counted, so
+        that a requested id the response omits is not mistaken for a stale one.
         """
 
         if not isinstance(payload, list):
             raise _MalformedPayload("batch book must be a list")
         served: dict[str, _Book | _BadBook] = {}
+        unattributed = 0
         for entry in payload:
             market = entry.get("market") if isinstance(entry, Mapping) else None
             market_id = market.get("id") if isinstance(market, Mapping) else None
             if not isinstance(market_id, str) or not market_id:
+                unattributed += 1
                 continue
             try:
                 served[market_id] = cls._parse_entry(entry)
             except _MalformedPayload as error:
                 served[market_id] = _BadBook(str(error))
-        return served
+        return _Served(served, unattributed)
 
     @staticmethod
     def _parse_entry(entry: Mapping[str, Any]) -> _Book:
@@ -771,20 +791,13 @@ class NovigAdapter:
         self,
         candidates: list[_Candidate],
         books: Mapping[str, _Book | _Dropped | _BadBook],
-        unread: Mapping[str, ProviderUnavailableError],
     ) -> dict[str, MarketVariant]:
         """Pick the one standard strike per (player, statistic, game).
 
-        Only markets whose player is known can be grouped.  A market that could
-        not be read might belong to any group of its game and statistic, so
-        those groups are undetermined.
+        Only markets whose player is known can be grouped; a market that could
+        not be read is a malformed record and simply has no midpoint.
         """
 
-        undetermined = {
-            (c.event_id, c.statistic_label)
-            for c in candidates
-            if c.market_id in unread or isinstance(books.get(c.market_id), _BadBook)
-        }
         groups: dict[tuple[str, str, str], list[_Candidate]] = defaultdict(list)
         for candidate in candidates:
             book = books.get(candidate.market_id)
@@ -793,12 +806,8 @@ class NovigAdapter:
                     (candidate.event_id, book.player_id, candidate.statistic_label)
                 ].append(candidate)
         variants: dict[str, MarketVariant] = {}
-        for (event_id, _player, label), members in groups.items():
-            standard = (
-                None
-                if (event_id, label) in undetermined
-                else self._standard_member(members, books)
-            )
+        for members in groups.values():
+            standard = self._standard_member(members, books)
             for member in members:
                 variants[member.market_id] = (
                     MarketVariant.STANDARD
@@ -853,7 +862,7 @@ class NovigAdapter:
             )
         book = books[candidate.market_id]
         if isinstance(book, _BadBook):
-            raise CoverageRecordMalformed(book.detail)
+            raise CoverageRecordMalformed(book.detail, code=book.code)
         if isinstance(book, _Dropped):
             raise CoverageRecordExcluded(CoverageCode.INELIGIBLE_STATUS)
         if book.player_id is None or book.player_name is None:

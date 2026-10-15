@@ -205,20 +205,22 @@ def test_several_lines_without_any_midpoint_are_all_alternate():
     }
 
 
-def test_an_unread_market_makes_its_game_and_statistic_undetermined():
+def test_an_unread_market_is_malformed_and_does_not_unsettle_the_standard_line():
     # 151 strikes make two batches (150 + 1); the lone last one cannot be read.
-    session, ids = _ladder({f"{n}.5": (0.40, 0.40) for n in range(1, 152)})
+    # Midpoints: 1.5 -> 0.5 exactly, 2.5 -> 0.3; the rest sit at 0.5 too, so
+    # make them all the same except the two pinned lines.
+    lines = {f"{n}.5": (0.10, 0.60) for n in range(1, 152)}  # midpoint 0.25
+    lines["1.5"] = (0.40, 0.40)  # midpoint 0.5
+    lines["2.5"] = (0.20, 0.60)  # midpoint 0.3
+    session, ids = _ladder(lines)
     session.unreadable = {ids["151.5"]}
 
     snapshot = _snapshot(adapter(session))
 
-    # The unread market might be any player's line of this statistic, so no
-    # line is standard; the lines that were read still carry their prices.
     assert snapshot.status is SnapshotStatus.PARTIAL
     assert len(snapshot.markets) == 150
-    assert {m.variant.value for m in snapshot.markets} == {"alternate"}
-    assert all(m.is_priced for m in snapshot.markets)
-    # An unread market has no player identity, so it cannot be a market.
+    standard = [m for m in snapshot.markets if m.variant is MarketVariant.STANDARD]
+    assert [str(m.threshold.value) for m in standard] == ["1.5"]
     assert snapshot.coverage.skipped_count == 1
     assert snapshot.coverage.skipped_reasons == (CoverageCode.FIXTURE_FAILED,)
     assert snapshot.coverage.warning_codes == (
@@ -637,19 +639,43 @@ def test_one_malformed_batch_entry_costs_only_its_own_market(mutate):
     assert _market(snapshot, BARNES_POINTS_19_5).is_priced is True
 
 
-def test_a_malformed_entry_leaves_its_game_and_statistic_undetermined():
+def test_a_malformed_entry_is_a_line_without_a_midpoint():
     session, ids = _ladder(
         {"19.5": (0.40, 0.40), "24.5": (0.50, 0.50), "29.5": (0.20, 0.60)}
     )
-    session.batch[1].pop("ladders")
+    session.batch[1].pop("ladders")  # 24.5 would have been midpoint 0.5
+
+    snapshot = _snapshot(adapter(session))
+
+    # Midpoints among the readable lines: 19.5 -> 0.5, 29.5 -> 0.3.
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert {m.market_id: m.variant.value for m in snapshot.markets} == {
+        ids["19.5"]: "standard",
+        ids["29.5"]: "alternate",
+    }
+
+
+def test_an_omitted_id_is_malformed_when_the_response_holds_an_unattributable_entry():
+    session = ReplaySession()
+    del session.batch[3]["market"]["id"]  # Kawhi POINTS 29.5, now unattributable
 
     snapshot = _snapshot(adapter(session))
 
     assert snapshot.status is SnapshotStatus.PARTIAL
-    assert {m.market_id: m.variant.value for m in snapshot.markets} == {
-        ids["19.5"]: "alternate",
-        ids["29.5"]: "alternate",
-    }
+    assert len(snapshot.markets) == 19
+    assert KAWHI_POINTS_29_5 not in {m.market_id for m in snapshot.markets}
+    assert CoverageCode.FIXTURE_FAILED in snapshot.coverage.skipped_reasons
+    assert CoverageCode.INELIGIBLE_STATUS not in snapshot.coverage.skipped_reasons
+    assert "batch entry without a market id" in snapshot.coverage.diagnostic_details
+
+
+def test_when_no_batch_entry_is_attributable_the_retrieval_fails():
+    session = ReplaySession()
+    for entry in session.batch:
+        del entry["market"]["id"]
+
+    with pytest.raises(ProviderUnavailableError, match="invalid response"):
+        _snapshot(adapter(session))
 
 
 def test_a_batch_that_is_not_a_list_is_an_invalid_response():

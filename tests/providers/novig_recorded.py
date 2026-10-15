@@ -108,7 +108,7 @@ class ReplaySession:
             if isinstance(self.batch, dict):  # an unusable envelope
                 return Response(self.batch)
             wanted = set(ids)
-            return Response([e for e in self.batch if e["market"]["id"] in wanted])
+            return Response([e for e in self.batch if e["market"].get("id") in wanted or "id" not in e["market"]])
         marker = "/v3/public/catalog/"
         path = url.split(marker, 1)[1]
         if path == "markets":
