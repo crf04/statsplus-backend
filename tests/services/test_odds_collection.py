@@ -517,26 +517,28 @@ def test_a_beat_that_drifts_out_of_the_closing_window_never_stores_a_closing_fla
 
 
 def test_the_guard_rechecks_remaining_credits_before_every_paid_call(world):
-    class SuspendedClient(FakeClient):
-        def event_odds(self, event_id):
-            result = super().event_odds(event_id)
-            world.clock[0] = TIP + timedelta(seconds=1)  # resumes after the first tip
-            return result
-
     events = load("events")[:2]
-    # Discovery says 11; a shared-key consumer spends 1; our first response says 5.
-    client = SuspendedClient(events=events, remaining=10)
-    client.discovery_quota = OddsQuota(11, 19989, 0)
-    world.clock[0] = TIP - timedelta(minutes=7)
-    # Both closings are in their window at dispatch (second tip 30s later).
     events[1]["commence_time"] = (TIP + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Discovery says 11; a shared-key consumer spends 1; our first response says 5.
+    client = FakeClient(events=events, remaining=10)
+    client.discovery_quota = OddsQuota(11, 19989, 0)
+    world.clock[0] = TIP - timedelta(minutes=7)  # both closings are due and in window
 
     result = world.coordinator(client).run()
 
-    assert len(client.event_calls) == 1  # the second call would take 5 credits to 0
+    assert len(client.event_calls) == 1  # the second would take 5 credits to 0
     (state,) = _rows(world, OddsApiQuotaState)
     assert state["remaining"] == 5
-    assert [(p["failure_reason"], p["remaining"]) for p in _rows(world, OddsApiPoll)] == [
-        ("received_after_tip", 5)
-    ]
     assert result.remaining == 5
+
+
+def test_a_discarded_response_still_updates_the_stored_quota_first(world):
+    client = FakeClient(remaining=10)
+    world.clock[0] = TIP - timedelta(minutes=7)
+    client.on_odds = lambda: world.clock.__setitem__(0, TIP + timedelta(seconds=1))
+
+    world.coordinator(client).run()
+
+    (state,) = _rows(world, OddsApiQuotaState)
+    assert (state["remaining"], state["used"], state["last_cost"]) == (5, 19995, 5)
+    assert [p["failure_reason"] for p in _rows(world, OddsApiPoll)] == ["received_after_tip"]
