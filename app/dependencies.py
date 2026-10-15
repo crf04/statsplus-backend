@@ -87,8 +87,10 @@ def _warn_on_redis_eviction_policy(redis_client: Any) -> None:
 
     Evicting a keyed entry is only ever a cold recompute, so the expected
     policy is ``allkeys-lru`` with ``maxmemory`` above 0: an operator who
-    left ``noeviction`` (production's current shape) or ``maxmemory 0``
-    gets one WARNING naming the configuration, not a failed startup.
+    left ``noeviction`` or ``maxmemory 0`` gets one WARNING naming the
+    configuration, not a failed startup.  Production's Railway Redis image
+    regenerates redis.conf on every boot from ``MAXMEMORY_MB`` and
+    ``MAXMEMORY_POLICY``, so those service variables are where to change it.
     A Redis that refuses CONFIG is tolerated silently.
     """
 
