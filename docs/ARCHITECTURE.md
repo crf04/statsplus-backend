@@ -2391,6 +2391,28 @@ error. A generation read that fails degrades exactly as the single route's
 pre-check does -- every item `uncached`, `targets_cache` `-` -- and, since that
 pre-check records nothing, is only logged as a warning with its traceback.
 
+A publication changes every key, so the first page load after one would
+compute every Target on the web workers. `TargetBacktestService.precompute`
+(#363) fills the cache from outside them: `scripts/player_shooting_refresh.py`
+runs it after every tick, whatever the tick's state, because that cron is the
+scheduled caller that advances pointers and the step only computes missing
+keys. A Target counts as recently used while its owner's `users.last_login`
+is within 14 days (no Target records its own reads). The step covers every
+`BACKTEST_SEASONS` season, the published one first, and skips a season that
+is `season_unavailable`. For each Target it checks the single read's key with
+`EXISTS`, and on a miss computes through `_backtest_stateful`, the single
+read's own path, which writes the entry. It stops between Targets once
+`TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default 180) has passed, and the
+next run carries on past the entries this one filed. One Target's failure is
+logged with its id and counted. `EXISTS` shares the read and write's circuit
+breaker, so an unreachable Redis ends the run, counting the rest `bypassed`,
+rather than computing results nothing can store. Each run logs one `target_backtest_precompute` line (`seasons`,
+`eligible`, `already_cached`, `computed`, `bypassed`, `failed`, `remaining`,
+`duration_ms`). With the cache off (`ENABLE_CACHE` or
+`TARGET_BACKTEST_CACHE_ENABLED` false, or no Redis client) it logs
+`skipped reason=cache_disabled` and contacts no Redis. A failure of the step
+never changes the tick's output or exit status.
+
 ### Target preview (#253)
 
 The Lab previews a Draft Target -- one no row holds -- and owes it the same

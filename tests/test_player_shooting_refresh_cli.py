@@ -8,6 +8,12 @@ from app.migrations import run_migrations
 from scripts import player_shooting_refresh
 
 
+@pytest.fixture(autouse=True)
+def _no_backtest_precompute(monkeypatch):
+    # The post-tick step has its own tests (test_target_backtest_precompute).
+    monkeypatch.setattr(player_shooting_refresh, "_precompute_target_backtests", lambda: None)
+
+
 @pytest.mark.parametrize("url", [None, "sqlite:///nba_play_types.db"])
 def test_cli_refuses_missing_or_demo_database(monkeypatch, url):
     if url is None:
