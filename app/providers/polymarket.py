@@ -99,6 +99,8 @@ _PERIOD_TYPE = re.compile(r"^(first_half|second_half|1h|2h|h[1-4]|q[1-4])(_|$)")
 _SLUG_TEAMS = re.compile(r"^nba-([a-z]{2,4})-([a-z]{2,4})-\d{4}-\d{2}-\d{2}")
 _HALF = Decimal("0.5")
 _ONE = Decimal(1)
+# Decimal prices are published to six places.
+_PRICE_STEP = Decimal("0.000001")
 
 
 class _MalformedPayload(MalformedProviderResponseError):
@@ -468,6 +470,14 @@ class PolymarketAdapter:
         starts_at = optional_text(market.get("gameStartTime")) or game.starts_at
         validate_timestamp(starts_at, "gameStartTime")
 
+        try:
+            over_price = (_ONE / over_ask).quantize(_PRICE_STEP) if priced else None
+            under_price = (_ONE / under_ask).quantize(_PRICE_STEP) if priced else None
+        except ArithmeticError as error:
+            raise CoverageRecordMalformed(
+                "price is outside the supported numeric range"
+            ) from error
+
         athlete_id = cls._athlete_key(player_name)
         if not athlete_id:
             raise CoverageRecordMalformed("player name must contain letters or digits")
@@ -484,7 +494,7 @@ class PolymarketAdapter:
                 event=EventEvidence(
                     provider_id=game.event_id,
                     label=game.label,
-                    starts_at=game.starts_at or starts_at,
+                    starts_at=starts_at,
                     home_team=game.home,
                     away_team=game.away,
                 ),
@@ -502,14 +512,14 @@ class PolymarketAdapter:
                         label="Over",
                         direction="over",
                         direction_label="Over",
-                        decimal_price=_ONE / over_ask if priced else None,
+                        decimal_price=over_price,
                     ),
                     Selection(
                         selection_id=f"{market_id}:under",
                         label="Under",
                         direction="under",
                         direction_label="Under",
-                        decimal_price=_ONE / under_ask if priced else None,
+                        decimal_price=under_price,
                     ),
                 ),
             )

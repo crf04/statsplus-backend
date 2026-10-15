@@ -239,8 +239,8 @@ def test_a_recorded_prop_prices_over_at_the_ask_and_under_at_one_minus_the_bid()
     assert [s.price_kind.value for s in settled.selections] == ["decimal", "decimal"]
     assert [s.price_scope.value for s in settled.selections] == ["selection"] * 2
     over, under = quoted.selections
-    assert str(over.decimal_price) == "1.001001001001001001001001001"
-    assert str(under.decimal_price) == "111.1111111111111111111111111"
+    assert str(over.decimal_price) == "1.001001"
+    assert str(under.decimal_price) == "111.111111"
 
 
 def test_prices_follow_the_ask_of_each_side_for_a_literal_quote():
@@ -426,6 +426,8 @@ def test_a_closed_line_does_not_take_part_in_the_standard_choice():
         ("q1_totals", CoverageCode.NON_GAME_MARKET),
         ("q3_totals", CoverageCode.NON_GAME_MARKET),
         ("h2_team_totals", CoverageCode.NON_GAME_MARKET),
+        ("q1_points", CoverageCode.NON_GAME_MARKET),
+        ("first_half_points", CoverageCode.NON_GAME_MARKET),
         ("threes", CoverageCode.NON_PROJECTION_MARKET),
     ],
 )
@@ -581,21 +583,29 @@ def test_a_prop_that_is_not_a_yes_no_probability_market_is_malformed(override):
 # -- resolver evidence ------------------------------------------------------------
 
 
+_PLAYERS = {
+    "Victor Wembanyama": (1641705, 1610612759, "San Antonio Spurs", "SAS"),
+    "Jalen Brunson": (1628973, 1610612752, "New York Knicks", "NYK"),
+    "De'Aaron Fox": (1628368, 1610612759, "San Antonio Spurs", "SAS"),
+}
+
+
 class _AthleteCatalog:
     def get_catalog(self, season: str, *, active_only: bool = False):
         return [
             {
                 "season": season,
-                "player_id": 1641705,
-                "display_name": "Victor Wembanyama",
+                "player_id": player_id,
+                "display_name": name,
                 "roster_status": "active",
                 "is_active": True,
                 "is_active_for_season": True,
-                "team_id": 1610612759,
-                "team_name": "San Antonio Spurs",
-                "team_abbreviation": "SAS",
+                "team_id": team_id,
+                "team_name": team_name,
+                "team_abbreviation": team_abbreviation,
                 "published_at": NOW,
             }
+            for name, (player_id, team_id, team_name, team_abbreviation) in _PLAYERS.items()
         ]
 
 
@@ -647,6 +657,118 @@ def test_the_recorded_event_resolves_by_teams_and_start_to_the_scheduled_game():
     assert result.state is EventResolutionState.AUTO
     assert result.canonical_event_id == "0042500406"
     assert isinstance(result.canonical_event, CanonicalEvent)
+
+
+def test_recorded_markets_resolve_through_the_board_resolvers_to_literal_ids():
+    snapshot, _ = _snapshot(_events())
+    markets = _by_id(snapshot)
+    season = "2025-26"
+    # The calls dfs_board makes: a board view per resolver, then resolve_market.
+    athletes = AthleteResolver(_AthleteCatalog()).for_board(
+        season,
+        [(m.provider, m.athlete.provider_id) for m in snapshot.markets],
+    )
+    games = EventResolver(_EventCatalog()).for_board(
+        season, [(m.provider, m.event.provider_id) for m in snapshot.markets]
+    )
+
+    resolved = {
+        market_id: (
+            athletes.resolve_market(markets[market_id], season).canonical_athlete.player_id,
+            games.resolve_market(markets[market_id], season).canonical_event_id,
+        )
+        for market_id in ("2502862", "2502856", "2502860")
+    }
+
+    assert resolved == {
+        "2502862": (1641705, "0042500406"),  # Wembanyama rebounds
+        "2502856": (1628973, "0042500406"),  # Brunson points
+        "2502860": (1628368, "0042500406"),  # De'Aaron Fox points
+    }
+    # A player outside the catalog stays unresolved rather than guessed.
+    unknown = athletes.resolve_market(markets["2502857"], season)
+    assert unknown.state is MappingResolutionState.UNMATCHED
+    assert unknown.canonical_athlete is None
+
+
+def test_standard_lines_are_chosen_separately_for_each_game():
+    game_a = _game_with(
+        [
+            _variant("a1", line=17.5, bid=0.55, ask=0.57),  # midpoint 0.56
+            _variant("a2", line=18.5, bid=0.4, ask=0.42),  # midpoint 0.41
+        ]
+    )[0]
+    game_b = copy.deepcopy(game_a)
+    game_b["id"] = "second-game"
+    game_b["markets"] = [
+        _variant("b1", line=19.5, bid=0.44, ask=0.46),  # midpoint 0.45
+        _variant("b2", line=20.5, bid=0.64, ask=0.66),  # midpoint 0.65
+    ]
+
+    snapshot, _ = _snapshot([game_a, game_b])
+
+    assert _variants(snapshot) == {
+        "a1": "standard",
+        "a2": "alternate",
+        "b1": "standard",
+        "b2": "alternate",
+    }
+
+
+# -- timestamps and numeric domain ----------------------------------------------
+
+
+def test_the_market_game_start_wins_over_a_stale_event_start():
+    market = _variant("p1", line=17.5, bid=0.4, ask=0.5)
+    market["gameStartTime"] = "2026-08-10 00:30:00+00"
+    event = _game_with([market])[0]
+    event["startTime"] = "2026-08-09T00:30:00Z"
+
+    snapshot, _ = _snapshot([event])
+
+    prop = snapshot.markets[0]
+    assert prop.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
+    assert prop.event.starts_at == datetime(2026, 8, 10, 0, 30, tzinfo=timezone.utc)
+    result = EventResolver(_EventCatalog()).resolve_market(prop, "2025-26")
+    assert result.canonical_event_id == "0042500406"
+
+
+def test_the_event_start_is_used_only_when_the_market_has_no_game_start():
+    market = _variant("p1", line=17.5, bid=0.4, ask=0.5)
+    del market["gameStartTime"]
+    event = _game_with([market])[0]
+    event["startTime"] = "2026-08-11T01:00:00Z"
+
+    snapshot, _ = _snapshot([event])
+
+    assert snapshot.markets[0].event.starts_at == datetime(
+        2026, 8, 11, 1, tzinfo=timezone.utc
+    )
+
+
+def test_prices_are_rounded_to_six_places():
+    snapshot, _ = _snapshot(_game_with([_variant("p1", line=17.5, bid=0.6, ask=0.7)]))
+
+    over, under = snapshot.markets[0].selections
+    assert str(over.decimal_price) == "1.428571"  # 1 / 0.7
+    assert str(under.decimal_price) == "2.500000"  # 1 / 0.4
+
+
+@pytest.mark.parametrize("ask", ["1e-1000000", "1e-30"])
+def test_an_unrepresentable_price_drops_only_its_own_market(ask):
+    events = _events()
+    broken = _prop(events, "2503883")
+    broken["bestAsk"] = ask
+    broken["bestBid"] = 0.5
+
+    snapshot, _ = _snapshot(events)
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert len(snapshot.markets) == 29
+    assert "2503883" not in _by_id(snapshot)
+    assert snapshot.coverage.diagnostic_details == (
+        "price is outside the supported numeric range",
+    )
 
 
 # -- pagination and transport -------------------------------------------------------
