@@ -104,7 +104,7 @@ PRIZEPICKS_OPERATIONS = frozenset({"get_snapshot"})
 UNDERDOG_OPERATIONS = frozenset({"get_snapshot"})
 KALSHI_OPERATIONS = frozenset({"series_markets", "open_games"})
 POLYMARKET_OPERATIONS = frozenset({"get_snapshot"})
-NOVIG_OPERATIONS = frozenset({"market_page", "event_detail", "market_book_batch"})
+NOVIG_OPERATIONS = frozenset({"market_page", "event_page", "market_book_batch"})
 ROTOWIRE_OPERATIONS = frozenset({"get_injuries"})
 PROVIDER_OPERATION_CATALOG = {
     PROVIDER_NBA_STATS: NBA_STATS_OPERATIONS,

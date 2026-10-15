@@ -8,7 +8,8 @@
 * ``markets.page2.json`` -- the same listing fetched with ``after=<page 1 next>``.
   Its own ``next`` was removed so that pagination ends after two pages, and its
   last row (a championship market) comes from a later real page.
-* ``events.json`` -- ``GET /v3/public/catalog/events/<eventId>``, keyed by id.
+* ``events.json`` -- ``GET /v3/public/catalog/events?league=NBA&limit=200``,
+  trimmed to three of the 22 events (its real ``next`` is null).
 * ``batch.json`` -- ``GET https://api.novig.us/nbx/v1/markets/book/batch``
   ``?marketIds=<the 20 player markets above>&currency=CASH``, verbatim.  Most
   books are one-sided because that is what the venue returned.
@@ -30,6 +31,7 @@ OBSERVED_AT = datetime(2026, 8, 9, 20, tzinfo=timezone.utc)
 
 NYK_EVENT = "01a13a36-f390-7e63-bd56-21d5f3c5613d"
 PHI_EVENT = "019ff261-5cb3-7913-8ece-6ab58f99e8f0"
+HOU_EVENT = "01a13a6d-8396-79e2-acc1-15861fd51b33"
 
 
 def load(name: str) -> Any:
@@ -113,8 +115,8 @@ class ReplaySession:
         path = url.split(marker, 1)[1]
         if path == "markets":
             return Response(self._page(params or {}))
-        if path.startswith("events/"):
-            return Response(self.events[path.removeprefix("events/")])
+        if path == "events":
+            return Response(self.events)
         raise AssertionError(f"unrecorded request {url}")
 
     def _page(self, params: dict[str, Any]) -> Any:
