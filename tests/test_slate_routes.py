@@ -77,6 +77,61 @@ def test_missing_event_catalog_dependency_is_standard_503(client, dependencies):
     assert response.get_json()["error"]["code"] == "provider_unavailable"
 
 
+class _OnlyCollectedSeason(NoNeighbourEvents):
+    """An Event Catalog holding the 2025-26 schedule and nothing else."""
+
+    def count_events(self, season):
+        return 1 if season == "2025-26" else 0
+
+    def get_freshness(self, season, *, now):
+        return {"last_success_at": "2026-10-14T10:00:00+00:00", "event_count": 1}
+
+    def get_events_between(self, season, starts_at, ends_at):
+        assert season == "2025-26"
+        return []
+
+
+def _real_slate_service(dependencies):
+    dependencies.slate_service = SlateService(
+        _OnlyCollectedSeason(),
+        settings=RuntimeSettings(environment="testing", nba=NBASeasonSettings()),
+        clock=lambda: datetime(2026, 10, 15, 16, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize(
+    ("date", "season"),
+    [("2024-12-25", "2024-25"), ("2027-10-25", "2027-28")],
+)
+def test_slate_for_an_uncollected_season_is_a_definite_404(
+    client, dependencies, date, season
+):
+    _real_slate_service(dependencies)
+
+    response = client.get(f"/api/games/slate?date={date}")
+
+    assert response.status_code == 404
+    body = response.get_json()
+    assert body["error"]["code"] == "resource_not_found"
+    assert body["error"]["message"] == f"No NBA schedule is stored for the {season} season."
+    assert body["error"]["details"] == {"season": season}
+
+
+@pytest.mark.parametrize("date", ["2025-10-21", "2026-10-15"])
+def test_slate_for_a_collected_or_fallback_season_is_still_200(
+    client, dependencies, date
+):
+    _real_slate_service(dependencies)
+
+    response = client.get(f"/api/games/slate?date={date}")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["slate_date"] == date
+    assert body["games"] == []
+    assert body["freshness"]["schedule"]["retrieved_at"] == "2026-10-14T10:00:00+00:00"
+
+
 def test_get_slate_requires_authentication(client, monkeypatch):
     from app.utils import auth
 

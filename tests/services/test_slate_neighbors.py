@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine, event
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
-from app.errors import ProviderUnavailableError
+from app.errors import ResourceNotFoundError
 from app.migrations import run_migrations
 from app.services.event_catalog_repository import EventCatalogRepository
 from app.services.event_catalog_service import EventCatalogService
@@ -384,6 +384,6 @@ def test_a_single_game_day_has_no_neighbours(world):
     assert world.neighbours("2026-03-01") == ("2026-01-02", None)
 
 
-def test_no_stored_schedule_stays_unavailable(world):
-    with pytest.raises(ProviderUnavailableError):
+def test_no_stored_schedule_is_not_found(world):
+    with pytest.raises(ResourceNotFoundError):
         world.slate.get_slate("2026-01-02")
