@@ -268,3 +268,25 @@ def test_existing_rows_are_never_rewritten_by_sync(engine, runtime_settings):
 
     assert _status(engine, "a") == "active"
     assert _status(engine, "b") == "waitlisted"
+
+
+def test_waitlist_refusal_runs_before_rate_limiting(gate_client, engine):
+    """Authentication (and so the waitlist gate) precedes the limiter.
+
+    A waitlisted caller is never counted: past the 30/min preview limit they
+    still get the waitlisted 403, not a 429.  An admitted user is limited
+    normally.
+    """
+    gate_client.service.set_signups_open(False)
+
+    statuses = {
+        gate_client.post(
+            "/api/user/targets/preview", json={}, headers=_as("queued")
+        ).status_code
+        for _ in range(32)
+    }
+    last = gate_client.post("/api/user/targets/preview", json={}, headers=_as("queued"))
+
+    assert statuses == {403}
+    assert last.get_json() == WAITLISTED_BODY
+    assert "Retry-After" not in last.headers

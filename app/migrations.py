@@ -83,8 +83,11 @@ def _add_user_access_status(connection: Connection) -> None:
     already has both from migrations that create tables from the models.
     """
     from app.models.app_setting import AppSetting
+    from app.models.user import User
 
     AppSetting.__table__.create(connection, checkfirst=True)
+    # A database stopped before ``users`` existed gets it in its current shape.
+    User.__table__.create(connection, checkfirst=True)
     existing = {column["name"] for column in inspect(connection).get_columns("users")}
     if "access_status" not in existing:
         connection.execute(
