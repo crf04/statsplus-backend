@@ -22,11 +22,52 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 Authentication levels:
 
 - Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
-- Admin-only: `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
+- Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
   or `roles` containing `admin` for admin-only routes. Missing claims return
   `403 Forbidden`.
+
+## Beta sign-ups and the waitlist
+
+Every user row has `access_status`, either `active` or `waitlisted` (separate
+from `is_active`, which means deactivation). Migration 062 adds the column and
+backfills every existing row to `active`; it also creates the `app_settings`
+table that holds the sign-up switch. The switch defaults to open, and it lives in
+Postgres, so flipping it needs no deploy and every worker sees it on its next
+read.
+
+- While sign-ups are open, a first authenticated request creates an `active`
+  user. While paused, it creates a `waitlisted` user. Concurrent first requests
+  for one uid produce exactly one row; the loser adopts the winner's row.
+- Pausing never changes an existing user: status is only ever set at creation
+  or by an admit. A user who is already `active` keeps working.
+- A `waitlisted` user gets this on every authenticated `/api` route, with
+  `403` and no other effect:
+
+```json
+{"error": {"code": "waitlisted", "message": "The beta is full right now. You're on the waitlist and we'll let you in soon."}}
+```
+
+  Users with an admin claim are exempt, so the admin endpoints below stay
+  reachable even for an admin whose own first sign-in landed while paused.
+  Optional-auth routes apply the same check whenever a valid token is sent. If
+  the user row could not be synced, the stored status (or, with no row, the
+  sign-up switch) decides; only a database outage on an optional route lets the
+  request through.
+- The switch is read from the database only when a first sign-in creates a user
+  and by the admin endpoints (at most once per request); there is no
+  per-process cache, so a change takes effect immediately.
+
+Admin endpoints (`require_admin`; non-admins get `403 forbidden`, anonymous
+callers `401`):
+
+| Request | Response |
+| --- | --- |
+| `GET /api/admin/signups` | `{"open": true}` |
+| `PUT /api/admin/signups` with `{"open": false}` | `{"open": false}`. `open` must be a JSON boolean, else `400 invalid_input`. |
+| `GET /api/admin/users?status=waitlisted` (default; `active` also accepted) | `{"users": [{"uid", "email", "display_name", "created_at"}]}`, oldest first. Other values are `400`. |
+| `POST /api/admin/users/<uid>/admit` | `{"uid": "<uid>", "status": "active"}`. Idempotent; an unknown uid is `404`. The user's next request succeeds. |
 
 ## Correlation headers
 
@@ -64,6 +105,7 @@ The public error categories and HTTP statuses are:
 | Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
+| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins. See "Beta sign-ups and the waitlist". |
 | Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
 | Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |

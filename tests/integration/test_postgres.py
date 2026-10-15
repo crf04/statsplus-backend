@@ -88,6 +88,7 @@ def test_user_model_ddl_applies_to_postgres(pg_engine):
         "created_at",
         "last_login",
         "is_active",
+        "access_status",
     }
     assert "idx_users_email" in indexes
     assert "idx_users_last_login" in indexes

@@ -218,6 +218,7 @@ def _register_blueprints(app: "Flask") -> None:
     from app.routes.diet_routes import diet_bp
     from app.routes.user_routes import user_bp
     from app.routes.collection_routes import collection_bp
+    from app.routes.admin_routes import admin_bp
 
     app.register_blueprint(player_bp, url_prefix="/api/players")
     app.register_blueprint(game_bp, url_prefix="/api/games")
@@ -231,6 +232,7 @@ def _register_blueprints(app: "Flask") -> None:
     app.register_blueprint(diet_bp, url_prefix="/api/diet")
     app.register_blueprint(user_bp, url_prefix="/api/user")
     app.register_blueprint(collection_bp, url_prefix="/api")
+    app.register_blueprint(admin_bp, url_prefix="/api/admin")
 
 
 def _register_rate_limiting(app: "Flask") -> None:

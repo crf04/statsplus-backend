@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from math import isfinite
 import logging
 import re
+from flask import g, has_request_context
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
@@ -22,10 +23,13 @@ from app.errors import (
     ConflictError,
     InvalidConfigurationError,
     InvalidInputError,
+    OperationFailedError,
     ResourceNotFoundError,
     raise_if_query_timeout,
 )
 from app.models import get_session, SavedFilterSet, Target, TargetQualifier, User
+from app.models.app_setting import SIGNUPS_OPEN_KEY, AppSetting
+from app.models.user import ACCESS_ACTIVE, ACCESS_WAITLISTED
 from app.models.saved_filter_set import (
     SAVED_FILTER_SET_NAME_MAX_LENGTH,
     SAVED_FILTER_SET_QUERY_STRING_MAX_LENGTH,
@@ -47,6 +51,8 @@ from app.models.target import (
 from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
+
+_SIGNUPS_MEMO = "_signups_open"
 
 USER_LOGIN_TOUCH_INTERVAL = timedelta(minutes=15)
 
@@ -343,8 +349,27 @@ class UserService:
             else:
                 # Create new user
                 new_user = User.from_firebase_user(firebase_user_data)
+                new_user.access_status = (
+                    ACCESS_ACTIVE
+                    if self._signups_open(session)
+                    else ACCESS_WAITLISTED
+                )
                 session.add(new_user)
-                session.commit()
+                try:
+                    session.commit()
+                except IntegrityError:
+                    # A concurrent first request for the same uid won the
+                    # insert.  Keep its row (and status) rather than failing
+                    # or rewriting it.
+                    session.rollback()
+                    winner = (
+                        session.query(User)
+                        .filter_by(firebase_uid=firebase_uid)
+                        .first()
+                    )
+                    if winner is None:
+                        raise
+                    return winner
                 logger.info(f"Created new user: {new_user.email}")
                 return new_user
                 
@@ -361,6 +386,121 @@ class UserService:
         finally:
             session.close()
     
+    def resolve_access_status(self, firebase_uid: str) -> str:
+        """The access status a uid has, or would get at sign-up with no row.
+
+        Used when user sync returned no row.  Database errors propagate, so an
+        unanswerable question refuses the request rather than admitting it.
+        """
+        session = self._get_session()
+        try:
+            stored = (
+                session.query(User.access_status)
+                .filter_by(firebase_uid=firebase_uid)
+                .scalar()
+            )
+            if stored is not None:
+                return stored
+            return ACCESS_ACTIVE if self._signups_open(session) else ACCESS_WAITLISTED
+        finally:
+            session.close()
+
+    @staticmethod
+    def _signups_open(session) -> bool:
+        """Whether new sign-ups are admitted; open unless explicitly paused.
+
+        Read straight from Postgres on each call (no cache), so a pause takes
+        effect on every worker at once.  Only the first-sign-in path and the
+        admin endpoints read it.
+        """
+        # Read at most once per request: a first sign-in that provisions a user
+        # and then serves an admin read of the switch shares one query.
+        if has_request_context() and hasattr(g, _SIGNUPS_MEMO):
+            return getattr(g, _SIGNUPS_MEMO)
+        value = session.query(AppSetting.value).filter_by(key=SIGNUPS_OPEN_KEY).scalar()
+        is_open = value != "false"
+        if has_request_context():
+            setattr(g, _SIGNUPS_MEMO, is_open)
+        return is_open
+
+    def get_signups_open(self) -> bool:
+        """Return whether new sign-ups are currently admitted."""
+        session = self._get_session()
+        try:
+            return self._signups_open(session)
+        finally:
+            session.close()
+
+    def set_signups_open(self, open_: bool) -> bool:
+        """Persist the sign-ups switch and return it.  Existing users are untouched."""
+        value = "true" if open_ else "false"
+        session = self._get_session()
+        try:
+            for _attempt in range(2):
+                try:
+                    updated = (
+                        session.query(AppSetting)
+                        .filter_by(key=SIGNUPS_OPEN_KEY)
+                        .update({"value": value})
+                    )
+                    if not updated:
+                        session.add(AppSetting(key=SIGNUPS_OPEN_KEY, value=value))
+                    session.commit()
+                    if has_request_context():
+                        setattr(g, _SIGNUPS_MEMO, open_)
+                    return open_
+                except IntegrityError:
+                    # First-ever write raced another admin's; update instead.
+                    session.rollback()
+            raise OperationFailedError("Could not persist the sign-ups setting.")
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def list_users_by_access_status(self, status: str) -> List[Dict[str, Any]]:
+        """List users with ``status``, oldest first, as admin-facing dicts."""
+        session = self._get_session()
+        try:
+            rows = (
+                session.query(User)
+                .filter_by(access_status=status)
+                .order_by(User.created_at, User.firebase_uid)
+                .all()
+            )
+            return [
+                {
+                    "uid": row.firebase_uid,
+                    "email": row.email,
+                    "display_name": row.display_name,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+        finally:
+            session.close()
+
+    def admit_user(self, firebase_uid: str) -> str:
+        """Mark a user ``active`` (idempotent) and return the status."""
+        session = self._get_session()
+        try:
+            updated = (
+                session.query(User)
+                .filter_by(firebase_uid=firebase_uid)
+                .update({"access_status": ACCESS_ACTIVE})
+            )
+            if not updated:
+                session.rollback()
+                raise ResourceNotFoundError("No such user.")
+            session.commit()
+            return ACCESS_ACTIVE
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def get_user_by_firebase_uid(self, firebase_uid: str) -> Optional[User]:
         """
         Retrieve user by Firebase UID.
