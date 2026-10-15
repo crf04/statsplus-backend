@@ -15,7 +15,8 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+import redis
+from sqlalchemy import create_engine, text
 
 from app.config.settings import CacheSettings
 from app.models.user import User
@@ -48,11 +49,53 @@ class CountingRedis(bt.FakeRedis):
 
 
 def _two_targets(world):
+    """Two of ``OWNER``'s Targets; ``first`` was updated later, so runs first."""
+
     first = world.saved_target()
     second = world.users.create_target(
         OWNER, opponent="BOS", qualifiers=[seasons.CORNER_THREE]
     )
+    _updated(world, first, NOW - timedelta(days=1))
+    _updated(world, second, NOW - timedelta(days=2))
     return first, second
+
+
+def _updated(world, target, stamp):
+    with world.engine.begin() as connection:
+        connection.execute(
+            text("UPDATE targets SET updated_at = :stamp WHERE id = :id"),
+            {"stamp": stamp, "id": target["id"]},
+        )
+
+
+def _add_owner(world, uid, last_login):
+    with world.engine.begin() as connection:
+        connection.execute(
+            User.__table__.insert(),
+            {
+                "firebase_uid": uid,
+                "email": f"{uid}@example.com",
+                "display_name": uid,
+                "photo_url": None,
+                "created_at": NOW - timedelta(days=30),
+                "last_login": last_login,
+                "is_active": True,
+            },
+        )
+
+
+def _computed_in_order(service, monkeypatch):
+    """Record the (Target id, season) of every entry the run computes."""
+
+    order = []
+    compute = service._backtest_stateful
+
+    def record(target, **kwargs):
+        order.append((target["id"], kwargs["choice"].season))
+        return compute(target, **kwargs)
+
+    monkeypatch.setattr(service, "_backtest_stateful", record)
+    return order
 
 
 def _stale_target(world):
@@ -62,19 +105,7 @@ def _stale_target(world):
     so an identical definition would share a recent Target's entry.
     """
 
-    with world.engine.begin() as connection:
-        connection.execute(
-            User.__table__.insert(),
-            {
-                "firebase_uid": STALE_OWNER,
-                "email": "stale@example.com",
-                "display_name": STALE_OWNER,
-                "photo_url": None,
-                "created_at": NOW - timedelta(days=30),
-                "last_login": NOW - timedelta(days=15),
-                "is_active": True,
-            },
-        )
+    _add_owner(world, STALE_OWNER, NOW - timedelta(days=15))
     return world.users.create_target(
         STALE_OWNER, opponent="LAL", qualifiers=[seasons.CORNER_THREE]
     )
@@ -142,12 +173,15 @@ def test_a_target_whose_owner_has_not_logged_in_for_14_days_is_not_computed(worl
     assert _statuses(service) == ["ok"]
 
 
-def test_a_second_run_with_nothing_changed_computes_nothing(world):
+def test_a_second_run_with_nothing_changed_computes_nothing(world, monkeypatch):
     _two_targets(world)
     redis = CountingRedis()
     service = world.backtests(redis_client=redis)
     service.precompute(now=NOW)
     writes = len(redis.sets)
+    monkeypatch.setattr(
+        service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed")
+    )
 
     result = service.precompute(now=NOW)
 
@@ -156,32 +190,80 @@ def test_a_second_run_with_nothing_changed_computes_nothing(world):
 
 
 def test_a_spent_budget_stops_after_the_current_target_and_the_next_run_resumes(
-    world,
+    world, monkeypatch
 ):
-    _two_targets(world)
+    first, second = _two_targets(world)
+    redis_client = CountingRedis()
     _with_budget(world, 0)
-    service = world.backtests(redis_client=CountingRedis())
+    stopped = world.backtests(redis_client=redis_client).precompute(now=NOW)
+    _with_budget(world, 180)
+    service = world.backtests(redis_client=redis_client)
+    order = _computed_in_order(service, monkeypatch)
 
-    stopped = service.precompute(now=NOW)
     resumed = service.precompute(now=NOW)
 
     assert _without_duration(stopped) == _counts(computed=1, remaining=1)
     assert _without_duration(resumed) == _counts(already_cached=1, computed=1)
+    assert order == [(second["id"], LAST)]
     assert _statuses(service) == ["ok", "ok"]
 
 
-def test_the_published_season_is_filled_first_and_each_season_has_an_entry(world):
-    first, _second = _two_targets(world)
+def test_a_spent_budget_also_stops_a_run_of_cached_entries(world):
+    """Each clock read is ten seconds later, so the five-second budget is
+    spent by the first entry's check whether it computed or not."""
+
+    _two_targets(world)
+    redis_client = CountingRedis()
+    world.backtests(redis_client=redis_client).precompute(now=NOW)
+    _with_budget(world, 5)
+    ticks = iter(range(0, 1000, 10))
+
+    result = world.backtests(redis_client=redis_client).precompute(
+        now=NOW, clock=lambda: next(ticks)
+    )
+
+    assert result == {**_counts(already_cached=1, remaining=1), "duration_ms": 20000}
+
+
+def test_the_published_season_is_filled_first_and_each_season_has_an_entry(
+    world, monkeypatch
+):
+    first, second = _two_targets(world)
     seasons._activate_new_season(world)
-    service = world.backtests(redis_client=CountingRedis())
+    redis_client = CountingRedis()
+    service = world.backtests(redis_client=redis_client)
+    order = _computed_in_order(service, monkeypatch)
 
     result = service.precompute(now=NOW)
 
     assert _without_duration(result) == _counts(
         seasons=[NEW, LAST], eligible=4, computed=4
     )
-    assert service.backtest(OWNER, first["id"], season=NEW)[1] == "hit"
-    assert service.backtest(OWNER, first["id"], season=LAST)[1] == "hit"
+    assert order == [
+        (first["id"], NEW), (second["id"], NEW),
+        (first["id"], LAST), (second["id"], LAST),
+    ]
+    reader = world.backtests(redis_client=redis_client)
+    assert reader.backtest(OWNER, first["id"], season=NEW)[1] == "hit"
+    assert reader.backtest(OWNER, first["id"], season=LAST)[1] == "hit"
+
+
+def test_targets_are_filled_by_owner_login_then_target_update_newest_first(
+    world, monkeypatch
+):
+    first, second = _two_targets(world)
+    _add_owner(world, "earlier-uid", NOW - timedelta(days=1))
+    earlier = world.users.create_target(
+        "earlier-uid", opponent="LAL", qualifiers=[seasons.CORNER_THREE]
+    )
+    # Updated most recently of all, but its owner logged in less recently.
+    _updated(world, earlier, NOW)
+    service = world.backtests(redis_client=CountingRedis())
+    order = _computed_in_order(service, monkeypatch)
+
+    service.precompute(now=NOW)
+
+    assert order == [(first["id"], LAST), (second["id"], LAST), (earlier["id"], LAST)]
 
 
 def test_an_unavailable_season_is_skipped(world):
@@ -216,7 +298,37 @@ def test_one_targets_failure_is_logged_and_the_run_continues(
         f"Target backtest precompute failed target_id={first['id']} season={LAST}"
         in caplog.messages
     )
+    # ``first`` ran first; the Target after it was still filed.
     assert service.backtest(OWNER, second["id"])[1] == "hit"
+
+
+class DeadRedis(CountingRedis):
+    """A Redis whose ``EXISTS`` fails the way an outage does."""
+
+    def exists(self, key):
+        self.exists_calls.append(key)
+        raise redis.exceptions.ConnectionError("connection refused")
+
+
+def test_an_unreachable_redis_stops_the_run_and_opens_the_circuit(
+    world, monkeypatch, caplog
+):
+    _two_targets(world)
+    dead = DeadRedis()
+    service = world.backtests(redis_client=dead)
+    monkeypatch.setattr(
+        service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed")
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.target_backtest"):
+        first = service.precompute(now=NOW)
+        again = service.precompute(now=NOW)
+
+    assert _without_duration(first) == _counts(remaining=2)
+    assert _without_duration(again) == _counts(remaining=2)
+    # The second run met the open circuit and called Redis not at all.
+    assert len(dead.exists_calls) == 1
+    assert "Target backtest precompute stopped: result cache unavailable" in caplog.messages
 
 
 def test_the_run_logs_one_structured_line(world, caplog):

@@ -2387,10 +2387,11 @@ is within 14 days (no Target records its own reads). The step covers every
 is `season_unavailable`. For each Target it checks the single read's key with
 `EXISTS`, and on a miss computes through `_backtest_stateful`, the single
 read's own path, which writes the entry. It stops between Targets once
-`TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default 180) has passed. The
-budget is checked only after a computed Target, so every run makes progress
-and the next run carries on. One Target's failure is logged with its id and
-counted. Each run logs one `target_backtest_precompute` line (`seasons`,
+`TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default 180) has passed, and the
+next run carries on past the entries this one filed. One Target's failure is
+logged with its id and counted. `EXISTS` shares the read and write's circuit
+breaker, so an unreachable Redis ends the run rather than computing results
+nothing can store. Each run logs one `target_backtest_precompute` line (`seasons`,
 `eligible`, `already_cached`, `computed`, `bypassed`, `failed`, `remaining`,
 `duration_ms`). With the cache off (`ENABLE_CACHE` or
 `TARGET_BACKTEST_CACHE_ENABLED` false, or no Redis client) it logs

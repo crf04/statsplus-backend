@@ -557,9 +557,11 @@ class TargetBacktestService:
         computed through the single read's path, which writes it.
 
         The budget (``target_backtest_precompute_budget_seconds``) is checked
-        after each computed Target, so every run computes at least one and
-        the next run carries on past the entries this one filed.  One
-        Target's failure is logged and counted; it does not stop the run.
+        after each Target, so a spent budget stops the run there and the next
+        run carries on past the entries this one filed.  One Target's failure
+        is logged and counted; it does not stop the run.  Redis being
+        unreachable does: an ``EXISTS`` that fails, or an open circuit, ends
+        the run with the rest ``remaining``.
 
         With the cache off this contacts no Redis, computes nothing, logs
         the skip, and returns ``None``.  Otherwise it logs and returns the
@@ -605,34 +607,42 @@ class TargetBacktestService:
             for choice, generation in work
             for target in targets
         ]
-        done = 0
-        for choice, generation, target in entries:
-            done += 1
-            try:
-                key = self._cache_key(target, choice.season, generation)
-                if self._redis.exists(key):
-                    counts["already_cached"] += 1
-                    continue
-                _body, state = self._backtest_stateful(target, choice=choice)
-                outcome = {"hit": "already_cached", "miss": "computed"}.get(
-                    state, "bypassed"
-                )
-                counts[outcome] += 1
-            except Exception:  # isolated per Target
+        remaining = 0
+        for index, (choice, generation, target) in enumerate(entries):
+            cached = self._cache_exists(
+                self._cache_key(target, choice.season, generation)
+            )
+            if cached is None:
                 logger.warning(
-                    "Target backtest precompute failed target_id=%s season=%s",
-                    target.get("id"),
-                    choice.season,
-                    exc_info=True,
+                    "Target backtest precompute stopped: result cache unavailable"
                 )
-                counts["failed"] += 1
+                remaining = len(entries) - index
+                break
+            if cached:
+                counts["already_cached"] += 1
+            else:
+                try:
+                    _body, state = self._backtest_stateful(target, choice=choice)
+                    outcome = {"hit": "already_cached", "miss": "computed"}.get(
+                        state, "bypassed"
+                    )
+                    counts[outcome] += 1
+                except Exception:  # isolated per Target
+                    logger.warning(
+                        "Target backtest precompute failed target_id=%s season=%s",
+                        target.get("id"),
+                        choice.season,
+                        exc_info=True,
+                    )
+                    counts["failed"] += 1
             if clock() - started >= budget:
+                remaining = len(entries) - index - 1
                 break
         result = {
             "seasons": [choice.season for choice, _generation in work],
             "eligible": len(entries),
             **counts,
-            "remaining": len(entries) - done,
+            "remaining": remaining,
             "duration_ms": round((clock() - started) * 1000),
         }
         logger.info(
@@ -1005,6 +1015,24 @@ class TargetBacktestService:
         try:
             return json.loads(zlib.decompress(payload).decode("utf-8"))
         except (TypeError, ValueError, zlib.error, json.JSONDecodeError):
+            return None
+
+    def _cache_exists(self, key: str) -> bool | None:
+        """Whether an entry exists under ``key``; ``None`` when Redis is down.
+
+        Honors the same circuit breaker as the read and the write: an open
+        circuit skips the call, and a connection or timeout error opens it.
+        """
+
+        if self._breaker.is_open():
+            return None
+        try:
+            return bool(self._redis.exists(key))
+        except (
+            redis.exceptions.ConnectionError,
+            redis.exceptions.TimeoutError,
+        ) as error:
+            self._breaker.record_failure(error)
             return None
 
     def _cache_write(self, key: str, evidence: Mapping[str, Any]) -> None:
