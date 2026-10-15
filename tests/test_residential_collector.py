@@ -230,6 +230,9 @@ def test_schedule_still_rejects_a_nonzero_unresolvable_team():
     half_set = _feed(_OPENER[:9] + [0] + _OPENER[10:])
     with pytest.raises(ProviderContractError, match="identity_unresolved"):
         normalize_schedule_response(half_set, season="2026-27", cutoff=NOW)
+    fractional = _feed(_CUP_TBD[:9] + [0.5] + _CUP_TBD[10:12] + [-0.5] + _CUP_TBD[13:])
+    with pytest.raises(ProviderContractError, match="identity_unresolved"):
+        normalize_schedule_response(fractional, season="2026-27", cutoff=NOW)
 
 
 def test_normalizers_preserve_provider_categories_and_scope_evidence():

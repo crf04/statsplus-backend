@@ -238,7 +238,7 @@ def _is_zero_team_id(value: Any) -> bool:
     if isinstance(value, bool) or value is None:
         return False
     try:
-        return int(value) == 0
+        return float(value) == 0
     except (TypeError, ValueError, OverflowError):
         return False
 
