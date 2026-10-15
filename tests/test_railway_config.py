@@ -21,3 +21,19 @@ def test_railway_health_checks_the_unauthenticated_health_route():
 
 def test_no_root_railway_json_applies_web_settings_to_workers():
     assert not Path("railway.json").exists()
+
+
+def test_ledger_refresh_cron_runs_inside_the_daily_manifest_window():
+    deploy = json.loads(Path("railway.ledger.json").read_text(encoding="utf-8"))["deploy"]
+
+    # ledger_refresh.py collects only under an executable manifest, which the
+    # player-shooting tick issues for 03:45-11:00 Central (08:45-16:00 UTC in
+    # CDT, 09:45-17:00 in CST); every run must land inside both.
+    assert deploy["cronSchedule"] == "15 10,12,14 * * *"
+    assert deploy["startCommand"] == (
+        "sh -c 'python scripts/ledger_refresh.py \"$LEDGER_SEASON\" "
+        "--database-url \"$DATABASE_URL\" --compose'"
+    )
+    assert deploy["preDeployCommand"] == "python scripts/migrate.py"
+    assert deploy["restartPolicyType"] == "NEVER"
+    assert "healthcheckPath" not in deploy
