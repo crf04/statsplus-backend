@@ -403,6 +403,32 @@ unchanged, and the hold applies to `player_game_logs` itself.
 calendar season. No reader uses them while the stream is enabled, and the
 cutover does not read them.
 
+**Verify.** Before the cutover, check the held candidates against NBA.com's
+figures for the same games (read-only; no writes, pointer moves, or artifacts):
+
+```
+python scripts/season_verify.py --season 2026-27 [--database-url …] \
+  [--proxy-url "$COLLECTOR_NBA_PROXY_URL"] [--output report.json]
+```
+
+For each ledger stream it takes the newest held candidate (the one the dry run
+would move) and bounds NBA.com to the US-Eastern date of the latest game its
+bound manifest and Event Catalog govern (never the payload's own games), Regular
+Season: `player_game_logs` per player-game against PlayerGameLogs, `player_per36`
+against LeagueDashPlayerStats `Per36`, and `traditional_opponent_*` team counts
+against LeagueDashTeamStats `Opponent` totals (`LastNGames=15` for L15). It
+reports rows compared, exact and within-tolerance matches, ledger-only and
+NBA-only identities, governed games the payload lacks or that it holds without
+governance (either fails the stream), and the ten largest mismatches with both values. Assist
+streams have no NBA.com reference and are reported as `no_reference`. It exits 1
+unless every reference stream matches every identity (`--threshold` lowers the
+required match rate). NBA.com games outside the governed set are dropped from
+the game-log reference; an aggregate whose NBA.com games-played exceeds the
+governed count is reported `window_incomparable` (also exit 1) rather than as
+stat mismatches, and a null NBA.com statistic aborts the run (exit 2). stats.nba.com blocks datacenter IPs: run it from a
+residential machine or pass `--proxy-url`, which is never printed. Attach the
+report to the cutover issue.
+
 **Cutover.** Once the new season's collection is composing nightly:
 
 1. Plan it, which writes nothing:
