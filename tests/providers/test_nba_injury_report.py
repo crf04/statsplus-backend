@@ -199,6 +199,12 @@ def test_garbage_bytes_are_a_response_error_not_an_empty_report():
         parse_injury_report(b"%PDF-1.4 truncated")
 
 
+TITLE = [
+    (62.0, 289.0, "Injury"), (62.0, 355.0, "Report:"), (62.0, 438.0, "12/25/25"),
+    (62.0, 539.0, "05:00"), (62.0, 602.0, "PM"),
+]
+
+
 def test_reason_line_at_the_foot_of_a_page_prefixes_the_next_pages_row(monkeypatch):
     """Page 1 ends with a reason-only line; the player/status line opens page 2."""
 
@@ -209,7 +215,7 @@ def test_reason_line_at_the_foot_of_a_page_prefixes_the_next_pages_row(monkeypat
         (115.2, 624.0, "Status"), (115.2, 666.0, "Reason"),
     ]
     page_one = [
-        (62.0, 289.0, "Injury"), *header,
+        *TITLE, *header,
         (136.3, 24.0, "12/25/2025"), (136.3, 121.0, "02:30"), (136.3, 201.0, "SAS@OKC"),
         (136.3, 265.0, "San"), (136.3, 282.0, "Antonio"), (136.3, 317.0, "Spurs"),
         (136.3, 426.0, "Ingram,"), (136.3, 459.0, "Harrison"), (136.3, 587.0, "Out"),
@@ -217,7 +223,7 @@ def test_reason_line_at_the_foot_of_a_page_prefixes_the_next_pages_row(monkeypat
         (500.0, 667.0, "Injury"), (500.0, 700.0, "Management;"),  # foot of page 1
     ]
     page_two = [
-        (62.0, 289.0, "Injury"),
+        *TITLE,
         (87.9, 426.0, "Jones"), (87.9, 451.0, "Garcia,"), (87.9, 481.0, "David"),
         (87.9, 587.0, "Questionable"), (87.9, 667.0, "Left"), (87.9, 690.0, "Ankle"),
     ]
@@ -278,6 +284,8 @@ def test_evidence_documents_round_trip():
         "raw_status": "Questionable",
         "reason": "Injury/Illness - Left Ankle; Sprain",
         "source_url": BASE + HOURLY,
+        "game_date": "2025-10-21",
+        "matchup": "HOU@OKC",
     }
     assert type(entry).from_document(entry.to_document()) == entry
 
@@ -474,25 +482,216 @@ def test_transport_timeout_is_a_sanitized_provider_failure():
     assert telemetry.get_recorded_provider_events()[-1]["outcome"] == "timeout"
 
 
+class Clock:
+    """A manual monotonic clock that a fake CDN advances."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class SlowSite(Site):
+    def __init__(self, clock, seconds, files=None):
+        super().__init__(files)
+        self.clock = clock
+        self.seconds = seconds
+
+    def get(self, url, *, timeout):
+        response = super().get(url, timeout=timeout)
+        self.clock.now += self.seconds
+        return response
+
+
+def _slow_provider(site, clock, **providers):
+    return NBAInjuryReportProvider(
+        session=site,
+        settings=RuntimeSettings(
+            environment="testing",
+            providers=ProviderSettings(
+                injury_report_probe_delay_seconds=0, **providers
+            ),
+        ),
+        clock=lambda: _utc(2025, 12, 25, 22, 40),
+        monotonic=clock,
+        sleep=lambda seconds: None,
+    )
+
+
 def test_the_whole_walk_respects_the_deadline():
+    clock = Clock()
+    site = SlowSite(clock, 5.0)
+
+    with pytest.raises(ProviderUnavailableError):
+        _slow_provider(site, clock, injury_report_deadline_seconds=12.0).get_snapshot()
+
+    # Requests at t=0, 5, 10; at t=15 the 12 s budget is spent.
+    assert len(site.calls) == 3
+    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == "timeout"
+
+
+def test_each_request_is_capped_by_the_remaining_budget():
+    clock = Clock()
+    site = SlowSite(clock, 5.0)
+
+    with pytest.raises(ProviderUnavailableError):
+        _slow_provider(
+            site,
+            clock,
+            injury_report_deadline_seconds=12.0,
+            injury_report_connect_timeout_seconds=3.0,
+            injury_report_read_timeout_seconds=8.0,
+        ).get_snapshot()
+
+    assert [timeout for _, timeout in site.calls] == [(3.0, 8.0), (3.0, 7.0), (2.0, 2.0)]
+
+
+def test_a_report_that_arrives_after_the_deadline_is_not_served():
+    clock = Clock()
+    site = SlowSite(
+        clock, 7.0, {"Injury-Report_2025-12-25_05_30PM.pdf": (FIXTURES / QUARTER_LATE).read_bytes()}
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        _slow_provider(site, clock, injury_report_deadline_seconds=5.0).get_snapshot()
+
+    assert len(site.calls) == 1
+
+
+def test_probes_are_paced_and_a_failed_search_is_not_repeated_during_the_cooldown():
+    clock = Clock()
     site = Site()
-    ticks = iter(range(0, 1000, 5))
+    pauses = []
     provider = NBAInjuryReportProvider(
         session=site,
         settings=RuntimeSettings(
             environment="testing",
-            providers=ProviderSettings(injury_report_deadline_seconds=12.0),
+            providers=ProviderSettings(
+                injury_report_probe_delay_seconds=0.1,
+                injury_report_failure_cooldown_seconds=300.0,
+            ),
         ),
         clock=lambda: _utc(2025, 12, 25, 22, 40),
-        monotonic=lambda: float(next(ticks)),
+        monotonic=clock,
+        sleep=pauses.append,
     )
 
+    for _ in range(3):
+        with pytest.raises(ProviderUnavailableError):
+            provider.get_snapshot()
+
+    assert len(site.calls) == 12  # one probe sequence for three reads
+    assert pauses == [0.1] * 11
+    clock.now = 299.0
     with pytest.raises(ProviderUnavailableError):
         provider.get_snapshot()
+    assert len(site.calls) == 12
+    clock.now = 301.0
+    with pytest.raises(ProviderUnavailableError):
+        provider.get_snapshot()
+    assert len(site.calls) == 24  # cooldown over: one more full sequence
 
-    # Tick 0 sets the deadline (12 s); checks at 5 and 10 pass, 15 is past it.
-    assert len(site.calls) == 2
-    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == "timeout"
+
+def test_a_successful_read_after_a_failure_clears_nothing_but_serves_normally():
+    clock = Clock()
+    site = Site()
+    provider = _slow_provider(site, clock, injury_report_failure_cooldown_seconds=0.0)
+    with pytest.raises(ProviderUnavailableError):
+        provider.get_snapshot()
+    site.files[QUARTER_LATE] = (FIXTURES / QUARTER_LATE).read_bytes()
+    site.files["Injury-Report_2025-12-25_05_30PM.pdf"] = site.files[QUARTER_LATE]
+
+    assert len(provider.get_snapshot().entries) == 115
+
+
+def test_a_report_stamped_after_now_is_not_current_yet():
+    # The 05PM file's own header says 05:30 PM.  At 5:10 PM ET it is from the
+    # future, so discovery moves on to the older file.
+    hourly = (FIXTURES / HOURLY).read_bytes()
+    site = Site({"Injury-Report_2025-10-21_05PM.pdf": hourly})
+
+    with pytest.raises(ProviderUnavailableError):
+        _provider(site, _utc(2025, 10, 21, 21, 10)).get_snapshot()  # 5:10 PM EDT
+    requested = [url.removeprefix(BASE) for url, _ in site.calls]
+    assert requested[:3] == [
+        "Injury-Report_2025-10-21_05_00PM.pdf",
+        "Injury-Report_2025-10-21_05PM.pdf",  # found, but stamped 05:30 PM
+        "Injury-Report_2025-10-21_04_45PM.pdf",  # so the walk went on
+    ]
+    assert len(requested) == 12
+
+    snapshot = _provider(site, _utc(2025, 10, 21, 21, 40)).get_snapshot()  # 5:40 PM
+    assert len(snapshot.entries) == 54
+
+
+def test_header_time_is_the_report_time():
+    assert _report(HOURLY).report_time == datetime(
+        2025, 10, 21, 17, 30, tzinfo=report_time_from_name(HOURLY).tzinfo
+    )
+    assert _report(QUARTER_LATE).report_time.hour == 17
+
+
+def test_candidates_walk_the_utc_timeline_across_the_fall_back_hour():
+    # 06:10Z on 2025-11-02 is 1:10 AM EST, the second 1 o'clock hour.
+    names = candidate_report_names(_utc(2025, 11, 2, 6, 10), max_requests=8)
+
+    assert names == [
+        "Injury-Report_2025-11-02_01_00AM.pdf",  # 01:00 EST
+        "Injury-Report_2025-11-02_01AM.pdf",
+        "Injury-Report_2025-11-02_01_45AM.pdf",  # 01:45 EDT
+        "Injury-Report_2025-11-02_01_30AM.pdf",
+        "Injury-Report_2025-11-02_01_15AM.pdf",
+        "Injury-Report_2025-11-02_12_45AM.pdf",  # 00:45 EDT; 01:00 EDT repeats
+        "Injury-Report_2025-11-02_12_30AM.pdf",
+        "Injury-Report_2025-11-02_12_15AM.pdf",
+    ]
+
+
+def test_a_report_with_lines_the_parser_cannot_place_is_rejected_whole(monkeypatch):
+    import app.providers.nba_injury_report as module
+
+    site = Site({"Injury-Report_2025-12-25_05_30PM.pdf": b"%PDF-1.4 stand-in"})
+    good = _report(QUARTER_LATE)
+    partial = module.ParsedInjuryReport(
+        title=good.title,
+        rows=good.rows,
+        unsubmitted=good.unsubmitted,
+        unparsed=("Out Out",),
+        report_time=good.report_time,
+    )
+    monkeypatch.setattr(module, "parse_injury_report", lambda content: partial)
+
+    with pytest.raises(ProviderUnavailableError):
+        _provider(site, _utc(2025, 12, 25, 22, 40)).get_snapshot()
+
+
+def test_two_rows_merged_into_one_line_are_unparsed_not_a_status(monkeypatch):
+    header = [
+        (115.2, 23.0, "Game"), (115.2, 53.0, "Date"), (115.2, 119.0, "Game"),
+        (115.2, 149.0, "Time"), (115.2, 200.0, "Matchup"), (115.2, 264.0, "Team"),
+        (115.2, 425.0, "Player"), (115.2, 457.0, "Name"), (115.2, 585.0, "Current"),
+        (115.2, 624.0, "Status"), (115.2, 666.0, "Reason"),
+    ]
+    page = [
+        *TITLE, *header,
+        (136.3, 24.0, "12/25/2025"), (136.3, 121.0, "02:30"), (136.3, 201.0, "SAS@OKC"),
+        (136.3, 265.0, "San"), (136.3, 282.0, "Antonio"), (136.3, 317.0, "Spurs"),
+        (136.3, 426.0, "Ingram,"), (136.3, 459.0, "Harrison"),
+        (136.3, 587.0, "Out"), (136.3, 610.0, "Out"), (136.3, 667.0, "Knee"),
+    ]
+
+    class FakeReader:
+        def __init__(self, stream):
+            self.pages = ["p"]
+
+    monkeypatch.setattr("app.providers.nba_injury_report.PdfReader", FakeReader)
+    monkeypatch.setattr("app.providers.nba_injury_report._fragments", lambda p: page)
+
+    report = parse_injury_report(b"x")
+
+    assert report.rows == ()
+    assert report.unparsed == ("12/25/2025 02:30 SAS@OKC San Antonio Spurs Ingram, Harrison Out Out Knee",)
 
 
 def test_the_adapter_never_names_another_publisher():

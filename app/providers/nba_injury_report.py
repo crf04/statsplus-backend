@@ -77,6 +77,9 @@ _COLUMNS = ("date", "time", "matchup", "team", "player", "status", "reason")
 _DATE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 _MATCHUP = re.compile(r"^([A-Z]{3})@([A-Z]{3})$")
 _NOT_SUBMITTED = "NOT YET SUBMITTED"
+_TITLE_TIME = re.compile(
+    r"Injury Report:\s*(\d{2})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2})\s+(AM|PM)"
+)
 _REPORT_NAME = re.compile(
     r"^Injury-Report_(\d{4}-\d{2}-\d{2})_(\d{2})(?:_(\d{2}))?(AM|PM)\.pdf$"
 )
@@ -94,6 +97,10 @@ class InjuryEntryEvidence:
     raw_status: str
     reason: str
     source_url: str
+    #: The game this row describes: Eastern game date (ISO) and ``AWAY@HOME``.
+    #: Empty only on evidence stored before the fields existed.
+    game_date: str = ""
+    matchup: str = ""
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -105,6 +112,8 @@ class InjuryEntryEvidence:
             "raw_status": self.raw_status,
             "reason": self.reason,
             "source_url": self.source_url,
+            "game_date": self.game_date,
+            "matchup": self.matchup,
         }
 
     @classmethod
@@ -125,6 +134,8 @@ class InjuryEntryEvidence:
             raw_status=str(value["raw_status"]),
             reason=str(value.get("reason") or ""),
             source_url=str(value["source_url"]),
+            game_date=str(value.get("game_date") or ""),
+            matchup=str(value.get("matchup") or ""),
         )
 
 
@@ -188,6 +199,9 @@ class ParsedInjuryReport:
     #: Reason-column text that fits neither a status row nor a team-level
     #: marker; an empty tuple means every printed line was understood.
     unparsed: tuple[str, ...]
+    #: The header timestamp ("Injury Report: 10/21/25 05:30 PM", Eastern),
+    #: which can differ from the time in the file name.
+    report_time: datetime | None = None
 
 
 def report_file_name(moment: datetime, *, quarter_hour: bool) -> str:
@@ -232,11 +246,14 @@ def candidate_report_names(
     )
     names: list[str] = []
     while len(names) < max_requests:
-        names.append(report_file_name(slot, quarter_hour=True))
-        if slot.minute == 0 and len(names) < max_requests:
-            names.append(report_file_name(slot, quarter_hour=False))
-        # Wall-clock arithmetic through UTC so a DST change cannot repeat or
-        # skip a slot.
+        # A fall-back hour prints the same wall-clock name twice; probe it once.
+        for quarter_hour in (True, False):
+            if quarter_hour is False and slot.minute != 0:
+                break
+            name = report_file_name(slot, quarter_hour=quarter_hour)
+            if name not in names and len(names) < max_requests:
+                names.append(name)
+        # Step through UTC so a DST change cannot repeat or skip a slot.
         slot = (slot.astimezone(timezone.utc) - timedelta(minutes=15)).astimezone(
             EASTERN
         )
@@ -404,14 +421,19 @@ def parse_injury_report(data: bytes) -> ParsedInjuryReport:
             ):
                 unparsed.append(_join([cluster.text(c) for c in _COLUMNS]))
                 continue
-            game_date = datetime.strptime(carried["date"], "%m/%d/%Y").date()
+            try:
+                game_date = datetime.strptime(carried["date"], "%m/%d/%Y").date()
+            except ValueError:
+                unparsed.append(_join([cluster.text(c) for c in _COLUMNS]))
+                continue
             tricode = _tricode_for_team(carried["team"])
             if reason == _NOT_SUBMITTED and not status and not player:
                 unsubmitted.append(
                     UnsubmittedTeam(game_date, matchup, carried["team"], tricode)
                 )
                 continue
-            if not status or not player:
+            if not player or status not in REPORT_STATUSES:
+                # Includes two rows merged into one ("Out Out").
                 unparsed.append(_join([cluster.text(c) for c in _COLUMNS]))
                 continue
             if pending_prefix:
@@ -431,11 +453,27 @@ def parse_injury_report(data: bytes) -> ParsedInjuryReport:
             )
     if pending_prefix:
         unparsed.append(pending_prefix)
+    header = _TITLE_TIME.search(title)
+    if header is None:
+        raise ProviderResponseError("injury report has no readable header time")
+    month, day, year, hour, minute, meridiem = header.groups()
+    try:
+        report_time = datetime(
+            2000 + int(year),
+            int(month),
+            int(day),
+            int(hour) % 12 + (12 if meridiem == "PM" else 0),
+            int(minute),
+            tzinfo=EASTERN,
+        )
+    except ValueError as error:
+        raise ProviderResponseError("injury report header time is invalid") from error
     return ParsedInjuryReport(
         title=title,
         rows=tuple(rows),
         unsubmitted=tuple(unsubmitted),
         unparsed=tuple(unparsed),
+        report_time=report_time,
     )
 
 
@@ -472,6 +510,8 @@ def entries_from_report(
                 raw_status=row.status,
                 reason=row.reason,
                 source_url=source_url,
+                game_date=row.game_date.isoformat(),
+                matchup=row.matchup,
             )
         )
     return tuple(entries)
@@ -497,11 +537,17 @@ class NBAInjuryReportProvider:
         settings: RuntimeSettings | None = None,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.settings = settings or get_runtime_settings()
         self.session = session or requests.Session()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.monotonic = monotonic
+        self.sleep = sleep
+        #: Monotonic time before which a failed search is not repeated.  Local
+        #: to this worker: the service's single-flight already serializes
+        #: refreshes within it.
+        self._cooldown_until = float("-inf")
         self.session.headers.update(
             {
                 "Accept": "application/pdf",
@@ -510,62 +556,94 @@ class NBAInjuryReportProvider:
         )
 
     def get_snapshot(self) -> InjuryProviderSnapshot:
-        """Find, fetch and normalize the newest report at or before now."""
+        """Find, fetch and normalize the newest report at or before now.
+
+        "Newest" is by the report's own header time, which can run past the
+        time in its file name; a report stamped after now is not yet current.
+        After a failed search no request is made until the cooldown ends.
+        """
 
         retrieved_at = self._now_utc()
         providers = self.settings.providers
-        deadline = self.monotonic() + providers.injury_report_deadline_seconds
+        started = self.monotonic()
+        if started < self._cooldown_until:
+            raise ProviderUnavailableError(
+                "The injury provider recently failed; retrying shortly."
+            )
+        deadline = started + providers.injury_report_deadline_seconds
         try:
             with provider_call(PROVIDER_NBA_INJURY_REPORT, "get_injuries") as tracker:
-                for name in candidate_report_names(
-                    retrieved_at, max_requests=self.MAX_REQUESTS
-                ):
-                    if self.monotonic() >= deadline:
-                        raise requests.Timeout("injury report deadline exceeded")
-                    response = self.session.get(
-                        self.BASE_URL + name,
-                        timeout=(
-                            providers.injury_report_connect_timeout_seconds,
-                            providers.injury_report_read_timeout_seconds,
-                        ),
-                    )
-                    tracker.status_code = getattr(response, "status_code", None)
-                    if response.status_code in (403, 404):
-                        continue  # no report was published at that time
-                    response.raise_for_status()
-                    content = response.content
-                    if not content.startswith(b"%PDF"):
-                        raise ProviderResponseError(
-                            "injury report response is not a PDF"
-                        )
-                    url = self.BASE_URL + name
-                    report = parse_injury_report(content)
-                    if report.unparsed or not (report.rows or report.unsubmitted):
-                        raise ProviderResponseError(
-                            "injury report layout was not understood"
-                        )
-                    entries = entries_from_report(report, source_url=url)
-                    raw = [row.to_document() for row in report.rows]
-                    raw.extend(
-                        {
-                            "game_date": team.game_date.isoformat(),
-                            "matchup": team.matchup,
-                            "team": team.team_name,
-                            "team_tricode": team.team_tricode,
-                            "status": _NOT_SUBMITTED,
-                        }
-                        for team in report.unsubmitted
-                    )
-                    return InjuryProviderSnapshot(raw, entries, retrieved_at)
-                raise ProviderResponseError("no recent injury report was published")
+                snapshot = self._search(retrieved_at, deadline, tracker)
         except ProviderResponseError as error:
+            self._cooldown_until = started + providers.injury_report_failure_cooldown_seconds
             raise ProviderUnavailableError(
                 "The injury provider returned an invalid response.", detail=error
             ) from error
         except requests.RequestException as error:
+            self._cooldown_until = started + providers.injury_report_failure_cooldown_seconds
             raise ProviderUnavailableError(
                 "The injury provider could not be reached.", detail=error
             ) from error
+        return snapshot
+
+    def _search(
+        self, retrieved_at: datetime, deadline: float, tracker: Any
+    ) -> InjuryProviderSnapshot:
+        providers = self.settings.providers
+        requested = 0
+        for name in candidate_report_names(
+            retrieved_at, max_requests=self.MAX_REQUESTS
+        ):
+            if requested:
+                self.sleep(
+                    max(
+                        0.0,
+                        min(
+                            providers.injury_report_probe_delay_seconds,
+                            deadline - self.monotonic(),
+                        ),
+                    )
+                )
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                raise requests.Timeout("injury report deadline exceeded")
+            requested += 1
+            response = self.session.get(
+                self.BASE_URL + name,
+                timeout=(
+                    min(providers.injury_report_connect_timeout_seconds, remaining),
+                    min(providers.injury_report_read_timeout_seconds, remaining),
+                ),
+            )
+            tracker.status_code = getattr(response, "status_code", None)
+            if response.status_code in (403, 404):
+                continue  # no report was published at that time
+            response.raise_for_status()
+            content = response.content
+            if not content.startswith(b"%PDF"):
+                raise ProviderResponseError("injury report response is not a PDF")
+            url = self.BASE_URL + name
+            report = parse_injury_report(content)
+            if report.unparsed or not (report.rows or report.unsubmitted):
+                raise ProviderResponseError("injury report layout was not understood")
+            if report.report_time > retrieved_at:
+                continue  # stamped after now: not yet current, try an older one
+            entries = entries_from_report(report, source_url=url)
+            raw = [row.to_document() for row in report.rows]
+            raw.extend(
+                {
+                    "game_date": team.game_date.isoformat(),
+                    "matchup": team.matchup,
+                    "team": team.team_name,
+                    "team_tricode": team.team_tricode,
+                    "status": _NOT_SUBMITTED,
+                }
+                for team in report.unsubmitted
+            )
+            if self.monotonic() >= deadline:
+                raise requests.Timeout("injury report deadline exceeded")
+            return InjuryProviderSnapshot(raw, entries, retrieved_at)
+        raise ProviderResponseError("no recent injury report was published")
 
     def _now_utc(self) -> datetime:
         value = self.clock()

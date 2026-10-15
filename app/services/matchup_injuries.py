@@ -17,7 +17,7 @@ from app.domain.nba_teams import (
 from app.domain.utc import assume_utc, parse_utc_iso
 from app.domain.nba_events import is_final_event
 from app.errors import ProviderUnavailableError
-from app.providers.nba_injury_report import InjuryEntryEvidence, SOURCE_URL
+from app.providers.nba_injury_report import EASTERN, InjuryEntryEvidence, SOURCE_URL
 from app.services.athlete_resolver import normalize_athlete_name
 from app.services.injury_snapshot_repository import InjurySnapshotScope
 from app.utils.telemetry import (
@@ -29,6 +29,11 @@ from app.utils.telemetry import (
 
 INJURY_SOURCE = "nba_official"
 INJURY_SOURCE_URL = SOURCE_URL
+#: Entry fields the API returns; stored rows also carry the game identity.
+_WIRE_ENTRY_KEYS = (
+    "entry_id", "source_player_id", "source_player_name", "canonical_player_id",
+    "team_id", "tricode", "canonical_status", "raw_status", "reason", "source_url",
+)
 _GENERATIONAL_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
 INJURY_REFRESH_SECONDS = 5 * 60
 INJURY_STALE_SERVE_SECONDS = 30 * 60
@@ -117,22 +122,44 @@ class AthleteNameIndex:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class GameIdentity:
+    """One game as the report names it: Eastern date and ``AWAY@HOME``."""
+
+    game_date: str
+    matchup: str
+    game_id: str | None = None
+
+
+def _entry_matchup(entry: Any) -> str:
+    away, _, home = str(getattr(entry, "matchup", "")).partition("@")
+    return f"{canonical_nba_team_abbreviation(away)}@{canonical_nba_team_abbreviation(home)}"
+
+
 def reconcile_injury_entries(
     evidence: Sequence[Any],
     *,
     teams: Mapping[str, Mapping[str, Any]],
     catalog: AthleteNameIndex,
+    game: GameIdentity | None = None,
 ) -> tuple[tuple[dict[str, Any], ...], int]:
     """Resolve source rows to canonical athletes for one game's two teams.
 
     Returns the reconciled rows of ``teams`` and the count of rows whose team
-    is not an NBA tricode at all.  A row naming an athlete the catalog cannot
+    is not an NBA tricode at all.  With ``game`` given, only rows the report
+    prints for that game (date and matchup) are kept: a report also lists the
+    same teams' later games, which must not describe this one.  A row naming an athlete the catalog cannot
     place keeps ``canonical_player_id = None`` (it is reported, not dropped).
     """
 
     rows: list[dict[str, Any]] = []
     unresolved_team_entries = 0
     for entry in evidence:
+        if game is not None and (
+            getattr(entry, "game_date", "") != game.game_date
+            or _entry_matchup(entry) != game.matchup
+        ):
+            continue
         tricode = canonical_nba_team_abbreviation(entry.source_team_tricode)
         if tricode not in NBA_TEAM_TRICODES:
             unresolved_team_entries += 1
@@ -154,6 +181,9 @@ def reconcile_injury_entries(
                 "raw_status": entry.raw_status,
                 "reason": entry.reason,
                 "source_url": entry.source_url,
+                "game_id": None if game is None else game.game_id,
+                "game_date": getattr(entry, "game_date", ""),
+                "matchup": getattr(entry, "matchup", ""),
             }
         )
     return tuple(rows), unresolved_team_entries
@@ -437,10 +467,20 @@ class MatchupInjuryService:
         season: str,
     ) -> tuple[tuple[dict[str, Any], ...], int]:
         catalog = self.athlete_catalog.get_catalog(season, active_only=True)
+        teams = self._event_teams(event)
+        sides = {value["side"]: code for code, value in teams.items()}
         return reconcile_injury_entries(
             evidence,
-            teams=self._event_teams(event),
+            teams=teams,
             catalog=AthleteNameIndex(catalog),
+            game=GameIdentity(
+                game_date=parse_utc_iso(str(event["scheduled_at"]))
+                .astimezone(EASTERN)
+                .date()
+                .isoformat(),
+                matchup=f"{sides['away']}@{sides['home']}",
+                game_id=str(event["nba_game_id"]),
+            ),
         )
 
     def _result(
@@ -459,7 +499,7 @@ class MatchupInjuryService:
         badge_refs: dict[int, str] = {}
         unmatched = 0
         for entry in entries:
-            row = dict(entry)
+            row = {key: entry[key] for key in _WIRE_ENTRY_KEYS}
             grouped[int(row["team_id"])].append(row)
             player_id = row.get("canonical_player_id")
             if player_id is None:
@@ -553,6 +593,7 @@ __all__ = [
     "INJURY_REFRESH_SECONDS",
     "INJURY_STALE_SERVE_SECONDS",
     "AthleteNameIndex",
+    "GameIdentity",
     "MatchupInjuryResult",
     "MatchupInjuryService",
     "StoredMatchupInjuryReader",

@@ -920,7 +920,7 @@ official PDF (`pypdf` text positions: carried-down game/team cells, wrapped
 reasons, rows split across pages) and keeps each row as raw evidence, plus the
 teams the report lists as `NOT YET SUBMITTED`. Normalization retains a
 name-derived identity, `First Last` name, status, reason, and the report PDF URL.
-Reconciliation uses the normalized athlete name plus canonical team and season
+Each evidence row keeps the game it describes (Eastern date and matchup), and a game's snapshot keeps only the rows printed for that game, because one report also lists the same teams' later games. Reconciliation uses the normalized athlete name plus canonical team and season
 against the active Athlete Catalog; if that finds nobody it retries without
 generational suffixes, then on a name that is unique league-wide (a traded
 player the catalog still files under his old team). Ambiguous or unmatched

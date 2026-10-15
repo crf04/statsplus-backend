@@ -223,6 +223,8 @@ def test_local_settings_have_typed_safe_defaults(monkeypatch):
     assert settings.providers.injury_report_connect_timeout_seconds == 3.0
     assert settings.providers.injury_report_read_timeout_seconds == 8.0
     assert settings.providers.injury_report_deadline_seconds == 12.0
+    assert settings.providers.injury_report_failure_cooldown_seconds == 300.0
+    assert settings.providers.injury_report_probe_delay_seconds == 0.1
 
 
 def test_injury_collection_requires_the_explicit_runtime_gate():
@@ -240,12 +242,16 @@ def test_injury_report_transport_timeouts_are_typed_named_settings():
             "INJURY_REPORT_CONNECT_TIMEOUT_SECONDS": "1.25",
             "INJURY_REPORT_READ_TIMEOUT_SECONDS": "4.5",
             "INJURY_REPORT_DEADLINE_SECONDS": "9",
+            "INJURY_REPORT_FAILURE_COOLDOWN_SECONDS": "60",
+            "INJURY_REPORT_PROBE_DELAY_SECONDS": "0.5",
         }
     )
 
     assert settings.providers.injury_report_connect_timeout_seconds == 1.25
     assert settings.providers.injury_report_read_timeout_seconds == 4.5
     assert settings.providers.injury_report_deadline_seconds == 9.0
+    assert settings.providers.injury_report_failure_cooldown_seconds == 60.0
+    assert settings.providers.injury_report_probe_delay_seconds == 0.5
 
 
 def test_testing_settings_allow_credential_free_bypass(monkeypatch):

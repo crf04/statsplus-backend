@@ -102,7 +102,8 @@ the most important variables:
 | `INJURY_REPORT_ENABLED` | No | `false`; the NBA official injury-report adapter exists only when this gate is true |
 | `PROJECTION_ARCHIVE_READ_ENABLED` | No | `false` default; operator-controlled activation switch flipped on at cutover. Selects the sole database-only projection reader for Slate/Matchup/Selection (no legacy request-time fallback after the #110 cutover) and requires an application database with the archive schema |
 | `PROJECTION_ARCHIVE_READ_PROVIDER` | No | Deprecated compatibility/default recorder identity (`dabble`); it never authorizes recording or enables reads/failure fallback. Historical reads still scan every supported archive-provider scope; only `DFS_ENABLED_PROVIDERS` authorizes application writes |
-| `INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` / `INJURY_REPORT_READ_TIMEOUT_SECONDS` / `INJURY_REPORT_DEADLINE_SECONDS` | No | `3` / `8` / `12`; typed connect/read caps per report GET and one absolute deadline for the whole newest-report search |
+| `INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` / `INJURY_REPORT_READ_TIMEOUT_SECONDS` / `INJURY_REPORT_DEADLINE_SECONDS` | No | `3` / `8` / `12`; connect/read caps per report GET (each also capped by the time left) and one absolute deadline for the whole newest-report search |
+| `INJURY_REPORT_FAILURE_COOLDOWN_SECONDS` / `INJURY_REPORT_PROBE_DELAY_SECONDS` | No | `300` / `0.1`; after a failed search a worker makes no new request for the cooldown, and probes within one search are paced |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |

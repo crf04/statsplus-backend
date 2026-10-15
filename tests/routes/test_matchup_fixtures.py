@@ -1046,6 +1046,8 @@ def _injuries(engine):
                         "Questionable",
                         "Left ankle soreness",
                         "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
+                        game_date="2026-01-15",
+                        matchup="LAL@BOS",
                     ),
                 ),
                 retrieved_at=NOW,

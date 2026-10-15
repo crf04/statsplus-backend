@@ -126,6 +126,8 @@ def _provider_snapshot():
                 "Out",
                 "Left ankle soreness",
                 "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
+                game_date="2026-01-15",
+                matchup="LAL@BOS",
             ),
             InjuryEntryEvidence(
                 "nba_official:9999",
@@ -136,6 +138,8 @@ def _provider_snapshot():
                 "Game Time Decision",
                 "Illness",
                 "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
+                game_date="2026-01-15",
+                matchup="LAL@BOS",
             ),
         ),
         retrieved_at=NOW,
@@ -247,10 +251,15 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
     assert result.out_player_ids == frozenset({2544})
     assert result.badge_refs == {2544: "nba_official:6504"}
     assert repository.replacements[0]["raw_payload"] == _provider_snapshot().raw_payload
-    assert repository.replacements[0]["normalized_entries"] == (
-        away_entry,
-        home_entry,
-    )
+    stored = repository.replacements[0]["normalized_entries"]
+    # Stored rows carry the game identity on top of the wire fields.
+    assert [
+        {k: v for k, v in row.items() if k not in {"game_id", "game_date", "matchup"}}
+        for row in stored
+    ] == [away_entry, home_entry]
+    assert [(row["game_id"], row["game_date"], row["matchup"]) for row in stored] == [
+        (GAME_ID, "2026-01-15", "LAL@BOS")
+    ] * 2
     assert telemetry.snapshot_recent_injury_events() == [
         {
             "unmatched_entry_count": 1,
@@ -284,6 +293,8 @@ def test_injury_team_dialects_reconcile_through_the_central_aliases(
                 "Questionable",
                 "Soreness",
                 "https://example.test/player/1",
+                game_date="2026-01-15",
+                matchup=f"{canonical_team}@BOS",
             ),
         ),
         retrieved_at=NOW,
@@ -329,6 +340,8 @@ def test_unresolved_source_team_stays_in_raw_evidence_and_emits_bounded_telemetr
                 "Out",
                 "Soreness",
                 "https://example.test/player/1",
+                game_date="2026-01-15",
+                matchup="LAL@BOS",
             ),
         ),
         retrieved_at=NOW,
@@ -648,3 +661,114 @@ def test_official_report_namesakes_and_unknown_players_stay_unmatched_but_listed
     assert resolved["Jaylin Williams"] == 32
     assert resolved["Harrison Ingram"] is None  # absent from the catalog
     assert len(resolved) == 115
+
+
+# -- one report, several games of the same team --------------------------------
+
+
+NYK = 1610612752
+PDF = "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf"
+
+
+def _two_game_snapshot():
+    def entry(entry_id, name, team, status, day, matchup):
+        return InjuryEntryEvidence(
+            entry_id, entry_id, name, team, status, status, "r", PDF,
+            game_date=day, matchup=matchup,
+        )
+
+    return InjuryProviderSnapshot(
+        raw_payload=[{"report": "two dates"}],
+        entries=(
+            entry("a", "LeBron James", "LAL", "Probable", "2026-01-15", "LAL@BOS"),
+            entry("b", "Jayson Tatum", "BOS", "Questionable", "2026-01-15", "LAL@BOS"),
+            entry("c", "Austin Reaves", "LAL", "Out", "2026-01-17", "NYK@LAL"),
+            entry("d", "Jalen Brunson", "NYK", "Out", "2026-01-17", "NYK@LAL"),
+            # Same date, same team, a different game: not the requested one.
+            entry("e", "Rui Hachimura", "LAL", "Out", "2026-01-15", "LAL@NYK"),
+        ),
+        retrieved_at=NOW,
+    )
+
+
+class TwoGameCatalog:
+    def get_catalog(self, season, *, active_only=False):
+        return [
+            {"player_id": 2544, "display_name": "LeBron James", "team_abbreviation": "LAL"},
+            {"player_id": 1630559, "display_name": "Austin Reaves", "team_abbreviation": "LAL"},
+            {"player_id": 1628369, "display_name": "Jayson Tatum", "team_abbreviation": "BOS"},
+            {"player_id": 1628973, "display_name": "Jalen Brunson", "team_abbreviation": "NYK"},
+            {"player_id": 1629060, "display_name": "Rui Hachimura", "team_abbreviation": "LAL"},
+        ]
+
+
+def _read(event, repository=None):
+    repository = repository or MemoryRepository()
+    result = MatchupInjuryService(
+        provider=RecordedProvider(_two_game_snapshot()),
+        snapshot_repository=repository,
+        athlete_catalog=TwoGameCatalog(),
+        enabled=True,
+        clock=lambda: NOW,
+    ).get_injuries(event=event, season=SEASON, pool_players=())
+    return result, repository
+
+
+def test_only_the_requested_games_report_rows_describe_it():
+    first, repository = _read(_event())  # LAL@BOS, 2026-01-15 ET
+
+    assert [
+        [entry["source_player_name"] for entry in team["entries"]]
+        for team in first.block["teams"]
+    ] == [["LeBron James"], ["Jayson Tatum"]]
+    assert first.out_player_ids == frozenset()  # Reaves is Out only on the 17th
+    assert [row["game_id"] for row in repository.replacements[0]["normalized_entries"]] == [
+        GAME_ID,
+        GAME_ID,
+    ]
+
+    later = _event(
+        nba_game_id="0022500611",
+        scheduled_at="2026-01-18T00:30:00+00:00",  # 7:30 PM ET on the 17th
+        away_team_id=NYK,
+        away_team_tricode="NYK",
+        home_team_id=LAL,
+        home_team_tricode="LAL",
+    )
+    second, _ = _read(later)
+
+    assert [
+        [entry["source_player_name"] for entry in team["entries"]]
+        for team in second.block["teams"]
+    ] == [["Jalen Brunson"], ["Austin Reaves"]]
+    assert second.out_player_ids == frozenset({1630559, 1628973})
+
+
+def test_a_team_game_the_report_does_not_list_gets_no_rows_from_other_dates():
+    third = _event(
+        nba_game_id="0022500700",
+        scheduled_at="2026-01-20T00:30:00+00:00",  # LAL@BOS again, the 19th
+    )
+
+    result, _ = _read(third)
+
+    assert result.block["status"] == "fresh"
+    assert [team["entries"] for team in result.block["teams"]] == [[], []]
+    assert result.out_player_ids == frozenset()
+
+
+def test_evidence_without_a_game_identity_describes_no_game():
+    snapshot = InjuryProviderSnapshot(
+        raw_payload=[{}],
+        entries=(InjuryEntryEvidence("x", "x", "LeBron James", "LAL", "Out", "Out", "", PDF),),
+        retrieved_at=NOW,
+    )
+    result = MatchupInjuryService(
+        provider=RecordedProvider(snapshot),
+        snapshot_repository=MemoryRepository(),
+        athlete_catalog=TwoGameCatalog(),
+        enabled=True,
+        clock=lambda: NOW,
+    ).get_injuries(event=_event(), season=SEASON, pool_players=())
+
+    assert [team["entries"] for team in result.block["teams"]] == [[], []]

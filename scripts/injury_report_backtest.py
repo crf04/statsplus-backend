@@ -21,7 +21,7 @@ import argparse
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -41,7 +41,7 @@ from app.domain.nba_events import (  # noqa: E402
     REGULAR_SEASON_TYPE,
     player_game_log_season_type,
 )
-from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID  # noqa: E402
+from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID, NBA_TEAM_TRICODES  # noqa: E402
 from app.domain.utc import parse_utc_iso  # noqa: E402
 from app.providers.nba_injury_report import (  # noqa: E402
     EASTERN,
@@ -63,6 +63,8 @@ from scripts.season_verify import open_read_only_engine  # noqa: E402
 MIN_IDENTITY_RATE = 0.99
 MIN_OUT_PRECISION = 0.98
 DEFAULT_MAX_PROBES = 48
+#: A report may name a game a few days out; a year off is not that.
+SEASON_WINDOW_SLACK_DAYS = 7
 DEFAULT_DELAY_SECONDS = 0.3
 #: Statuses whose play rate the report states (Out is scored as precision).
 PLAY_RATE_STATUSES = ("Probable", "Available", "Questionable", "Doubtful")
@@ -169,13 +171,21 @@ class ReportFetcher:
 
 def find_last_report(
     fetcher: ReportFetcher, tip: datetime, *, max_probes: int
-) -> tuple[str, bytes] | None:
-    """The newest report whose file time is at or before ``tip``."""
+) -> tuple[str, bytes, ParsedInjuryReport] | None:
+    """The newest report whose own header time is at or before ``tip``.
+
+    The file name only bounds the search: a report can be stamped later than
+    its name (``05PM`` printing "05:30 PM"), and one stamped after ``tip``
+    carries information from after it, so it is skipped.
+    """
 
     for name in candidate_report_names(tip, max_requests=max_probes):
         content = fetcher.get(name)
-        if content is not None:
-            return name, content
+        if content is None:
+            continue
+        report = parse_injury_report(content)
+        if report.report_time is not None and report.report_time <= tip:
+            return name, content, report
     return None
 
 
@@ -288,6 +298,11 @@ def evaluate(
     # snapshot here, so players who left mid-season are inactive in it, while
     # the live catalog refreshes daily and has no such gap.
     index = AthleteNameIndex(list(inputs.athletes))
+    event_dates = [_eastern_date(str(event["scheduled_at"])) for event in inputs.events]
+    window = (
+        min(event_dates) - timedelta(days=SEASON_WINDOW_SLACK_DAYS),
+        max(event_dates) + timedelta(days=SEASON_WINDOW_SLACK_DAYS),
+    )
     teams = {code: {"team_id": team_id} for code, team_id in NBA_TEAM_TRICODE_TO_ID.items()}
 
     overall = _Tally()
@@ -306,27 +321,30 @@ def evaluate(
         for tally in tallies:
             tally.dates += 1
         first_tip = min(parse_utc_iso(str(event["scheduled_at"])) for event in events)
-        found = find_last_report(fetcher, first_tip, max_probes=max_probes)
         record: dict[str, Any] = {
             "date": game_date.isoformat(),
             "first_tip_utc": first_tip.astimezone(timezone.utc).isoformat(),
         }
         per_date.append(record)
+        try:
+            found = find_last_report(fetcher, first_tip, max_probes=max_probes)
+        except Exception as error:  # noqa: BLE001 - any parse failure is a finding
+            record["report"] = None
+            coverage_failures.append({**record, "reason": f"parse error: {error}"})
+            continue
         if found is None:
             record["report"] = None
             coverage_failures.append({**record, "reason": "no report found"})
             continue
-        name, content = found
+        name, content, report = found
         record["report"] = name
-        try:
-            report = parse_injury_report(content)
-        except Exception as error:  # noqa: BLE001 - any parse failure is a finding
-            coverage_failures.append({**record, "reason": f"parse error: {error}"})
-            continue
+        record["report_time"] = report.report_time.isoformat()
         for tally in tallies:
             tally.covered += 1
 
-        problems = _completeness_problems(report, content, count_status_cells)
+        problems = _completeness_problems(
+            report, content, count_status_cells, window
+        )
         record["rows"] = len(report.rows)
         if problems:
             completeness_failures.append({**record, "problems": problems})
@@ -335,15 +353,20 @@ def evaluate(
                 tally.reports_complete += 1
 
         in_catalog = []
+        strays = []  # rows dated outside the season: identity counts them
         for row in report.rows:
-            if row.game_date != game_date:
+            if not window[0] <= row.game_date <= window[1]:
+                strays.append(row)
                 continue
+            if row.game_date != game_date:
+                continue  # another date's rows are scored by that date's report
             away, _, home = row.matchup.partition("@")
             if (game_date, away, home) in event_by_key:
                 in_catalog.append(row)
             else:
                 games_not_in_catalog[(game_date.isoformat(), row.matchup)] += 1
-        todays_rows = tuple(in_catalog)
+        todays_rows = tuple(in_catalog) + tuple(strays)
+        graded_rows = {id(row) for row in in_catalog}
         todays = ParsedInjuryReport(report.title, todays_rows, (), ())
         entries = entries_from_report(todays, source_url=REPORT_BASE_URL + name)
         reconciled, _ = reconcile_injury_entries(entries, teams=teams, catalog=index)
@@ -361,6 +384,8 @@ def evaluate(
                 tally.identity_matched += player_id is not None
             if player_id is None:
                 unmatched[(row.display_name, row.team_tricode)] += 1
+                continue
+            if id(row) not in graded_rows:
                 continue
             away, _, home = row.matchup.partition("@")
             event = event_by_key.get((game_date, away, home))
@@ -422,6 +447,7 @@ def _completeness_problems(
     report: ParsedInjuryReport,
     content: bytes,
     count_status_cells: Callable[[bytes], int],
+    window: tuple[date, date],
 ) -> list[str]:
     problems: list[str] = []
     expected = count_status_cells(content)
@@ -432,6 +458,10 @@ def _completeness_problems(
     for row in report.rows:
         away, _, home = row.matchup.partition("@")
         where = f"{row.game_date} {row.matchup} {row.player_name}"
+        if not window[0] <= row.game_date <= window[1]:
+            problems.append(f"{where}: date is outside the season")
+        if away not in NBA_TEAM_TRICODES or home not in NBA_TEAM_TRICODES:
+            problems.append(f"{where}: matchup names a non-NBA team")
         if row.status not in REPORT_STATUSES:
             problems.append(f"{where}: invalid status {row.status!r}")
         if row.team_tricode not in {away, home}:

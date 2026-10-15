@@ -10,6 +10,7 @@ publication read is injected.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -29,9 +30,18 @@ from scripts import injury_report_backtest as backtest
 FIXTURES = Path(__file__).parent / "fixtures" / "injury_report"
 LATE = (FIXTURES / "Injury-Report_2025-12-25_05_00PM.pdf").read_bytes()
 SEASON = "2025-26"
-needs_pdftotext = pytest.mark.skipif(
-    shutil.which("pdftotext") is None, reason="pdftotext (poppler) not installed"
-)
+@pytest.fixture
+def require_pdftotext():
+    """The independent row count needs poppler: CI must have it, never skip."""
+
+    if shutil.which("pdftotext") is None:
+        message = "pdftotext (poppler-utils) is not installed"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
+
+
+needs_pdftotext = pytest.mark.usefixtures("require_pdftotext")
 
 #: The CDN files the fixture season "published": 12-25's last report before
 #: 5:20 PM ET, and the same bytes standing in for 12-26's last report.
@@ -440,3 +450,65 @@ def test_games_missing_from_the_event_catalog_are_listed_not_graded(
     listed = document["games_not_in_catalog"]
     assert listed == [{"date": day, "matchup": matchup, "rows": rows}]
     assert document["overall"]["identity_rows"] == 115 - rows
+
+
+HOURLY = (FIXTURES / "Injury-Report_2025-10-21_05PM.pdf").read_bytes()
+
+
+def test_a_report_stamped_after_the_cutoff_is_not_used(tmp_path):
+    # The 05PM file's header says 05:30 PM; a 5:15 PM cutoff must skip it.
+    def search(tip):
+        fetcher = backtest.ReportFetcher(
+            tmp_path / "cache",
+            delay_seconds=0,
+            session=FakeCdn({"Injury-Report_2025-10-21_05PM.pdf": HOURLY}),
+            sleep=lambda s: None,
+        )
+        return backtest.find_last_report(fetcher, tip, max_probes=6)
+
+    assert search(datetime(2025, 10, 21, 21, 15, tzinfo=timezone.utc)) is None
+    name, _, report = search(datetime(2025, 10, 21, 21, 30, tzinfo=timezone.utc))
+    assert name == "Injury-Report_2025-10-21_05PM.pdf"
+    assert report.report_time.hour == 17 and report.report_time.minute == 30
+
+
+@needs_pdftotext
+def test_a_row_dated_outside_the_season_fails_completeness_and_counts_toward_identity(
+    tmp_path, monkeypatch
+):
+    import dataclasses
+
+    real_parse = backtest.parse_injury_report
+
+    def corrupt(content):
+        report = real_parse(content)
+        rows = tuple(
+            dataclasses.replace(
+                row, game_date=date(2024, 12, 25), player_name="Nobody, Unknown"
+            )
+            if row.player_name == "Christie, Max"
+            else row
+            for row in report.rows
+        )
+        return dataclasses.replace(report, rows=rows)
+
+    monkeypatch.setattr(backtest, "parse_injury_report", corrupt)
+    engine, logs, _ = _season_database(tmp_path, omit=())
+    inputs = backtest.load_inputs(engine, SEASON, publication_reader=Publications(logs))
+    fetcher = backtest.ReportFetcher(
+        tmp_path / "cache", delay_seconds=0, session=FakeCdn(SITE), sleep=lambda s: None
+    )
+
+    document = backtest.evaluate(inputs, fetcher)
+
+    assert document["thresholds"]["parse_completeness"]["value"] == 0.0
+    assert all(
+        "2024-12-25 DAL@GSW Nobody, Unknown: date is outside the season" in item["problems"]
+        for item in document["completeness_failures"]
+    )
+    # Both stand-in reports carry the stray row; it never reaches grading but
+    # is counted, unmatched, against identity.
+    assert document["unmatched"] == [{"name": "Unknown Nobody", "team": "DAL", "rows": 2}]
+    assert document["overall"]["identity_rows"] == 116
+    assert document["overall"]["identity_matched"] == 114
+    assert document["overall"]["statuses"]["Available"]["graded"] == 12
