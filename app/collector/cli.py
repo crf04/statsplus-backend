@@ -66,13 +66,8 @@ def run_once(
             allow_insecure_localhost=config.allow_insecure_localhost,
             release_version=config.release_version,
         )
-        if credential_provider is None:
-            if secret:
-                credential_provider = None
-            elif config.environment in {"testing", "test", "development", "historical_rehearsal"}:
-                credential_provider = EnvironmentCredentialProvider()
-            else:
-                credential_provider = default_credential_provider()
+        if credential_provider is None and not secret:
+            credential_provider = default_credential_provider(config.environment)
         collector = ResidentialCollector(
             client=client, outbox=outbox,
             provider=provider if provider is not None else NBAStatsProviderAdapter(proxy=config.nba_proxy_url),
@@ -111,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                           "nba_proxy": "configured" if config.nba_proxy_url else "none"}, sort_keys=True))
         return 0
     if args.command == "credential-check":
-        default_credential_provider().get_secret(config.identity_id)
+        default_credential_provider(config.environment).get_secret(config.identity_id)
         print(json.dumps({"status": "available", "identity_id": config.identity_id}, sort_keys=True))
         return 0
     if args.command == "status":
@@ -148,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.season or not args.cutoff or config.environment == "production":
             parser.error("railway-rehearsal requires season/cutoff and a non-production environment")
         metadata = release_metadata(_release_root(), version=config.release_version)
-        credential = default_credential_provider()
+        credential = default_credential_provider(config.environment)
         client = RailwayClient(
             config.railway_url, identity_id=config.identity_id, environment=config.environment,
             timeout=config.http_timeout_seconds, release_version=config.release_version,

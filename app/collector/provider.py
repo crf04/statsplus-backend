@@ -9,6 +9,8 @@ import math
 import os
 from typing import Any, Iterator, Protocol
 
+import requests
+
 from .contracts import (
     NormalizedObservation,
     ProviderContractError,
@@ -329,6 +331,10 @@ class _StandaloneNBAProvider:
             return self._frame(factory())
         except ProviderContractError:
             raise
+        except requests.exceptions.RequestException:
+            # Includes ProxyError, ConnectionError and Timeout.  The message
+            # can carry the proxy URL, so it is never kept.
+            raise ProviderTransientError("provider_unavailable") from None
         except Exception as error:
             name = type(error).__name__.casefold()
             if any(marker in name for marker in (

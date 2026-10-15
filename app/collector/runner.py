@@ -90,12 +90,19 @@ class WindowsCredentialProvider:
         return secret
 
 
-def default_credential_provider(environ: Mapping[str, str] | None = None) -> Any:
-    """Container secret when ``COLLECTOR_SECRET`` is set, Credential Manager otherwise."""
+def default_credential_provider(environment: str = "production", environ: Mapping[str, str] | None = None) -> Any:
+    """Pick the one credential source every command shares.
+
+    ``COLLECTOR_SECRET`` (a container) wins everywhere.  Otherwise the
+    non-production environments read ``COLLECTOR_MACHINE_SECRET`` and
+    production reads Credential Manager.
+    """
 
     values = os.environ if environ is None else environ
     if str(values.get("COLLECTOR_SECRET", "")).strip():
         return EnvironmentCredentialProvider(variable="COLLECTOR_SECRET", environ=values)
+    if environment in {"testing", "test", "development", "historical_rehearsal"}:
+        return EnvironmentCredentialProvider(environ=values)
     return WindowsCredentialProvider()
 
 

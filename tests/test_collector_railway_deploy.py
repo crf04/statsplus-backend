@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -30,10 +32,27 @@ BASE_ENV = {
 
 class _Reply:
     status_code = 200
-    text = '{"resultSets": []}'
+    # Empty frames: enough for a second dependent request to be made.
+    text = json.dumps({"resultSets": [
+        {"name": name, "headers": ["TEAM_ID"], "rowSet": []}
+        for name in ("SynergyPlayType", "LeagueDashTeamStats", "x")
+    ]})
     content = b"{}"
     headers: dict = {}
     url = "https://stats.nba.com/stats/x"
+
+
+@pytest.fixture(autouse=True)
+def isolated_release_root(tmp_path, monkeypatch):
+    """``run_once`` checksums COLLECTOR_RELEASE_ROOT; the default is the working
+    tree, which races pytest-cov's transient ``.coverage.*`` files."""
+
+    root = tmp_path / "release"
+    root.mkdir()
+    (root / "statsplus_collector.txt").write_text("release", encoding="utf-8")
+    monkeypatch.setenv("COLLECTOR_RELEASE_ROOT", str(root))
+    monkeypatch.delenv("COLLECTOR_SECRET", raising=False)
+    monkeypatch.delenv("COLLECTOR_MACHINE_SECRET", raising=False)
 
 
 @pytest.fixture
@@ -43,7 +62,7 @@ def wire(monkeypatch):
     calls: list[tuple[str, object]] = []
 
     def fake_request(self, method, url, **kwargs):
-        calls.append((url, kwargs.get("proxies")))
+        calls.append((url, kwargs.get("proxies") or dict(self.proxies) or None))
         return _Reply()
 
     monkeypatch.setattr(requests.Session, "request", fake_request)
@@ -76,6 +95,14 @@ def test_every_nba_request_carries_the_proxy(wire):
     assert all(proxies == {"http": PROXY, "https": PROXY} for _, proxies in wire)
 
 
+def test_team_synergy_and_its_supporting_minutes_request_both_carry_the_proxy(wire):
+    _swallow(NBAStatsProviderAdapter(proxy=PROXY).fetch_synergy_play_types,
+             "Transition", player_or_team_abbreviation="T", type_grouping="Offensive",
+             season="2026-27", season_type="Regular Season")
+    assert len(wire) == 2, wire
+    assert all(proxies == {"http": PROXY, "https": PROXY} for _, proxies in wire)
+
+
 def test_nba_requests_have_no_proxy_when_unset(wire, monkeypatch):
     monkeypatch.setattr("nba_api.library.http.PROXY", None)
     _swallow(NBAStatsProviderAdapter().fetch_whole_season_schedule, season="2026-27")
@@ -88,15 +115,16 @@ def test_control_plane_requests_never_use_the_proxy(wire):
 
 
 class _Transport:
-    def __init__(self):
+    def __init__(self, discovery=None, environment="production"):
         self.calls = []
+        self.discovery = discovery or {"environment": environment, "bootstrap_requests": [], "manifests": []}
 
     def request(self, method, url, *, headers=None, body=None, json_body=None, timeout=30):
         self.calls.append((method, url, headers, body, json_body))
         if url.endswith("/api/collector/token"):
             return HTTPResponse(201, {"token": "short-lived", "expires_in": 300})
         if "/api/collector/discovery" in url:
-            return HTTPResponse(200, {"environment": "production", "bootstrap_requests": [], "manifests": []})
+            return HTTPResponse(200, self.discovery)
         return HTTPResponse(200, {})
 
 
@@ -173,3 +201,64 @@ def test_malformed_proxy_is_rejected_without_echoing_it(bad):
     with pytest.raises(CollectorConfigurationError) as raised:
         load_collector_config({**BASE_ENV, "COLLECTOR_NBA_PROXY_URL": bad})
     assert bad not in str(raised.value)
+
+
+def test_control_plane_requests_bypass_a_configured_proxy_through_run_once(tmp_path, monkeypatch, wire):
+    monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
+    with contextlib.redirect_stdout(io.StringIO()):
+        cli.run_once(_config(tmp_path, nba_proxy_url=PROXY))  # real RequestsTransport
+    assert wire, "the control plane was never contacted"
+    assert all(url.startswith("https://railway.example/") for url, _ in wire)
+    assert all(proxies is None for _, proxies in wire)
+
+
+def test_only_collector_secret_set_lets_run_succeed_in_a_non_production_environment(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
+    for key, value in {**BASE_ENV, "COLLECTOR_ENVIRONMENT": "testing",
+                       "COLLECTOR_OUTBOX_PATH": str(tmp_path / "outbox.sqlite3")}.items():
+        monkeypatch.setenv(key, value)
+    transport = _Transport(environment="testing")
+    monkeypatch.setattr(cli, "RequestsTransport", lambda: transport)
+    assert cli.main(["credential-check"]) == 0
+    assert cli.main(["run"]) == 0
+    token_bodies = [call[4] for call in transport.calls if call[1].endswith("/api/collector/token")]
+    assert [body["secret"] for body in token_bodies] == [SECRET]
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["status"] in {"no_work", "complete"}
+
+
+def test_a_proxy_failure_is_retryable_and_leaks_neither_stdout_nor_the_log(tmp_path, monkeypatch, capsys, caplog):
+    from app.services.collection_control import _collector_scope_descriptors
+
+    def refuse(self, method, url, **kwargs):
+        if "nba.com" in url:
+            raise requests.exceptions.ProxyError(f"Unable to connect to proxy {PROXY} for {url}")
+        return _Reply()
+
+    monkeypatch.setattr(requests.Session, "request", refuse)
+    monkeypatch.setenv("COLLECTOR_SECRET", SECRET)
+    live = datetime.now(timezone.utc)
+    scopes = {"exact_shot_zones_opponent_season", "shot_zones_opponent"}
+    discovery = {"environment": "production", "bootstrap_requests": [], "manifests": [{
+        "manifest_id": "manifest-1", "season": "2026-27", "cutoff": live.isoformat(),
+        "collect_before": (live + timedelta(hours=1)).isoformat(), "accepted_versions": [2],
+        "scopes": sorted(scopes), "scope_descriptors": _collector_scope_descriptors(scopes, live),
+    }]}
+    config = _config(tmp_path, nba_proxy_url=PROXY)
+    shared = logging.getLogger("statsplus.residential")
+    for handler in list(shared.handlers):
+        shared.removeHandler(handler)
+    transport = _Transport(discovery=discovery)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            code = cli.run_once(config, transport=transport)
+    finally:
+        for handler in list(shared.handlers):
+            handler.close()
+            shared.removeHandler(handler)
+    assert code == 10  # retryable, not non_retryable/provider_schema_changed
+    output = capsys.readouterr()
+    log = config.log_path.read_text() if config.log_path.exists() else ""
+    reported = json.dumps(transport.calls, default=str)
+    for text in (output.out, output.err, log, caplog.text, reported):
+        assert "proxy-pass-7731" not in text and "proxy.example" not in text
+    assert "provider_unavailable" in output.out + log + reported

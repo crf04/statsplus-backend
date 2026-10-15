@@ -108,7 +108,7 @@ Two optional settings make this possible without changing the Windows path:
   never logged, and `validate-config` prints only `"nba_proxy": "configured"`
   or `"none"`. Unset, NBA requests go direct as before.
 - `COLLECTOR_SECRET` supplies the machine secret when there is no Credential
-  Manager. When it is set it is used; when unset the secret is read from
+  Manager. When it is set every command uses it, in any environment; when unset the secret is read from
   Credential Manager (keyring service `StatsPlus/Collector/<identity-id>`, user
   `machine`) exactly as before. It is read only for the token exchange.
 
@@ -138,10 +138,32 @@ tick. To keep the Outbox across runs, attach a volume and set
 One-time operator steps:
 
 1. Mint a collector identity with `CollectorTokenService.create_identity`
-   (owner `residential_collector`, provider `nba`, the collector's observation
-   surfaces, scope `ingest`) against the production control database. The
-   secret is shown once. The old PC's identity can be reused only if its secret
-   is still known.
+   against the production control database (it needs the production
+   `COLLECTOR_SIGNING_SECRET`). The secret is shown once. The identity needs:
+   - scopes `poll` and `ingest`. Discovery accepts `poll`, `bootstrap` or
+     `catalog_publish`, and manifest reads require `poll`; observation and
+     catalog uploads accept `ingest`. `ingest` alone authenticates but gets 403
+     on discovery. The collector requests no explicit scopes, so a token carries
+     everything the identity holds.
+   - owner `residential_collector` and provider `nba`; the owner and provider
+     must match the surface registry for every surface.
+   - surfaces, one per observation type the collector emits: `event_catalog`
+     and `athlete_catalog` (the Event and Athlete Catalogs), and the collection
+     surfaces `synergy_play_types`, `grouped_shot_types`, `exact_shot_zones`,
+     `synergy_opponent`, `shot_types_opponent` and `shot_zones_opponent`.
+
+   ```python
+   tokens.create_identity(
+       "railway-cron", identity_id="railway-cron",
+       scopes=["poll", "ingest"], owner="residential_collector", providers=["nba"],
+       surfaces=["event_catalog", "athlete_catalog", "synergy_play_types",
+                 "grouped_shot_types", "exact_shot_zones", "synergy_opponent",
+                 "shot_types_opponent", "shot_zones_opponent"],
+   )
+   ```
+
+   A surface the identity lacks is refused with `scope_denied` on upload, and
+   a new surface needs a new identity or rotation.
 2. Create a service from this repository with the config-as-code path
    `/railway.collector.json`, and set the variables above.
 3. Run `python -m app.collector validate-config` and `credential-check` from the
