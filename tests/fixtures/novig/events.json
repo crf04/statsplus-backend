@@ -1,18 +1,28 @@
 {
-  "01a13a36-f390-7e63-bd56-21d5f3c5613d": {
-    "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
-    "description": "Toronto Raptors @ New York Knicks",
-    "sport": "BASKETBALL",
-    "league": "NBA",
-    "status": "OPEN_PREGAME",
-    "startsTs": 1792107300000
-  },
-  "019ff261-5cb3-7913-8ece-6ab58f99e8f0": {
-    "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
-    "description": "Philadelphia 76ers @ New York Knicks",
-    "sport": "BASKETBALL",
-    "league": "NBA",
-    "status": "OPEN_PREGAME",
-    "startsTs": 1792537500000
-  }
+  "items": [
+    {
+      "eventId": "01a13a6d-8396-79e2-acc1-15861fd51b33",
+      "description": "Oklahoma City Thunder @ Houston Rockets",
+      "sport": "BASKETBALL",
+      "league": "NBA",
+      "status": "OPEN_PREGAME",
+      "startsTs": 1792110900000
+    },
+    {
+      "eventId": "01a13a36-f390-7e63-bd56-21d5f3c5613d",
+      "description": "Toronto Raptors @ New York Knicks",
+      "sport": "BASKETBALL",
+      "league": "NBA",
+      "status": "OPEN_PREGAME",
+      "startsTs": 1792107300000
+    },
+    {
+      "eventId": "019ff261-5cb3-7913-8ece-6ab58f99e8f0",
+      "description": "Philadelphia 76ers @ New York Knicks",
+      "sport": "BASKETBALL",
+      "league": "NBA",
+      "status": "OPEN_PREGAME",
+      "startsTs": 1792537500000
+    }
+  ]
 }

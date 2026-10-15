@@ -32,6 +32,7 @@ from app.providers.registry import DFSProviderRuntime, build_dfs_provider
 from app.services.statistic_catalog import MatchState, StatisticCatalog
 from app.utils import telemetry
 from tests.providers.novig_recorded import (
+    HOU_EVENT,
     NYK_EVENT,
     PHI_EVENT,
     ReplaySession,
@@ -125,7 +126,12 @@ def _ladder(lines: dict[str, tuple[float | None, float | None] | None]):
         batch.append(entry)
     session = ReplaySession(
         pages=[{"items": items}],
-        events={NYK_EVENT: load("events.json")[NYK_EVENT]},
+        events={
+            "items": [
+                e for e in load("events.json")["items"] if e["eventId"] == NYK_EVENT
+            ],
+            "next": None,
+        },
         batch=batch,
         unreadable=unreadable,
     )
@@ -527,7 +533,9 @@ def test_the_description_is_never_parsed_for_the_player():
 
 def test_an_event_that_is_not_pregame_excludes_its_markets():
     session = ReplaySession()
-    session.events[PHI_EVENT]["status"] = "OPEN_INGAME"
+    next(
+        e for e in session.events["items"] if e["eventId"] == PHI_EVENT
+    )["status"] = "OPEN_INGAME"
 
     snapshot = _snapshot(adapter(session))
 
@@ -572,8 +580,11 @@ def test_a_market_without_one_over_and_one_under_is_malformed():
     )
 
 
-def test_an_event_that_cannot_be_read_makes_its_markets_malformed_and_partial():
-    session = ReplaySession(failures={f"/events/{PHI_EVENT}": 403})
+def test_an_event_the_list_lacks_makes_its_markets_malformed_and_partial():
+    session = ReplaySession()
+    session.events["items"] = [
+        e for e in session.events["items"] if e["eventId"] != PHI_EVENT
+    ]
 
     snapshot = _snapshot(adapter(session))
 
@@ -584,13 +595,50 @@ def test_an_event_that_cannot_be_read_makes_its_markets_malformed_and_partial():
     assert snapshot.coverage.diagnostic_details == ("event detail unavailable",)
 
 
-def test_when_no_event_can_be_read_the_retrieval_fails_as_unavailable():
-    session = ReplaySession(
-        failures={f"/events/{NYK_EVENT}": 403, f"/events/{PHI_EVENT}": 403}
-    )
+def test_a_malformed_event_item_leaves_only_its_own_markets_malformed():
+    session = ReplaySession()
+    for item in session.events["items"]:
+        if item["eventId"] == PHI_EVENT:
+            item["description"] = "no teams here"
+
+    snapshot = _snapshot(adapter(session))
+
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert {m.event.provider_id for m in snapshot.markets} == {NYK_EVENT}
+
+
+def test_when_the_event_list_cannot_be_read_the_retrieval_fails_as_unavailable():
+    session = ReplaySession(failures={"/catalog/events": 403})
 
     with pytest.raises(ProviderUnavailableError, match="Novig could not be reached"):
         _snapshot(adapter(session))
+
+
+def test_a_board_spanning_three_events_costs_pages_plus_one_event_list_plus_batches():
+    session = ReplaySession()
+    # Move one recorded NYK market into the third recorded event (Houston).
+    moved = next(
+        r for r in session.pages[0]["items"] if r["marketId"] == BARNES_24_5
+    )
+    moved["eventId"] = HOU_EVENT
+
+    snapshot = _snapshot(adapter(session))
+
+    assert {m.event.provider_id for m in snapshot.markets} == {
+        NYK_EVENT,
+        PHI_EVENT,
+        HOU_EVENT,
+    }
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    kinds = [
+        "page" if u.endswith("/catalog/markets")
+        else "events" if u.endswith("/catalog/events")
+        else "batch" if u.endswith("/batch")
+        else "other"
+        for u, _ in session.calls
+    ]
+    assert sorted(kinds) == ["batch", "events", "page", "page"]
+    assert len(session.calls) == 4
 
 
 def test_a_batch_that_fails_other_than_by_404_leaves_its_markets_unread_and_partial():
@@ -736,16 +784,41 @@ class _AthleteCatalog:
         return [r for r in self.ROWS if r["season"] == season]
 
 
+def _catalog_row(game_id, when, home, away):
+    """One event-catalog row in the shape production stores.
+
+    The collector writes nba_api's ``teamName`` (the nickname, "Knicks") and
+    ``teamTricode`` ("NYK"), not the full team name.
+    """
+
+    (home_id, home_name, home_code), (away_id, away_name, away_code) = home, away
+    return {
+        "nba_game_id": game_id, "season": "2026-27", "scheduled_at": when,
+        "home_team_id": home_id, "home_team_name": home_name,
+        "home_team_tricode": home_code,
+        "away_team_id": away_id, "away_team_name": away_name,
+        "away_team_tricode": away_code,
+        "status_text": "Scheduled", "status_code": 1, "postponed_status": None,
+        "postponement_evidence": None, "classification": "Regular Season",
+        "is_postponed": False,
+    }
+
+
+_KNICKS = (1610612752, "Knicks", "NYK")
+_RAPTORS = (1610612761, "Raptors", "TOR")
+_SIXERS = (1610612755, "76ers", "PHI")
+
+
 class _EventCatalog:
     ROWS = [
-        {"nba_game_id": "0022600001", "season": "2026-27",
-         "scheduled_at": datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
-         "home_team_id": 1610612752, "home_team_name": "New York Knicks",
-         "home_team_tricode": "NYK", "away_team_id": 1610612761,
-         "away_team_name": "Toronto Raptors", "away_team_tricode": "TOR",
-         "status_text": "Scheduled", "status_code": 1, "postponed_status": None,
-         "postponement_evidence": None, "classification": "Regular Season",
-         "is_postponed": False},
+        _catalog_row(
+            "0022600001", datetime(2026, 10, 15, 23, 30, tzinfo=timezone.utc),
+            _KNICKS, _RAPTORS,
+        ),
+        _catalog_row(
+            "0022600077", datetime(2026, 10, 20, 23, 0, tzinfo=timezone.utc),
+            _KNICKS, _SIXERS,
+        ),
     ]
 
     def get_events(self, season):
@@ -783,10 +856,10 @@ def test_recorded_markets_resolve_to_the_expected_athlete_and_game():
     kawhi, _ = resolved(KAWHI_POINTS_29_5)
     assert kawhi.canonical_athlete.player_id == 202695
 
-    # A game the schedule does not hold does not resolve.
-    _, other_game = resolved("01a13b8c-20ef-7d32-868d-926b7c3400b5")  # PHI @ NYK
-    assert other_game.state is not EventResolutionState.AUTO
-    assert other_game.canonical_event_id is None
+    # PHI @ NYK on 2026-10-20 is a second scheduled game.
+    _, phi_game = resolved("01a13b8c-20ef-7d32-868d-926b7c3400b5")
+    assert phi_game.state is EventResolutionState.AUTO
+    assert phi_game.canonical_event_id == "0022600077"
 
 
 def test_a_later_page_that_fails_keeps_the_earlier_pages_and_is_partial():
@@ -885,8 +958,8 @@ def test_requests_state_the_league_page_size_cursor_and_batch_ids():
     assert batch_call[0] == "https://api.novig.us/nbx/v1/markets/book/batch"
     assert batch_call[1]["currency"] == "CASH"
     assert len(batch_call[1]["marketIds"].split(",")) == 20
-    assert len(session.urls(f"/events/{NYK_EVENT}")) == 1
-    assert len(session.urls(f"/events/{PHI_EVENT}")) == 1
+    (event_call,) = [call for call in session.calls if call[0].endswith("/catalog/events")]
+    assert event_call[1] == {"league": "NBA", "limit": 200}
 
 
 def test_provider_events_use_the_novig_operation_catalog():
@@ -897,7 +970,7 @@ def test_provider_events_use_the_novig_operation_catalog():
     assert {e["provider"] for e in events} == {"novig"}
     operations = [e["operation"] for e in events]
     assert operations.count("market_page") == 2
-    assert operations.count("event_detail") == 2
+    assert operations.count("event_page") == 1
     assert operations.count("market_book_batch") == 1
     assert set(operations) <= telemetry.PROVIDER_OPERATION_CATALOG["novig"]
 
@@ -918,3 +991,25 @@ def test_the_registry_builds_the_adapter_with_bounded_concurrency():
 
     assert isinstance(built, NovigAdapter)
     assert built.detail_concurrency == 4
+
+
+def test_event_team_evidence_carries_the_catalog_tricode_for_each_full_name():
+    market = _market(_snapshot(), BARNES_POINTS_19_5)
+
+    assert [
+        (t.name, t.abbreviation)
+        for t in (market.event.home_team, market.event.away_team)
+    ] == [("New York Knicks", "NYK"), ("Toronto Raptors", "TOR")]
+
+
+def test_a_team_name_outside_the_closed_table_states_no_abbreviation():
+    session = ReplaySession()
+    for item in session.events["items"]:
+        if item["eventId"] == NYK_EVENT:
+            item["description"] = "Toronto Raptors @ New York Knickerbockers"
+
+    market = _market(_snapshot(adapter(session)), BARNES_POINTS_19_5)
+
+    assert market.event.home_team.name == "New York Knickerbockers"
+    assert market.event.home_team.abbreviation is None
+    assert market.event.away_team.abbreviation == "TOR"

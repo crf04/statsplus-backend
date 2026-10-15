@@ -35,6 +35,7 @@ from typing import Any
 import requests
 
 from app.errors import ProviderUnavailableError
+from app.domain.nba_teams import NBA_TEAM_FULL_NAME_TO_TRICODE
 from app.providers.dfs import (
     AthleteEvidence,
     CoverageCode,
@@ -295,7 +296,9 @@ class NovigAdapter:
             result for _, result in outcomes if isinstance(result, _Candidate)
         ]
 
-        events, event_errors = self._fetch_events(context, candidates)
+        events, event_errors, events_complete, event_codes, event_details = (
+            self._fetch_events(context, candidates)
+        )
         usable = [
             candidate
             for candidate in candidates
@@ -328,7 +331,12 @@ class NovigAdapter:
         batch = _NormalizedBatch.from_accumulator(
             records,
             markets=collection.markets,
-            warning_codes=(*page_codes, *fanout_codes, *collection.warning_codes),
+            warning_codes=(
+                *page_codes,
+                *event_codes,
+                *fanout_codes,
+                *collection.warning_codes,
+            ),
         )
         if batch.malformed_count and not batch.markets:
             if event_errors and len(event_errors) == len(
@@ -346,7 +354,7 @@ class NovigAdapter:
             eligible_count=batch.eligible_count,
             normalized_count=batch.normalized_count,
             skipped_count=batch.skipped_count,
-            pagination_complete=pagination_complete,
+            pagination_complete=pagination_complete and events_complete,
             fanout_complete=not batch.malformed_count and not unread,
             expected_total=None,
             warning_codes=batch.warning_codes,
@@ -354,6 +362,7 @@ class NovigAdapter:
             diagnostic_details=(
                 *batch.diagnostic_details,
                 *page_details,
+                *event_details,
                 *fanout_details,
             ),
         )
@@ -386,7 +395,12 @@ class NovigAdapter:
             raise _MalformedPayload(str(error)) from error
 
     def _fetch_catalog(
-        self, context: RetrievalContext
+        self,
+        context: RetrievalContext,
+        *,
+        path: str = "/catalog/markets",
+        operation: str = "market_page",
+        noun: str = "market",
     ) -> tuple[list[Any], bool, list[CoverageCode], list[str]]:
         rows: list[Any] = []
         cursor: str | None = None
@@ -398,8 +412,8 @@ class NovigAdapter:
             try:
                 items, cursor = self._get(
                     context,
-                    f"{self.BASE_URL}/catalog/markets",
-                    operation="market_page",
+                    f"{self.BASE_URL}{path}",
+                    operation=operation,
                     params=params,
                     parse=self._parse_page,
                 )
@@ -410,7 +424,7 @@ class NovigAdapter:
                     rows,
                     False,
                     [CoverageCode.PAGE_FETCH_FAILED],
-                    [f"novig market page {page_number + 1} unavailable: {error}"],
+                    [f"novig {noun} page {page_number + 1} unavailable: {error}"],
                 )
             except _MalformedPayload as error:
                 if page_number == 0:
@@ -419,7 +433,7 @@ class NovigAdapter:
                     rows,
                     False,
                     [CoverageCode.PAGE_MALFORMED],
-                    [f"novig market page {page_number + 1} malformed: {error}"],
+                    [f"novig {noun} page {page_number + 1} malformed: {error}"],
                 )
             rows.extend(items)
             if cursor is None:
@@ -429,14 +443,14 @@ class NovigAdapter:
                     rows,
                     False,
                     [CoverageCode.PAGINATION_PAGE_MISMATCH],
-                    ["novig market pagination repeated a cursor"],
+                    [f"novig {noun} pagination repeated a cursor"],
                 )
             seen.add(cursor)
         return (
             rows,
             False,
             [CoverageCode.PAGINATION_PAGE_MISMATCH],
-            [f"novig market pagination exceeded {self.MAX_PAGES} pages"],
+            [f"novig {noun} pagination exceeded {self.MAX_PAGES} pages"],
         )
 
     @staticmethod
@@ -455,26 +469,50 @@ class NovigAdapter:
 
     def _fetch_events(
         self, context: RetrievalContext, candidates: list[_Candidate]
-    ) -> tuple[dict[str, _Event], dict[str, ProviderUnavailableError]]:
-        event_ids = list(dict.fromkeys(c.event_id for c in candidates))
+    ) -> tuple[
+        dict[str, _Event],
+        dict[str, ProviderUnavailableError],
+        bool,
+        list[CoverageCode],
+        list[str],
+    ]:
+        """Read every NBA event in one paginated list call.
+
+        The per-event route shares the public throttle and answers 429 for most
+        events of a board, so events are joined to markets by ``eventId``.  An
+        event the list lacks leaves its markets malformed; a list that cannot
+        be read at all fails every event with its error.
+        """
+
         events: dict[str, _Event] = {}
         errors: dict[str, ProviderUnavailableError] = {}
-
-        def fetch(event_id: str) -> _Event:
-            return self._get(
+        event_ids = list(dict.fromkeys(c.event_id for c in candidates))
+        if not event_ids:
+            return events, errors, True, [], []
+        try:
+            items, complete, codes, details = self._fetch_catalog(
                 context,
-                f"{self.BASE_URL}/catalog/events/{event_id}",
-                operation="event_detail",
-                params=None,
-                parse=lambda payload: self._parse_event(payload, event_id),
+                path="/catalog/events",
+                operation="event_page",
+                noun="event",
             )
-
-        for event_id, result in self._fan_out(event_ids, fetch):
-            if isinstance(result, _Event):
-                events[event_id] = result
-            else:
-                errors[event_id] = result
-        return events, errors
+        except ProviderUnavailableError as error:
+            return (
+                events,
+                {event_id: error for event_id in event_ids},
+                False,
+                [CoverageCode.PAGE_FETCH_FAILED],
+                [f"novig event list unavailable: {error}"],
+            )
+        for item in items:
+            event_id = item.get("eventId") if isinstance(item, Mapping) else None
+            if not isinstance(event_id, str):
+                continue
+            try:
+                events[event_id] = self._parse_event(item, event_id)
+            except _MalformedPayload:
+                continue  # the event stays absent, so its markets are malformed
+        return events, errors, complete, codes, details
 
     def _fetch_books(
         self, context: RetrievalContext, candidates: list[_Candidate]
@@ -629,8 +667,15 @@ class NovigAdapter:
                 label=description,
                 status_label=status,
                 starts_at=starts_at,
-                home_team=TeamEvidence(name=home),
-                away_team=TeamEvidence(name=away),
+                # The event catalog stores a tricode, so a bare full name only
+                # matches through the closed name table; a name outside it
+                # states no abbreviation and stays unmatched.
+                home_team=TeamEvidence(
+                    name=home, abbreviation=NBA_TEAM_FULL_NAME_TO_TRICODE.get(home)
+                ),
+                away_team=TeamEvidence(
+                    name=away, abbreviation=NBA_TEAM_FULL_NAME_TO_TRICODE.get(away)
+                ),
             ),
             league=optional_text(payload.get("league")),
         )
