@@ -22,6 +22,7 @@ from tests import test_target_backtest as bt
 from tests import test_target_preview as preview_tests
 from tests import test_target_resolution as res
 from tests.support.season_rollover import cut_over_if_held
+from tests.support.slate_catalog import NoNeighbourEvents
 
 
 PUBLISHED = "2025-26"
@@ -316,7 +317,7 @@ TRANSITION_15 = {
 }
 
 
-class ScheduleCatalog:
+class ScheduleCatalog(NoNeighbourEvents):
     """One Event Catalog serving both the Slate and the Matchup, by season."""
 
     def __init__(self, events_by_season):

@@ -43,6 +43,7 @@ from app.services.slate_service import SlateService
 from app.services.stats_freshness_repository import StatsFreshness
 from app.services.target_resolution import TargetResolutionService
 from app.services.user_service import UserService
+from tests.support.slate_catalog import NoNeighbourEvents
 
 
 OWNER = "owner-uid"
@@ -1584,7 +1585,7 @@ PARITY_GAME_COUNT = {
 }
 
 
-class _ParityEvents(matchup_doubles.RecordedEvents):
+class _ParityEvents(NoNeighbourEvents, matchup_doubles.RecordedEvents):
     """The matchup double, widened with the read a Slate Date makes."""
 
     def get_events_between(self, season, start, end):

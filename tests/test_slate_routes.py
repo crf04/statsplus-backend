@@ -7,6 +7,7 @@ import pytest
 from app.config.settings import NBASeasonSettings, RuntimeSettings
 from app.errors import InvalidInputError, ProviderUnavailableError
 from app.services.slate_service import SlateService
+from tests.support.slate_catalog import NoNeighbourEvents
 
 
 def test_get_slate_returns_the_service_payload(client, dependencies):
@@ -31,7 +32,7 @@ def test_get_slate_returns_the_service_payload(client, dependencies):
 
 
 def test_authenticated_omitted_date_defaults_through_real_service(client, dependencies):
-    class Catalog:
+    class Catalog(NoNeighbourEvents):
         def count_events(self, season):
             return 1
 

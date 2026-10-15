@@ -217,6 +217,68 @@ class EventCatalogRepository:
             ).mappings()
             return [self._serialize(row) for row in rows]
 
+    def list_seasons(self) -> list[str]:
+        """Every season with at least one stored event, oldest first."""
+
+        table = EventCatalogEntry.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table.c.season).distinct().order_by(table.c.season)
+            )
+            return [str(row[0]) for row in rows]
+
+    def list_events_before(
+        self,
+        season: str,
+        before: datetime,
+        limit: int,
+        *,
+        inclusive: bool = False,
+    ) -> list[dict[str, Any]]:
+        """The ``limit`` latest events before ``before``, newest first.
+
+        Reads through the (season, scheduled_at) index, so a neighbour search
+        never decodes a season.  ``inclusive`` admits events scheduled exactly
+        at ``before`` (a continuation page).
+        """
+
+        table = EventCatalogEntry.__table__
+        bound = assume_utc(before)
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.season == season,
+                    table.c.scheduled_at <= bound
+                    if inclusive
+                    else table.c.scheduled_at < bound,
+                )
+                .order_by(table.c.scheduled_at.desc(), table.c.nba_game_id.desc())
+                .limit(limit)
+            ).mappings()
+            return [self._serialize(row) for row in rows]
+
+    def list_events_after(
+        self,
+        season: str,
+        after: datetime,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """The ``limit`` earliest events at or after ``after``, oldest first."""
+
+        table = EventCatalogEntry.__table__
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.season == season,
+                    table.c.scheduled_at >= assume_utc(after),
+                )
+                .order_by(table.c.scheduled_at, table.c.nba_game_id)
+                .limit(limit)
+            ).mappings()
+            return [self._serialize(row) for row in rows]
+
     def freshness(
         self,
         season: str,

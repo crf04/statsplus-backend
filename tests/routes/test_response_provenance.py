@@ -42,6 +42,7 @@ from app.services.target_resolution import TargetResolutionService
 from app.services.user_service import UserService
 from tests import test_target_resolution as res
 from tests.services import test_matchup_service as m
+from tests.support.slate_catalog import NoNeighbourEvents
 
 
 NOW = m.NOW  # 2026-01-15T12:00:00Z, the reader's clock
@@ -433,7 +434,7 @@ def test_game_logs_return_the_generation_their_logs_were_read_from(
 UNAVAILABLE = {"status": "unavailable", "retrieved_at": None}
 
 
-class _Catalog:
+class _Catalog(NoNeighbourEvents):
     """An Event Catalog collected 30 hours before the Slate is read."""
 
     def __init__(self, events=()):
@@ -472,6 +473,8 @@ def test_the_slate_reads_no_publication_and_states_its_sources(
     assert response.status_code == 200
     assert response.get_json() == {
         "slate_date": SLATE_DATE,
+        "previous_game_date": None,
+        "next_game_date": None,
         "freshness": {
             "schedule": {"status": "stale", "retrieved_at": "2026-01-14T06:00:00+00:00"},
             "pool": {"status": "unavailable", "retrieved_at": None, "providers": {}},

@@ -31,6 +31,27 @@ class RecordedCatalog:
         assert season == "2025-26"
         return len(self.events)
 
+    def get_seasons(self):
+        return ["2025-26"]
+
+    def get_events_before(self, season, before, limit, *, inclusive=False):
+        assert season == "2025-26"
+        stamped = [dict(e, season=season) for e in self.events]
+        found = [
+            e for e in stamped
+            if (datetime.fromisoformat(e["scheduled_at"]) <= before
+                if inclusive else datetime.fromisoformat(e["scheduled_at"]) < before)
+        ]
+        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]), reverse=True)
+        return found[:limit]
+
+    def get_events_after(self, season, after, limit):
+        assert season == "2025-26"
+        stamped = [dict(e, season=season) for e in self.events]
+        found = [e for e in stamped if datetime.fromisoformat(e["scheduled_at"]) >= after]
+        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
+        return found[:limit]
+
     def get_freshness(self, season, *, now=None):
         assert season == "2025-26"
         return dict(self.freshness)
@@ -590,6 +611,28 @@ class SeasonCatalog:
             if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
         ]
 
+    def get_seasons(self):
+        return sorted(season for season, events in self.events_by_season.items() if events)
+
+    def get_events_before(self, season, before, limit, *, inclusive=False):
+        found = [
+            dict(event, season=season)
+            for event in self.events_by_season.get(season, ())
+            if datetime.fromisoformat(event["scheduled_at"]) < before
+            or (inclusive and datetime.fromisoformat(event["scheduled_at"]) == before)
+        ]
+        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]), reverse=True)
+        return found[:limit]
+
+    def get_events_after(self, season, after, limit):
+        found = [
+            dict(event, season=season)
+            for event in self.events_by_season.get(season, ())
+            if datetime.fromisoformat(event["scheduled_at"]) >= after
+        ]
+        found.sort(key=lambda e: (e["scheduled_at"], e["nba_game_id"]))
+        return found[:limit]
+
 
 def _rollover_service(catalog, *, nba=None, player_pool=None, injuries=None):
     """A Slate on 2026-10-01, the day the calendar starts 2026-27."""
@@ -746,3 +789,19 @@ def test_slate_treats_a_stored_none_string_or_blank_as_a_missing_name(stored):
 
     assert game["away_team"]["name"] == "Detroit Pistons"
     assert game["home_team"]["name"] is None
+
+
+def test_slate_carries_the_nearest_game_days_on_either_side():
+    service = _service(
+        [
+            _event("001", "2025-12-30T00:00:00+00:00"),  # Dec 29 ET
+            _event("002", "2026-01-03T00:00:00+00:00"),  # Jan 2 ET
+            _event("003", "2026-01-09T00:00:00+00:00"),  # Jan 8 ET
+        ]
+    )
+
+    payload = service.get_slate("2026-01-05")
+
+    assert payload["games"] == []
+    assert payload["previous_game_date"] == "2026-01-02"
+    assert payload["next_game_date"] == "2026-01-08"
