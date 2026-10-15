@@ -16,6 +16,7 @@ from app.models.sportsbook_odds import (
     SportsbookPropLatest,
     SportsbookPropQuote,
 )
+from app.config.settings import OddsApiSettings
 from app.providers.odds_api import OddsApiError, OddsQuota
 from app.services.odds_collection import LeaseLost
 from app.services.odds_schedule import Tier
@@ -519,17 +520,19 @@ def test_a_beat_that_drifts_out_of_the_closing_window_never_stores_a_closing_fla
 def test_the_guard_rechecks_remaining_credits_before_every_paid_call(world):
     events = load("events")[:2]
     events[1]["commence_time"] = (TIP + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Discovery says 11; a shared-key consumer spends 1; our first response says 5.
-    client = FakeClient(events=events, remaining=10)
-    client.discovery_quota = OddsQuota(11, 19989, 0)
-    world.clock[0] = TIP - timedelta(minutes=7)  # both closings are due and in window
+    # Discovery says 1020, so both hourly polls fit above the 1000 reserve; a
+    # shared-key consumer then spends 11 and our first response says 999.
+    client = FakeClient(events=events, remaining=1004)
+    client.discovery_quota = OddsQuota(1020, 18980, 0)
+    world.clock[0] = TIP - timedelta(hours=5)
+    settings = OddsApiSettings(enabled=True, api_key="k" * 24, assumed_lead_hours=1)
 
-    result = world.coordinator(client).run()
+    result = world.coordinator(client, odds_settings=settings).run()
 
-    assert len(client.event_calls) == 1  # the second would take 5 credits to 0
+    assert (result.tier, len(client.event_calls)) == ("normal", 1)  # a second would dip below the reserve
+    assert (result.status, result.remaining) == ("partial", 999)
     (state,) = _rows(world, OddsApiQuotaState)
-    assert state["remaining"] == 5
-    assert result.remaining == 5
+    assert state["remaining"] == 999
 
 
 def test_a_discarded_response_still_updates_the_stored_quota_first(world):
