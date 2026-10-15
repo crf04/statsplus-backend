@@ -17,7 +17,9 @@ from app.models.sportsbook_odds import (
     SportsbookPropQuote,
 )
 from app.providers.odds_api import OddsApiError, OddsQuota
-from app.services.sportsbook_quotes import SportsbookQuoteReader
+from app.services.odds_collection import LeaseLost
+from app.services.odds_schedule import Tier
+from app.services.sportsbook_quotes import ResolvedQuote, SportsbookQuoteReader
 from tests.support.odds_world import (
     CURRY,
     EVENT_ID,
@@ -461,3 +463,35 @@ def test_an_approved_mapping_outside_the_two_rosters_is_still_refused(world):
 
     assert lakers_nuggets == {}
     assert warriors_clippers == {"Stephen Curry": CURRY}
+
+
+def test_every_write_layer_refuses_a_stale_fence_even_with_the_same_owner_name(world):
+    # Production workers share one owner string; only the fence tells them apart.
+    a = world.coordinator(FakeClient())
+    b = world.coordinator(FakeClient())
+    a._load_state(NOW)
+    a._fence = a._acquire_lease(NOW)
+    b_fence = b._acquire_lease(NOW + timedelta(minutes=6))  # A's lease expired, B holds it
+    assert (a._fence, b_fence) == (1, 2)
+    quote = ResolvedQuote(LEBRON, "PTS", "draftkings", 27.5, -115, -105, NOW)
+    writes = {
+        "quota": lambda: a._save_quota(OddsQuota(1, 19999, 5), now=NOW),
+        "tier": lambda: a._save_tier({}, Tier.HALTED, NOW, NOW),
+        "failures": lambda: a._clear_failures(NOW, unresolved_players=3),
+        "poll": lambda: a.store.record_poll(
+            odds_event_id="e", game_id=GAME_ID, started_at=NOW, completed_at=NOW,
+            cost=5, remaining=1, is_closing=False, quotes=[quote], fence=a._assert_lease,
+        ),
+        "unstored poll": lambda: a.store.record_unstored_poll(
+            odds_event_id="e", game_id=GAME_ID, started_at=NOW, completed_at=NOW,
+            outcome="failed", is_closing=False, fence=a._assert_lease,
+        ),
+    }
+
+    for name, write in writes.items():
+        with pytest.raises(LeaseLost):
+            write()
+
+    (state,) = _rows(world, OddsApiQuotaState)
+    assert (state["remaining"], state["tier"], state["unresolved_total"]) == (None, "normal", 0)
+    assert _rows(world, OddsApiPoll) == [] and _rows(world, SportsbookPropLatest) == []
