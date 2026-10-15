@@ -49,6 +49,7 @@ from app.providers.dfs import (
 )
 from app.providers.kalshi import SERIES_STATISTIC_LABELS, KalshiAdapter
 from app.providers.registry import DFSProviderRuntime, build_dfs_provider
+from app.services.athlete_resolver import AthleteResolver, MappingResolutionState
 from app.services.event_resolver import (
     DEFAULT_EVENT_MATCH_WINDOW,
     EventResolutionState,
@@ -425,6 +426,66 @@ def test_ladders_are_chosen_per_game_statistic_and_player():
     ) == [("Stephon Castle", "standard"), ("Victor Wembanyama", "standard")]
 
 
+def test_two_games_of_one_athlete_and_statistic_each_get_their_own_standard_line():
+    june_13 = [
+        _rung(24.5, bid="0.7800", ask="0.8000"),
+        _rung(29.5, bid="0.4800", ask="0.5000"),
+    ]
+    june_16 = [
+        _rung(
+            line,
+            bid=bid,
+            ask=ask,
+            ticker=f"KXNBAPTS-26JUN16SASNYK-SASVWEMBANYAMA1-{suffix}",
+            event_ticker="KXNBAPTS-26JUN16SASNYK",
+        )
+        for line, bid, ask, suffix in (
+            (24.5, "0.4800", "0.5000", 25),
+            (29.5, "0.1800", "0.2000", 30),
+        )
+    ]
+
+    snapshot = _ladder_snapshot(*june_13, *june_16)
+
+    assert sorted(
+        (m.event.provider_id, str(m.threshold.value), m.variant.value)
+        for m in snapshot.markets
+    ) == [
+        ("KXNBAGAME-26JUN13NYKSAS", "24.5", "alternate"),
+        ("KXNBAGAME-26JUN13NYKSAS", "29.5", "standard"),
+        ("KXNBAGAME-26JUN16SASNYK", "24.5", "standard"),
+        ("KXNBAGAME-26JUN16SASNYK", "29.5", "alternate"),
+    ]
+
+
+def _conflicting_duplicates(order):
+    a = _rung(24.5, bid="0.4000", ask="0.8000")
+    b = _rung(29.5, bid="0.4500", ask="0.6500")
+    duplicate = _rung(24.5, bid="0.2000", ask="0.8000")
+    rows = {"duplicate_last": [a, b, duplicate], "duplicate_first": [duplicate, b, a]}
+    return _ladder_snapshot(*rows[order])
+
+
+@pytest.mark.parametrize("order", ["duplicate_last", "duplicate_first"])
+def test_a_repeated_ticker_with_a_different_bid_is_excluded_in_either_order(order):
+    snapshot = _conflicting_duplicates(order)
+
+    assert _lines_by_variant(snapshot) == {"standard": ["29.5"], "alternate": []}
+    assert snapshot.status is SnapshotStatus.PARTIAL
+    assert snapshot.coverage.skipped_reasons == (
+        CoverageCode.CONFLICTING_SOURCE_IDENTITY,
+    )
+
+
+def test_an_identical_repeated_row_is_one_market():
+    row = _rung(29.5, bid="0.4800", ask="0.5000")
+
+    snapshot = _ladder_snapshot(row, deepcopy(row))
+
+    assert [str(m.threshold.value) for m in snapshot.markets] == ["29.5"]
+    assert snapshot.status is SnapshotStatus.COMPLETE
+
+
 # -- prices (D1, D2) ----------------------------------------------------------
 
 
@@ -510,6 +571,22 @@ def test_a_market_of_another_series_is_excluded_as_a_non_projection_market():
 
     assert len(snapshot.markets) == 1
     assert snapshot.status is SnapshotStatus.COMPLETE
+    assert snapshot.coverage.skipped_count == 1
+    assert _skipped(snapshot) == (CoverageCode.NON_PROJECTION_MARKET,)
+
+
+@pytest.mark.parametrize(
+    "event_ticker",
+    ["KXNBAH2HPTS-26JUN13LKORNET7JALVARADO5", "KXNBAFINMVP-26"],
+)
+def test_head_to_head_and_season_long_tickers_are_excluded_not_malformed(event_ticker):
+    row = _rung(29.5, bid="0.4800", ask="0.5000", suffix="x")
+    row["event_ticker"] = event_ticker
+
+    snapshot = _with_one_excluded_row(row)
+
+    assert snapshot.status is SnapshotStatus.COMPLETE
+    assert len(snapshot.markets) == 1
     assert snapshot.coverage.skipped_count == 1
     assert _skipped(snapshot) == (CoverageCode.NON_PROJECTION_MARKET,)
 
@@ -676,6 +753,66 @@ def test_the_event_resolver_maps_the_game_with_either_start_time(estimated):
 
     assert resolution.state is EventResolutionState.AUTO
     assert resolution.canonical_event.nba_game_id == "0042500405"
+
+
+def _athlete_row(player_id, name, team_id, abbreviation):
+    return {
+        "season": "2025-26",
+        "player_id": player_id,
+        "display_name": name,
+        "roster_status": "active",
+        "is_active": True,
+        "is_active_for_season": True,
+        "team_id": team_id,
+        "team_name": None,
+        "team_abbreviation": abbreviation,
+        "published_at": TIP_OFF,
+    }
+
+
+class _AthleteCatalog:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def get_catalog(self, season, *, active_only=False):
+        return [r for r in self.rows if r["season"] == season]
+
+
+def test_recorded_markets_resolve_to_canonical_athletes_and_the_game_through_the_resolvers():
+    """The calls dfs_board makes: ``resolve_market(market, season, observed_at=)``."""
+
+    snapshot = _snapshot(_recorded_session())
+    athletes = AthleteResolver(
+        _AthleteCatalog(
+            [
+                _athlete_row(1641705, "Victor Wembanyama", 1610612759, "SAS"),
+                _athlete_row(1628973, "Jalen Brunson", 1610612752, "NYK"),
+                _athlete_row(1626157, "Karl-Anthony Towns", 1610612752, "NYK"),
+            ]
+        )
+    )
+    events = EventResolver(_Catalog())
+
+    resolved = {}
+    for market in snapshot.markets:
+        athlete = athletes.resolve_market(
+            market, "2025-26", observed_at=snapshot.retrieved_at
+        )
+        event = events.resolve_market(
+            market, "2025-26", observed_at=snapshot.retrieved_at
+        )
+        assert athlete.state is MappingResolutionState.AUTO
+        assert event.state is EventResolutionState.AUTO
+        resolved[market.athlete.name] = (
+            athlete.canonical_athlete.player_id,
+            event.canonical_event.nba_game_id,
+        )
+
+    assert resolved == {
+        "Victor Wembanyama": (1641705, "0042500405"),
+        "Jalen Brunson": (1628973, "0042500405"),
+        "Karl-Anthony Towns": (1626157, "0042500405"),
+    }
 
 
 # -- coverage and failures ----------------------------------------------------

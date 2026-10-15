@@ -122,7 +122,9 @@ class _Page:
     """One parsed page: its normalized rows and the next cursor, if any."""
 
     batch: _NormalizedBatch
-    midpoints: Mapping[str, Decimal]
+    #: One Over midpoint (``None`` when the row has none) per batch market, in
+    #: the batch's order.
+    midpoints: tuple[Decimal | None, ...]
     cursor: str | None
 
 
@@ -132,7 +134,8 @@ class _Collected:
     coverage: _RecordCoverageAccumulator = field(
         default_factory=_RecordCoverageAccumulator
     )
-    midpoints: dict[str, Decimal] = field(default_factory=dict)
+    midpoints: dict[str | None, Decimal | None] = field(default_factory=dict)
+    conflicting: set[str | None] = field(default_factory=set)
     failures: list[ProviderUnavailableError] = field(default_factory=list)
     requests_made: int = 0
 
@@ -194,7 +197,12 @@ class KalshiAdapter:
         if not collected.requests_made:
             raise collected.failures[-1]
         markets = self._with_standard_lines(
-            collected.markets.markets, collected.midpoints
+            tuple(
+                market
+                for market in collected.markets.markets
+                if market.market_id not in collected.conflicting
+            ),
+            {k: v for k, v in collected.midpoints.items() if v is not None},
         )
         coverage = collected.coverage
         if not markets:
@@ -276,8 +284,13 @@ class KalshiAdapter:
                 logger.warning("Kalshi %s page was malformed: %s", series, error)
                 return False
             collected.requests_made += 1
-            collected.coverage.absorb(page.batch, on_success=collected.markets.add)
-            collected.midpoints.update(page.midpoints)
+            page_midpoints = iter(page.midpoints)
+            collected.coverage.absorb(
+                page.batch,
+                on_success=lambda market: self._accept(
+                    collected, market, next(page_midpoints)
+                ),
+            )
             cursor = page.cursor
             if not cursor:
                 return True
@@ -289,6 +302,29 @@ class KalshiAdapter:
             seen_cursors.add(cursor)
         collected.failures.append(self._invalid_response("pagination did not end"))
         return False
+
+    @staticmethod
+    def _accept(
+        collected: _Collected, market: PlayerProjectionMarket, midpoint: Decimal | None
+    ) -> None:
+        """Add one market, refusing a repeat whose midpoint contradicts the first.
+
+        The Over midpoint chooses the standard line but is not part of the
+        market content the collector compares, so a repeated ticker with a
+        different bid would otherwise be a silent duplicate and the chosen line
+        would depend on row order.  A contradiction is a conflicting source
+        identity, excluded wherever it appears, exactly as the collector does.
+        """
+
+        key = market.market_id
+        if key in collected.midpoints and collected.midpoints[key] != midpoint:
+            collected.conflicting.add(key)
+            raise CoverageRecordMalformed(
+                "repeated provider market identity has conflicting book evidence",
+                code=CoverageCode.CONFLICTING_SOURCE_IDENTITY,
+            )
+        collected.midpoints.setdefault(key, midpoint)
+        collected.markets.add(market)
 
     def _open_games(self, context: RetrievalContext) -> Mapping[str, _Game]:
         """Index every open NBA game's milestone by game key."""
@@ -447,9 +483,9 @@ class KalshiAdapter:
         rows = payload.get("markets")
         if not isinstance(rows, list):
             raise _MalformedPayload("markets must be a list")
-        midpoints: dict[str, Decimal] = {}
-        collection = _SnapshotMarketCollector()
+        midpoints: list[Decimal | None] = []
         records = _RecordCoverageAccumulator()
+        # Repeats are judged once, across pages, in get_snapshot's collector.
         records.extend(
             rows,
             lambda row: cls._normalize_market(
@@ -458,21 +494,10 @@ class KalshiAdapter:
                 allowed_statuses=allowed_statuses,
                 midpoints=midpoints,
             ),
-            on_success=collection.add,
         )
-        batch = _NormalizedBatch.from_accumulator(
-            records,
-            markets=collection.markets,
-            warning_codes=collection.warning_codes,
-        )
-        retained = {market.market_id for market in batch.markets}
         return _Page(
-            batch=batch,
-            midpoints={
-                market_id: midpoint
-                for market_id, midpoint in midpoints.items()
-                if market_id in retained
-            },
+            batch=_NormalizedBatch.from_accumulator(records),
+            midpoints=tuple(midpoints),
             cursor=cls._cursor(payload),
         )
 
@@ -483,19 +508,21 @@ class KalshiAdapter:
         *,
         games: Mapping[str, _Game],
         allowed_statuses: tuple[MarketStatus | str, ...],
-        midpoints: dict[str, Decimal],
+        midpoints: list[Decimal | None],
     ) -> PlayerProjectionMarket:
         if not isinstance(row, Mapping):
             raise CoverageRecordMalformed("market must be an object")
         ticker = required_text(row, "ticker")
         event_ticker = required_text(row, "event_ticker")
+        # The series decides scope before the ticker's shape is read: head to
+        # head and season-long series have other shapes and are out of scope,
+        # not malformed.
+        statistic_label = SERIES_STATISTIC_LABELS.get(event_ticker.partition("-")[0])
+        if statistic_label is None:
+            raise CoverageRecordExcluded(CoverageCode.NON_PROJECTION_MARKET)
         event_match = _EVENT_TICKER.match(event_ticker)
         if event_match is None:
             raise CoverageRecordMalformed("event_ticker is not a Kalshi game event")
-        series = event_match.group("series")
-        statistic_label = SERIES_STATISTIC_LABELS.get(series)
-        if statistic_label is None:
-            raise CoverageRecordExcluded(CoverageCode.NON_PROJECTION_MARKET)
         if row.get("market_type") != "binary" or row.get("strike_type") != "structured":
             raise CoverageRecordExcluded(CoverageCode.NON_PROJECTION_MARKET)
         custom_strike = row.get("custom_strike")
@@ -585,8 +612,7 @@ class KalshiAdapter:
             )
         except ValueError as error:
             raise CoverageRecordMalformed(str(error)) from error
-        if midpoint is not None:
-            midpoints[ticker] = midpoint
+        midpoints.append(midpoint)
         return market
 
     @staticmethod
