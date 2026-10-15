@@ -68,7 +68,12 @@ def _environ(providers: str) -> dict[str, str]:
 
 
 def test_the_registry_names_every_provider_the_application_may_enable():
-    assert dfs_provider_names() == ("dabble", "prizepicks", "underdog")
+    assert dfs_provider_names() == (
+        "dabble",
+        "prizepicks",
+        "underdog",
+        "kalshi",
+    )
     assert dfs_provider_name_set() == set(dfs_provider_names())
     assert tuple(
         registration.name for registration in dfs_provider_registrations()
@@ -126,6 +131,7 @@ def test_registering_a_provider_is_all_onboarding_takes(monkeypatch):
             "dabble",
             "prizepicks",
             "underdog",
+            "kalshi",
         }
 
     # The registration is gone, and so is the configuration that named it.

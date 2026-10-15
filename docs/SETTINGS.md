@@ -65,7 +65,7 @@ used for part weights has fewer than the configured minimum games.
 The internal DFS collector receives an explicit injected provider registry. In
 development and testing, omitting `DFS_ENABLED_PROVIDERS` disables all DFS
 adapters. Tests and local experiments may explicitly configure the recorded
-provider adapters (`dabble`, `prizepicks`, and `underdog`). Production must
+provider adapters (`dabble`, `prizepicks`, `underdog`, and `kalshi`). Production must
 explicitly provide `DFS_ENABLED_PROVIDERS`; a comma-separated list enables
 those providers, while an explicit empty value disables all of them. Publishing
 the board still requires at least one enabled provider.
