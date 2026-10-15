@@ -460,7 +460,7 @@ def test_an_invalid_date_is_the_slates_invalid_input():
         service.get_edges("04-10-2026")
 
 
-# --- the result cache and the concurrent compose ------------------------------
+# --- the result cache and the serial compose ------------------------------
 
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -487,7 +487,7 @@ class DictRedis:
 
 
 class SnapshotComposer:
-    """Composes from a snapshot, recording how many ran at once."""
+    """Composes from a snapshot, recording the order and how many ran at once."""
 
     def __init__(self, payloads, delay=0.0):
         self.payloads = payloads
@@ -520,7 +520,7 @@ class Publications:
         return SimpleNamespace(generation=self.generation, retained_history=())
 
 
-def _cached_service(composer, redis_client, games, *, publications=None, workers=4):
+def _cached_service(composer, redis_client, games, *, publications=None):
     return SlateEdgesService(
         slates=FakeSlate(games),
         matchups=composer,
@@ -530,7 +530,6 @@ def _cached_service(composer, redis_client, games, *, publications=None, workers
             environment="testing", nba={"current_season": "2025-26"}
         ),
         redis_client=redis_client,
-        max_workers=workers,
     )
 
 
@@ -624,26 +623,16 @@ def test_a_redis_failure_is_a_miss_not_an_error():
     assert [game["game_id"] for game in edges["games"]] == ["G1", "G2"]
 
 
-def test_matchups_compose_concurrently_but_never_more_than_the_worker_bound():
-    games = [_game(f"G{i}") for i in range(12)]
-    payloads = {f"G{i}": _matchup([_blend_player(i, f"P{i}", 0.01 * i)]) for i in range(12)}
-    composer = SnapshotComposer(payloads, delay=0.05)
+def test_matchups_compose_one_at_a_time_in_slate_order():
+    games = [_game(f"G{i}") for i in range(6)]
+    payloads = {f"G{i}": _matchup([_blend_player(i, f"P{i}", 0.01 * i)]) for i in range(6)}
+    composer = SnapshotComposer(payloads, delay=0.01)
 
-    edges = _cached_service(composer, None, games, workers=3).get_edges("d")
+    edges = _cached_service(composer, None, games).get_edges("d")
 
-    assert composer.peak == 3
-    assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(12)]
-
-
-def test_the_first_game_composes_alone_before_the_workers_start():
-    games = [_game(f"G{i}") for i in range(5)]
-    payloads = {f"G{i}": _matchup([]) for i in range(5)}
-    composer = SnapshotComposer(payloads, delay=0.05)
-
-    _cached_service(composer, None, games, workers=4).get_edges("d")
-
-    assert composer.calls[0] == "G0"
-    assert composer.peak == 4
+    assert composer.peak == 1
+    assert composer.calls == [f"G{i}" for i in range(6)]
+    assert [game["game_id"] for game in edges["games"]] == [f"G{i}" for i in range(6)]
 
 
 # --- the HTTP seam -------------------------------------------------------------

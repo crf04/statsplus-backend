@@ -23,7 +23,6 @@ import hashlib
 import json
 import zlib
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import redis
@@ -51,9 +50,6 @@ EFFECTS_PER_GAME = 3
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
 SLATE_EDGES_CACHE_SCHEMA = 1
-#: Matchups composed at once.  Each worker holds one whole Matchup document
-#: while it reduces it to the game's entry, so this also bounds peak memory.
-MAX_CONCURRENT_MATCHUPS = 4
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -73,7 +69,6 @@ class SlateEdgesService:
         injuries: Any | None = None,
         settings: RuntimeSettings | None = None,
         redis_client: Any | None = None,
-        max_workers: int = MAX_CONCURRENT_MATCHUPS,
     ) -> None:
         self.slates = slates
         self.matchups = matchups
@@ -83,7 +78,6 @@ class SlateEdgesService:
         self.publication_reader = publication_reader
         self.injuries = injuries
         self.settings = settings
-        self.max_workers = max_workers
         # The response cache is off, never an error, without a client, without
         # settings or with its flag off.
         self._redis = redis_client
@@ -110,15 +104,7 @@ class SlateEdgesService:
         if cached is not None:
             return cached
 
-        # The first game is composed alone: it fills the shared league-wide
-        # window and Diet baseline memo, which the rest then only read instead
-        # of every worker rebuilding the same one at once.
-        first = self._compose_game(matchups, slate_games[0])
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            rest = list(
-                pool.map(lambda game: self._compose_game(matchups, game), slate_games[1:])
-            )
-        composed = [first, *rest]
+        composed = [self._compose_game(matchups, game) for game in slate_games]
         response = self._response(
             slate["slate_date"],
             [entry for entry, _ in composed],
@@ -133,8 +119,7 @@ class SlateEdgesService:
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """One game's entry and its spotlight candidates, from its Matchup.
 
-        The Matchup is reduced here, so a worker never holds more than the one
-        document it is reading.
+        The Matchup is reduced here, so only one document is held at a time.
         """
 
         try:

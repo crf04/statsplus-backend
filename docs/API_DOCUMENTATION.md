@@ -766,9 +766,9 @@ DFS provider and writes nothing.
 - A game whose Matchup cannot be read (a refused or incomplete stored read)
   contributes `effects: []`, `scores: []` and no pick; the response is still
   `200`.
-- The per-game Matchups are composed concurrently (at most four at once, from
-  the one Publication snapshot, after the first has filled the shared
-  league-wide memo). With Redis enabled (`ENABLE_CACHE`, and
+- The per-game Matchups are composed one at a time in Slate order, from the one
+  Publication snapshot, each reduced to its game's entry before the next. With
+  Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
   cached under `slate:edges:v1:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
