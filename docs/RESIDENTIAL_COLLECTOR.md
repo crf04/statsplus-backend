@@ -1,7 +1,10 @@
 # Residential NBA Collector
 
-The collector is a one-shot, pull-only package. It runs from a Windows
-Scheduled Task and never starts Flask, listens for inbound traffic, reads
+The collector is a one-shot, pull-only package. Production runs it as the
+`nba-collector` Railway cron service, with NBA requests sent through a
+residential proxy (see [Railway cron service](#railway-cron-service)). The
+Windows Scheduled Task it first ran from is retired and documented only as a
+fallback. Either way it never starts Flask, listens for inbound traffic, reads
 Postgres credentials, or becomes a product composition authority.
 
 ## Configuration and credential boundary
@@ -182,6 +185,9 @@ One-time operator steps:
 4. Disable the Windows scheduled task so two collectors do not compete.
 
 ## Windows installation and operations
+
+This was the production deployment until the Railway cron replaced it. Keep it
+only as a fallback, and never run it alongside the cron (step 4 above).
 
 Run `install_collector.ps1` under a dedicated non-admin account. It registers
 one task with:
@@ -376,12 +382,12 @@ holds issuance. It records an actor and reason for new requests and manifests.
 Missing/invalid inputs and failed transactions leave last-good publications
 untouched. This operation does not change Archetype membership or refresh it.
 
-Configure the Windows task to start at 04:00 Central and repeat every thirty
-minutes for six hours, retaining the startup catch-up trigger and
-`MultipleInstances=IgnoreNew`. A catalog-only collector invocation exits
-successfully; later scheduled invocations collect the next catalog or manifest
-after the hosted tick makes it available. Conditional failure retries alone
-cannot drive this successful multi-stage handshake.
+The `nba-collector` Railway cron runs every 30 minutes from 09:00 to 16:30
+UTC, covering that window in both CDT and CST (see
+[Railway cron service](#railway-cron-service)). A catalog-only collector
+invocation exits successfully; later scheduled invocations collect the next
+catalog or manifest after the hosted tick makes it available. Conditional
+failure retries alone cannot drive this successful multi-stage handshake.
 
 Inside or outside the issuance window, already accepted queued composition
 jobs use the existing fenced `LedgerRuntime.compose_queued` path. That includes
