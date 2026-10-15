@@ -96,3 +96,35 @@ def test_signup_setting_persists_across_service_instances(engine):
     assert UserService(engine, settings=settings).get_signups_open() is False
     UserService(engine, settings=settings).set_signups_open(True)
     assert UserService(engine, settings=settings).get_signups_open() is True
+
+
+def test_a_competing_first_request_committing_mid_creation_keeps_its_waitlisted_row(
+    engine, monkeypatch
+):
+    """Deterministic version of the race: the rival commits after our lookup."""
+    from app.models.user import User
+
+    settings = load_settings(overrides={"DATABASE_URL": str(engine.url)})
+    service = UserService(engine, settings=settings)
+    service.set_signups_open(False)
+    original = User.from_firebase_user.__func__
+
+    def racing(cls, data):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO users (firebase_uid, email, is_active, access_status) "
+                    "VALUES (:uid, :email, true, 'waitlisted')"
+                ),
+                {"uid": data["uid"], "email": data["email"]},
+            )
+        return original(cls, data)
+
+    monkeypatch.setattr(User, "from_firebase_user", classmethod(racing))
+
+    user = service.create_or_update_user({"uid": "racer", "email": "racer@example.com"})
+
+    assert user is not None and user.access_status == "waitlisted"
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT access_status FROM users")).all()
+    assert [tuple(r) for r in rows] == [("waitlisted",)]
