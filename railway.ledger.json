@@ -1,0 +1,9 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "sh -c 'python scripts/ledger_refresh.py \"$LEDGER_SEASON\" --database-url \"$DATABASE_URL\" --compose'",
+    "preDeployCommand": "python scripts/migrate.py",
+    "cronSchedule": "15 10,12,14 * * *",
+    "restartPolicyType": "NEVER"
+  }
+}
