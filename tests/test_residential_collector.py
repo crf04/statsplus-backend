@@ -188,6 +188,50 @@ def test_normalizers_reject_cross_phase_duplicate_and_negative_values():
         )
 
 
+_FEED_COLUMNS = [
+    "seasonYear", "gameId", "gameStatus", "gameStatusText", "gameDateTimeUTC", "postponedStatus",
+    "gameLabel", "gameSubLabel", "gameSubtype",
+    "homeTeam_teamId", "homeTeam_teamName", "homeTeam_teamTricode",
+    "awayTeam_teamId", "awayTeam_teamName", "awayTeam_teamTricode",
+]
+
+
+def _feed(*rows):
+    return pd.DataFrame(list(rows), columns=_FEED_COLUMNS)
+
+
+_CUP_TBD = [
+    "2026-27", "0022601201", 1, "TBD", "2026-12-04T05:00:00Z", "N",
+    "Emirates NBA Cup", "Quarterfinal", "in-season-knockout", 0, None, None, 0, None, None,
+]
+_OPENER = [
+    "2026-27", "0022600001", 1, "7:00 pm ET", "2026-10-21T00:00:00Z", "N",
+    "", "", "", 1610612747, "Lakers", "LAL", 1610612759, "Spurs", "SAS",
+]
+
+
+def test_schedule_skips_undetermined_cup_knockout_rows_and_keeps_real_games():
+    observation = normalize_schedule_response(
+        _feed(_CUP_TBD, _OPENER), season="2026-27", cutoff=NOW
+    )
+    assert observation.complete is True
+    assert observation.payload["events"] == [{
+        "nba_game_id": "0022600001", "home_team_id": 1610612747, "away_team_id": 1610612759,
+        "scheduled_at": "2026-10-21T00:00:00Z", "status": "Scheduled",
+        "phase": "Regular Season", "classification": "Regular Season",
+    }]
+    assert observation.payload["coverage"]["game_count"] == 1
+
+
+def test_schedule_still_rejects_a_nonzero_unresolvable_team():
+    unresolved = _feed(_OPENER[:9] + [-5] + _OPENER[10:])
+    with pytest.raises(ProviderContractError, match="identity_unresolved"):
+        normalize_schedule_response(unresolved, season="2026-27", cutoff=NOW)
+    half_set = _feed(_OPENER[:9] + [0] + _OPENER[10:])
+    with pytest.raises(ProviderContractError, match="identity_unresolved"):
+        normalize_schedule_response(half_set, season="2026-27", cutoff=NOW)
+
+
 def test_normalizers_preserve_provider_categories_and_scope_evidence():
     synergy = normalize_synergy_response(_stats(), season="2025-26", cutoff=NOW)
     assert synergy.observation_type == "synergy_play_types"

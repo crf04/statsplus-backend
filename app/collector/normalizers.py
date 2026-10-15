@@ -232,6 +232,17 @@ def _positive_id(value: Any, *, reason: str = "identity_unresolved") -> int:
     return number
 
 
+def _is_zero_team_id(value: Any) -> bool:
+    """True only for a numeric zero, the feed's marker for an undetermined team."""
+
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        return int(value) == 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _number(value: Any, *, nonnegative: bool = True, integer: bool = False) -> float | int:
     if isinstance(value, bool) or value is None:
         raise ProviderContractError("provider_schema_changed")
@@ -319,11 +330,19 @@ def normalize_schedule_response(
             if len(game_id) == 10 and game_id.isdigit():
                 continue
             raise ProviderContractError("cross_phase_observation")
+        raw_home = _value(row, "home_team_id", "HOME_TEAM_ID", "homeTeam_teamId")
+        raw_away = _value(row, "away_team_id", "AWAY_TEAM_ID", "awayTeam_teamId")
+        if _is_zero_team_id(raw_home) and _is_zero_team_id(raw_away):
+            # Bracket not set yet (e.g. NBA Cup knockout rows): the feed lists
+            # the game with team ID 0 on both sides. It is a matchup that does
+            # not exist yet, not an identity failure; it enters a later
+            # observation once the teams are known.
+            continue
         if game_id in seen:
             raise ProviderContractError("duplicate_identity")
         seen.add(game_id)
-        home = _positive_id(_value(row, "home_team_id", "HOME_TEAM_ID", "homeTeam_teamId"))
-        away = _positive_id(_value(row, "away_team_id", "AWAY_TEAM_ID", "awayTeam_teamId"))
+        home = _positive_id(raw_home)
+        away = _positive_id(raw_away)
         if home == away:
             raise ProviderContractError("value_invariant_failed")
         scheduled = _timestamp(_required(row, "scheduled_at", "game_date", "GAME_DATE", "GAME_DATE_EST", "gameDateTimeUTC"))
