@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.config.settings import NBASeasonSettings, RuntimeSettings
-from app.errors import InvalidInputError, ProviderUnavailableError
+from app.errors import InvalidInputError, ProviderUnavailableError, ResourceNotFoundError
 from app.services.matchup_injuries import MatchupInjuryResult
 from app.services.slate_service import SlateService
 from app.services.player_pool import PlayerPool, PoolPlayer
@@ -574,7 +574,7 @@ def test_slate_requires_a_stored_schedule_success_even_when_the_date_is_empty():
         freshness={"fresh": False, "last_success_at": None, "event_count": 0},
     )
 
-    with pytest.raises(ProviderUnavailableError):
+    with pytest.raises(ResourceNotFoundError):
         service.get_slate("2026-01-15")
 
 
@@ -588,7 +588,7 @@ def test_slate_requires_stored_events_even_when_success_metadata_exists():
         },
     )
 
-    with pytest.raises(ProviderUnavailableError):
+    with pytest.raises(ResourceNotFoundError):
         service.get_slate("2026-01-15")
 
 
@@ -718,20 +718,24 @@ def test_a_pinned_slate_keeps_the_pinned_season_for_every_date():
     assert {season for _, season in catalog.seasons_read} == {"2025-26"}
 
 
-def test_a_pin_without_a_schedule_stays_unavailable():
+def test_a_pin_without_a_schedule_is_not_found():
     catalog = SeasonCatalog({
         "2025-26": [_event("0022501150", "2026-04-10T23:00:00+00:00")],
     })
     service = _rollover_service(catalog, nba=NBASeasonSettings(current_season="2026-27"))
 
-    with pytest.raises(ProviderUnavailableError):
+    with pytest.raises(ResourceNotFoundError) as raised:
         service.get_slate("2026-04-10")
 
+    # The pin is the season read, so it is the season the 404 names.
+    assert str(raised.value) == "No NBA schedule is stored for the 2026-27 season."
+    assert raised.value.public_details == {"season": "2026-27"}
 
-def test_an_unpinned_slate_without_either_seasons_schedule_stays_unavailable():
+
+def test_an_unpinned_slate_without_either_seasons_schedule_is_not_found():
     service = _rollover_service(SeasonCatalog({"2024-25": [_event("1", "2025-04-10T23:00:00+00:00")]}))
 
-    with pytest.raises(ProviderUnavailableError):
+    with pytest.raises(ResourceNotFoundError):
         service.get_slate()
 
 
