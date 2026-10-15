@@ -642,6 +642,7 @@ def test_matchup_player_rows_are_integer_season_only_raw_and_thin_where_evidence
             },
         },
         "injury_badge_ref": None,
+        "book_lines": {},
     }
     assert all(
         "last_15" not in row for rows in player["diet_shares"].values() for row in rows
@@ -1476,6 +1477,33 @@ def test_a_matchup_composed_over_a_given_snapshot_is_the_matchup_get_matchup_ser
     assert overridden["injuries"] == injury_block
     assert overridden["experience"]["sections"]["injuries"]["status"] == "available"
     assert service.get_matchup(game_id=GAME_ID)["injuries"] == expected["injuries"]
+
+
+def test_book_lines_are_read_once_per_matchup_and_never_for_a_snapshot_composition():
+    """Sportsbook lines ride the Matchup read only (#377); Targets skip them."""
+
+    class Books:
+        def __init__(self):
+            self.calls = []
+
+        def book_lines(self, game_id, *, connection=None):
+            self.calls.append(game_id)
+            return {2544: {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}}
+
+    books = Books()
+    service = _service()
+    service.sportsbook_reader = books
+
+    served = service.get_matchup(game_id=GAME_ID)
+    composed = service.get_matchup_from_snapshot(
+        game_id=GAME_ID, publication_snapshot=None, injuries=None
+    )
+
+    assert [row["book_lines"] for row in served["players"]] == [
+        {"PTS": {"as_of": "2026-01-15T11:00:00Z", "closing": False, "books": []}}
+    ]
+    assert [row["book_lines"] for row in composed["players"]] == [{}]
+    assert books.calls == [GAME_ID]
 
 
 def test_matchup_reads_player_logs_through_the_indexed_projection(tmp_path):

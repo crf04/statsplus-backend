@@ -704,6 +704,8 @@ def build_dependencies(
         publication_reader=research_publications,
         engine=engine,
     )
+    from app.services.sportsbook_quotes import SportsbookQuoteReader
+
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,
         player_pool=matchup_player_pool_reader,
@@ -723,6 +725,11 @@ def build_dependencies(
             AthleteCatalogReader(engine)
             if athlete_catalog_service is not None
             else None
+        ),
+        # Always wired in a real database (even with collection off, so the
+        # web service needs no key): an empty store reads as ``{}``.
+        sportsbook_reader=(
+            None if demo_database else SportsbookQuoteReader(engine)
         ),
     )
     user_service = UserService(

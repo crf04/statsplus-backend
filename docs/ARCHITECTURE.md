@@ -4313,6 +4313,80 @@ GET /api/health/pbp-stats or PUT /api/data/*_PBP
 instances from `ApplicationDependencies`; they do not create duplicate
 providers or perform provider calls in route modules.
 
+### Sportsbook player-prop odds (#377)
+
+Sportsbook Over/Under prices come from The Odds API v4 and are a separate store
+from the DFS Projection archive and registry (crf04/statsplus#185 section 6):
+two-sided prices are native columns, the book is a column rather than a
+provider, and nothing here feeds DFS `provenance`, the Targets pool, or the DFS
+board. The code is `app/providers/odds_api.py` (the only module that builds a
+URL; parses the five standard prop markets; the allowlist of regulated US
+books), `app/services/odds_identity.py` (event and player resolution),
+`app/services/odds_schedule.py` (pure cadence and credit-guard policy),
+`app/services/odds_collection.py` (the coordinator),
+`app/services/sportsbook_quotes.py` (store and the `book_lines` reader), and
+`app/models/sportsbook_odds.py` (migration 063, reversible by
+`downgrade_sportsbook_odds`).
+
+```text
+beat (every 5 min, inside the projection collector's loop)
+  → lease row "odds" in projection_collection_leases (own fence)
+  → GET /events for the next 36h (free) → EventResolver → canonical game
+  → plan_cycle: tier + due calls from poll history and odds_api_quota_state
+  → GET /events/{id}/odds (5 credits when props exist; empty responses are free)
+  → roster-scoped AthleteResolver (provider "oddsapi", ids "name:<folded>")
+  → one transaction: odds_api_polls + sportsbook_prop_quotes (history, only on
+    change, plus every closing snapshot) + sportsbook_prop_latest
+Matchup read: MatchupService._book_lines → SportsbookQuoteReader (savepoint)
+```
+
+Schedule: polling starts 14 hours before tip (an empty response costs
+nothing), hourly in the `normal` tier, with one closing fetch from tip-10
+minutes, and no call at or after tip. The budget guard re-evaluates hourly and
+moves one tier per evaluation: `normal` (hourly), `degraded` (every 2 hours),
+`closing` (closing snapshots only, which may spend the 1,000-credit reserve),
+`halted`. Hourly polls never touch the reserve and no call may leave fewer than
+1 credit, so `x-requests-remaining` never reaches 0 because of this job. A
+401/422 halts for six hours; 429, 5xx and transport failures back off
+exponentially (1 to 30 minutes). Tier changes and quota below 25% and 10% of
+the plan log a structured line and mirror to Sentry.
+
+The API key is read from `ODDS_API_KEY` only, lives inside `OddsApiClient`, and
+never appears in an error, log, or Sentry event: errors carry the endpoint
+path and a closed reason, the shared sanitizer in `app/errors.py` (and so the
+Sentry scrubber) already redacts an `apiKey=` value and a test pins it, and the
+HTTP library's request logging is filtered. Enabled without a key
+disables only the odds beat (the collector prints why); the web service needs
+no key and reads `{}` until quotes exist.
+
+**Operator steps** (production is untouched by this change; do these after
+merge and deploy):
+
+1. Create the Odds API plan and read the billing reset day from its dashboard.
+2. On the existing projection-collector Railway service only (not the web
+   service), set `ODDS_API_KEY`, `ODDS_API_RESET_DAY=<day>`, and finally
+   `ODDS_API_ENABLED=true`. Optional: `ODDS_API_PLAN_CREDITS` (20000),
+   `ODDS_API_RESERVE_CREDITS` (1000), `ODDS_API_ASSUMED_LEAD_HOURS` (10).
+3. Deploy this change (Railway's `preDeployCommand` runs `scripts/migrate.py`,
+   which applies migration 063) and let the collector restart so the loop picks
+   the variables up. The 2026-27
+   Event Catalog (crf04/statsplus-backend#374, #375) must be in production,
+   or every event is skipped as unmapped.
+4. Run the spikes first with `python scripts/odds_api_spike.py costs`,
+   `... posting` (re-run hourly across a slate) and `... names --database-url
+   $DATABASE_URL`, at most about 100 credits.
+5. Watch the first game day: the cycle line (tier, calls, credits, remaining,
+   unresolved) is logged by `app.services.odds_collection` whenever a call is
+   made. Switch `ODDS_API_ENABLED` to `false` to stop; stored quotes stay.
+
+The odds beat runs inside the existing collector process, not as its own cron
+service: it adds one free HTTP call per five minutes plus at most a few paid
+per-event calls an hour, has its own lease, quota state and exception boundary
+(`odds_collection.run_once` never raises, so it cannot fail or delay DFS
+collection), needs no new Railway service, and keeps the key out of every
+service except the collector. `scripts/collect_odds.py` runs the same beat
+standalone if isolation is later wanted; the lease makes running both safe.
+
 ### Collection control plane
 
 Issue #84's Railway control plane is an additive seam beside the legacy data

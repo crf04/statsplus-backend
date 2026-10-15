@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -225,6 +225,37 @@ class ProjectionCollectionSettings:
             raise ValueError("fast_window cannot exceed pregame_horizon")
         if self.backoff_base > self.backoff_max:
             raise ValueError("backoff_base cannot exceed backoff_max")
+
+
+@dataclass(frozen=True, slots=True)
+class OddsApiSettings:
+    """The Odds API sportsbook collection: switch, key, plan, and budget.
+
+    The key is read from ``ODDS_API_KEY`` only.  It is excluded from the
+    repr so a logged settings object cannot carry it.  Enabling collection
+    without a key is not a web-application error: only the collector that
+    builds the coordinator refuses to start (see ``build_odds_collection``).
+    """
+
+    enabled: bool = False
+    api_key: str | None = field(default=None, repr=False)
+    base_url: str = "https://api.the-odds-api.com"
+    #: Day of the month the plan's credits reset.  No response header states
+    #: it, so the operator sets it from the account dashboard.
+    reset_day: int = 1
+    plan_credits: int = 20000
+    reserve_credits: int = 1000
+    #: Assumed hours before tip that props first post; sizes the budget guard.
+    assumed_lead_hours: int = 10
+    request_timeout_seconds: float = 20.0
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.reset_day <= 31:
+            raise ValueError("ODDS_API_RESET_DAY must be between 1 and 31")
+        if self.plan_credits <= self.reserve_credits or self.reserve_credits < 0:
+            raise ValueError("ODDS_API_PLAN_CREDITS must exceed the reserve")
+        if self.assumed_lead_hours < 1 or self.request_timeout_seconds <= 0:
+            raise ValueError("ODDS_API lead hours and timeout must be positive")
 
 
 class ProviderSettings(BaseModel):
@@ -635,6 +666,7 @@ class RuntimeSettings(BaseModel):
     projection_collection: ProjectionCollectionSettings = Field(
         default_factory=ProjectionCollectionSettings
     )
+    odds_api: OddsApiSettings = Field(default_factory=OddsApiSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     nba: NBASeasonSettings = Field(default_factory=NBASeasonSettings)
@@ -925,6 +957,18 @@ def _build_settings(
                 backoff_max=timedelta(
                     seconds=reader.decimal("PROJECTION_COLLECTION_BACKOFF_MAX_SECONDS", 1800)
                 ),
+            ),
+            odds_api=_validated_model(
+                OddsApiSettings,
+                enabled=reader.boolean("ODDS_API_ENABLED", False),
+                api_key=reader.text("ODDS_API_KEY"),
+                base_url=reader.text(
+                    "ODDS_API_BASE_URL", "https://api.the-odds-api.com"
+                ),
+                reset_day=reader.integer("ODDS_API_RESET_DAY", 1),
+                plan_credits=reader.integer("ODDS_API_PLAN_CREDITS", 20000),
+                reserve_credits=reader.integer("ODDS_API_RESERVE_CREDITS", 1000),
+                assumed_lead_hours=reader.integer("ODDS_API_ASSUMED_LEAD_HOURS", 10),
             ),
             llm=llm,
             cors=cors,
