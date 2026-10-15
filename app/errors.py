@@ -232,6 +232,13 @@ class InvalidInputError(AppError):
         return self._public_details
 
 
+class InvalidAttributionError(InvalidInputError):
+    """The first-touch attribution body is not a JSON object of strings."""
+
+    code = "invalid_attribution"
+    default_message = "The attribution must be a JSON object of strings or nulls."
+
+
 class ResourceNotFoundError(AppError):
     """The requested resource does not exist."""
 

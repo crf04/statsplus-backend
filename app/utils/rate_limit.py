@@ -136,7 +136,9 @@ def _authenticate_before_limiting() -> None:
         return
     view = current_app.view_functions.get(request.endpoint or "")
     if getattr(view, "requires_auth", False):
-        _authenticate_request()
+        _authenticate_request(
+            allow_waitlisted=getattr(view, "allows_waitlisted", False)
+        )
     elif getattr(view, "optional_auth", False):
         _authenticate_optionally()
 

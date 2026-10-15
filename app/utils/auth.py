@@ -257,8 +257,13 @@ def _refuse_waitlisted(
         )
 
 
-def _authenticate_request() -> None:
-    """Authenticate the current request or raise a safe application error."""
+def _authenticate_request(*, allow_waitlisted: bool = False) -> None:
+    """Authenticate the current request or raise a safe application error.
+
+    Token verification and the user sync are identical either way.  Only the
+    waitlist refusal is skipped, and only for a route that opted in with
+    :func:`require_auth_allow_waitlisted`.
+    """
 
     try:
         firebase_app = get_firebase_app()
@@ -303,7 +308,8 @@ def _authenticate_request() -> None:
         decoded_token = verify_firebase_token(token)
 
         current_user = _sync_firebase_user(decoded_token)
-        _refuse_waitlisted(current_user)
+        if not allow_waitlisted:
+            _refuse_waitlisted(current_user)
 
         logger.info(
             "Authenticated user: %s (%s)",
@@ -344,6 +350,27 @@ def require_auth(f: Callable[..., Any]) -> Callable[..., Any]:
     # Lets the rate limiter authenticate before it counts, so it can key on the
     # Firebase uid; ``wraps`` copies the marker through outer decorators.
     decorated_function.requires_auth = True  # type: ignore[attr-defined]
+    return decorated_function
+
+
+def require_auth_allow_waitlisted(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Require a verified Firebase token, but accept a waitlisted account.
+
+    For the one route a waitlisted visitor must still reach: recording their
+    first-touch source.  Verification fails closed exactly as in
+    :func:`require_auth`.  The ``allows_waitlisted`` marker lets the rate
+    limiter, which authenticates before the route runs, apply the same
+    exemption.
+    """
+
+    @wraps(f)
+    def decorated_function(*args: Any, **kwargs: Any) -> Any:
+        if get_current_user() is None:
+            _authenticate_request(allow_waitlisted=True)
+        return f(*args, **kwargs)
+
+    decorated_function.requires_auth = True  # type: ignore[attr-defined]
+    decorated_function.allows_waitlisted = True  # type: ignore[attr-defined]
     return decorated_function
 
 

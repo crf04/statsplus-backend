@@ -49,7 +49,8 @@ read.
 {"error": {"code": "waitlisted", "message": "The beta is full right now. You're on the waitlist and we'll let you in soon."}}
 ```
 
-  Users with an admin claim are exempt, so the admin endpoints below stay
+  `POST /api/user/attribution` accepts waitlisted accounts so their first-touch
+  source is recorded. Users with an admin claim are exempt, so the admin endpoints below stay
   reachable even for an admin whose own first sign-in landed while paused.
   Optional-auth routes apply the same check whenever a valid token is sent. If
   the user row could not be synced, the stored status (or, with no row, the
@@ -98,6 +99,7 @@ The public error categories and HTTP statuses are:
 | Category | Code | Status | Use |
 | --- | --- | ---: | --- |
 | Invalid input | `invalid_input` | 400 | Query parameters or request bodies cannot be parsed or validated. |
+| Invalid attribution | `invalid_attribution` | 400 | `POST /api/user/attribution` got a body that is not a JSON object, or a known field that is neither a string nor null. |
 | Missing resource | `resource_not_found` | 404 | The requested player, profile, or other resource does not exist. |
 | Provider unavailable | `provider_unavailable` | 503 | A required NBA or other upstream provider cannot be reached. |
 | Query timeout | `query_timeout` | 503 | A database statement ran past the web `statement_timeout` (`WEB_STATEMENT_TIMEOUT_MS`, default 30000 ms). The query was cancelled; retry with a narrower request. |
@@ -105,7 +107,7 @@ The public error categories and HTTP statuses are:
 | Authentication required | `authentication_required` | 401 | Credentials are missing or malformed. |
 | Invalid token | `invalid_token` | 401 | The supplied Firebase token cannot be verified. |
 | Forbidden | `forbidden` | 403 | The authenticated user lacks the required permission. |
-| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins. See "Beta sign-ups and the waitlist". |
+| Waitlisted | `waitlisted` | 403 | The user signed in while sign-ups were paused and has not been admitted. Returned on every authenticated `/api` route except for admins and `POST /api/user/attribution`. See "Beta sign-ups and the waitlist". |
 | Rate limited | `rate_limited` | 429 | The caller exceeded a request limit (see [Rate limits](#rate-limits)). The response carries `Retry-After: <seconds>` and no `details`. |
 | Payload too large | `payload_too_large` | 413 | The request body exceeds 1 MB (collector envelope uploads keep their own 2 MB bound). |
 | Operation failed | `operation_failed` | 500 | A requested application operation could not be completed. |
@@ -3291,6 +3293,47 @@ Optional-auth endpoint:
 POST /api/user/activity/ping
 ```
 
+### First-touch attribution
+
+```http
+POST /api/user/attribution
+```
+
+Records where the account's visitor first landed from (UTM parameters, `ref`
+code, external referrer, landing path). It requires a Firebase bearer token,
+verified exactly like any other authenticated route, and syncs the user row. It
+is the one authenticated route that **accepts waitlisted accounts**, so their
+source is recorded too; every other route still refuses them (see "Beta
+sign-ups and the waitlist"). A stored `ref` is raw data, not a Referral.
+
+The body is a JSON object; every field is optional, a string or `null`, and
+unknown keys are ignored:
+
+| Field | Meaning |
+| --- | --- |
+| `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` | Query parameters on the first landing URL |
+| `ref` | `ref` query parameter on the first landing URL |
+| `referrer` | `document.referrer` when its origin differs from the app's, else null |
+| `landing_path` | `location.pathname` of the first landing |
+| `landed_at` | ISO-8601 UTC timestamp of the first landing; unparseable is stored null |
+
+Strings are trimmed, values over 512 characters are truncated to 512, and empty
+strings are stored as null. A body whose fields are all null (or `{}`) is still
+recorded: a direct visit.
+
+| Status | Body | When |
+| --- | --- | --- |
+| 201 | `{"recorded": true}` | First record for this account |
+| 200 | `{"recorded": false}` | The account already has a record; it is write-once and never overwritten |
+| 400 | `{"error": {"code": "invalid_attribution", "message": "..."}}` | Body is not a JSON object, or a known field is neither string nor null |
+| 401 | standard auth error | Missing or invalid token |
+
+Storage is the `user_attributions` table (migration 065): one row per account,
+keyed by `firebase_uid` (a foreign key to `users` that cascades on delete), with
+the eight text columns above (`VARCHAR(512)`, nullable), `landed_at` (nullable
+timestamptz) and `created_at` (server time of the first record). Only this
+endpoint writes it.
+
 ### Saved Filter Sets
 
 A Saved Filter Set is an account-private bookmark of a Log Workspace URL: a
@@ -3349,6 +3392,11 @@ A Target is an account-private record pairing one opponent with the Qualifiers
 a player has to meet, plus an optional note. It stores no defensive reading and
 has no season. Every route requires Firebase auth and operates only on the
 caller's own rows.
+
+The first sign-in that creates an account also gives it the default Targets
+(`DEFAULT_TARGETS` in `app/services/user_service.py`). They are ordinary rows
+the owner can edit or delete; nothing re-adds a deleted one, and accounts
+created before them never receive them.
 
 ```http
 GET    /api/user/targets
