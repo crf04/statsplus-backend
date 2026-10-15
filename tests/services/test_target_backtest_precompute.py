@@ -305,16 +305,27 @@ def test_one_targets_failure_is_logged_and_the_run_continues(
 class DeadRedis(CountingRedis):
     """A Redis whose ``EXISTS`` fails the way an outage does."""
 
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
     def exists(self, key):
         self.exists_calls.append(key)
-        raise redis.exceptions.ConnectionError("connection refused")
+        raise self.error
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        redis.exceptions.ConnectionError("connection refused"),
+        redis.exceptions.TimeoutError("timed out"),
+    ],
+)
 def test_an_unreachable_redis_stops_the_run_and_opens_the_circuit(
-    world, monkeypatch, caplog
+    world, monkeypatch, caplog, error
 ):
     _two_targets(world)
-    dead = DeadRedis()
+    dead = DeadRedis(error)
     service = world.backtests(redis_client=dead)
     monkeypatch.setattr(
         service, "_backtest_stateful", lambda *a, **k: pytest.fail("computed")
@@ -324,8 +335,8 @@ def test_an_unreachable_redis_stops_the_run_and_opens_the_circuit(
         first = service.precompute(now=NOW)
         again = service.precompute(now=NOW)
 
-    assert _without_duration(first) == _counts(remaining=2)
-    assert _without_duration(again) == _counts(remaining=2)
+    assert _without_duration(first) == _counts(bypassed=2)
+    assert _without_duration(again) == _counts(bypassed=2)
     # The second run met the open circuit and called Redis not at all.
     assert len(dead.exists_calls) == 1
     assert "Target backtest precompute stopped: result cache unavailable" in caplog.messages

@@ -2390,8 +2390,8 @@ read's own path, which writes the entry. It stops between Targets once
 `TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` (default 180) has passed, and the
 next run carries on past the entries this one filed. One Target's failure is
 logged with its id and counted. `EXISTS` shares the read and write's circuit
-breaker, so an unreachable Redis ends the run rather than computing results
-nothing can store. Each run logs one `target_backtest_precompute` line (`seasons`,
+breaker, so an unreachable Redis ends the run, counting the rest `bypassed`,
+rather than computing results nothing can store. Each run logs one `target_backtest_precompute` line (`seasons`,
 `eligible`, `already_cached`, `computed`, `bypassed`, `failed`, `remaining`,
 `duration_ms`). With the cache off (`ENABLE_CACHE` or
 `TARGET_BACKTEST_CACHE_ENABLED` false, or no Redis client) it logs

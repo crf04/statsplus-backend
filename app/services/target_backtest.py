@@ -561,7 +561,8 @@ class TargetBacktestService:
         run carries on past the entries this one filed.  One Target's failure
         is logged and counted; it does not stop the run.  Redis being
         unreachable does: an ``EXISTS`` that fails, or an open circuit, ends
-        the run with the rest ``remaining``.
+        the run with the rest counted ``bypassed`` (``remaining`` is only the
+        budget's).
 
         With the cache off this contacts no Redis, computes nothing, logs
         the skip, and returns ``None``.  Otherwise it logs and returns the
@@ -616,7 +617,7 @@ class TargetBacktestService:
                 logger.warning(
                     "Target backtest precompute stopped: result cache unavailable"
                 )
-                remaining = len(entries) - index
+                counts["bypassed"] += len(entries) - index
                 break
             if cached:
                 counts["already_cached"] += 1
