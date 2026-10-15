@@ -69,7 +69,10 @@ class UnderdogAdapter:
     """Retrieve and normalize Underdog's public over/under board."""
 
     name = "underdog"
-    BASE_URL = "https://api.underdogfantasy.com/beta/v3/over_under_lines"
+    # The web client's board endpoint.  The retired ``beta/v3`` (and v5/v6)
+    # paths answer 426 upgrade_required; ``v1`` needs no client-version header.
+    # ``sport_id`` trims the multi-sport board (~26 MB) to NBA (~0.6 MB).
+    BASE_URL = "https://api.underdogfantasy.com/v1/over_under_lines?sport_id=NBA"
     # The central DFS board caps each safe GET at three seconds to connect
     # and eight seconds to read (or the remaining board budget).
     DEFAULT_TIMEOUT = (3.0, 8.0)
