@@ -96,7 +96,7 @@ through a residential proxy (`stats.nba.com` blocks datacenter addresses). It
 is the same one-shot command: `python -m app.collector run` performs one
 invocation and exits with the codes above, so a Railway cron run ends when the
 tick does. The service's config file is `railway.collector.json`
-(`startCommand` `python -m app.collector run`, `cronSchedule` `0,30 9-15 * * *`,
+(`startCommand` `python -m app.collector run`, `cronSchedule` `0,30 9-16 * * *`,
 `restartPolicyType` `NEVER`). It has no pre-deploy migration and no health
 check; it never reads `DATABASE_URL`.
 
@@ -125,15 +125,14 @@ Variables on the service:
 
 The hosted ticks issue work between 03:45 and 11:00 Central, and the Windows
 task ran from 04:00 every 30 minutes for six hours. The cron keeps that
-cadence in UTC: every 30 minutes from 09:00 to 15:30 UTC (04:00-10:30 CDT,
-03:00-09:30 CST), 14 runs a day. A successful run spends 3 of the control
-plane's 100 daily polls (start status, discovery, terminal status), so this uses
-about 42; a round-the-clock `*/30` would use 144 and get 429 on discovery after
+cadence in UTC and covers the issuing window in both CDT and CST: every 30
+minutes from 09:00 to 16:30 UTC (04:00-11:30 CDT, 03:00-10:30 CST), 16 runs a
+day. A successful run spends 3 of the control plane's 100 daily polls (start
+status, discovery, terminal status), so this uses about 48; a round-the-clock `*/30` would use 144 and get 429 on discovery after
 33 runs. Keep headroom for manual runs and extra manifest reads, and do not
 schedule faster than hourly all day. Catalogs are requested daily, well under
 72 hours. Railway skips a start while the previous run is still going, so a
-slow tick cannot overlap itself. After the DST change the window shifts one hour
-against Central; widen the hours if the last stage lands late.
+slow tick cannot overlap itself.
 Exit `10`/`11` are normal between handshake stages; exit `20` needs an operator.
 
 The container filesystem is ephemeral, so the SQLite Outbox, lease and
