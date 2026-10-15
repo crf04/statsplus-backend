@@ -80,7 +80,8 @@ def _blend_player(cid, name, value, **kwargs):
         cid,
         name,
         blend=_cell(value, thin),
-        components={"play_types": _cell(value, thin)},
+        # A component that disagrees with the Blend: the Blend is the score.
+        components={"play_types": _cell(round(value + 0.5, 4), thin)},
         **kwargs,
     )
 
@@ -393,19 +394,19 @@ def test_the_reason_reads_the_defense_the_pick_actually_faces():
     assert pick["reason"]["opponent_rank"] == 28
 
 
-def test_a_player_with_no_readable_reason_gives_way_to_the_next_pick():
-    unreadable = _blend_player(1, "No Reading", 0.2)
-    readable = _blend_player(2, "Reading", 0.1)
-    defense = {HOME: HOME_DEFENSE}
-
+def test_a_pick_with_no_readable_reason_is_still_the_extreme_with_a_null_reason():
+    unreadable = _blend_player(1, "No Reading", 0.20)
+    readable = _blend_player(2, "Reading", 0.10)
     # Player 1's slices are named differently, so the defense has no row.
     unreadable["diet_shares"]["play_types"] = [_slice("Cut", 0.5)]
 
     pick = _edges(
-        [_game()], {"G1": _matchup([unreadable, readable], defense)}
+        [_game()], {"G1": _matchup([unreadable, readable], {HOME: HOME_DEFENSE})}
     )["spotlight"]["best"]
 
-    assert pick["canonical_id"] == 2
+    assert pick["canonical_id"] == 1
+    assert pick["value"] == 0.20
+    assert pick["reason"] is None
 
 
 def test_a_game_that_cannot_be_read_has_no_effects_scores_or_pick_and_the_rest_succeed():
@@ -423,6 +424,48 @@ def test_a_game_that_cannot_be_read_has_no_effects_scores_or_pick_and_the_rest_s
     assert edges["games"][0] == {"game_id": "BAD", "effects": [], "scores": []}
     assert [effect["canonical_id"] for effect in edges["games"][1]["effects"]] == [7]
     assert edges["spotlight"]["best"]["game_id"] == "GOOD"
+
+
+def test_a_stored_read_database_failure_is_an_unreadable_game_too():
+    from sqlalchemy.exc import OperationalError
+
+    good = _matchup([_blend_player(7, "Survivor", 0.05)], {HOME: HOME_DEFENSE})
+
+    edges = _edges(
+        [_game("BAD"), _game("GOOD")],
+        {"BAD": OperationalError("select 1", {}, Exception("connection lost")),
+         "GOOD": good},
+    )
+
+    assert edges["games"][0] == {"game_id": "BAD", "effects": [], "scores": []}
+    assert [e["canonical_id"] for e in edges["games"][1]["effects"]] == [7]
+
+
+def test_the_blend_value_not_a_components_is_the_score():
+    player = _player(
+        1,
+        "Blended",
+        blend=_cell(0.06),
+        components={"play_types": _cell(0.91), "shot_zones": _cell(-0.40)},
+    )
+
+    game = _edges([_game()], {"G1": _matchup([player])})["games"][0]
+
+    assert game["scores"] == [{"canonical_id": 1, "value": 0.06}]
+    assert game["effects"][0]["value"] == 0.06
+
+
+def test_several_components_without_a_blend_are_no_score():
+    player = _player(
+        1,
+        "Two Components",
+        components={"play_types": _cell(0.2), "shot_zones": _cell(0.4)},
+    )
+
+    game = _edges([_game()], {"G1": _matchup([player])})["games"][0]
+
+    assert game["scores"] == []
+    assert game["effects"] == []
 
 
 def test_an_empty_slate_has_no_games_and_null_picks_and_reads_no_matchup():
@@ -520,15 +563,14 @@ class Publications:
         return SimpleNamespace(generation=self.generation, retained_history=())
 
 
-def _cached_service(composer, redis_client, games, *, publications=None):
+def _cached_service(composer, redis_client, games, *, publications=None, settings=None):
     return SlateEdgesService(
         slates=FakeSlate(games),
         matchups=composer,
         publication_reader=publications or Publications(),
         injuries=object(),
-        settings=RuntimeSettings(
-            environment="testing", nba={"current_season": "2025-26"}
-        ),
+        settings=settings
+        or RuntimeSettings(environment="testing", nba={"current_season": "2025-26"}),
         redis_client=redis_client,
     )
 
@@ -557,53 +599,122 @@ def test_a_cached_response_is_returned_without_composing_any_matchup():
     assert list(redis_client.ttls.values()) == [300]
 
 
-def test_a_new_publication_generation_misses_the_cache():
-    games, payloads = _two_games()
-    redis_client = DictRedis()
-    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("d")
-    composer = SnapshotComposer(payloads)
-    changed = Publications((("player_game_logs", "pub-2", 1, 8),))
+def _assert_misses(games, payloads, *, second_games=None, publications=None,
+                   settings=None, first_date="d", second_date="d"):
+    """Prime the cache, change one input, and require a recomposed body."""
 
-    _cached_service(composer, redis_client, games, publications=changed).get_edges("d")
+    redis_client = DictRedis()
+    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges(first_date)
+    composer = SnapshotComposer(payloads)
+    service = _cached_service(
+        composer, redis_client, second_games or games, publications=publications
+    )
+    if settings is not None:
+        service.settings = settings
+    body = service.get_edges(second_date)
 
     assert composer.calls == ["G1", "G2"]
     assert len(redis_client.values) == 2
+    assert [game["game_id"] for game in body["games"]] == ["G1", "G2"]
+    assert body["spotlight"]["best"]["canonical_id"] == 1
+
+
+def test_a_new_publication_generation_misses_the_cache():
+    games, payloads = _two_games()
+
+    _assert_misses(
+        games, payloads,
+        publications=Publications((("player_game_logs", "pub-2", 1, 8),)),
+    )
+
+
+def test_a_changed_retained_history_misses_the_cache():
+    games, payloads = _two_games()
+
+    class Retained(Publications):
+        def snapshot(self, stream_keys, *, season, **_):
+            return SimpleNamespace(
+                generation=self.generation,
+                retained_history=(("player_game_logs", "old-row"),),
+            )
+
+    _assert_misses(games, payloads, publications=Retained())
+
+
+def _settings(**scores):
+    return RuntimeSettings(
+        environment="testing",
+        nba={"current_season": "2025-26"},
+        matchup_scores=scores,
+    )
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"min_games": 6},
+        {"play_types_min_volume_per_game": 100.0},
+        {"shot_types_min_volume_per_game": 9.0},
+    ],
+)
+def test_a_changed_score_threshold_misses_the_cache(changed):
+    games, payloads = _two_games()
+
+    _assert_misses(games, payloads, settings=_settings(**changed))
+
+
+def test_a_changed_diet_baseline_threshold_misses_the_cache():
+    games, payloads = _two_games()
+    changed = RuntimeSettings(
+        environment="testing",
+        nba={"current_season": "2025-26"},
+        player_diet_baseline={"play_types_min_volume_per_game": 60.0},
+    )
+
+    _assert_misses(games, payloads, settings=changed)
 
 
 def test_a_game_changing_state_misses_the_cache():
     games, payloads = _two_games()
-    redis_client = DictRedis()
-    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("d")
     finished = [dict(game, status={"state": "final"}) for game in games]
-    composer = SnapshotComposer(payloads)
 
-    _cached_service(composer, redis_client, finished).get_edges("d")
+    _assert_misses(games, payloads, second_games=finished)
 
-    assert composer.calls == ["G1", "G2"]
+
+def test_a_moved_tip_time_misses_the_cache():
+    games, payloads = _two_games()
+    moved = [dict(game, scheduled_at="2026-04-11T01:00:00+00:00") for game in games]
+
+    _assert_misses(games, payloads, second_games=moved)
 
 
 def test_a_different_slate_date_misses_the_cache():
     games, payloads = _two_games()
-    redis_client = DictRedis()
-    _cached_service(SnapshotComposer(payloads), redis_client, games).get_edges("2026-04-10")
-    composer = SnapshotComposer(payloads)
-
-    _cached_service(composer, redis_client, games).get_edges("2026-04-11")
-
-    assert composer.calls == ["G1", "G2"]
+    _assert_misses(
+        games, payloads, first_date="2026-04-10", second_date="2026-04-11"
+    )
 
 
 def test_a_disabled_flag_or_missing_client_never_caches():
     games, payloads = _two_games()
     redis_client = DictRedis()
-    off = _cached_service(SnapshotComposer(payloads), redis_client, games)
-    off._cache_enabled = False
-    off.get_edges("d")
-    off.get_edges("d")
-    no_client = _cached_service(SnapshotComposer(payloads), None, games)
-    no_client.get_edges("d")
+    off = _cached_service(
+        SnapshotComposer(payloads),
+        redis_client,
+        games,
+        settings=RuntimeSettings(
+            environment="testing",
+            nba={"current_season": "2025-26"},
+            cache={"slate_edges_enabled": False},
+        ),
+    )
+    bodies = [off.get_edges("d"), off.get_edges("d")]
+    no_client = _cached_service(SnapshotComposer(payloads), None, games).get_edges("d")
 
     assert redis_client.values == {}
+    assert off.matchups.calls == ["G1", "G2", "G1", "G2"]
+    assert bodies[0] == bodies[1] == no_client
+    assert no_client["spotlight"]["best"]["canonical_id"] == 1
 
 
 def test_a_redis_failure_is_a_miss_not_an_error():

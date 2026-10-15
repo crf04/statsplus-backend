@@ -49,7 +49,7 @@ SPOTLIGHT_MIN_SCORING = 12
 EFFECTS_PER_GAME = 3
 #: Bumped whenever the selection rules or the response shape change, so a
 #: stored response of the old rules is never served.
-SLATE_EDGES_CACHE_SCHEMA = 1
+SLATE_EDGES_CACHE_SCHEMA = 2
 _REASON_BASE = "play_types"
 _REASON_SLICES = 2
 
@@ -126,11 +126,9 @@ class SlateEdgesService:
             matchup = matchups.get_matchup(game_id=game["game_id"])
             players = self._scored_players(matchup)
             picks = [
-                pick
+                self._spotlight_candidate(game, matchup, entry)
                 for entry in players
                 if self._is_spotlight_eligible(entry)
-                for pick in (self._spotlight_candidate(game, matchup, entry),)
-                if pick is not None
             ]
         except _UNREADABLE:
             players, picks = [], []
@@ -197,9 +195,16 @@ class SlateEdgesService:
                 [game["game_id"], game["status"]["state"], game["scheduled_at"]]
                 for game in slate["games"]
             ],
+            # Every setting the thin verdict and the floors read, whole, so a
+            # configuration rollout never serves a response of the old one.
             "thresholds": {
-                "min_games": settings.matchup_scores.min_games,
-                "diet_min_games": settings.player_diet_baseline.min_games,
+                "matchup_scores": settings.matchup_scores.model_dump(mode="json"),
+                "player_diet_baseline": settings.player_diet_baseline.model_dump(
+                    mode="json"
+                ),
+                "effect_min_scoring": EFFECT_MIN_SCORING,
+                "spotlight_min_scoring": SPOTLIGHT_MIN_SCORING,
+                "effects_per_game": EFFECTS_PER_GAME,
             },
         }
         digest = hashlib.sha256(
@@ -340,11 +345,11 @@ class SlateEdgesService:
         game: Mapping[str, Any],
         matchup: Mapping[str, Any],
         entry: Mapping[str, Any],
-    ) -> dict[str, Any] | None:
-        """Shape one eligible player as a pick, or ``None`` with no reason.
+    ) -> dict[str, Any]:
+        """Shape one eligible player as a pick.
 
-        A pick without a readable reason cannot fill the contract's shape, so
-        the next player stands in rather than the reason being invented.
+        ``reason`` is ``None`` when neither of his two largest play-type slices
+        has an opponent points reading: the pick is still the extreme.
         """
 
         player = entry["player"]
@@ -357,8 +362,6 @@ class SlateEdgesService:
         reason = self._reason(
             player, matchup, int(game[opponent_side]["team_id"]), 1 if value > 0 else -1
         )
-        if reason is None:
-            return None
         return {
             "game_id": game["game_id"],
             "canonical_id": int(player["canonical_id"]),

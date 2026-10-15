@@ -760,9 +760,8 @@ DFS provider and writes nothing.
   `league_average_share` are the player's Season diet values;
   `opponent_rank` and `opponent_percent_vs_league` are that Defense Sheet row's
   `rank` (the existing scale, 30 = allows the most) and
-  `percent_vs_league_average`. A player none of whose two slices has a readable
-  opponent PTS row has no reason, and the next-ranked player stands in rather
-  than the reason being invented.
+  `percent_vs_league_average`. `reason` is `null` when neither of the pick's two
+  slices has an opponent PTS reading; the pick is still the extreme.
 - A game whose Matchup cannot be read (a refused or incomplete stored read)
   contributes `effects: []`, `scores: []` and no pick; the response is still
   `200`.
@@ -770,14 +769,15 @@ DFS provider and writes nothing.
   Publication snapshot, each reduced to its game's entry before the next. With
   Redis enabled (`ENABLE_CACHE`, and
   `SLATE_EDGES_CACHE_ENABLED`, default `true`) the whole response is also
-  cached under `slate:edges:v1:<sha256>`, keyed on the slate date, the
+  cached under `slate:edges:v2:<sha256>`, keyed on the slate date, the
   evidence season, the Publication generation (live pointers and retained
-  history rows), each game's id, status and tip time, and the score
-  thresholds, so a new publication or a game starting or finishing misses.
+  history rows), each game's id, status and tip time, every Matchup score and
+  Diet baseline setting (game-count and per-Base volume floors), and the
+  8/12 PPG and top-three limits, so a new publication or a game starting or finishing misses.
   The key has no user: the response is the same for every caller. A stored
-  injury or Player Pool change moves none of those, so an entry also expires
-  after `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300), which is the longest
-  such a change can go unseen here. A Redis failure is a miss, never an error.
+  injury or Player Pool change moves none of those, so a cached response can
+  lag such a change by up to `SLATE_EDGES_CACHE_TTL_SECONDS` (default 300)
+  before it expires. A Redis failure is a miss, never an error.
 
 ### Get Matchup
 
