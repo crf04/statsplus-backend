@@ -708,7 +708,7 @@ def test_posted_markets_and_the_injury_badge_come_from_the_matchup(targets, reso
                         "Corner Sniper",
                         shot_zones=_zone_diet(0.4, 0.2),
                         posted_markets=("PTS", "3PM"),
-                        injury_badge_ref="rotowire:6504",
+                        injury_badge_ref="nba_official:6504",
                     )
                 ]
             )
@@ -718,7 +718,7 @@ def test_posted_markets_and_the_injury_badge_come_from_the_matchup(targets, reso
     player = resolve(matchups=matchups)["targets"][0]["players"][0]
 
     assert player["posted_markets"] == ["PTS", "3PM"]
-    assert player["injury_badge_ref"] == "rotowire:6504"
+    assert player["injury_badge_ref"] == "nba_official:6504"
 
 
 def test_a_thin_diet_is_flagged_rather_than_excluded(targets, resolve):
@@ -2058,8 +2058,8 @@ def test_resolve_never_reaches_the_injury_provider(targets):
     ``resolve`` must never take that path.
     """
 
-    provider = Mock(name="rotowire")
-    provider.get_snapshot.side_effect = ProviderUnavailableError("rotowire down")
+    provider = Mock(name="injury_report")
+    provider.get_snapshot.side_effect = ProviderUnavailableError("injury report down")
     repository = Mock(name="injury_snapshots")
     repository.get.return_value = None
     repository.get_latest_source.return_value = None

@@ -1324,6 +1324,10 @@ class MatchupService:
     def _injury_section(
         historical: bool, injury_block: Mapping[str, Any]
     ) -> dict[str, Any]:
+        # The ``source`` literals below are the experience-section provenance
+        # vocabulary the web decoder pins (``SECTION_PROVENANCE``).  The data
+        # now comes from the NBA official report; renaming the literal is a
+        # coordinated web change, so it stays until the decoder accepts it.
         if injury_block["status"] in {"fresh", "stale"}:
             # A stopped game only ever serves its retained pre-tip snapshot, so
             # available historical injury evidence is pregame by construction.

@@ -99,10 +99,10 @@ the most important variables:
 | `DFS_PROVIDER_CONNECT_TIMEOUT_SECONDS` / `DFS_PROVIDER_READ_TIMEOUT_SECONDS` | No | `3` / `8`; DFS GET caps, reduced to remaining deadline |
 | `DFS_COMPARISON_MAX_MARKETS` | No | `10000`; post-filter Comparison Board ceiling |
 | `PROJECTION_ARCHIVE_MAX_MARKETS` | No | `10000`; independent pre-persistence ceiling for one normalized provider snapshot |
-| `INJURY_REPORT_ENABLED` / `ROTOWIRE_PERMISSION_GRANTED` | No | Both `false`; RotoWire collection exists only when both explicit gates are true |
+| `INJURY_REPORT_ENABLED` | No | `false`; the NBA official injury-report adapter exists only when this gate is true |
 | `PROJECTION_ARCHIVE_READ_ENABLED` | No | `false` default; operator-controlled activation switch flipped on at cutover. Selects the sole database-only projection reader for Slate/Matchup/Selection (no legacy request-time fallback after the #110 cutover) and requires an application database with the archive schema |
 | `PROJECTION_ARCHIVE_READ_PROVIDER` | No | Deprecated compatibility/default recorder identity (`dabble`); it never authorizes recording or enables reads/failure fallback. Historical reads still scan every supported archive-provider scope; only `DFS_ENABLED_PROVIDERS` authorizes application writes |
-| `ROTOWIRE_CONNECT_TIMEOUT_SECONDS` / `ROTOWIRE_READ_TIMEOUT_SECONDS` | No | `3` / `8`; typed connect/read caps for the injury-table GET |
+| `INJURY_REPORT_CONNECT_TIMEOUT_SECONDS` / `INJURY_REPORT_READ_TIMEOUT_SECONDS` / `INJURY_REPORT_DEADLINE_SECONDS` | No | `3` / `8` / `12`; typed connect/read caps per report GET and one absolute deadline for the whole newest-report search |
 | `FIREBASE_ADMIN_DISABLED` | No | `false`; local/test-only credential bypass, rejected outside those environments |
 | `FIREBASE_SERVICE_ACCOUNT_PATH` | No | Path to local Firebase Admin JSON |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No | Inline service-account JSON for hosted deploys |

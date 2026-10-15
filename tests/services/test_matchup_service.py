@@ -428,11 +428,11 @@ def test_usable_out_injury_removes_pool_player_and_updates_matchup_counts():
         "unavailable_reason": None,
         "retrieved_at": RETRIEVED_AT.isoformat(),
         "source": "rotowire",
-        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
         "teams": [],
     }
     injuries = RecordedInjuries(
-        MatchupInjuryResult(injury_block, frozenset({2544}), {2544: "rotowire:6504"})
+        MatchupInjuryResult(injury_block, frozenset({2544}), {2544: "nba_official:6504"})
     )
 
     payload = _service(injuries=injuries).get_matchup(game_id=GAME_ID)
@@ -454,17 +454,17 @@ def test_non_out_badge_does_not_change_scores_diets_or_pool_membership():
         "unavailable_reason": None,
         "retrieved_at": RETRIEVED_AT.isoformat(),
         "source": "rotowire",
-        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
         "teams": [],
     }
     injuries = RecordedInjuries(
-        MatchupInjuryResult(injury_block, frozenset(), {2544: "rotowire:6504"})
+        MatchupInjuryResult(injury_block, frozenset(), {2544: "nba_official:6504"})
     )
 
     payload = _service(injuries=injuries).get_matchup(game_id=GAME_ID)
 
     assert payload["game"]["away_team"]["targetable_player_count"] == 1
-    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["players"][0]["injury_badge_ref"] == "nba_official:6504"
     assert payload["players"][0]["scores"] == baseline["players"][0]["scores"]
     assert payload["players"][0]["diet_shares"] == baseline["players"][0]["diet_shares"]
     assert payload["players"][0]["season_scoring"] == baseline["players"][0]["season_scoring"]
@@ -1067,8 +1067,8 @@ def test_matchup_carries_strict_source_freshness_and_unavailable_injuries():
         "status": "unavailable",
         "unavailable_reason": "disabled",
         "retrieved_at": None,
-        "source": "rotowire",
-        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "source": "nba_official",
+        "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
         "teams": [],
     }
     assert payload["freshness"]["schedule"] == {
@@ -1472,7 +1472,7 @@ def test_a_matchup_composed_over_a_given_snapshot_is_the_matchup_get_matchup_ser
         "retrieved_at": RETRIEVED_AT.isoformat(),
         "entries": [],
         "unavailable_reason": None,
-        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
     }
     injuries = RecordedInjuries(MatchupInjuryResult(injury_block, frozenset(), {}))
     overridden = service.get_matchup_from_snapshot(
@@ -2162,14 +2162,14 @@ def test_a_retained_pregame_snapshot_is_labeled_pregame_and_removes_nobody():
         "unavailable_reason": None,
         "retrieved_at": RETRIEVED_AT.isoformat(),
         "source": "rotowire",
-        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
         "teams": [],
     }
     injuries = RecordedInjuries(
         MatchupInjuryResult(
             injury_block,
             frozenset({AWAY_PARTICIPANT}),
-            {AWAY_PARTICIPANT: "rotowire:6504"},
+            {AWAY_PARTICIPANT: "nba_official:6504"},
         )
     )
 

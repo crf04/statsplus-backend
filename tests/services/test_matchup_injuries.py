@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from app.migrations import run_migrations
-from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.services.matchup_injuries import MatchupInjuryService
 from app.services.injury_snapshot_repository import (
     StoredInjurySnapshot,
@@ -118,24 +118,24 @@ def _provider_snapshot():
         raw_payload=[{"ID": "6504"}, {"ID": "9999"}],
         entries=(
             InjuryEntryEvidence(
-                "rotowire:6504",
+                "nba_official:6504",
                 "6504",
                 "LeBron James",
                 "LAL",
                 "Out",
                 "Out",
                 "Left ankle soreness",
-                "https://www.rotowire.com/basketball/player/lebron-james-2344",
+                "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
             ),
             InjuryEntryEvidence(
-                "rotowire:9999",
+                "nba_official:9999",
                 "9999",
                 "Mystery Reserve",
                 "BOS",
                 None,
                 "Game Time Decision",
                 "Illness",
-                "https://www.rotowire.com/basketball/player/mystery-reserve-9999",
+                "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
             ),
         ),
         retrieved_at=NOW,
@@ -153,7 +153,7 @@ def _stored(retrieved_at):
     return StoredInjurySnapshot(
         normalized_entries=(
             {
-                "entry_id": "rotowire:6504",
+                "entry_id": "nba_official:6504",
                 "source_player_id": "6504",
                 "source_player_name": "LeBron James",
                 "canonical_player_id": 2544,
@@ -162,7 +162,7 @@ def _stored(retrieved_at):
                 "canonical_status": "Out",
                 "raw_status": "Out",
                 "reason": "Left ankle soreness",
-                "source_url": "https://www.rotowire.com/basketball/player/lebron-james-2344",
+                "source_url": "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
             },
         ),
         retrieved_at=retrieved_at,
@@ -192,8 +192,8 @@ def test_disabled_and_unpermissioned_services_are_unavailable_without_fetching()
         "status": "unavailable",
         "unavailable_reason": "disabled",
         "retrieved_at": None,
-        "source": "rotowire",
-        "source_url": "https://www.rotowire.com/basketball/injury-report.php",
+        "source": "nba_official",
+        "source_url": "https://official.nba.com/nba-injury-report-2025-26-season/",
         "teams": [],
     }
     assert permission_required.block["unavailable_reason"] == "permission_required"
@@ -229,7 +229,7 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
     ]
     away_entry = result.block["teams"][0]["entries"][0]
     assert away_entry == {
-        "entry_id": "rotowire:6504",
+        "entry_id": "nba_official:6504",
         "source_player_id": "6504",
         "source_player_name": "LeBron James",
         "canonical_player_id": 2544,
@@ -238,14 +238,14 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
         "canonical_status": "Out",
         "raw_status": "Out",
         "reason": "Left ankle soreness",
-        "source_url": "https://www.rotowire.com/basketball/player/lebron-james-2344",
+        "source_url": "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
     }
     home_entry = result.block["teams"][1]["entries"][0]
     assert home_entry["canonical_player_id"] is None
     assert home_entry["canonical_status"] is None
     assert home_entry["raw_status"] == "Game Time Decision"
     assert result.out_player_ids == frozenset({2544})
-    assert result.badge_refs == {2544: "rotowire:6504"}
+    assert result.badge_refs == {2544: "nba_official:6504"}
     assert repository.replacements[0]["raw_payload"] == _provider_snapshot().raw_payload
     assert repository.replacements[0]["normalized_entries"] == (
         away_entry,
@@ -264,7 +264,7 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
     ("source_team", "canonical_team"),
     [("GS", "GSW"), ("NY", "NYK"), ("SA", "SAS"), ("PHO", "PHX"), ("NO", "NOP")],
 )
-def test_rotowire_team_dialects_reconcile_through_the_central_aliases(
+def test_injury_team_dialects_reconcile_through_the_central_aliases(
     source_team, canonical_team
 ):
     team_id = 100
@@ -276,7 +276,7 @@ def test_rotowire_team_dialects_reconcile_through_the_central_aliases(
         raw_payload=[{"ID": "1", "team": source_team}],
         entries=(
             InjuryEntryEvidence(
-                "rotowire:1",
+                "nba_official:1",
                 "1",
                 "Alias Player",
                 source_team,
@@ -321,7 +321,7 @@ def test_unresolved_source_team_stays_in_raw_evidence_and_emits_bounded_telemetr
         raw_payload=[{"ID": "1", "player": "Unknown Team", "team": "ZZ"}],
         entries=(
             InjuryEntryEvidence(
-                "rotowire:1",
+                "nba_official:1",
                 "1",
                 "Unknown Team",
                 "ZZ",
@@ -545,3 +545,106 @@ def test_concurrent_pretip_reads_share_one_refresh_per_service_worker(tmp_path):
     assert provider.calls == 1
     assert [result.block["status"] for result in results] == ["fresh", "fresh"]
     assert all(result.out_player_ids == frozenset({2544}) for result in results)
+
+
+# -- reconciling official-report names against the Athlete Catalog ------------
+
+
+def _official_report_entries():
+    from pathlib import Path
+
+    from app.providers.nba_injury_report import entries_from_report, parse_injury_report
+
+    path = (
+        Path(__file__).parents[1]
+        / "fixtures"
+        / "injury_report"
+        / "Injury-Report_2025-12-25_05_00PM.pdf"
+    )
+    return entries_from_report(parse_injury_report(path.read_bytes()), source_url="u")
+
+
+def _reconcile_official(catalog_rows):
+    from app.domain.nba_teams import NBA_TEAM_TRICODE_TO_ID
+    from app.services.matchup_injuries import AthleteNameIndex, reconcile_injury_entries
+
+    rows, unresolved = reconcile_injury_entries(
+        _official_report_entries(),
+        teams={code: {"team_id": team_id} for code, team_id in NBA_TEAM_TRICODE_TO_ID.items()},
+        catalog=AthleteNameIndex(catalog_rows),
+    )
+    assert unresolved == 0
+    return {row["source_player_name"]: row["canonical_player_id"] for row in rows}
+
+
+def _catalog_row(player_id, name, team):
+    return {"player_id": player_id, "display_name": name, "team_abbreviation": team}
+
+
+def test_official_report_names_reconcile_through_accents_suffixes_and_hyphens():
+    resolved = _reconcile_official(
+        [
+            _catalog_row(1, "Luka Dončić", "LAL"),
+            _catalog_row(2, "Larry Nance Jr.", "CLE"),
+            _catalog_row(3, "Dorian Finney-Smith", "HOU"),
+            _catalog_row(4, "Dereck Lively II", "DAL"),
+            _catalog_row(5, "Jae'Sean Tate", "HOU"),
+            _catalog_row(6, "P.J. Washington", "DAL"),
+            _catalog_row(7, "Jayson Tatum", "BOS"),
+        ]
+    )
+
+    assert resolved["Luka Doncic"] == 1
+    assert resolved["Larry Nance Jr."] == 2
+    assert resolved["Dorian Finney-Smith"] == 3
+    assert resolved["Dereck Lively II"] == 4
+    assert resolved["Jae'Sean Tate"] == 5
+    assert resolved["P.J. Washington"] == 6
+    assert resolved["Jayson Tatum"] == 7
+
+
+def test_official_report_suffix_the_catalog_omits_still_resolves_with_the_team():
+    resolved = _reconcile_official(
+        [
+            _catalog_row(10, "Gary Trent", "MIL"),
+            _catalog_row(11, "Jaime Jaquez", "MIA"),
+        ]
+    )
+
+    assert resolved["Gary Trent Jr."] == 10
+    assert resolved["Jaime Jaquez Jr."] == 11
+
+
+def test_official_report_suffix_fallback_keeps_the_team_when_namesakes_exist():
+    # "Kelly Oubre" is on two catalog teams; the report's PHI row picks PHI.
+    resolved = _reconcile_official(
+        [
+            _catalog_row(21, "Kelly Oubre", "PHI"),
+            _catalog_row(22, "Kelly Oubre", "CHA"),
+        ]
+    )
+
+    assert resolved["Kelly Oubre Jr."] == 21
+
+
+def test_official_report_traded_player_resolves_on_a_unique_name_only():
+    # The report prints Kelly Oubre Jr. on PHI; the catalog still has him on CHA.
+    resolved = _reconcile_official([_catalog_row(20, "Kelly Oubre Jr.", "CHA")])
+
+    assert resolved["Kelly Oubre Jr."] == 20
+
+
+def test_official_report_namesakes_and_unknown_players_stay_unmatched_but_listed():
+    resolved = _reconcile_official(
+        [
+            # Two athletes share a name and neither is on the report's team.
+            _catalog_row(30, "Brandon Williams", "UTA"),
+            _catalog_row(31, "Brandon Williams", "SAC"),
+            _catalog_row(32, "Jaylin Williams", "OKC"),
+        ]
+    )
+
+    assert resolved["Brandon Williams"] is None  # ambiguous, never guessed
+    assert resolved["Jaylin Williams"] == 32
+    assert resolved["Harrison Ingram"] is None  # absent from the catalog
+    assert len(resolved) == 115

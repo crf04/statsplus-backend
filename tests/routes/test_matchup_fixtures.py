@@ -51,7 +51,7 @@ from app.services.canonical_game_ledger import (
     CanonicalGameLedgerRepository,
     raw_rows_from_facts,
 )
-from app.providers.rotowire import InjuryEntryEvidence, InjuryProviderSnapshot
+from app.providers.nba_injury_report import InjuryEntryEvidence, InjuryProviderSnapshot
 from app.domain.statistics import MatchState, ScoringPeriod, StatisticMatch
 from app.providers.dfs import (
     AthleteEvidence,
@@ -1038,14 +1038,14 @@ def _injuries(engine):
                 ],
                 entries=(
                     InjuryEntryEvidence(
-                        "rotowire:6504",
+                        "nba_official:6504",
                         "6504",
                         "LeBron James",
                         "LAL",
                         "Questionable",
                         "Questionable",
                         "Left ankle soreness",
-                        "https://www.rotowire.com/basketball/player/lebron-james-2344",
+                        "https://ak-static.cms.nba.com/referee/injury/Injury-Report_2026-01-15_05_00PM.pdf",
                     ),
                 ),
                 retrieved_at=NOW,
@@ -1254,7 +1254,7 @@ def test_persisted_matchup_fixture_serves_exact_windows_and_raw_player_facts(tmp
             "sigma_deviation": None,
         },
     }
-    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["players"][0]["injury_badge_ref"] == "nba_official:6504"
     assert payload["injuries"]["status"] == "fresh"
     assert payload["injuries"]["teams"][0]["submission_state"] == "unknown"
     assert payload["injuries"]["teams"][0]["entries"][0][
@@ -1479,7 +1479,7 @@ def test_persisted_authenticated_matchup_keeps_legacy_traditional_available(
     for market in ("TOV", "STL", "BLK"):
         assert scores[market]["season"]["components"]["traditional"] is not None
         assert scores[market]["last_15"]["components"]["traditional"] is not None
-    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["players"][0]["injury_badge_ref"] == "nba_official:6504"
     assert payload["injuries"]["status"] == "fresh"
 
 
@@ -1572,7 +1572,7 @@ def test_persisted_matchup_degrades_non_rebound_traditional_identity_divergence(
         row["season"] is not None and row["last_15"] is not None
         for row in payload["league"]["defense_sheet"]["shot_zones"]
     )
-    assert payload["players"][0]["injury_badge_ref"] == "rotowire:6504"
+    assert payload["players"][0]["injury_badge_ref"] == "nba_official:6504"
     assert payload["injuries"]["status"] == "fresh"
 
 
