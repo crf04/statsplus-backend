@@ -145,6 +145,16 @@ def test_get_snapshot_joins_underdog_resources_and_preserves_modifiers() -> None
     assert events[0]["request_id"] == "underdog-request"
 
 
+def test_underdog_requests_the_live_nba_board_endpoint() -> None:
+    session = FakeSession(FakeResponse(_payload()))
+
+    UnderdogAdapter(session=session).get_snapshot(_query(), _context())
+
+    assert [url for url, _ in session.calls] == [
+        "https://api.underdogfantasy.com/v1/over_under_lines?sport_id=NBA"
+    ]
+
+
 def test_missing_underdog_variant_label_remains_missing() -> None:
     payload = _payload()
     rows = payload["over_under_lines"]
