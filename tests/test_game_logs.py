@@ -442,8 +442,9 @@ def test_get_filtered_logs_resolves_a_player_only_present_in_the_athlete_catalog
     GameLogResponse.model_validate(result)
 
 
+@pytest.mark.parametrize("person_id", [2544, 1642843])
 def test_get_filtered_logs_names_the_player_even_when_filters_match_no_games(
-    mock_db_engine, mock_redis_client
+    person_id, mock_db_engine, mock_redis_client
 ):
     """The client shows the player's headshot from the NBA person id, so the
     id comes from the season's logs, not the filtered ones."""
@@ -451,7 +452,7 @@ def test_get_filtered_logs_names_the_player_even_when_filters_match_no_games(
     class _LogsSource:
         def get_player_logs(self, player_id, season):
             frame = _game_logs_frame().copy()
-            frame["PLAYER_ID"] = 2544
+            frame["PLAYER_ID"] = person_id
             return frame
 
     service = GameService(
@@ -464,13 +465,13 @@ def test_get_filtered_logs_names_the_player_even_when_filters_match_no_games(
         game_logs_source=_LogsSource(),
         team_filter_rankings=_StubRankings(["LAL"]),
     )
-    service.get_player_id = lambda player_name, season: 2544
+    service.get_player_id = lambda player_name, season: person_id
     query = GameLogQuery(season_filter="2024-25", minutes_filter="45,48")
 
     result = service.get_filtered_logs("LeBron James", query)
 
     assert result["game_logs"] == []
-    assert result["player_id"] == 2544
+    assert result["player_id"] == person_id
     GameLogResponse.model_validate(result)
 
 
