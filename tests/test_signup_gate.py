@@ -7,7 +7,7 @@ migrated SQLite database.  Only the Firebase token verifier is replaced.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from app.migrations import run_migrations
 from app.models.user import User
@@ -41,16 +41,19 @@ def gate_client(app, dependencies, engine, runtime_settings, monkeypatch):
     dependencies.user_service = service
     app.extensions["dependencies"] = dependencies
 
-    claims_by_token = {"admin-1": ADMIN_CLAIMS}
+    claims_by_token = {
+        "admin-1": ADMIN_CLAIMS,
+        # Same email as "veteran": user sync fails on the unique email.
+        "collider": {"email": "veteran@example.com"},
+    }
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
     monkeypatch.setattr(
         auth,
         "verify_firebase_token",
         lambda token: {
             "uid": token,
-            "email": f"{token}@example.com",
             "name": f"Name {token}",
-            **claims_by_token.get(token, {}),
+            **{"email": f"{token}@example.com", **claims_by_token.get(token, {})},
         },
     )
     client = app.test_client()
@@ -273,20 +276,62 @@ def test_existing_rows_are_never_rewritten_by_sync(engine, runtime_settings):
 def test_waitlist_refusal_runs_before_rate_limiting(gate_client, engine):
     """Authentication (and so the waitlist gate) precedes the limiter.
 
-    A waitlisted caller is never counted: past the 30/min preview limit they
-    still get the waitlisted 403, not a 429.  An admitted user is limited
-    normally.
+    The limiter keys an unauthenticated caller by IP at 60/min.  A waitlisted
+    caller is refused before that bucket counts them, so past 60 requests they
+    still get the waitlisted 403 and never a 429.
     """
     gate_client.service.set_signups_open(False)
 
-    statuses = {
-        gate_client.post(
-            "/api/user/targets/preview", json={}, headers=_as("queued")
-        ).status_code
-        for _ in range(32)
-    }
-    last = gate_client.post("/api/user/targets/preview", json={}, headers=_as("queued"))
+    responses = [
+        gate_client.get("/api/user/profile", headers=_as("queued")) for _ in range(65)
+    ]
 
-    assert statuses == {403}
-    assert last.get_json() == WAITLISTED_BODY
-    assert "Retry-After" not in last.headers
+    assert {r.status_code for r in responses} == {403}
+    assert responses[-1].get_json() == WAITLISTED_BODY
+    assert "Retry-After" not in responses[-1].headers
+
+
+def test_failed_user_sync_while_paused_is_refused_not_waved_through(gate_client, engine):
+    """A sync that stores no row (unique-email clash) must not skip the gate."""
+    gate_client.get("/api/user/profile", headers=_as("veteran"))
+    gate_client.service.set_signups_open(False)
+
+    response = gate_client.get("/api/user/profile", headers=_as("collider"))
+
+    assert response.status_code == 403
+    assert response.get_json() == WAITLISTED_BODY
+    assert _status(engine, "collider") is None
+
+
+def test_failed_user_sync_while_open_is_not_refused(gate_client, engine):
+    gate_client.get("/api/user/profile", headers=_as("veteran"))
+
+    response = gate_client.get("/api/user/profile", headers=_as("collider"))
+
+    assert response.status_code != 403
+    assert _status(engine, "collider") is None
+
+
+def test_waitlisted_user_is_refused_on_optional_auth_routes_too(gate_client):
+    gate_client.service.set_signups_open(False)
+
+    response = gate_client.post("/api/user/activity/ping", headers=_as("queued"))
+
+    assert response.status_code == 403
+    assert response.get_json() == WAITLISTED_BODY
+
+
+def test_first_admin_request_reads_the_signup_setting_once(gate_client, engine):
+    """Provisioning a new admin and answering GET /signups share one read."""
+    reads = []
+
+    def record(_connection, _cursor, statement, *_args):
+        if "FROM app_settings" in statement:
+            reads.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record)
+
+    response = gate_client.get("/api/admin/signups", headers=_as("admin-1"))
+
+    assert response.status_code == 200
+    assert len(reads) == 1

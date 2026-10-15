@@ -217,18 +217,37 @@ def _sync_firebase_user(
     return current_user
 
 
-def _refuse_waitlisted(current_user: dict[str, Any]) -> None:
+def _refuse_waitlisted(
+    current_user: dict[str, Any], *, resolve_missing_row: bool = True
+) -> None:
     """Refuse a waitlisted account, except an administrator.
 
     Administrators are exempt so the switch and the waitlist stay reachable
     even if an admin's own first sign-in landed while sign-ups were paused.
+
+    When the sync returned no row (it swallows database errors, for example a
+    uid whose email already belongs to another uid), the decision cannot be
+    skipped: ``resolve_access_status`` answers from the stored row, or, with no
+    row, from the sign-up switch, so a paused beta never admits an
+    unprovisioned user.  Optional authentication passes
+    ``resolve_missing_row=False`` so a database outage cannot make a public
+    route unavailable.
     """
 
+    if _user_is_admin(current_user):
+        return
     db_user = current_user.get("db_user")
-    if (
-        getattr(db_user, "access_status", None) == ACCESS_WAITLISTED
-        and not _user_is_admin(current_user)
+    if db_user is not None:
+        status = getattr(db_user, "access_status", None)
+    elif resolve_missing_row and isinstance(
+        user_service := get_dependencies().user_service, UserService
     ):
+        # Only the real service can answer; the offline suite's stand-ins have
+        # no access policy to apply.
+        status = user_service.resolve_access_status(current_user.get("uid"))
+    else:
+        return
+    if status == ACCESS_WAITLISTED:
         raise WaitlistedError(
             detail=f"Waitlisted user {current_user.get('uid')} refused"
         )
@@ -415,10 +434,12 @@ def _authenticate_optionally() -> None:
                 return
 
             decoded_token = verify_firebase_token(token)
-            _sync_firebase_user(decoded_token, tolerate_sync_errors=True)
+            synced = _sync_firebase_user(decoded_token, tolerate_sync_errors=True)
         except Exception:
             # Optional auth must not turn a public route into an outage.
-            pass
+            return
+        # Outside the guard above: a waitlisted caller is refused here too.
+        _refuse_waitlisted(synced, resolve_missing_row=False)
 
 
 def require_auth_optional(f: Callable[..., Any]) -> Callable[..., Any]:

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from math import isfinite
 import logging
 import re
+from flask import g, has_request_context
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
@@ -50,6 +51,8 @@ from app.models.target import (
 from app.utils.db import get_engine
 
 logger = logging.getLogger(__name__)
+
+_SIGNUPS_MEMO = "_signups_open"
 
 USER_LOGIN_TOUCH_INTERVAL = timedelta(minutes=15)
 
@@ -383,6 +386,25 @@ class UserService:
         finally:
             session.close()
     
+    def resolve_access_status(self, firebase_uid: str) -> str:
+        """The access status a uid has, or would get at sign-up with no row.
+
+        Used when user sync returned no row.  Database errors propagate, so an
+        unanswerable question refuses the request rather than admitting it.
+        """
+        session = self._get_session()
+        try:
+            stored = (
+                session.query(User.access_status)
+                .filter_by(firebase_uid=firebase_uid)
+                .scalar()
+            )
+            if stored is not None:
+                return stored
+            return ACCESS_ACTIVE if self._signups_open(session) else ACCESS_WAITLISTED
+        finally:
+            session.close()
+
     @staticmethod
     def _signups_open(session) -> bool:
         """Whether new sign-ups are admitted; open unless explicitly paused.
@@ -391,8 +413,15 @@ class UserService:
         effect on every worker at once.  Only the first-sign-in path and the
         admin endpoints read it.
         """
+        # Read at most once per request: a first sign-in that provisions a user
+        # and then serves an admin read of the switch shares one query.
+        if has_request_context() and hasattr(g, _SIGNUPS_MEMO):
+            return getattr(g, _SIGNUPS_MEMO)
         value = session.query(AppSetting.value).filter_by(key=SIGNUPS_OPEN_KEY).scalar()
-        return value != "false"
+        is_open = value != "false"
+        if has_request_context():
+            setattr(g, _SIGNUPS_MEMO, is_open)
+        return is_open
 
     def get_signups_open(self) -> bool:
         """Return whether new sign-ups are currently admitted."""
@@ -417,6 +446,8 @@ class UserService:
                     if not updated:
                         session.add(AppSetting(key=SIGNUPS_OPEN_KEY, value=value))
                     session.commit()
+                    if has_request_context():
+                        setattr(g, _SIGNUPS_MEMO, open_)
                     return open_
                 except IntegrityError:
                     # First-ever write raced another admin's; update instead.
