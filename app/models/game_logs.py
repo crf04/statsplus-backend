@@ -689,6 +689,8 @@ class GameLogResponse(BaseModel):
     changes them.
     ``provenance`` is the shared ``generation``/``sources`` block naming the
     Publications the read used (crf04/statsplus#107).
+    ``player_id`` is the player's NBA person id, ``null`` when the season holds
+    no games for them.
     """
 
     game_logs: list[dict[str, Any]]
@@ -696,6 +698,7 @@ class GameLogResponse(BaseModel):
     season_averages: list[dict[str, Any]]
     season_game_count: int = Field(ge=0)
     next_game: str | None = None
+    player_id: int | None = None
     provenance: dict[str, Any]
 
 

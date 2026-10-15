@@ -1740,6 +1740,11 @@ filter, `date_filter` included, changes it. It is `0` when no such games exist
 The filtered count is the length of `game_logs`. Together they let a caller
 state a sample as "12 of 71 games".
 
+Player id: `player_id` is the player's NBA person id, the id NBA's headshot
+images are named by. It comes from the player's season log, so no filter
+changes it, including one that matches no games. It is `null` when the season
+holds no games for the player.
+
 Every successful response also carries the shared
 [`provenance`](#response-provenance) block naming the Publications it read.
 
@@ -1749,7 +1754,8 @@ Every successful response also carries the shared
   "averages": [{ "PTS": 31.0 }],
   "season_averages": [{ "PTS": 27.4 }],
   "season_game_count": 71,
-  "next_game": null
+  "next_game": null,
+  "player_id": 2544
 }
 ```
 
