@@ -704,6 +704,8 @@ def build_dependencies(
         publication_reader=research_publications,
         engine=engine,
     )
+    from app.services.sportsbook_quotes import SportsbookQuoteReader
+
     matchup_service = MatchupService(
         event_catalog=event_catalog_service,
         player_pool=matchup_player_pool_reader,
@@ -722,6 +724,14 @@ def build_dependencies(
         athlete_catalog=(
             AthleteCatalogReader(engine)
             if athlete_catalog_service is not None
+            else None
+        ),
+        # Wired only when ODDS_API_ENABLED is true (the web service needs the
+        # flag but never the key).  Disabled, the Matchup serves ``{}`` even
+        # if quotes were stored earlier.
+        sportsbook_reader=(
+            SportsbookQuoteReader(engine)
+            if settings.odds_api.enabled and not demo_database
             else None
         ),
     )

@@ -973,7 +973,8 @@ Each stored pool player has this shape:
       }
     }
   },
-  "injury_badge_ref": null
+  "injury_badge_ref": null,
+  "book_lines": {}
 }
 ```
 
@@ -984,6 +985,46 @@ exactly the key set of `scores`; in current mode it equals `posted_markets`,
 and in historical mode it is the governed Statistic Catalog crossed with the
 score-input contract rather than any DFS archive. `focal_game_line` is `null`
 in current mode.
+
+`book_lines` (#377, crf04/statsplus#185) is additive and always present: sportsbook
+player-prop lines from The Odds API, keyed by category (a subset of `PTS`,
+`REB`, `AST`, `3PM`, `PRA`). It is `{}` for a Historical or Unscheduled
+Matchup, for a game with no quotes, and whenever collection is off. It is a
+sibling of `provenance`, not part of it: a book never appears in `provenance`,
+`posted_markets`, `stat_categories`, the Targets pool, or the DFS board, so a
+market only books post is not targetable.
+
+```json
+"book_lines": {
+  "PTS": {
+    "as_of": "2026-10-21T21:04:11Z",
+    "closing": false,
+    "books": [
+      { "book": "draftkings", "line": 27.5, "over": -115, "under": -105,
+        "updated_at": "2026-10-21T21:02:40Z",
+        "best_over": false, "best_under": true },
+      { "book": "fanduel", "line": 27.5, "over": -110, "under": -110,
+        "updated_at": "2026-10-21T21:03:02Z",
+        "best_over": true, "best_under": false }
+    ]
+  }
+}
+```
+
+`book` is the Odds API bookmaker key from an allowlist of regulated US books
+(`draftkings`, `fanduel`, `betmgm`, `williamhill_us`, `betrivers`,
+`fanatics`); offshore books are never served. `line` is a finite number
+>= 0. `over` and `under` are integer American prices, either `null` when the
+book posts one side only. `best_over` and `best_under` are computed only among
+books posting the same `line`: the higher American price wins (+120 beats
++110 beats -105 beats -115; +100 and -100 tie), ties all flag, and a book
+alone at its line (or alone on that side) is never flagged. `books` is sorted
+by `line` ascending, then `book`. `as_of` is the newest `updated_at`.
+`closing` is true only when every entry comes from the game's closing snapshot
+(taken between tip-10 and tip-5 minutes; a missed closing fetch is not
+marked). A book that posted two distinct lines for one player and market in
+its latest poll is omitted for that market. A store read error yields `{}`
+with a logged error and never fails the route.
 
 `diet_thin` carries one verdict per Diet Base: whether that Base's evidence for
 this player is too slight to lean on. It is the same rule a score component
