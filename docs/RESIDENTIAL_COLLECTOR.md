@@ -95,7 +95,8 @@ The collector can instead run as a Railway cron service whose NBA requests leave
 through a residential proxy (`stats.nba.com` blocks datacenter addresses). It
 is the same one-shot command: `python -m app.collector run` performs one
 invocation and exits with the codes above, so a Railway cron run ends when the
-tick does. The service's config file is `railway.collector.json`
+tick does. The service's settings are recorded in `railway.collector.json`
+and set on the service instance
 (`startCommand` `python -m app.collector run`, `cronSchedule` `0,30 9-16 * * *`,
 `restartPolicyType` `NEVER`). It has no pre-deploy migration and no health
 check; it never reads `DATABASE_URL`.
@@ -171,8 +172,11 @@ One-time operator steps:
 
    A surface the identity lacks is refused with `scope_denied` on upload, and
    a new surface needs a new identity (`rotate` changes credentials only).
-2. Create a service from this repository with the config-as-code path
-   `/railway.collector.json`, and set the variables above.
+2. Create a service from this repository, set the start command, cron schedule
+   and restart policy recorded in `railway.collector.json` on the service
+   instance (Railway's API no longer sets a config-as-code path), and set the
+   variables above. The collector has no `DATABASE_URL`, so it must not inherit
+   a pre-deploy migration.
 3. Run `python -m app.collector validate-config` and `credential-check` from the
    service shell, then trigger one run and read the stdout JSON.
 4. Disable the Windows scheduled task so two collectors do not compete.
