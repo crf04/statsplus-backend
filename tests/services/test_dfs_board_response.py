@@ -694,7 +694,7 @@ def test_an_unreadable_oversized_read_is_observed_from_what_it_observed():
     assert event.comparison_availability == "available"
     assert event.provider_status_counts == (("complete", 1),)
     assert event.freshness_counts == (("unknown", 1),)
-    assert event.disabled_provider_count == 3
+    assert event.disabled_provider_count == 4
 
 
 def test_an_oversized_read_with_one_readable_provider_is_still_too_large():
@@ -794,7 +794,7 @@ def test_a_served_board_records_bounded_labels_only():
     assert event.group_count == 1
     assert event.market_count == 2
     assert event.unresolved_count == 0
-    assert event.disabled_provider_count == 2
+    assert event.disabled_provider_count == 3
     assert event.duration_ms >= 0
 
 
@@ -878,7 +878,7 @@ def test_a_refused_board_is_observed_with_the_read_it_completed():
     assert event.provider_status_counts == (("complete", 2),)
     assert event.freshness_counts == (("fresh", 2),)
     assert event.cache_counts == (("unset", 2),)
-    assert event.disabled_provider_count == 2
+    assert event.disabled_provider_count == 3
 
 
 def test_a_disabled_request_is_observed_as_one_disabled_event():
