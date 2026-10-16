@@ -106,7 +106,10 @@ def _ambiguous_outcome(provider_id: str) -> BoardMappingOutcome:
 
 
 class _Board:
-    def __init__(self, clock, *, with_outcomes: bool, athletes=None, events=None):
+    def __init__(
+        self, clock, *, with_outcomes: bool, athletes=None, events=None, snapshot=None
+    ):
+        self.snapshot = snapshot
         self.clock = clock
         self.with_outcomes = with_outcomes
         self.athletes = athletes
@@ -116,7 +119,7 @@ class _Board:
         provider_outcome = SimpleNamespace(
             provider="dabble",
             status="complete",
-            snapshot=_snapshot(self.clock()),
+            snapshot=self.snapshot or _snapshot(self.clock()),
             reason=None,
         )
         athletes = self.athletes or (
@@ -133,7 +136,9 @@ class _Board:
         )
 
 
-def _collector(tmp_path, clock, *, with_outcomes: bool, athletes=None, events=None):
+def _collector(
+    tmp_path, clock, *, with_outcomes: bool, athletes=None, events=None, snapshot=None
+):
     engine = create_engine(f"sqlite:///{tmp_path / 'collector-mappings.sqlite3'}")
     run_migrations(engine)
     query = NBAMarketQuery(season=SEASON)
@@ -152,7 +157,11 @@ def _collector(tmp_path, clock, *, with_outcomes: bool, athletes=None, events=No
     coordinator = ProjectionCollectionCoordinator(
         engine,
         board_service=_Board(
-            clock, with_outcomes=with_outcomes, athletes=athletes, events=events
+            clock,
+            with_outcomes=with_outcomes,
+            athletes=athletes,
+            events=events,
+            snapshot=snapshot,
         ),
         recording_service=recorder,
         event_reader=lambda _season: (event,),
@@ -322,3 +331,77 @@ def test_mappings_are_keyed_by_provider_as_well_as_provider_id():
         market.athlete.team.canonical_id,
         market.event.canonical_id,
     ) == (2544, "LeBron James", 1610612747, GAME_ID)
+
+
+def _recorded_dabble_snapshot():
+    import json
+    from pathlib import Path
+
+    from app.providers.dabble import DabbleAdapter
+    from app.providers.dfs import RetrievalContext
+    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+
+    folder = Path(__file__).parents[1] / "fixtures" / "dabble"
+    payloads = [
+        json.loads((folder / f"recorded_2026-10-15.{name}.json").read_text("utf-8"))
+        for name in ("competitions", "fixtures", "fixture_details")
+    ]
+
+    class Session:
+        headers: dict = {}
+
+        def get(self, url, **kwargs):
+            payload = payloads.pop(0)
+            return SimpleNamespace(
+                status_code=200, raise_for_status=lambda: None, json=lambda: payload
+            )
+
+    snapshot = DabbleAdapter(
+        session=Session(), entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES
+    ).get_snapshot(
+        NBAMarketQuery(),
+        RetrievalContext(deadline="2099-01-01T00:00:00Z", request_id="priced"),
+    )
+    resolver = CATALOG.resolver
+    return replace(
+        snapshot,
+        retrieved_at=NOW,
+        markets=tuple(
+            replace(market, statistic_match=resolver.resolve_market(market))
+            for market in snapshot.markets
+        ),
+    )
+
+
+def test_resolved_dabble_standard_line_is_targetable_and_alternate_is_not(tmp_path):
+    coordinator, engine = _collector(
+        tmp_path,
+        lambda: NOW,
+        with_outcomes=True,
+        snapshot=_recorded_dabble_snapshot(),
+        athletes=(
+            _athlete_outcome(
+                "dabble",
+                "642195c8-e31d-4f16-87a6-2ae49fcefe90",
+                1630595,
+                1610612765,
+                "Cade Cunningham",
+            ),
+        ),
+        events=(
+            _event_outcome(
+                "dabble",
+                "01a12518-4599-735f-a212-cf7312c08ceb",
+                GAME_ID,
+                (1610612765, 1610612738),
+            ),
+        ),
+    )
+
+    assert coordinator.run().status == "complete"
+
+    rows = _rows(engine)
+    standard = rows["01a137b5-a0eb-71fb-b11c-7648e07aeb39"]
+    alternate = rows["01a137b5-9faa-763d-b887-cef1723d5877"]
+    assert (standard.targetable, standard.canonical_player_id) == (True, 1630595)
+    assert alternate.targetable is False
