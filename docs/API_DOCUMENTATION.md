@@ -21,7 +21,8 @@ the service returns `503 Service Unavailable`. Missing or invalid tokens return
 
 Authentication levels:
 
-- Required: `GET /api/games/slate`, `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
+- Anonymous (crf04/statsplus#211): `GET /api/games/slate`, `GET /api/games/slate/edges`, and `GET /api/games/ladder`. They carry no auth check, so any `Authorization` header (a waitlisted user's token included) is ignored, never refused, and the [rate limiter](#rate-limits) counts the caller by client IP in the unauthenticated bucket.
+- Required: `GET /api/games/matchup`, `GET /api/games/game_logs`, `GET /api/games/seasons`, `GET /api/games/matchup/selection`, `GET /api/dfs/board`, `POST /api/nl-query`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, and most `/api/user/*` routes.
 - Admin-only: `GET`/`PUT /api/admin/signups`, `GET /api/admin/users`, `POST /api/admin/users/<uid>/admit`, `PUT /api/admin/users/<uid>/cohort`, `GET /api/admin/research-activity`, `GET /api/user/admin/stats`, every `/api/data/*` endpoint (including `GET /api/data/jobs/<job_id>`), and `PUT /api/players/fetch`.
 - Optional: player and team read routes, plus `POST /api/user/activity/ping`.
 - Admin claims: an authenticated token must contain `admin=true`, `role=admin`,
@@ -94,7 +95,7 @@ reads.
 
 | Does not count | Route | Why |
 | --- | --- | --- |
-| Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges` | Slate and home loads are not research. |
+| Slate and home | `GET /api/games/slate`, `GET /api/games/slate/edges`, `GET /api/games/ladder` | Slate and home loads are not research. These reads are anonymous, so there is no account to count them for. |
 | Target resolve | `GET /api/user/targets/resolve` | The Slate page reads it on every load to show live Targets, so counting it would count Slate loads. This also means the connector's `get_targets` call is not counted. |
 | Reference lists | `GET /api/players`, `GET /api/teams`, `GET /api/games/seasons`, `GET /api/diet/baselines`, `GET /api/teams/<tricode>/season-minutes`, `GET /api/players/next-opponent` | Pickers and reference data. |
 | Account | every other `/api/user/*` route, `POST /api/user/attribution` | Account management, not research. |
@@ -524,7 +525,8 @@ Common query types:
 GET /api/games/slate?date=YYYY-MM-DD
 ```
 
-Requires Firebase bearer authentication. `date` is optional only by omission
+Anonymous (crf04/statsplus#211): no authentication, and an `Authorization`
+header is ignored. `date` is optional only by omission
 and defaults to today's Slate Date in US Eastern time; an explicitly empty
 `?date=` is malformed input. The route reads the persisted Event Catalog of the
 season containing the Slate Date, or of the previous season while that one has
@@ -798,7 +800,7 @@ Empty and error behavior:
 GET /api/games/slate/edges?date=YYYY-MM-DD
 ```
 
-Requires Firebase bearer authentication. One read for the home page in place of
+Anonymous (crf04/statsplus#211), like [Get Slate](#get-slate). One read for the home page in place of
 one Matchup read per game (crf04/statsplus#204). `date` means exactly what it
 means on [Get Slate](#get-slate): absent is the current ET Slate Date, and a
 malformed value (including an empty `?date=`) is the same `400 invalid_input`.
@@ -1976,6 +1978,40 @@ whose `player_game_logs` can be read through a published Publication
 | No season is published | `200` with `"seasons": []` and the `default_season` |
 | Authentication is missing or invalid | existing `401` authentication error contract |
 | The publication store cannot be read | `503 provider_unavailable` |
+
+### Get Ladder
+
+```http
+GET /api/games/ladder
+```
+
+Anonymous (crf04/statsplus#211): no authentication, `Authorization` ignored,
+limited by client IP. Takes no query parameters; any parameter is
+`400 invalid_input`. The backend owns three Filter Sets, each computed through
+the same path as [Get Game Logs](#get-game-logs) for the default season:
+
+| id | Filter Set (game_logs parameters) |
+|---|---|
+| `start` | `player_name=Jalen Johnson` |
+| `narrow` | `player_name=Jalen Johnson&players_off[]=Trae Young` |
+| `stack` | `player_name=Jalen Johnson&players_off[]=Trae Young&teams_against[]=OPP_PTS&rank_filter[]=10&minutes_filter=25,48` |
+
+```json
+{
+  "rungs": [
+    { "id": "start", "points": 22.4, "games": 61, "series": [18, 25, 31] },
+    { "id": "narrow", "points": 24.1, "games": 9, "series": [27, 22] },
+    { "id": "stack", "points": null, "games": 0, "series": [] }
+  ]
+}
+```
+
+`rungs` always holds the three ids in that order. `points` is
+`averages[0].PTS` of the game-logs response (the average over the kept games),
+or `null` when the rung kept no games; `games` is the number of kept games;
+`series` is each kept game's `PTS` in the order game logs returns them. Errors
+follow Get Game Logs: a provider timeout is `503 provider_unavailable` and a
+missing player is `404 resource_not_found`.
 
 ### Get Game Logs
 
