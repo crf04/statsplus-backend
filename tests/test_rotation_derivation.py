@@ -57,8 +57,13 @@ def test_overtime_game_splits_minutes_by_period_and_marks_who_closed():
     # Joel Embiid started but was on the bench at the end of regulation.
     embiid = _player(rotation, "Joel Embiid")
     assert (embiid.started, embiid.closed, dict(embiid.period_cs)["OT"]) == (True, False, 0)
-    # Bub Carrington was subbed out 9.3 s before the overtime ended.
-    assert dict(_player(rotation, "Bub Carrington").period_cs)["OT"] == 29070
+    # Bub Carrington was on court at the end of regulation and subbed out 9.3 s
+    # before the overtime ended; Tre Johnson only came on late in overtime.
+    carrington = _player(rotation, "Bub Carrington")
+    assert dict(carrington.period_cs)["OT"] == 29070
+    assert carrington.closed is True
+    johnson = _player(rotation, "Tre Johnson")
+    assert (dict(johnson.period_cs)["OT"], johnson.closed) == (930, False)
 
 
 def test_overtime_game_keeps_every_box_score_player_including_those_who_did_not_play():

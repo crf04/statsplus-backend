@@ -397,7 +397,11 @@ unchanged, and the hold applies to `player_game_logs` itself.
   compose once every team has fifteen. A rerun in the same window fetches only
   games not yet stored; stored games are rechecked for stat corrections once a
   day while recent and once a week after that (`daily_recheck_days`,
-  `weekly_recheck_days`).
+  `weekly_recheck_days`). The same service then runs
+  `scripts/rotation_refresh.py` (at most 60 games a run), which stores each
+  completed regular-season game's starters and on-court stints for
+  `GET /api/games/rotation` (crf04/statsplus#223); it runs whatever the ledger
+  step's outcome, and the run fails if either step failed.
 
 `statsplus-nightly-refresh` writes the legacy `player_game_logs` tables for the
 calendar season. No reader uses them while the stream is enabled, and the

@@ -82,6 +82,9 @@ class ApplicationDependencies:
     diet_baselines_service: Any | None = None
     target_season_minutes_service: Any | None = None
     on_off_service: Any | None = None
+    rotation_repository: Any | None = None
+    rotation_service: Any | None = None
+    rotation_collection_service: Any | None = None
 
 
 logger = getLogger(__name__)
@@ -187,6 +190,9 @@ def build_dependencies(
     from app.services.team_matchup_repository import TeamMatchupRepository
     from app.services.matchup_injuries import StoredMatchupInjuryReader
     from app.services.on_off import OnOffService
+    from app.services.rotation_collection import RotationCollectionService
+    from app.services.rotation_repository import RotationRepository
+    from app.services.rotation_service import RotationService
     from app.services.target_season_minutes import TargetSeasonMinutesService
     from app.services.diet_baselines import DietBaselinesService
     from app.services.target_backtest import TargetBacktestService
@@ -833,6 +839,7 @@ def build_dependencies(
         publication_reader=research_publications,
     )
 
+    rotation_repository = RotationRepository(engine)
     return ApplicationDependencies(
         settings=settings,
         engine=engine,
@@ -892,6 +899,19 @@ def build_dependencies(
         target_resolution_service=target_resolution_service,
         target_backtest_service=target_backtest_service,
         target_preview_service=target_preview_service,
+        rotation_repository=rotation_repository,
+        rotation_service=RotationService(
+            rotation_repository, athlete_catalog_service, game_service.default_season
+        ),
+        rotation_collection_service=RotationCollectionService(
+            nba_live_data_provider,
+            rotation_repository,
+            (
+                event_catalog_service.get_events
+                if event_catalog_service is not None
+                else (lambda season: [])
+            ),
+        ),
         on_off_service=OnOffService(
             pbp_stats_provider, settings, redis_client=redis_client
         ),
