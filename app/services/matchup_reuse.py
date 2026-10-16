@@ -132,6 +132,7 @@ class ComposedMatchupCache:
         season: str | None,
         game: Mapping[str, Any],
         retained: Any = (),
+        pool: Mapping[str, Any] | None = None,
     ) -> str | None:
         """``matchup:composed:v<schema>:<sha256>``, or ``None`` when uncacheable.
 
@@ -139,10 +140,14 @@ class ComposedMatchupCache:
         publication: the evidence season, the Publication generation (live
         pointers and any retained history rows), the retained prior-season
         Publication an earlier game's participants come from, the game's id,
-        state and tip time, the Slate's view of the game's Player Pool
-        (projection state and targetable counts, which move with each poll and
-        each stored Out), and every setting the scores read.  Only an injury
-        change the Slate's counts do not show can lag, by the TTL.  The user is
+        state and tip time, the Slate's view of the Player Pool (the game's
+        projection state and targetable counts, and the pool's freshness block
+        with each provider's own status and ``retrieved_at``, so one provider's
+        new poll misses though the oldest stamp holds), each stream's freshness
+        label in the snapshot (a fresh capture and a stale one of one
+        generation compose different freshness sections), and every setting
+        the scores read.  Only an injury change the Slate's counts do not show
+        can lag, by the TTL.  The user is
         not in it: a Matchup is the same for everyone.
         """
 
@@ -165,7 +170,12 @@ class ComposedMatchupCache:
             ],
             "retained": retained,
             "game": [game["game_id"], game["status"]["state"], game["scheduled_at"]],
+            "labels": sorted(
+                [stream, read.freshness, read.status]
+                for stream, read in (getattr(snapshot, "reads", None) or {}).items()
+            ),
             "pool": [
+                pool,
                 game.get("projection_state"),
                 [
                     (game.get(side) or {}).get("targetable_player_count")

@@ -130,7 +130,12 @@ class TargetResolutionService:
         idle: list[dict[str, Any]] = []
         for target in self.targets.list_targets(firebase_uid):
             resolved = self._resolve_target(
-                target, games, read_matchups, matchups=matchups, slate_date=slate["slate_date"]
+                target,
+                games,
+                read_matchups,
+                matchups=matchups,
+                slate_date=slate["slate_date"],
+                pool=(slate.get("freshness") or {}).get("pool"),
             )
             (idle if resolved["game"] is None else live).append(resolved)
         shared = bool(read_matchups) and isinstance(matchups, SnapshotMatchups)
@@ -238,6 +243,7 @@ class TargetResolutionService:
         *,
         matchups: MatchupReader,
         slate_date: str,
+        pool: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve one Target against an indexed Slate, reading each game once.
 
@@ -251,7 +257,7 @@ class TargetResolutionService:
         game, opponent_side, filtered_side = scheduled
         game_id = game["game_id"]
         if game_id not in read_matchups:
-            read_matchups[game_id] = read_game_matchup(matchups, game)
+            read_matchups[game_id] = read_game_matchup(matchups, game, pool)
         return self._live(
             target, game, opponent_side, filtered_side, read_matchups[game_id], slate_date
         )

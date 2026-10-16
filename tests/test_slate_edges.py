@@ -861,3 +861,40 @@ def test_the_route_serves_an_unauthenticated_caller(
 
     assert response.status_code == 200
     assert response.get_json() == {"slate_date": "2026-04-10"}
+
+
+def test_edges_recompose_when_one_providers_pool_stamp_moves():
+    from app.services.matchup_reuse import ComposedMatchupCache
+
+    games, payloads = _two_games()
+    redis_client = DictRedis()
+    settings = RuntimeSettings(
+        environment="testing",
+        nba={"current_season": "2025-26"},
+        cache={"slate_edges_enabled": False},
+    )
+    composer = SnapshotComposer(payloads)
+
+    class PooledSlate(FakeSlate):
+        def __init__(self, games, underdog):
+            super().__init__(games)
+            self.underdog = underdog
+
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"] = {
+                "pool": {"providers": {"underdog": {"retrieved_at": self.underdog}}}
+            }
+            return slate
+
+    def edges(underdog):
+        service = _cached_service(composer, redis_client, games, settings=settings)
+        service.matchup_cache = ComposedMatchupCache(redis_client)
+        service.slates = PooledSlate(games, underdog)
+        service.get_edges("2026-04-10")
+
+    edges("12:31")
+    keys_first = set(redis_client.values)
+    edges("12:32")
+
+    assert len(set(redis_client.values) - keys_first) == 2

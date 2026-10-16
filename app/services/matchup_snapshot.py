@@ -64,6 +64,27 @@ def capture_publication_snapshot(
 _BYPASS = object()
 
 
+def _agrees_with_lookup(document: Mapping[str, Any], found: Any, identity: Any) -> bool:
+    """Whether the retained Publication composition listed is the one keyed.
+
+    ``identity`` is empty for a game that reads none; otherwise its second item
+    is the retained season, and the document may list at most the keyed
+    Publication for that season.
+    """
+
+    if not identity:
+        return True
+    generation = (document.get("provenance") or {}).get("generation") or ()
+    listed = {
+        entry.get("publication_id")
+        for entry in generation
+        if isinstance(entry, Mapping)
+        and entry.get("stream_key") == "player_game_logs"
+        and entry.get("season") == identity[1]
+    }
+    return listed <= ({found[0]} if found is not None else set())
+
+
 def _used_publication(document: Mapping[str, Any], found: Any) -> bool:
     """Whether the composed document lists the retained Publication ``found``."""
 
@@ -129,8 +150,14 @@ class SnapshotMatchups:
         self._compose_cache = MatchupComposeCache()
 
     def get_matchup(
-        self, *, game_id: str, game: Mapping[str, Any] | None = None
+        self,
+        *,
+        game_id: str,
+        game: Mapping[str, Any] | None = None,
+        pool: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
+        """``pool`` is the Slate's pool freshness block, part of the cache key."""
+
         if (
             self._cache is None
             or game is None
@@ -143,13 +170,18 @@ class SnapshotMatchups:
             return self._compose(game_id)
         found, identity = retained
         key = self._cache.key(
-            self._settings, self.snapshot, self.season, game, identity
+            self._settings, self.snapshot, self.season, game, identity, pool
         )
         if key is None:
             return self._compose(game_id)
         entry = self._cache.get(key) if self._cache_reads else None
         if entry is None:
             document = self._compose(game_id)
+            if not _agrees_with_lookup(document, found, identity):
+                # Composition read a different retained Publication than the
+                # key names (a correction activated in between): its data
+                # does not belong under this key.
+                return document
             used = _used_publication(document, found)
             entry = self._cache.put(
                 key, {"matchup": document, "retained_used": used}, self._settings
@@ -224,7 +256,9 @@ class SnapshotMatchups:
         )
 
 
-def read_game_matchup(matchups: Any, game: Mapping[str, Any]) -> Mapping[str, Any]:
+def read_game_matchup(
+    matchups: Any, game: Mapping[str, Any], pool: Mapping[str, Any] | None = None
+) -> Mapping[str, Any]:
     """One Slate game's Matchup from any ``MatchupReader``.
 
     A snapshot-bound reader is told the game so it can cache by the game's
@@ -232,7 +266,7 @@ def read_game_matchup(matchups: Any, game: Mapping[str, Any]) -> Mapping[str, An
     """
 
     if isinstance(matchups, SnapshotMatchups):
-        return matchups.get_matchup(game_id=game["game_id"], game=game)
+        return matchups.get_matchup(game_id=game["game_id"], game=game, pool=pool)
     return matchups.get_matchup(game_id=game["game_id"])
 
 

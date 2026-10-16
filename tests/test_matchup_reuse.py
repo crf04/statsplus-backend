@@ -532,7 +532,7 @@ class ProvenanceComposer(Composer):
 def test_a_hit_reports_the_current_snapshots_age_not_the_stored_one():
     composer = ProvenanceComposer()
     cache = ComposedMatchupCache(DictRedis())
-    first_capture, second_capture = _real_snapshot(age=0), _real_snapshot(age=60, freshness="stale")
+    first_capture, second_capture = _real_snapshot(age=0), _real_snapshot(age=60)
     _read(cache, composer, snapshot=first_capture)
 
     hit = _read(cache, composer, snapshot=second_capture)
@@ -542,7 +542,7 @@ def test_a_hit_reports_the_current_snapshots_age_not_the_stored_one():
 
     assert composer.calls == ["G1"]
     assert hit["provenance"]["generation"][0]["age_seconds"] == 60
-    assert hit["provenance"]["generation"][0]["freshness"] == "stale"
+    assert hit["provenance"]["generation"][0]["freshness"] == "fresh"
     assert hit["provenance"]["player_game_logs"]["age_seconds"] == 60
     assert hit["coverage"]["mixed_freshness"] is False
     assert json.dumps(hit) == json.dumps(uncached)
@@ -634,3 +634,164 @@ def test_request_matchups_reuses_the_snapshot_and_the_cached_matchup():
 
     assert first == second == {"compose": 1, "game": "G1", "scores": [0.25, None]}
     assert (reader.captures, composer.calls) == (1, ["G1"])
+
+
+# --- round 2: the real services and the reviewer's reproductions -------------
+
+
+def _real_service_cache(cache):
+    import tests.services.test_matchup_service as service_doubles
+    from app.services.player_game_log_repository import PlayerGameLogRepository
+
+    service = service_doubles._service()
+    repo = SimpleNamespace(_publication_reader=object())
+    # The real repository method: with a serving snapshot it needs no database.
+    service.player_logs.get_read_freshness = (
+        lambda season, publication_snapshot: PlayerGameLogRepository.get_read_freshness(
+            repo, season, publication_snapshot=publication_snapshot
+        )
+    )
+    game = service._game(service_doubles._event())
+
+    def cached(snapshot):
+        return SnapshotMatchups(
+            service, snapshot, None, season="2025-26", cache=cache,
+            settings=service.settings,
+        ).get_matchup(game_id=service_doubles.GAME_ID, game=game)
+
+    def uncached(snapshot):
+        return service.get_matchup_from_snapshot(
+            game_id=service_doubles.GAME_ID, publication_snapshot=snapshot,
+            injuries=None, season="2025-26",
+        )
+
+    return service, cached, uncached
+
+
+def test_a_fresh_then_stale_capture_of_one_generation_equals_an_uncached_compose():
+    cache = ComposedMatchupCache(DictRedis())
+    service, cached, uncached = _real_service_cache(cache)
+    cached(_real_snapshot(age=0))
+    stale = _real_snapshot(age=60, freshness="stale")
+
+    hit = cached(stale)
+    expected = uncached(stale)
+
+    assert expected["freshness"]["player_game_logs"]["status"] == "stale"
+    assert hit["freshness"]["player_game_logs"]["status"] == "stale"
+    assert json.dumps(hit) == json.dumps(expected)
+
+
+def test_an_older_capture_with_the_same_labels_is_a_hit_equal_to_an_uncached_compose():
+    cache = ComposedMatchupCache(DictRedis())
+    service, cached, uncached = _real_service_cache(cache)
+    cached(_real_snapshot(age=0))
+    composes = len(service.player_logs.summary_calls)
+    older = _real_snapshot(age=60)
+
+    hit = cached(older)
+
+    assert len(service.player_logs.summary_calls) == composes
+    assert hit["provenance"]["player_game_logs"]["age_seconds"] == 60
+    assert json.dumps(hit) == json.dumps(uncached(older))
+
+
+def test_a_retained_publication_activated_between_lookup_and_compose_is_not_cached():
+    redis_client, composer = DictRedis(), ProvenanceComposer()
+    snapshot = _real_snapshot(age=0)
+    looked_up = _read_of("player_game_logs", "ret-A", age=1000, season="2024-25")
+    composed = _read_of("player_game_logs", "ret-B", age=1000, season="2024-25")
+    # The lookup names A; composition reads B, activated in between.
+    composer.retained.update(found=("ret-A", 4, looked_up), read=composed)
+    game = {**GAME, "game_id": "0022400001"}
+
+    def read():
+        return SnapshotMatchups(
+            composer, snapshot, object(), season="2025-26",
+            cache=ComposedMatchupCache(redis_client),
+            settings=RuntimeSettings(environment="testing"),
+        ).get_matchup(game_id=game["game_id"], game=game)
+
+    first, second = read(), read()
+
+    assert [e["publication_id"] for e in first["provenance"]["generation"]] == [
+        "ret-B", "pub-1",
+    ]
+    assert (first["compose"], second["compose"]) == (1, 2)
+    assert redis_client.values == {}
+
+
+def test_one_providers_new_poll_misses_though_the_oldest_stamp_and_counts_hold():
+    import tests.services.test_projection_archive as archive
+    from datetime import timedelta
+    from sqlalchemy import create_engine
+
+    from app.migrations import run_migrations
+    from app.providers.dfs import NBAMarketQuery
+    from app.services.projection_archive import (
+        LatestProjectionPlayerPoolReader,
+        ProjectionArchive,
+        ProjectionArchiveReadScope,
+    )
+    from app.services.statistic_catalog import StatisticCatalog
+    import tempfile
+
+    t0, season, game_id = archive.OBSERVED_AT, archive.SEASON, archive.GAME_ID
+    with tempfile.TemporaryDirectory() as temp:
+        engine = create_engine(f"sqlite:///{temp}/pool.sqlite3")
+        run_migrations(engine)
+        catalog = StatisticCatalog.load_default()
+        projections = ProjectionArchive(engine, catalog)
+        query = NBAMarketQuery(season=season)
+
+        def put(provider, minutes, line):
+            at = t0 + timedelta(minutes=minutes)
+            projections.ingest_complete_snapshot(
+                archive._line_snapshot(provider, [archive._line_market(
+                    catalog, provider=provider, market_id="pts",
+                    statistic_id="points", threshold=line,
+                )], at),
+                query=query, accepted_at=at,
+            )
+
+        put("dabble", 0, "20.5")
+        put("underdog", 1, "21.5")
+        reader = LatestProjectionPlayerPoolReader(
+            engine,
+            [ProjectionArchiveReadScope(provider=p, query=query) for p in ("dabble", "underdog")],
+            clock=lambda: t0 + timedelta(minutes=3),
+        )
+        first = reader.get_pool_for_game(season=season, game_id=game_id)
+        put("underdog", 2, "25.5")
+        second = reader.get_pool_for_game(season=season, game_id=game_id)
+
+        def game(pool):
+            return {
+                **GAME, "game_id": game_id,
+                "projection_state": pool.game_states[game_id],
+                "away_team": {"targetable_player_count": 0},
+                "home_team": {"targetable_player_count": pool.team_counts[1610612747]},
+            }
+
+        class LineComposer(Composer):
+            pool = first
+
+            def get_matchup_from_snapshot(self, **kwargs):
+                return {"lines": self.pool.players[0].lines}
+
+        composer = LineComposer()
+        cache = ComposedMatchupCache(DictRedis())
+
+        def read(pool, *, cached=True):
+            return SnapshotMatchups(
+                composer, _snapshot(), None, season=season, settings=_settings(),
+                cache=cache if cached else None,
+            ).get_matchup(game_id=game_id, game=game(pool), pool=pool.freshness)
+
+        old = read(first)
+        composer.pool = second
+        hit = read(second)
+
+        assert game(first) == game(second)
+        assert hit == read(second, cached=False)
+        assert hit != old

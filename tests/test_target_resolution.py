@@ -2328,3 +2328,32 @@ def test_resolve_recomposes_a_game_whose_state_changed(targets):
     )
 
     assert len(composer.calls) == 2
+
+
+def test_resolve_recomposes_when_one_providers_pool_stamp_moves(targets):
+    _create(targets, opponent="OKC", qualifiers=(CORNER_THREE,))
+    composer = _RecordedSnapshotMatchups({GAME_ID: _matchup()})
+    reader, redis_client = _StoredGeneration(), _DictRedis()
+
+    class PooledSlate(FakeSlate):
+        def __init__(self, underdog):
+            super().__init__()
+            self.underdog = underdog
+
+        def get_slate(self, requested_date=None):
+            slate = super().get_slate(requested_date)
+            slate["freshness"]["pool"] = {
+                "providers": {
+                    "dabble": {"status": "fresh", "retrieved_at": "12:30"},
+                    "underdog": {"status": "fresh", "retrieved_at": self.underdog},
+                }
+            }
+            return slate
+
+    def resolve(underdog):
+        service = _cached_resolution(targets, composer, reader, redis_client)
+        service.slates = PooledSlate(underdog)
+        service.resolve(OWNER, requested_date=SLATE_DATE)
+        return len(composer.calls)
+
+    assert [resolve("12:31"), resolve("12:31"), resolve("12:32")] == [1, 1, 2]
