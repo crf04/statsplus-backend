@@ -12,8 +12,9 @@ shape raise :class:`ProviderResponseError`, which is recorded as a
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime
 import json
 from typing import Any
@@ -33,6 +34,7 @@ from app.utils.telemetry import (
 
 PBP_TOTALS_URL = "https://api.pbpstats.com/get-totals/nba"
 PBP_GAME_LOGS_URL = "https://api.pbpstats.com/get-game-logs/nba"
+PBP_WOWY_URL = "https://api.pbpstats.com/get-wowy-stats/nba"
 PBP_REGULAR_SEASON = "Regular+Season"
 
 # These are the columns consumed by the publication and assist-table
@@ -81,6 +83,88 @@ PBP_PLAYER_DIET_COLUMNS = (
     *PBP_PLAYER_DIET_IDENTITY_COLUMNS,
     *PBP_PLAYER_DIET_VOLUME_COLUMNS,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class WowyPlayerRow:
+    """One teammate's raw totals in one WOWY lineup state.
+
+    ``player_id`` is the StatsPlus player id (the NBA person id); the PBP
+    ``EntityId`` string is translated here so no caller sees the wire id.
+    ``fga`` is ``FG2A + FG3A``.  A counter PBP omits (it sends ``null`` when a
+    player never recorded one) is zero.
+    """
+
+    player_id: int
+    name: str
+    minutes: int
+    possessions: int
+    usage: float | None
+    points: int
+    rebounds: int
+    assists: int
+    fg3m: int
+    fga: int
+
+
+def to_pbp_player_id(player_id: int) -> str:
+    """Translate a StatsPlus player id to PBP's ``EntityId``.
+
+    Both are NBA person ids (Jokic is 203999 on each), so the translation is
+    the decimal string; it lives here so a future divergence has one home.
+    """
+
+    return str(int(player_id))
+
+
+def from_pbp_player_id(entity_id: object) -> int:
+    """Translate PBP's ``EntityId`` back to a StatsPlus player id."""
+
+    return int(str(entity_id))
+
+
+def _wowy_count(row: dict[str, Any], key: str) -> int:
+    value = row.get(key)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProviderResponseError(
+            f"PBP Stats WOWY payload has a non-numeric {key}."
+        )
+    return int(value)
+
+
+def wowy_request_descriptor(
+    *, team_id: int, season: str, season_type: str,
+    on_player_ids: Sequence[int], off_player_ids: Sequence[int],
+) -> dict[str, object]:
+    """Return the exact non-secret PBP WOWY request sent on the wire.
+
+    ``0ExactlyNOnFloor`` lists players of whom exactly N are on the floor:
+    with N the size of the on-set, all of them together; ``0Exactly0OnFloor``
+    lists the players required off it.  Several ids are comma separated
+    (verified against the live endpoint 2026-10-16).
+    """
+
+    parameters: dict[str, object] = {
+        "Season": season, "SeasonType": season_type,
+        "TeamId": str(team_id), "Type": "Player",
+    }
+    if on_player_ids:
+        # ``0ExactlyNOnFloor`` means exactly N of the listed players are on
+        # the floor, so N = len(on) selects "all of them together"; a fixed 1
+        # would select "exactly one of them".
+        parameters[f"0Exactly{len(on_player_ids)}OnFloor"] = ",".join(
+            to_pbp_player_id(pid) for pid in on_player_ids
+        )
+    if off_player_ids:
+        parameters["0Exactly0OnFloor"] = ",".join(
+            to_pbp_player_id(pid) for pid in off_player_ids
+        )
+    return {
+        "adapter": "pbp_stats", "operation": "get_wowy_player",
+        "endpoint": PBP_WOWY_URL, "parameters": parameters,
+    }
 
 
 def _date_key(value: object) -> str:
@@ -301,6 +385,75 @@ class PBPTotalsAdapter:
                 ) from error
             return type(self).parse_totals(payload, data_type=data_type)
 
+    def fetch_wowy_rows(
+        self,
+        *,
+        team_id: int,
+        season: str,
+        on_player_ids: Sequence[int] = (),
+        off_player_ids: Sequence[int] = (),
+        season_type: str = "Regular Season",
+    ) -> tuple[WowyPlayerRow, ...]:
+        """Fetch one team's WOWY rows for the given on/off-floor players."""
+
+        descriptor = wowy_request_descriptor(
+            team_id=team_id, season=season, season_type=season_type,
+            on_player_ids=on_player_ids, off_player_ids=off_player_ids,
+        )
+        with self._request(
+            str(descriptor["operation"]),
+            dict(descriptor["parameters"]),  # type: ignore[arg-type]
+            url=PBP_WOWY_URL,
+        ) as response:
+            try:
+                payload = response.json()
+            except ValueError as error:
+                raise ProviderResponseError(
+                    "PBP Stats returned a response that was not valid JSON."
+                ) from error
+            return type(self).parse_wowy(payload)
+
+    @staticmethod
+    def parse_wowy(payload: Any) -> tuple[WowyPlayerRow, ...]:
+        """Validate and normalize a recorded PBP WOWY payload."""
+
+        rows = payload.get("multi_row_table_data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ProviderResponseError(
+                "PBP Stats WOWY payload is missing a list of rows."
+            )
+        parsed: list[WowyPlayerRow] = []
+        for row in rows:
+            try:
+                player_id = from_pbp_player_id(row["EntityId"])
+                name = str(row["Name"])
+            except (KeyError, ValueError, TypeError) as error:
+                raise ProviderResponseError(
+                    "PBP Stats WOWY payload has an invalid player identity."
+                ) from error
+            usage = row.get("Usage")
+            if usage is not None and (
+                isinstance(usage, bool) or not isinstance(usage, (int, float))
+            ):
+                raise ProviderResponseError(
+                    "PBP Stats WOWY payload has a non-numeric Usage."
+                )
+            parsed.append(
+                WowyPlayerRow(
+                    player_id=player_id,
+                    name=name,
+                    minutes=_wowy_count(row, "Minutes"),
+                    possessions=_wowy_count(row, "OffPoss"),
+                    usage=None if usage is None else float(usage),
+                    points=_wowy_count(row, "Points"),
+                    rebounds=_wowy_count(row, "Rebounds"),
+                    assists=_wowy_count(row, "Assists"),
+                    fg3m=_wowy_count(row, "FG3M"),
+                    fga=_wowy_count(row, "FG2A") + _wowy_count(row, "FG3A"),
+                )
+            )
+        return tuple(parsed)
+
     def fetch_player_diet_totals(self, *, season: str) -> pd.DataFrame:
         """Fetch one league-wide player total set for assist-location Diets."""
 
@@ -415,6 +568,11 @@ class PBPTotalsAdapter:
 __all__ = [
     "PBP_TOTALS_URL",
     "PBP_GAME_LOGS_URL",
+    "PBP_WOWY_URL",
+    "WowyPlayerRow",
+    "from_pbp_player_id",
+    "to_pbp_player_id",
+    "wowy_request_descriptor",
     "PBP_REGULAR_SEASON",
     "PBP_PLAYER_REQUIRED_COLUMNS",
     "PBP_OPPONENT_REQUIRED_COLUMNS",

@@ -175,6 +175,12 @@ class CacheSettings(BaseModel):
     # injury or Player Pool change (neither moves the generation) can be missed.
     slate_edges_enabled: bool = True
     slate_edges_ttl_seconds: int = Field(default=300, ge=1)
+    # The PBPStats on/off (WOWY) cache behind /api/on_off: fresh for the TTL,
+    # kept longer as a stale fallback, and upstream calls spaced at least
+    # ``on_off_min_interval_seconds`` apart.
+    on_off_enabled: bool = True
+    on_off_ttl_seconds: int = Field(default=86400, ge=1)
+    on_off_min_interval_seconds: int = Field(default=2, ge=0)
     # The composed-Matchup cache (#422): one Matchup per Publication
     # generation, game and game state, shared by Target resolution and the
     # slate edges.  The TTL bounds how long a stored injury or Player Pool
@@ -874,6 +880,11 @@ def _build_settings(
         ),
         slate_edges_enabled=reader.boolean("SLATE_EDGES_CACHE_ENABLED", True),
         slate_edges_ttl_seconds=reader.integer("SLATE_EDGES_CACHE_TTL_SECONDS", 300),
+        on_off_enabled=reader.boolean("ON_OFF_CACHE_ENABLED", True),
+        on_off_ttl_seconds=reader.integer("ON_OFF_CACHE_TTL_SECONDS", 86400),
+        on_off_min_interval_seconds=reader.integer(
+            "ON_OFF_MIN_INTERVAL_SECONDS", 2
+        ),
         matchup_enabled=reader.boolean("MATCHUP_CACHE_ENABLED", True),
         matchup_ttl_seconds=reader.integer("MATCHUP_CACHE_TTL_SECONDS", 300),
         snapshot_reuse_max_age_seconds=reader.integer(

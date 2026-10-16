@@ -1,0 +1,8 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "deploy": {
+    "startCommand": "python scripts/on_off_warm.py",
+    "cronSchedule": "5,35 0,15-23 * * *",
+    "restartPolicyType": "NEVER"
+  }
+}

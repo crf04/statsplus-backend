@@ -2259,6 +2259,41 @@ curl "http://localhost:5000/api/games/game_logs?player_name=LeBron%20James&minut
   -H "Authorization: Bearer <firebase-id-token>"
 ```
 
+### Get On/Off Splits
+
+`GET /api/on_off?team=ABBR&season=YYYY-YY&on[]=ID&off[]=ID` (authenticated;
+#424, part of statsplus#220). For one team and season, returns every player
+with minutes while all `on[]` players were on the floor and all `off[]`
+players were off it. Ids are StatsPlus player ids (NBA person ids), at least one in total, and no id on both sides. A missing or invalid
+`team`, `season` or id is a 400.
+
+```json
+{
+  "status": "ok", "source": "pbpstats", "team": "DEN", "season": "2025-26",
+  "on": [], "off": [203999],
+  "cached_at": "2026-10-16T18:00:00+00:00", "stale": false,
+  "players": [{
+    "player_id": 1627750, "name": "Jamal Murray", "minutes": 946,
+    "possessions": 1856, "usage": 29.62,
+    "totals": {"pts": 677, "reb": 112, "ast": 222, "fg3m": 75, "fga": 493},
+    "per36": {"pts": 25.76, "reb": 4.26, "ast": 8.45, "fg3m": 2.85, "fga": 18.76}
+  }]
+}
+```
+
+`totals` are the provider's raw counts; `per36` is `total * 36 / minutes`
+rounded to two places, from PBPStats' whole-number minutes. `usage` is a
+percentage. Players are ordered by minutes. The result is cached in Redis for
+24 hours. When a refresh fails the cached copy is served with `"stale": true`
+(its original `cached_at`); with no copy the response is HTTP 200 with
+`"status": "unavailable"`, `"cached_at": null` and an empty `players`.
+Upstream calls are throttled through a Redis slot shared by every worker and the warm (`ON_OFF_MIN_INTERVAL_SECONDS`). `on[]` takes at most 5 ids (all on the floor together), `off[]` at most 15.
+`python scripts/on_off_warm.py [--date YYYY-MM-DD]` (default: today, Eastern)
+warms the cache for the stored injury report's Out, Doubtful and Questionable
+players; run it after every scheduled injury refresh (`railway.on_off_warm.json`,
+five minutes past each refresh). It fetches only splits not already cached and
+exits 1 if it cannot write to Redis.
+
 ## Player Endpoints
 
 ### Get Players
