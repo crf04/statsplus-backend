@@ -193,6 +193,7 @@ def reconcile_injury_entries(
                 "game_id": None if game is None else game.game_id,
                 "game_date": getattr(entry, "game_date", ""),
                 "matchup": getattr(entry, "matchup", ""),
+                "report_time": getattr(entry, "report_time", ""),
             }
         )
     return tuple(rows), unresolved_team_entries

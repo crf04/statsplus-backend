@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
 from app.config.settings import FeatureSettings, NBASeasonSettings, RuntimeSettings
 from app.errors import ProviderUnavailableError
@@ -51,8 +52,11 @@ GAMES = [
 
 
 class Events(NoNeighbourEvents):
+    def __init__(self, games=None):
+        self.games = GAMES if games is None else games
+
     def count_events(self, season):
-        return len(GAMES)
+        return len(self.games)
 
     def get_freshness(self, season, *, now):
         return {"last_success_at": "2026-01-15T10:00:00+00:00"}
@@ -60,7 +64,7 @@ class Events(NoNeighbourEvents):
     def get_events_between(self, season, starts_at, ends_at):
         return [
             event
-            for event in GAMES
+            for event in self.games
             if starts_at <= datetime.fromisoformat(event["scheduled_at"]) < ends_at
         ]
 
@@ -73,10 +77,13 @@ class AthleteCatalog:
         ]
 
 
-def _entry(name, team, status, reason, matchup, url=REPORT_5PM):
+def _entry(
+    name, team, status, reason, matchup, url=REPORT_5PM,
+    report_time="2026-01-15T17:00:00-05:00", game_date="2026-01-15",
+):
     slug = name.lower().replace(" ", "")
     return InjuryEntryEvidence(
-        entry_id=f"nba_official:2026-01-15:{matchup}:{slug}",
+        entry_id=f"nba_official:{game_date}:{matchup}:{slug}",
         source_player_id=f"{team}:{slug}",
         source_player_name=name,
         source_team_tricode=team,
@@ -84,8 +91,9 @@ def _entry(name, team, status, reason, matchup, url=REPORT_5PM):
         raw_status=status,
         reason=reason,
         source_url=url,
-        game_date="2026-01-15",
+        game_date=game_date,
         matchup=matchup,
+        report_time=report_time,
     )
 
 
@@ -118,12 +126,12 @@ REPORT_ONE = [
 class World:
     """One migrated database plus the services that read and write it."""
 
-    def __init__(self, tmp_path, dependencies, enabled=True):
+    def __init__(self, tmp_path, dependencies, enabled=True, games=None, entries=None):
         self.now = AFTERNOON
         self.engine = create_engine(f"sqlite:///{tmp_path / 'injuries.sqlite3'}")
         run_migrations(self.engine)
-        self.provider = FakeInjuryProvider(REPORT_ONE)
-        repository = InjurySnapshotRepository(self.engine)
+        self.provider = FakeInjuryProvider(REPORT_ONE if entries is None else entries)
+        repository = self.repository = InjurySnapshotRepository(self.engine)
         settings = RuntimeSettings(
             environment="testing",
             features=FeatureSettings(injury_report_enabled=enabled),
@@ -137,7 +145,7 @@ class World:
             clock=lambda: self.now,
         )
         listing = StoredInjuryListing(
-            event_catalog=Events(),
+            event_catalog=Events(games),
             snapshot_repository=repository,
             settings=settings,
             enabled=enabled,
@@ -145,13 +153,13 @@ class World:
         )
         self.refresh = InjuryReportRefreshService(
             injuries=injuries,
-            event_catalog=Events(),
+            event_catalog=Events(games),
             settings=settings,
             clock=lambda: self.now,
         )
         dependencies.injury_listing_service = listing
         dependencies.slate_service = SlateService(
-            Events(),
+            Events(games),
             settings=settings,
             clock=lambda: self.now,
             injury_counts=listing,
@@ -257,7 +265,8 @@ def test_a_new_report_replaces_game_rows_and_keeps_one_row_per_game(
     world.refresh.run()
     world.advance(30)
     world.provider.entries = [
-        _entry("LeBron James", "LAL", "Out", "Left ankle soreness", "LAL@BOS", REPORT_530PM)
+        _entry("LeBron James", "LAL", "Out", "Left ankle soreness", "LAL@BOS", REPORT_530PM,
+                "2026-01-15T17:30:00-05:00")
     ]
 
     assert world.refresh.run()["state"] == "new_report"
@@ -366,3 +375,135 @@ def test_a_disabled_report_refreshes_nothing(tmp_path, dependencies):
 
     assert world.refresh.run() == {"state": "disabled", "games": 0, "report_url": None}
     assert world.rows("injury_source_snapshots") == 0
+
+
+def _timeout():
+    class QueryCanceled(Exception):
+        pgcode = "57014"
+
+    return OperationalError("SELECT 1", {}, QueryCanceled("statement timeout"))
+
+
+def test_a_statement_timeout_reading_injuries_is_a_503_not_an_empty_list(
+    client, authenticate, world
+):
+    world.refresh.run()
+
+    def cancelled(scopes):
+        raise _timeout()
+
+    world.repository.get_many = cancelled
+
+    response = _get(client, authenticate, "/api/injuries?date=2026-01-15")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "query_timeout"
+
+
+def test_any_other_failed_read_is_a_503_not_an_empty_list(client, authenticate, world):
+    world.refresh.run()
+
+    def broken(scopes):
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    world.repository.get_many = broken
+
+    response = _get(client, authenticate, "/api/injuries?date=2026-01-15")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "provider_unavailable"
+
+
+def test_the_slate_reports_a_statement_timeout_and_survives_other_read_failures(
+    client, world
+):
+    world.refresh.run()
+
+    def broken(scopes):
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    world.repository.get_many = broken
+    degraded = client.get("/api/games/slate?date=2026-01-15")
+    assert degraded.status_code == 200
+    assert [game["injury_counts"] for game in degraded.get_json()["games"]] == [None, None]
+
+    def cancelled(scopes):
+        raise _timeout()
+
+    world.repository.get_many = cancelled
+    response = client.get("/api/games/slate?date=2026-01-15")
+    assert response.status_code == 503
+    assert response.get_json()["error"]["code"] == "query_timeout"
+
+
+def test_report_time_is_the_header_time_even_when_the_file_name_differs(
+    client, authenticate, world
+):
+    # The file name says 5:00 PM; the report's own header says 5:30 PM.
+    world.provider.entries = [
+        _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS",
+               report_time="2026-01-15T17:30:00-05:00")
+    ]
+    world.refresh.run()
+
+    body = _get(client, authenticate, "/api/injuries?date=2026-01-15").get_json()
+
+    assert body["injuries"][0]["report_time"] == "2026-01-15T17:30:00-05:00"
+
+
+def test_report_time_falls_back_to_the_file_name_without_a_header_time(
+    client, authenticate, world
+):
+    world.provider.entries = [
+        _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", report_time="")
+    ]
+    world.refresh.run()
+
+    body = _get(client, authenticate, "/api/injuries?date=2026-01-15").get_json()
+
+    assert body["injuries"][0]["report_time"] == "2026-01-15T17:00:00-05:00"
+
+
+SUMMER_GAME = _event(
+    "0022600001", (LAL, "LAL"), (BOS, "BOS"), "2026-07-15T23:30:00+00:00"
+)
+SUMMER_ENTRIES = [
+    _entry("LeBron James", "LAL", "Out", "Ankle", "LAL@BOS", game_date="2026-07-15")
+]
+
+
+@pytest.mark.parametrize(
+    ("now", "state"),
+    [
+        # Eastern Daylight Time: 11:00 ET is 15:00 UTC, so a fixed UTC-5 is wrong.
+        (datetime(2026, 7, 15, 14, 59, tzinfo=timezone.utc), "outside_window"),
+        (datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc), "new_report"),
+        (datetime(2026, 7, 15, 15, 0, 5, tzinfo=timezone.utc), "new_report"),
+    ],
+)
+def test_the_window_follows_eastern_daylight_time_in_summer(tmp_path, dependencies, now, state):
+    world = World(tmp_path, dependencies, games=[SUMMER_GAME], entries=SUMMER_ENTRIES)
+    world.now = now
+
+    assert world.refresh.run()["state"] == state
+
+
+@pytest.mark.parametrize(
+    ("now", "state"),
+    [
+        (datetime(2026, 1, 15, 15, 59, 59, tzinfo=timezone.utc), "outside_window"),  # 10:59:59
+        (datetime(2026, 1, 15, 16, 0, 0, tzinfo=timezone.utc), "new_report"),  # 11:00:00
+        (datetime(2026, 1, 16, 0, 30, 0, tzinfo=timezone.utc), "new_report"),  # 19:30:00
+        (datetime(2026, 1, 16, 0, 30, 0, 1, tzinfo=timezone.utc), "new_report"),  # 19:30:00.000001
+        (datetime(2026, 1, 16, 0, 30, 45, tzinfo=timezone.utc), "new_report"),  # 19:30:45
+        (datetime(2026, 1, 16, 0, 31, 0, tzinfo=timezone.utc), "outside_window"),  # 19:31:00
+    ],
+)
+def test_the_window_runs_from_11_00_through_the_final_scheduled_minute(
+    tmp_path, dependencies, now, state
+):
+    # Only the second game (tip 21:00 ET) is still to tip at 19:30.
+    world = World(tmp_path, dependencies, games=GAMES)
+    world.now = now
+
+    assert world.refresh.run()["state"] == state

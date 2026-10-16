@@ -286,6 +286,7 @@ def test_evidence_documents_round_trip():
         "source_url": BASE + HOURLY,
         "game_date": "2025-10-21",
         "matchup": "HOU@OKC",
+        "report_time": "2025-10-21T17:30:00-04:00",
     }
     assert type(entry).from_document(entry.to_document()) == entry
 
@@ -813,3 +814,11 @@ def test_a_report_still_parsing_at_the_deadline_is_not_served(monkeypatch):
     with pytest.raises(ProviderUnavailableError):
         _slow_provider(site, clock, injury_report_deadline_seconds=12.0).get_snapshot()
     assert telemetry.get_recorded_provider_events()[-1]["outcome"] == "timeout"
+
+
+def test_entries_carry_the_report_header_time_not_the_file_name_time():
+    # The hourly fixture is named 05PM but its header reads 05:30 PM.
+    entry = entries_from_report(_report(HOURLY), source_url=BASE + HOURLY)[0]
+
+    assert entry.report_time == "2025-10-21T17:30:00-04:00"
+    assert entry.to_document()["report_time"] == "2025-10-21T17:30:00-04:00"

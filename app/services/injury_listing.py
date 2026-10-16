@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.domain.nba_events import is_all_star_kind, is_final_event, resolve_stored_event_classification
 from app.domain.nba_teams import NBA_TEAM_TRICODES, canonical_nba_team_abbreviation
 from app.domain.utc import assume_utc, parse_utc_iso
-from app.errors import InvalidInputError, ProviderUnavailableError
+from app.errors import InvalidInputError, ProviderUnavailableError, raise_if_query_timeout
 from app.providers.nba_injury_report import (
     EASTERN,
     REPORT_STATUSES,
@@ -36,6 +36,11 @@ INJURY_LIST_STALE_SECONDS = 45 * 60
 
 
 def _report_time(entry: Mapping[str, Any]) -> str | None:
+    """The report's header time; the file name's only for evidence stored without it."""
+
+    header = str(entry.get("report_time") or "")
+    if header:
+        return header
     name = os.path.basename(str(entry.get("source_url") or ""))
     moment = report_time_from_name(name)
     return None if moment is None else moment.isoformat()
@@ -70,7 +75,7 @@ class StoredInjuryListing:
     ) -> dict[str, dict[str, int] | None]:
         """Listed players per status for each game; ``None`` with no stored report."""
 
-        stored = self._stored(events, season)
+        stored = self._stored(events, season, strict=False)
         counts: dict[str, dict[str, int] | None] = {}
         for event in events:
             game_id = str(event["nba_game_id"])
@@ -99,7 +104,7 @@ class StoredInjuryListing:
             )
         events = self._events(slate_date)
         season = schedule_season(self.settings, self.event_catalog, slate_date)
-        stored = self._stored(events, season)
+        stored = self._stored(events, season, strict=True)
         now = assume_utc(self._clock())
         injuries: list[dict[str, Any]] = []
         for event in events:
@@ -145,8 +150,15 @@ class StoredInjuryListing:
         return slate_events(self.event_catalog, self.settings, slate_date)
 
     def _stored(
-        self, events: Sequence[Mapping[str, Any]], season: str
+        self, events: Sequence[Mapping[str, Any]], season: str, *, strict: bool
     ) -> dict[str, Any]:
+        """Stored snapshots by game; a failed read is never an absent report.
+
+        A statement timeout is always the public 503.  Any other database
+        failure is a 503 for the injuries list (``strict``) and degrades to "no
+        report" for the Slate, which must still answer.
+        """
+
         if not (self.enabled and events and self.snapshot_repository is not None):
             return {}
         scopes = {
@@ -157,7 +169,13 @@ class StoredInjuryListing:
         }
         try:
             by_scope = self.snapshot_repository.get_many(tuple(scopes.values()))
-        except (SQLAlchemyError, TypeError, ValueError):
+        except (SQLAlchemyError, TypeError, ValueError) as error:
+            raise_if_query_timeout(error)
+            if strict:
+                raise ProviderUnavailableError(
+                    "The injury report is not available. Please try again later.",
+                    detail=error,
+                ) from error
             return {}
         return {
             game_id: by_scope[scope]

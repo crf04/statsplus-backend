@@ -103,6 +103,9 @@ class InjuryEntryEvidence:
     #: Empty only on evidence stored before the fields existed.
     game_date: str = ""
     matchup: str = ""
+    #: The report's own header time (ISO, Eastern offset); empty on evidence
+    #: stored before the field existed.
+    report_time: str = ""
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -116,6 +119,7 @@ class InjuryEntryEvidence:
             "source_url": self.source_url,
             "game_date": self.game_date,
             "matchup": self.matchup,
+            "report_time": self.report_time,
         }
 
     @classmethod
@@ -138,6 +142,7 @@ class InjuryEntryEvidence:
             source_url=str(value["source_url"]),
             game_date=str(value.get("game_date") or ""),
             matchup=str(value.get("matchup") or ""),
+            report_time=str(value.get("report_time") or ""),
         )
 
 
@@ -514,6 +519,9 @@ def entries_from_report(
                 source_url=source_url,
                 game_date=row.game_date.isoformat(),
                 matchup=row.matchup,
+                report_time=(
+                    "" if report.report_time is None else report.report_time.isoformat()
+                ),
             )
         )
     return tuple(entries)

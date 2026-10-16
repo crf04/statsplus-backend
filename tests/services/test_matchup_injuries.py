@@ -254,7 +254,7 @@ def test_refresh_reconciles_entries_and_reports_out_board_conflicts():
     stored = repository.replacements[0]["normalized_entries"]
     # Stored rows carry the game identity on top of the wire fields.
     assert [
-        {k: v for k, v in row.items() if k not in {"game_id", "game_date", "matchup"}}
+        {k: v for k, v in row.items() if k not in {"game_id", "game_date", "matchup", "report_time"}}
         for row in stored
     ] == [away_entry, home_entry]
     assert [(row["game_id"], row["game_date"], row["matchup"]) for row in stored] == [
