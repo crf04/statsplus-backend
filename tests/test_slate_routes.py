@@ -1,4 +1,4 @@
-"""HTTP contract for the authenticated slate read."""
+"""HTTP contract for the slate read."""
 
 from datetime import datetime, timezone
 
@@ -132,16 +132,18 @@ def test_slate_for_a_collected_or_fallback_season_is_still_200(
     assert body["freshness"]["schedule"]["retrieved_at"] == "2026-10-14T10:00:00+00:00"
 
 
-def test_get_slate_requires_authentication(client, monkeypatch):
+def test_get_slate_is_anonymous(client, dependencies, monkeypatch):
+    """Anonymous since crf04/statsplus#211, even with Firebase enforced."""
     from app.utils import auth
 
     monkeypatch.setenv("FIREBASE_ADMIN_DISABLED", "false")
     monkeypatch.setattr(auth, "get_firebase_app", lambda: object())
+    dependencies.slate_service.get_slate.return_value = {"slate_date": "2026-01-02"}
 
     response = client.get("/api/games/slate")
 
-    assert response.status_code == 401
-    assert response.get_json()["error"]["code"] == "authentication_required"
+    assert response.status_code == 200
+    assert response.get_json() == {"slate_date": "2026-01-02"}
 
 
 def test_get_slate_preserves_an_explicit_empty_date_as_invalid(client, dependencies):

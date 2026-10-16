@@ -997,7 +997,9 @@ def test_postgres_projection_routes_require_authentication(
     authenticated_postgres_projection_routes,
 ):
     client = authenticated_postgres_projection_routes.client
-    assert client.get("/api/games/slate?date=2026-01-02").status_code == 401
+    # The Slate is public for the signed-out home page (crf04/statsplus#211);
+    # Matchup reads stay signed-in.
+    assert client.get("/api/games/slate?date=2026-01-02").status_code == 200
     assert client.get(f"/api/games/matchup?game_id={GAME_ID}").status_code == 401
     assert client.get(
         f"/api/games/matchup/selection?game_id={GAME_ID}&player_id=7"
