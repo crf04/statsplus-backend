@@ -741,7 +741,8 @@ def test_a_call_that_may_have_been_charged_counts_against_the_cap(tmp_path):
     summary = world.backfill(client, max_credits=21).run()
 
     # list 1 + the unknown game assumed 10 + the next game 10 = 21; day two's
-    # list would be 22.
+    # list would be 22.  (Were the lost call free, day two's list would run.)
+    assert len(client.event_calls) == 1
     assert [call[0] for call in client.odds_calls] == [DEN_LAL_EVENT, GSW_LAC_EVENT]
     assert (summary.stop, summary.failed) == ("max_credits", 1)
     assert _ledger(world)[DEN_LAL].outcome == "failed"
