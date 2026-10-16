@@ -76,6 +76,8 @@ _COLUMN_TOLERANCE = 4.0
 _COLUMNS = ("date", "time", "matchup", "team", "player", "status", "reason")
 _DATE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 _MATCHUP = re.compile(r"^([A-Z]{3})@([A-Z]{3})$")
+_CHUNK_BYTES = 16 * 1024
+_MAX_REPORT_BYTES = 10 * 1024 * 1024
 _NOT_SUBMITTED = "NOT YET SUBMITTED"
 _TITLE_TIME = re.compile(
     r"Injury Report:\s*(\d{2})/(\d{2})/(\d{2})\s+(\d{2}):(\d{2})\s+(AM|PM)"
@@ -614,12 +616,18 @@ class NBAInjuryReportProvider:
                     min(providers.injury_report_connect_timeout_seconds, remaining),
                     min(providers.injury_report_read_timeout_seconds, remaining),
                 ),
+                stream=True,
             )
             tracker.status_code = getattr(response, "status_code", None)
-            if response.status_code in (403, 404):
-                continue  # no report was published at that time
-            response.raise_for_status()
-            content = response.content
+            try:
+                if response.status_code in (403, 404):
+                    continue  # no report was published at that time
+                response.raise_for_status()
+                content = self._read_body(response, deadline)
+            finally:
+                close = getattr(response, "close", None)
+                if close is not None:
+                    close()
             if not content.startswith(b"%PDF"):
                 raise ProviderResponseError("injury report response is not a PDF")
             url = self.BASE_URL + name
@@ -644,6 +652,24 @@ class NBAInjuryReportProvider:
                 raise requests.Timeout("injury report deadline exceeded")
             return InjuryProviderSnapshot(raw, entries, retrieved_at)
         raise ProviderResponseError("no recent injury report was published")
+
+    def _read_body(self, response: Any, deadline: float) -> bytes:
+        """Download the body in chunks, giving up the moment the deadline passes.
+
+        A read timeout only measures silence, so a server dribbling bytes
+        would otherwise hold the refresh past its budget.
+        """
+
+        chunks: list[bytes] = []
+        size = 0
+        for chunk in response.iter_content(chunk_size=_CHUNK_BYTES):
+            if self.monotonic() >= deadline:
+                raise requests.Timeout("injury report deadline exceeded")
+            size += len(chunk)
+            if size > _MAX_REPORT_BYTES:
+                raise ProviderResponseError("injury report is implausibly large")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def _now_utc(self) -> datetime:
         value = self.clock()

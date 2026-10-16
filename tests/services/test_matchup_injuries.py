@@ -772,3 +772,30 @@ def test_evidence_without_a_game_identity_describes_no_game():
     ).get_injuries(event=_event(), season=SEASON, pool_players=())
 
     assert [team["entries"] for team in result.block["teams"]] == [[], []]
+
+
+def test_report_matchup_dialects_resolve_to_the_event_teams():
+    # A report that printed legacy tricodes (GS/NO/PHO) still names this game.
+    entry = InjuryEntryEvidence(
+        "e", "s", "Some Player", "NO", "Out", "Out", "", PDF,
+        game_date="2025-12-25", matchup="NO@PHO",
+    )
+    from app.services.matchup_injuries import (
+        AthleteNameIndex,
+        GameIdentity,
+        reconcile_injury_entries,
+    )
+
+    rows, unresolved = reconcile_injury_entries(
+        [entry],
+        teams={"NOP": {"team_id": 1}, "PHX": {"team_id": 2}},
+        catalog=AthleteNameIndex(
+            [{"player_id": 7, "display_name": "Some Player", "team_abbreviation": "NOP"}]
+        ),
+        game=GameIdentity("2025-12-25", "NOP@PHX", "g"),
+    )
+
+    assert [(r["canonical_player_id"], r["canonical_status"], r["game_id"]) for r in rows] == [
+        (7, "Out", "g")
+    ]
+    assert unresolved == 0

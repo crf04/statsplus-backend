@@ -11,6 +11,10 @@ too), and the database connection is read-only, so a rerun is idempotent.
         --database-url "$DATABASE_URL" --cache-dir .cache/injury-reports \\
         --output report.json
 
+Every parsed row must be a game in the Event Catalog or a listed exception
+(``KNOWN_GAMES_NOT_IN_CATALOG``, extended with ``--allow-game DATE:AWAY@HOME``);
+identity is scored over every parsed row.
+
 Exit status: 0 when every threshold passes, 1 when one fails, 2 when an input
 could not be read (database, publication, ``pdftotext``).
 """
@@ -21,7 +25,7 @@ import argparse
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -63,11 +67,22 @@ from scripts.season_verify import open_read_only_engine  # noqa: E402
 MIN_IDENTITY_RATE = 0.99
 MIN_OUT_PRECISION = 0.98
 DEFAULT_MAX_PROBES = 48
-#: A report may name a game a few days out; a year off is not that.
-SEASON_WINDOW_SLACK_DAYS = 7
+#: Real 2025-26 games the Event Catalog deliberately lacks: the NBA Cup final
+#: (Cup knockouts are excluded from the catalog) and three postponed games.
+#: Reports list them; they are not graded.  Anything else absent from the
+#: catalog fails completeness.  Extend per run with ``--allow-game``.
+KNOWN_GAMES_NOT_IN_CATALOG = frozenset(
+    {
+        (date(2025, 12, 16), "SAS@NYK"),
+        (date(2026, 1, 8), "MIA@CHI"),
+        (date(2026, 1, 24), "GSW@MIN"),
+        (date(2026, 1, 25), "DAL@MIL"),
+    }
+)
 DEFAULT_DELAY_SECONDS = 0.3
 #: Statuses whose play rate the report states (Out is scored as precision).
 PLAY_RATE_STATUSES = ("Probable", "Available", "Questionable", "Doubtful")
+_MATCHUP_ARG = re.compile(r"^[A-Z]{3}@[A-Z]{3}$")
 _STATUS_CELL = re.compile(
     r"(?:^|\s{2,})(?:" + "|".join(sorted(REPORT_STATUSES)) + r")(?=\s{2,}|\s*$)"
 )
@@ -280,7 +295,9 @@ def evaluate(
     count_status_cells: Callable[[bytes], int] = pdftotext_status_cells,
     min_identity: float = MIN_IDENTITY_RATE,
     min_out_precision: float = MIN_OUT_PRECISION,
+    allowed_games: Iterable[tuple[date, str]] = KNOWN_GAMES_NOT_IN_CATALOG,
 ) -> dict[str, Any]:
+    allowed = frozenset(allowed_games)
     dates = regular_season_dates(inputs.events)
     event_by_key = {
         (_eastern_date(str(event["scheduled_at"])), event["away_team_tricode"], event["home_team_tricode"]): event
@@ -298,11 +315,13 @@ def evaluate(
     # snapshot here, so players who left mid-season are inactive in it, while
     # the live catalog refreshes daily and has no such gap.
     index = AthleteNameIndex(list(inputs.athletes))
-    event_dates = [_eastern_date(str(event["scheduled_at"])) for event in inputs.events]
-    window = (
-        min(event_dates) - timedelta(days=SEASON_WINDOW_SLACK_DAYS),
-        max(event_dates) + timedelta(days=SEASON_WINDOW_SLACK_DAYS),
-    )
+    catalog_games = {
+        (
+            _eastern_date(str(event["scheduled_at"])),
+            f"{event['away_team_tricode']}@{event['home_team_tricode']}",
+        )
+        for event in inputs.events
+    }
     teams = {code: {"team_id": team_id} for code, team_id in NBA_TEAM_TRICODE_TO_ID.items()}
 
     overall = _Tally()
@@ -311,6 +330,7 @@ def evaluate(
     completeness_failures: list[dict[str, Any]] = []
     unmatched: Counter = Counter()
     games_not_in_catalog: Counter = Counter()
+    identity_seen: set[str] = set()
     out_played: list[dict[str, Any]] = []
     ungraded_games: set[str] = set()
     per_date: list[dict[str, Any]] = []
@@ -343,7 +363,7 @@ def evaluate(
             tally.covered += 1
 
         problems = _completeness_problems(
-            report, content, count_status_cells, window
+            report, content, count_status_cells, catalog_games, allowed
         )
         record["rows"] = len(report.rows)
         if problems:
@@ -352,42 +372,29 @@ def evaluate(
             for tally in tallies:
                 tally.reports_complete += 1
 
-        in_catalog = []
-        strays = []  # rows dated outside the season: identity counts them
-        for row in report.rows:
-            if not window[0] <= row.game_date <= window[1]:
-                strays.append(row)
-                continue
-            if row.game_date != game_date:
-                continue  # another date's rows are scored by that date's report
-            away, _, home = row.matchup.partition("@")
-            if (game_date, away, home) in event_by_key:
-                in_catalog.append(row)
-            else:
-                games_not_in_catalog[(game_date.isoformat(), row.matchup)] += 1
-        todays_rows = tuple(in_catalog) + tuple(strays)
-        graded_rows = {id(row) for row in in_catalog}
-        todays = ParsedInjuryReport(report.title, todays_rows, (), ())
-        entries = entries_from_report(todays, source_url=REPORT_BASE_URL + name)
+        # Identity covers every parsed row, whatever its date or game; a row
+        # is counted once however many selected reports repeat it.
+        entries = entries_from_report(report, source_url=REPORT_BASE_URL + name)
         reconciled, _ = reconcile_injury_entries(entries, teams=teams, catalog=index)
         resolved = {row["entry_id"]: row for row in reconciled}
-        seen: set[str] = set()
-        for row in todays_rows:
+        for row in report.rows:
             entry_id = entry_id_for(row)
-            if entry_id in seen:
-                continue  # one player is one entry per game, as in production
-            seen.add(entry_id)
+            if row.game_date == game_date and (game_date, row.matchup) not in catalog_games:
+                games_not_in_catalog[(game_date.isoformat(), row.matchup)] += 1
             reconciled_row = resolved.get(entry_id)
             player_id = None if reconciled_row is None else reconciled_row["canonical_player_id"]
-            for tally in tallies:
-                tally.identity_rows += 1
-                tally.identity_matched += player_id is not None
+            if entry_id not in identity_seen:
+                identity_seen.add(entry_id)  # one player, one game: counted once
+                for tally in tallies:
+                    tally.identity_rows += 1
+                    tally.identity_matched += player_id is not None
+                if player_id is None:
+                    unmatched[(row.display_name, row.team_tricode)] += 1
             if player_id is None:
-                unmatched[(row.display_name, row.team_tricode)] += 1
-                continue
-            if id(row) not in graded_rows:
                 continue
             away, _, home = row.matchup.partition("@")
+            # Looked up by this report's date: another date's rows, and games the
+            # catalog lacks, find no event and are never graded here.
             event = event_by_key.get((game_date, away, home))
             if event is None or str(event["nba_game_id"]) not in games_with_logs:
                 if event is not None:
@@ -447,7 +454,8 @@ def _completeness_problems(
     report: ParsedInjuryReport,
     content: bytes,
     count_status_cells: Callable[[bytes], int],
-    window: tuple[date, date],
+    catalog_games: set[tuple[date, str]],
+    allowed: frozenset[tuple[date, str]],
 ) -> list[str]:
     problems: list[str] = []
     expected = count_status_cells(content)
@@ -458,8 +466,10 @@ def _completeness_problems(
     for row in report.rows:
         away, _, home = row.matchup.partition("@")
         where = f"{row.game_date} {row.matchup} {row.player_name}"
-        if not window[0] <= row.game_date <= window[1]:
-            problems.append(f"{where}: date is outside the season")
+        if (row.game_date, row.matchup) not in catalog_games | allowed:
+            problems.append(
+                f"{where}: game is not in the Event Catalog or the allowed exceptions"
+            )
         if away not in NBA_TEAM_TRICODES or home not in NBA_TEAM_TRICODES:
             problems.append(f"{where}: matchup names a non-NBA team")
         if row.status not in REPORT_STATUSES:
@@ -544,8 +554,25 @@ def main(
     parser.add_argument("--cache-dir", required=True, type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-probes", type=int, default=DEFAULT_MAX_PROBES)
+    parser.add_argument(
+        "--allow-game",
+        action="append",
+        default=[],
+        metavar="DATE:AWAY@HOME",
+        help="a real game the Event Catalog lacks (repeatable), e.g. 2026-01-08:MIA@CHI",
+    )
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY_SECONDS)
     args = parser.parse_args(argv)
+    try:
+        extra_games = {
+            (date.fromisoformat(day), matchup)
+            for day, _, matchup in (item.partition(":") for item in args.allow_game)
+            if _MATCHUP_ARG.match(matchup)
+        }
+        if len(extra_games) != len(set(args.allow_game)):
+            raise ValueError
+    except ValueError:
+        parser.error("--allow-game must look like 2026-01-08:MIA@CHI")
 
     try:
         engine = open_read_only_engine(args.database_url)
@@ -556,6 +583,7 @@ def main(
             inputs,
             ReportFetcher(args.cache_dir, delay_seconds=args.delay, session=session),
             max_probes=args.max_probes,
+            allowed_games=KNOWN_GAMES_NOT_IN_CATALOG | extra_games,
         )
     except (BacktestInputError, requests.RequestException) as error:
         print(f"backtest could not run: {error}", file=sys.stderr)

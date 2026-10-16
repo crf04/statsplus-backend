@@ -409,7 +409,7 @@ def test_pdftotext_counts_the_status_cells_of_a_recorded_report():
     ) == 54
 
 
-def _evaluate_after(tmp_path, statement):
+def _evaluate_after(tmp_path, statement, **options):
     from sqlalchemy import text
 
     engine, logs, _ = _season_database(tmp_path)
@@ -419,7 +419,7 @@ def _evaluate_after(tmp_path, statement):
     fetcher = backtest.ReportFetcher(
         tmp_path / "cache", delay_seconds=0, session=FakeCdn(SITE), sleep=lambda s: None
     )
-    return backtest.evaluate(inputs, fetcher)
+    return backtest.evaluate(inputs, fetcher, **options)
 
 
 @needs_pdftotext
@@ -430,26 +430,88 @@ def test_athletes_inactive_in_the_end_of_season_catalog_still_reconcile(tmp_path
     assert document["unmatched_rows"] == 2
 
 
+def _delete_game(matchup):
+    return (
+        f"DELETE FROM event_catalog WHERE home_team_tricode = '{matchup[-3:]}' "
+        f"AND away_team_tricode = '{matchup[:3]}'"
+    )
+
+
 @needs_pdftotext
 @pytest.mark.parametrize(
     ("matchup", "day", "rows"),
-    [("DAL@GSW", "2025-12-25", 13), ("PHX@NOP", "2025-12-26", 5)],
+    [("DAL@GSW", date(2025, 12, 25), 13), ("PHX@NOP", date(2025, 12, 26), 5)],
 )
-def test_games_missing_from_the_event_catalog_are_listed_not_graded(
+def test_allowed_games_missing_from_the_event_catalog_are_listed_not_graded(
     tmp_path, matchup, day, rows
 ):
-    # Stands in for a Cup final or a postponed game the catalog never held.
+    # Stands in for the Cup final or a postponed game the catalog never held.
     document = _evaluate_after(
-        tmp_path,
-        f"DELETE FROM event_catalog WHERE home_team_tricode || '' = '{matchup[-3:]}' "
-        f"AND away_team_tricode = '{matchup[:3]}'",
+        tmp_path, _delete_game(matchup), allowed_games={(day, matchup)}
     )
 
     assert document["thresholds"]["parse_completeness"]["value"] == 1.0
     assert document["completeness_failures"] == []
-    listed = document["games_not_in_catalog"]
-    assert listed == [{"date": day, "matchup": matchup, "rows": rows}]
-    assert document["overall"]["identity_rows"] == 115 - rows
+    assert document["games_not_in_catalog"] == [
+        {"date": day.isoformat(), "matchup": matchup, "rows": rows}
+    ]
+    assert document["overall"]["identity_rows"] == 115  # still scored for identity
+    graded = sum(
+        item["graded"] for item in document["overall"]["statuses"].values()
+    )
+    assert graded == 113 - rows  # but not graded (two names are not in the catalog)
+
+
+@needs_pdftotext
+def test_a_game_missing_from_the_catalog_and_not_allowed_fails_completeness(tmp_path):
+    document = _evaluate_after(tmp_path, _delete_game("DAL@GSW"), allowed_games=())
+
+    assert document["thresholds"]["parse_completeness"]["value"] == 0.0
+    problems = document["completeness_failures"][0]["problems"]
+    assert len(problems) == 13
+    assert problems[0] == (
+        "2025-12-25 DAL@GSW Christie, Max: game is not in the Event Catalog "
+        "or the allowed exceptions"
+    )
+
+
+def test_the_known_2025_26_exceptions_are_the_cup_final_and_three_postponements():
+    assert sorted(backtest.KNOWN_GAMES_NOT_IN_CATALOG) == [
+        (date(2025, 12, 16), "SAS@NYK"),
+        (date(2026, 1, 8), "MIA@CHI"),
+        (date(2026, 1, 24), "GSW@MIN"),
+        (date(2026, 1, 25), "DAL@MIL"),
+    ]
+
+
+@needs_pdftotext
+def test_allow_game_flag_admits_a_missing_game_and_a_malformed_one_is_a_usage_error(
+    tmp_path,
+):
+    engine, logs, _ = _season_database(tmp_path, played_out=(), omit=())
+    from sqlalchemy import text
+
+    with engine.begin() as connection:
+        connection.execute(text(_delete_game("DAL@GSW")))
+    argv = [
+        "--season", SEASON,
+        "--database-url", f"sqlite:///{tmp_path / 'season.sqlite3'}",
+        "--cache-dir", str(tmp_path / "cache"),
+        "--delay", "0",
+    ]
+
+    def run(*extra):
+        return backtest.main(
+            [*argv, *extra],
+            session=FakeCdn(SITE),
+            publication_reader=Publications(logs),
+        )
+
+    assert run() == 1
+    assert run("--allow-game", "2025-12-25:DAL@GSW") == 0
+    with pytest.raises(SystemExit) as raised:
+        run("--allow-game", "DAL@GSW")
+    assert raised.value.code == 2
 
 
 HOURLY = (FIXTURES / "Injury-Report_2025-10-21_05PM.pdf").read_bytes()
@@ -473,8 +535,15 @@ def test_a_report_stamped_after_the_cutoff_is_not_used(tmp_path):
 
 
 @needs_pdftotext
-def test_a_row_dated_outside_the_season_fails_completeness_and_counts_toward_identity(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("changes", "label"),
+    [
+        ({"game_date": date(2025, 12, 24)}, "2025-12-24 DAL@GSW"),  # wrong date, in season
+        ({"matchup": "DAL@LAL"}, "2025-12-25 DAL@LAL"),  # invented matchup, real date
+    ],
+)
+def test_an_invalid_row_fails_completeness_and_still_counts_toward_identity(
+    tmp_path, monkeypatch, changes, label
 ):
     import dataclasses
 
@@ -483,9 +552,7 @@ def test_a_row_dated_outside_the_season_fails_completeness_and_counts_toward_ide
     def corrupt(content):
         report = real_parse(content)
         rows = tuple(
-            dataclasses.replace(
-                row, game_date=date(2024, 12, 25), player_name="Nobody, Unknown"
-            )
+            dataclasses.replace(row, player_name="Nobody, Unknown", **changes)
             if row.player_name == "Christie, Max"
             else row
             for row in report.rows
@@ -502,13 +569,15 @@ def test_a_row_dated_outside_the_season_fails_completeness_and_counts_toward_ide
     document = backtest.evaluate(inputs, fetcher)
 
     assert document["thresholds"]["parse_completeness"]["value"] == 0.0
-    assert all(
-        "2024-12-25 DAL@GSW Nobody, Unknown: date is outside the season" in item["problems"]
-        for item in document["completeness_failures"]
-    )
-    # Both stand-in reports carry the stray row; it never reaches grading but
-    # is counted, unmatched, against identity.
-    assert document["unmatched"] == [{"name": "Unknown Nobody", "team": "DAL", "rows": 2}]
-    assert document["overall"]["identity_rows"] == 116
+    assert document["passed"] is False
+    for item in document["completeness_failures"]:
+        assert (
+            f"{label} Nobody, Unknown: game is not in the Event Catalog "
+            "or the allowed exceptions"
+        ) in item["problems"]
+    # The row is scored for identity once (both stand-in reports repeat it),
+    # is unmatched, and is never graded.
+    assert document["unmatched"] == [{"name": "Unknown Nobody", "team": "DAL", "rows": 1}]
+    assert document["overall"]["identity_rows"] == 115
     assert document["overall"]["identity_matched"] == 114
     assert document["overall"]["statuses"]["Available"]["graded"] == 12

@@ -343,6 +343,13 @@ class Response:
         if self.status_code >= 400:
             raise requests.HTTPError(f"status {self.status_code}")
 
+    def iter_content(self, chunk_size):
+        for start in range(0, len(self.content), chunk_size):
+            yield self.content[start : start + chunk_size]
+
+    def close(self):
+        pass
+
 
 class Site:
     """A fake CDN: named files exist, everything else is 403."""
@@ -353,7 +360,7 @@ class Site:
         self.headers = {}
         self.calls = []
 
-    def get(self, url, *, timeout):
+    def get(self, url, *, timeout, stream=False):
         self.calls.append((url, timeout))
         name = url.removeprefix(BASE)
         if name in self.files:
@@ -472,7 +479,7 @@ def test_a_report_with_unreadable_rows_is_rejected_not_published_partially():
 
 def test_transport_timeout_is_a_sanitized_provider_failure():
     class Slow(Site):
-        def get(self, url, *, timeout):
+        def get(self, url, *, timeout, stream=False):
             raise requests.ReadTimeout("secret upstream detail")
 
     with pytest.raises(ProviderUnavailableError) as raised:
@@ -498,8 +505,8 @@ class SlowSite(Site):
         self.clock = clock
         self.seconds = seconds
 
-    def get(self, url, *, timeout):
-        response = super().get(url, timeout=timeout)
+    def get(self, url, *, timeout, stream=False):
+        response = super().get(url, timeout=timeout, stream=stream)
         self.clock.now += self.seconds
         return response
 
@@ -699,3 +706,110 @@ def test_the_adapter_never_names_another_publisher():
     _provider(site, _utc(2025, 12, 25, 22, 10)).get_snapshot()
 
     assert all(url.startswith("https://ak-static.cms.nba.com/") for url, _ in site.calls)
+
+
+class DrippingResponse:
+    """A 200 whose body arrives one chunk per ``seconds`` of fake time."""
+
+    status_code = 200
+
+    def __init__(self, clock, seconds, chunks):
+        self.clock, self.seconds, self.chunks = clock, seconds, chunks
+        self.delivered = 0
+        self.closed = False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size):
+        for chunk in self.chunks:
+            self.clock.now += self.seconds
+            self.delivered += 1
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_slowly_delivered_body_is_abandoned_at_the_deadline_not_after():
+    clock = Clock()
+    response = DrippingResponse(clock, 5.0, [b"%PDF-" + b"x" * 10] * 10)
+
+    class Dripper(Site):
+        def get(self, url, *, timeout, stream=False):
+            self.calls.append((url, timeout))
+            return response
+
+    with pytest.raises(ProviderUnavailableError):
+        _slow_provider(
+            Dripper(), clock, injury_report_deadline_seconds=12.0
+        ).get_snapshot()
+
+    # Chunks land at t=5, 10 and 15; the third is past the 12 s deadline, so
+    # the other seven are never read and the connection is released.
+    assert response.delivered == 3
+    assert clock.now == 15.0
+    assert response.closed is True
+    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == "timeout"
+
+
+# -- supplemental round-2 checks --------------------------------------------------
+
+
+def test_transport_failure_starts_the_cooldown_and_recovers_after_it():
+    clock = Clock()
+    site = Site(default=500)
+    provider = _slow_provider(site, clock, injury_report_failure_cooldown_seconds=300.0)
+
+    with pytest.raises(ProviderUnavailableError):
+        provider.get_snapshot()
+    site.files["Injury-Report_2025-12-25_05_30PM.pdf"] = (FIXTURES / QUARTER_LATE).read_bytes()
+    clock.now = 299.0
+    with pytest.raises(ProviderUnavailableError):
+        provider.get_snapshot()
+    assert len(site.calls) == 1  # the 500 stopped the first search; nothing since
+
+    clock.now = 301.0
+    assert len(provider.get_snapshot().entries) == 115
+    assert len(site.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("clock_text", "meridiem", "utc_hour", "utc_minute"),
+    [("12:00", "AM", 5, 0), ("12:00", "PM", 17, 0), ("01:30", "AM", 6, 30), ("01:30", "PM", 18, 30)],
+)
+def test_header_midnight_noon_and_meridiem(monkeypatch, clock_text, meridiem, utc_hour, utc_minute):
+    import app.providers.nba_injury_report as module
+
+    real = module._fragments
+
+    def altered(page):
+        return [
+            (y, x, clock_text if y < 70 and text == "05:00" else meridiem if y < 70 and text == "PM" else text)
+            for y, x, text in real(page)
+        ]
+
+    monkeypatch.setattr(module, "_fragments", altered)
+
+    report = parse_injury_report((FIXTURES / QUARTER_LATE).read_bytes())
+
+    assert report.report_time.astimezone(timezone.utc) == _utc(2025, 12, 25, utc_hour, utc_minute)
+
+
+def test_a_report_still_parsing_at_the_deadline_is_not_served(monkeypatch):
+    import app.providers.nba_injury_report as module
+
+    clock = Clock()
+    site = Site({"Injury-Report_2025-12-25_05_30PM.pdf": (FIXTURES / QUARTER_LATE).read_bytes()})
+    real = module.parse_injury_report
+
+    def slow_parse(content):
+        report = real(content)
+        clock.now += 20.0  # parsing outlasts the 12 s budget
+        return report
+
+    monkeypatch.setattr(module, "parse_injury_report", slow_parse)
+
+    with pytest.raises(ProviderUnavailableError):
+        _slow_provider(site, clock, injury_report_deadline_seconds=12.0).get_snapshot()
+    assert telemetry.get_recorded_provider_events()[-1]["outcome"] == "timeout"
