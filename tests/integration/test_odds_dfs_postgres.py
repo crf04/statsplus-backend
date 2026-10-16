@@ -24,6 +24,7 @@ from tests.support.odds_world import (
     FakeClient,
     build_world,
     event_row,
+    load,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.real_migrations]
@@ -58,16 +59,31 @@ def test_a_beat_serves_prizepicks_lines_for_ninety_minutes_then_closes_the_game(
         "prizepicks", "partial", True, 10,
     )
     (beat,) = _rows(world, OddsApiPoll)
-    assert (beat["outcome"], beat["quote_count"], beat["cost"]) == ("complete", 10, 5)
+    assert (beat["outcome"], beat["quote_count"], beat["cost"], beat["failure_reason"]) == (
+        "complete", 10, 5, None,
+    )
+
+    # An hour later the response drops LeBron's points line: it is retired.
+    dropped = load("event_odds_us_dfs")
+    for market in dropped["bookmakers"][0]["markets"]:
+        if market["key"] == "player_points":
+            market["outcomes"] = [
+                o for o in market["outcomes"] if o["description"] != "LeBron James"
+            ]
+    coordinator.client.odds = dropped
+    world.clock[0] = NOW + timedelta(hours=1)
+    coordinator.run()
+    after = world.pool_reader().get_pool_for_game(season=SEASON, game_id=GAME_ID)
+    assert "PTS" not in dict(
+        {p.canonical_player_id: p for p in after.players}[LEBRON].lines["prizepicks"]
+    )
 
     reader = world.pool_reader()
     world.clock[0] = NOW + timedelta(minutes=90)
     pool = reader.get_pool_for_game(season=SEASON, game_id=GAME_ID)
     lebron = {p.canonical_player_id: p for p in pool.players}[LEBRON]
-    assert dict(lebron.lines["prizepicks"]) == {
-        "PTS": 27.5, "REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5,
-    }
-    world.clock[0] = NOW + timedelta(minutes=91)
+    assert dict(lebron.lines["prizepicks"]) == {"REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5}
+    world.clock[0] = NOW + timedelta(hours=2, minutes=31)  # 90 minutes after the hourly poll
     assert reader.get_pool_for_game(season=SEASON, game_id=GAME_ID).players == ()
 
     started = event_row(GAME_ID, 1610612743, "Nuggets", "DEN", LAL, "Lakers", "LAL", TIP)
@@ -81,4 +97,5 @@ def test_a_beat_serves_prizepicks_lines_for_ninety_minutes_then_closes_the_game(
     assert (closing["provider"], closing["canonical_game_id"]) == ("prizepicks", GAME_ID)
     pool, is_closing = reader.get_pool_for_game_with_closing_state(season=SEASON, game_id=GAME_ID)
     assert is_closing is True
-    assert dict({p.canonical_player_id: p for p in pool.players}[LEBRON].lines["prizepicks"])["PTS"] == 27.5
+    closing_lines = dict({p.canonical_player_id: p for p in pool.players}[LEBRON].lines["prizepicks"])
+    assert closing_lines == {"REB": 7.5, "AST": 7.5, "3PM": 2.5, "PRA": 42.5}  # PTS stays retired
