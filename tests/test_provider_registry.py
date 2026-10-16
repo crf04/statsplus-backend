@@ -218,3 +218,43 @@ def test_every_registered_provider_builds_the_shared_snapshot_seam():
         provider = build_dfs_provider(name, runtime)
         assert isinstance(provider, ProviderSnapshotProvider)
         assert type(provider).__name__.casefold().startswith(name)
+
+
+def test_registered_dabble_adapter_prices_a_recorded_standard_line_at_three_times():
+    import json
+    from pathlib import Path
+    folder = Path(__file__).parent / "fixtures" / "dabble"
+    payloads = [
+        json.loads((folder / f"recorded_2026-10-15.{name}.json").read_text("utf-8"))
+        for name in ("competitions", "fixtures", "fixture_details")
+    ]
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def get(self, url, **kwargs):
+            return Response(payloads.pop(0))
+
+    adapter = build_dfs_provider("dabble", DFSProviderRuntime())
+    adapter._request_session = Session()
+
+    snapshot = adapter.get_snapshot(
+        NBAMarketQuery(),
+        RetrievalContext(deadline="2099-01-01T00:00:00Z", request_id="registry"),
+    )
+
+    standard = next(m for m in snapshot.markets if m.variant.value == "standard")
+    assert [
+        (s.price_kind.value, s.price_value, s.price_scope.value)
+        for s in standard.selections
+    ] == [("multiplier", Decimal("3"), "entry")] * 2

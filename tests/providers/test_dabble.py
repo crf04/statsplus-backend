@@ -982,3 +982,69 @@ def test_dabble_telemetry_uses_retrieval_context_request_id():
     events = telemetry.get_recorded_provider_events()
     assert events
     assert {event["request_id"] for event in events} == {"dabble-test"}
+
+
+def _recorded_snapshot(**adapter_args):
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("recorded_2026-10-15.competitions.json")),
+        FakeResponse(_payload("recorded_2026-10-15.fixtures.json")),
+        FakeResponse(_payload("recorded_2026-10-15.fixture_details.json")),
+    ]
+    return DabbleAdapter(session=session, **adapter_args).get_snapshot(
+        NBAMarketQuery(), _context()
+    )
+
+
+def test_recorded_standard_lines_carry_the_registry_entry_multiplier():
+    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+
+    snapshot = _recorded_snapshot(entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES)
+
+    standard = [m for m in snapshot.markets if m.variant.value == "standard"]
+    assert len(standard) == 5
+    for market in standard:
+        assert [
+            (s.direction.value, s.price_kind.value, s.price_value, s.price_scope.value)
+            for s in market.selections
+        ] == [
+            ("higher", "multiplier", Decimal("3"), "entry"),
+            ("lower", "multiplier", Decimal("3"), "entry"),
+        ]
+
+
+def test_recorded_one_sided_line_stays_unpriced_with_the_table():
+    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+
+    snapshot = _recorded_snapshot(entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES)
+
+    alternates = [m for m in snapshot.markets if m.variant.value == "alternate"]
+    assert [m.variant_label for m in alternates] == ["one_sided"]
+    assert [
+        (s.price_kind.value, s.price_value) for s in alternates[0].selections
+    ] == [("unpriced", None)]
+
+
+def test_standard_lines_are_unpriced_without_a_payout_table():
+    snapshot = _recorded_snapshot()
+
+    assert {
+        s.price_kind.value for m in snapshot.markets for s in m.selections
+    } == {"unpriced"}
+
+
+def test_a_payload_stated_multiplier_is_not_overridden_by_the_table():
+    from app.providers.registry import DABBLE_ENTRY_PAYOUT_TABLES
+
+    session = Mock()
+    session.get.side_effect = [
+        FakeResponse(_payload("competitions.valid.json")),
+        FakeResponse(_payload("fixtures.valid.json")),
+        FakeResponse(_payload("fixture_details.valid.json")),
+    ]
+    snapshot = DabbleAdapter(
+        session=session, entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES
+    ).get_snapshot(NBAMarketQuery(), _context())
+
+    over = snapshot.markets[0].selections[0]
+    assert (over.price_kind.value, over.price_value) == ("multiplier", Decimal("1.5"))

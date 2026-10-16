@@ -152,6 +152,7 @@ def _build_dabble(runtime: DFSProviderRuntime) -> ProviderSnapshotProvider:
         connect_timeout_seconds=runtime.connect_timeout_seconds,
         read_timeout_seconds=runtime.read_timeout_seconds,
         detail_concurrency=runtime.detail_concurrency,
+        entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES,
     )
 
 
@@ -211,8 +212,24 @@ PRIZEPICKS_ENTRY_PAYOUT_TABLES: Mapping[str, EntryPayoutTable] = MappingProxyTyp
 )
 
 
+# Dabble's API publishes no per-pick price; its 2-pick entry pays 3x (owner
+# decision, crf04/statsplus#210).  Only its two-sided standard line is priced.
+DABBLE_ENTRY_PAYOUT_TABLES: Mapping[str, EntryPayoutTable] = MappingProxyType(
+    {
+        "standard": EntryPayoutTable(
+            reference_entry_size=2,
+            multipliers={2: Decimal("3")},
+        )
+    }
+)
+
+
 _DEFAULT_REGISTRATIONS: tuple[DFSProviderRegistration, ...] = (
-    DFSProviderRegistration(name="dabble", build=_build_dabble),
+    DFSProviderRegistration(
+        name="dabble",
+        build=_build_dabble,
+        entry_payout_tables=DABBLE_ENTRY_PAYOUT_TABLES,
+    ),
     DFSProviderRegistration(
         name="prizepicks",
         build=_build_prizepicks,
@@ -302,6 +319,7 @@ __all__ = [
     "DFSProviderRegistration",
     "DFSProviderRuntime",
     "EntryPayoutTable",
+    "DABBLE_ENTRY_PAYOUT_TABLES",
     "PRIZEPICKS_ENTRY_PAYOUT_TABLES",
     "ProviderRegistryError",
     "build_dfs_provider",
