@@ -1,4 +1,9 @@
-"""Authenticated slate and game-log HTTP adapters.
+"""Slate, ladder and game-log HTTP adapters.
+
+The slate, slate-edges and ladder reads are anonymous (crf04/statsplus#211):
+they carry no auth decorator, so an ``Authorization`` header is ignored and
+the rate limiter counts the caller by IP. Every other route here requires
+authentication.
 
 The slate route delegates one optional ET date to the persisted-schedule
 service. The game-log route parses query parameters into one typed
@@ -14,6 +19,7 @@ from typing import Any
 import requests
 from flask import Blueprint, jsonify, request
 from pydantic import ValidationError
+from werkzeug.datastructures import MultiDict
 from sqlalchemy.exc import SQLAlchemyError
 
 from ..errors import (
@@ -61,14 +67,12 @@ def _is_canonical_player_id(value: str) -> bool:
 
 
 @game_bp.route('/slate', methods=['GET'])
-@require_auth
 def get_slate():
     """Return the persisted current-season slate for one ET calendar date."""
     return jsonify(slate_service.get_slate(request.args.get("date")))
 
 
 @game_bp.route("/slate/edges", methods=["GET"])
-@require_auth
 def get_slate_edges():
     """Return each slate game's biggest points effects and the slate's picks."""
     return jsonify(slate_edges_service.get_edges(request.args.get("date")))
@@ -185,37 +189,43 @@ def _default_season() -> str:
 
 
 def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
-    """Parse game-log query parameters into one typed :class:`GameLogQuery`."""
+    """Parse the request's query parameters into one :class:`GameLogQuery`."""
 
-    player_name = request.args.get("player_name")
+    return _game_log_query_from(request.args)
+
+
+def _game_log_query_from(args: Any) -> tuple[str, GameLogQuery]:
+    """Parse game-log parameters (a ``MultiDict``) into a typed query."""
+
+    player_name = args.get("player_name")
     if not player_name:
         raise InvalidInputError("player_name is required.")
 
     # Only an omitted season discovers the published default.
-    season_filter = request.args.get("season_filter")
+    season_filter = args.get("season_filter")
     filters = {
         "season_filter": (
             _default_season() if season_filter is None else season_filter
         ),
-        "minutes_filter": request.args.get("minutes_filter", "0,48"),
-        "players_on": request.args.getlist("players_on[]"),
-        "players_off": request.args.getlist("players_off[]"),
-        "date_filter": request.args.get("date_filter"),
-        "date_to": request.args.get("date_to"),
-        "teams_against": request.args.getlist("teams_against[]"),
-        "rank_filter": request.args.getlist("rank_filter[]"),
-        "opponent_tricode": request.args.get("opponent_tricode"),
-        "location_filter": request.args.get("location_filter", "Both"),
-        "game_filter": request.args.get("game_filter"),
+        "minutes_filter": args.get("minutes_filter", "0,48"),
+        "players_on": args.getlist("players_on[]"),
+        "players_off": args.getlist("players_off[]"),
+        "date_filter": args.get("date_filter"),
+        "date_to": args.get("date_to"),
+        "teams_against": args.getlist("teams_against[]"),
+        "rank_filter": args.getlist("rank_filter[]"),
+        "opponent_tricode": args.get("opponent_tricode"),
+        "location_filter": args.get("location_filter", "Both"),
+        "game_filter": args.get("game_filter"),
         "playstyle_range": [
-            request.args.get("playstyle_RTG_min", "0"),
-            request.args.get("playstyle_RTG_max", "200"),
+            args.get("playstyle_RTG_min", "0"),
+            args.get("playstyle_RTG_max", "200"),
         ],
         # Keep repeated ``self_filters[STAT]`` parameters as ordered pairs;
         # collapsing them into a dict would silently drop same-stat bounds.
         "self_filters": [
             (key[len("self_filters[") : -1], value)
-            for key, value in request.args.items(multi=True)
+            for key, value in args.items(multi=True)
             if key.startswith("self_filters[") and key.endswith("]")
         ],
     }
@@ -226,7 +236,7 @@ def _parse_game_log_filters() -> tuple[str, GameLogQuery]:
         raise InvalidInputError(
             "One or more game log filters are invalid.",
             detail=error,
-            public_details=_game_log_validation_details(error, filters, request.args),
+            public_details=_game_log_validation_details(error, filters, args),
         ) from error
 
 
@@ -409,12 +419,10 @@ def get_game_log_seasons():
         raise ProviderUnavailableError(detail=error) from error
 
 
-@game_bp.route('/game_logs', methods=['GET'])
-@require_auth
-def get_game_logs():
-    player_name, query = _parse_game_log_filters()
+def _filtered_logs(player_name: str, query: GameLogQuery) -> dict[str, Any]:
+    """Run one game-log query, mapping failures to the public error contract."""
     try:
-        result = game_service.get_filtered_logs(player_name, query)
+        return game_service.get_filtered_logs(player_name, query)
     except requests.exceptions.Timeout as error:
         raise ProviderUnavailableError(
             "The upstream stats provider timed out. Please try again shortly.",
@@ -430,4 +438,53 @@ def get_game_logs():
                 "The requested player was not found.", detail=error
             ) from error
         raise InvalidInputError("The game log request is invalid.", detail=error) from error
-    return jsonify(result)
+
+
+@game_bp.route('/game_logs', methods=['GET'])
+@require_auth
+def get_game_logs():
+    player_name, query = _parse_game_log_filters()
+    return jsonify(_filtered_logs(player_name, query))
+
+
+#: The backend-owned Filter Sets behind the home page ladder, in order. Each
+#: is a set of ``/api/games/game_logs`` parameters (crf04/statsplus#211).
+_LADDER_RUNGS = (
+    ("start", (("player_name", "Jalen Johnson"),)),
+    (
+        "narrow",
+        (("player_name", "Jalen Johnson"), ("players_off[]", "Trae Young")),
+    ),
+    (
+        "stack",
+        (
+            ("player_name", "Jalen Johnson"),
+            ("players_off[]", "Trae Young"),
+            ("teams_against[]", "OPP_PTS"),
+            ("rank_filter[]", "10"),
+            ("minutes_filter", "25,48"),
+        ),
+    ),
+)
+
+
+@game_bp.route("/ladder", methods=["GET"])
+def get_ladder():
+    """Return the points answer of each home page ladder rung, anonymously."""
+    if request.args:
+        raise InvalidInputError("The ladder takes no query parameters.")
+    rungs = []
+    for rung_id, parameters in _LADDER_RUNGS:
+        player_name, query = _game_log_query_from(MultiDict(parameters))
+        result = _filtered_logs(player_name, query)
+        logs = result["game_logs"]
+        averages = result["averages"]
+        rungs.append(
+            {
+                "id": rung_id,
+                "points": float(averages[0]["PTS"]) if logs and averages else None,
+                "games": len(logs),
+                "series": [log["PTS"] for log in logs],
+            }
+        )
+    return jsonify({"rungs": rungs})

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config.settings import ProjectionCollectionSettings
 from scripts import collect_projections, projection_collection_service
 
 
@@ -45,7 +46,10 @@ def test_one_shot_cli_and_railway_loop_share_one_coordinator_path(monkeypatch, c
             coordinator_runs.append("run")
             return SimpleNamespace(status="complete", reason="collected")
 
-    settings = SimpleNamespace(nba=SimpleNamespace(current_season="2025-26"))
+    settings = SimpleNamespace(
+        nba=SimpleNamespace(current_season="2025-26"),
+        projection_collection=ProjectionCollectionSettings(),
+    )
     monkeypatch.setattr(collect_projections, "load_settings", lambda **_kwargs: settings)
 
     def build_dependencies(candidate_settings):

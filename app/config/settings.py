@@ -208,7 +208,7 @@ class FeatureSettings(BaseModel):
 class ProjectionCollectionSettings:
     """Cadence, lease, and bounded retry policy for projection collection."""
 
-    slow_interval: timedelta = timedelta(minutes=30)
+    slow_interval: timedelta = timedelta(minutes=8)
     fast_interval: timedelta = timedelta(minutes=5)
     pregame_horizon: timedelta = timedelta(hours=24)
     fast_window: timedelta = timedelta(hours=2)
@@ -972,7 +972,7 @@ def _build_settings(
             projection_collection=_validated_model(
                 ProjectionCollectionSettings,
                 slow_interval=timedelta(
-                    minutes=reader.decimal("PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES", 30)
+                    minutes=reader.decimal("PROJECTION_COLLECTION_SLOW_INTERVAL_MINUTES", 8)
                 ),
                 fast_interval=timedelta(
                     minutes=reader.decimal("PROJECTION_COLLECTION_FAST_INTERVAL_MINUTES", 5)
