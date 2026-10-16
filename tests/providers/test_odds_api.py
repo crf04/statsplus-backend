@@ -15,6 +15,8 @@ import requests
 from app.errors import _sanitize_diagnostic_detail
 from app.providers.odds_api import (
     BOOK_ALLOWLIST,
+    DFS_BOOK_ALLOWLIST,
+    MARKET_CATEGORIES,
     OddsApiClient,
     OddsApiError,
     install_log_redaction,
@@ -43,8 +45,8 @@ class Session:
         return self.response
 
 
-def client_for(session):
-    return OddsApiClient(SECRET, session=session, timeout=7)
+def client_for(session, regions="us"):
+    return OddsApiClient(SECRET, session=session, timeout=7, regions=regions)
 
 
 # -- recorded responses -----------------------------------------------------
@@ -87,6 +89,61 @@ def test_event_odds_asks_for_the_us_region_five_markets_in_american_odds():
     assert (result.cost, result.quota.remaining, result.quota.used, result.quota.last_cost) == (
         5, 19990, 10, 5,
     )
+
+
+def test_the_dfs_beat_requests_only_the_us_dfs_region_and_no_alternate_market():
+    session = Session(FakeResponse(200, load("event_odds_us_dfs"), quota_headers(19990, 10, 5)))
+
+    result = client_for(session, regions="us_dfs").event_odds("9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12")
+
+    (url, params, _), = session.calls
+    assert url.endswith("/v4/sports/basketball_nba/events/9e6c2f0a1b7d4c3e8a5f6b7c8d9e0f12/odds")
+    assert params["regions"] == "us_dfs"
+    assert params["markets"] == (
+        "player_points,player_rebounds,player_assists,player_threes,"
+        "player_points_rebounds_assists"
+    )
+    assert "_alternate" not in params["markets"]
+    assert "bookmakers" not in params
+    assert (result.cost, result.quota.remaining) == (5, 19990)
+    assert {quote.book for quote in result.parsed.quotes} == {"prizepicks"}
+
+
+def test_the_client_defaults_to_the_dfs_region_and_refuses_any_other():
+    session = Session(FakeResponse(200, load("event_odds_us_dfs"), quota_headers()))
+    OddsApiClient(SECRET, session=session).event_odds("e")
+    assert session.calls[0][1]["regions"] == "us_dfs"
+
+    for regions in ("us2", "us,us_dfs", "us_dfs,us", "us_ex", "uk", ""):
+        with pytest.raises(ValueError, match="regions must be one of us_dfs, us"):
+            OddsApiClient(SECRET, regions=regions)
+
+
+def test_a_dfs_response_keeps_prizepicks_standard_lines_and_nothing_else():
+    parsed = parse_event_odds(load("event_odds_us_dfs"), allowlist=DFS_BOOK_ALLOWLIST)
+
+    assert DFS_BOOK_ALLOWLIST == frozenset({"prizepicks"})
+    # Underdog, Pick6 and Dabble answer in the same region; none is kept.
+    assert parsed.dropped_books == frozenset({"underdog", "pick6", "dabble_us_dfs"})
+    assert {quote.book for quote in parsed.quotes} == {"prizepicks"}
+    assert parsed.bookmaker_count == 4
+    # The goblin (22.5) and demon (32.5) arrive under player_points_alternate.
+    assert {quote.market_key for quote in parsed.quotes} == set(MARKET_CATEGORIES)
+    points = {
+        quote.player_name: quote.line for quote in parsed.quotes if quote.category == "PTS"
+    }
+    # LeBron's alternate has two points; Jokic's has one (24.5), which would be
+    # taken for a second PTS quote and a line conflict if the market were mapped.
+    assert points["LeBron James"] == 27.5 and points["Nikola Jokić"] == 26.5
+    assert len([q for q in parsed.quotes if q.player_name == "Nikola Jokić" and q.category == "PTS"]) == 1
+    assert parsed.multi_line_omitted == 0
+
+
+def test_a_sportsbook_parse_never_keeps_a_dfs_app():
+    parsed = parse_event_odds(load("event_odds_us_dfs"))
+
+    assert parsed.quotes == ()
+    assert parsed.dropped_books == frozenset({"prizepicks", "underdog", "pick6", "dabble_us_dfs"})
 
 
 def test_five_market_response_normalizes_to_allowlisted_quotes():
@@ -276,7 +333,8 @@ def test_an_unexpected_failure_in_a_beat_logs_without_the_key(tmp_path, caplog):
 
     world = build_world(tmp_path)
     coordinator = world.coordinator(
-        FakeClient(), odds_settings=OddsApiSettings(enabled=True, api_key=SECRET)
+        FakeClient(),
+        odds_settings=OddsApiSettings(enabled=True, api_key=SECRET, regions="us"),
     )
 
     def explode():

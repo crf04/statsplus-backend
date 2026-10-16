@@ -271,6 +271,7 @@ def test_a_held_lease_makes_the_beat_busy(world):
 def test_full_team_names_map_and_an_unmapped_event_is_skipped_never_guessed(world):
     events = load("events")  # Lakers at Nuggets, "LA Clippers" at Warriors, Sonics
     client = FakeClient(events=events)
+    world.clock[0] = NOW + timedelta(hours=2)  # both tips inside the 13-hour window
 
     result = world.coordinator(client).run()
 
@@ -525,7 +526,9 @@ def test_the_guard_rechecks_remaining_credits_before_every_paid_call(world):
     client = FakeClient(events=events, remaining=1004)
     client.discovery_quota = OddsQuota(1020, 18980, 0)
     world.clock[0] = TIP - timedelta(hours=5)
-    settings = OddsApiSettings(enabled=True, api_key="k" * 24, assumed_lead_hours=1)
+    settings = OddsApiSettings(
+        enabled=True, api_key="k" * 24, assumed_lead_hours=1, regions="us"
+    )
 
     result = world.coordinator(client, odds_settings=settings).run()
 

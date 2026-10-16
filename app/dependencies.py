@@ -17,6 +17,7 @@ from app.providers.registry import (
     DFSProviderRuntime,
     ProviderRegistryError,
     build_dfs_provider,
+    dfs_provider_live_max_ages,
     dfs_provider_names,
 )
 
@@ -615,6 +616,7 @@ def build_dependencies(
             engine,
             projection_read_scopes,
             required_providers=settings.providers.dfs_enabled_providers,
+            provider_live_max_age=dfs_provider_live_max_ages(),
             event_reader=event_catalog_service,
         )
         if settings.features.projection_archive_read_enabled

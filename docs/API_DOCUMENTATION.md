@@ -568,15 +568,23 @@ is represented; one with no eligible current row is emitted as
 `{ "status": "missing", "retrieved_at": null }` rather than omitted.
 The Player Pool is read entirely from stored projection evidence; a request
 never fetches a provider board or refreshes a legacy snapshot. A confirmed
-offering no more than 15 minutes old is served as `fresh` and retains each
-provider's actual `retrieved_at`. This is an inclusive reuse maximum age, not
+offering no more than 15 minutes old (90 for `prizepicks`) is served as `fresh`
+and retains each provider's actual `retrieved_at`. This is an inclusive reuse maximum age, not
 the provider cache's exclusive fresh window. Partial coverage marks absent
 providers `missing`. On total failure, the last confirmed evidence is served
 through six hours with aggregate and contributing-provider status
 `stale-served`; beyond six hours the pool is empty and `unavailable`. No
 synthetic pool is produced.
 Aggregate `retrieved_at` is the oldest usable contributor snapshot, so its age
-never understates any provider observation included in the union.
+never understates any provider observation included in the union, with one
+declared exception: a provider that the provider registry gives its own, longer
+live window (`prizepicks`, polled hourly through The Odds API, 90 minutes
+instead of 15) is served as `fresh` through that window and reports its own
+`retrieved_at` and status under `providers`, but does not set the aggregate
+`retrieved_at` (nor a game's `observed_at`, live or closing) while any
+default-window provider has evidence. Its hourly cadence would otherwise make the whole pool read as
+old between its polls; when it is the only provider with evidence it sets the
+aggregate itself.
 
 `PROJECTION_ARCHIVE_READ_ENABLED` is the operator-controlled activation switch
 that selects one database-only reader for Slate, Matchup, and Matchup Selection.

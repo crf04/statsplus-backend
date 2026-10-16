@@ -3347,3 +3347,25 @@ def test_combined_live_and_closing_pools_omit_a_market_whose_lines_differ(
 
     assert player.provenance == {"dabble": ("PTS", "REB")}
     assert player.lines == {"dabble": {"REB": 7.5}}
+
+
+def test_a_provider_live_window_needs_a_read_scope_and_fits_the_failure_fallback():
+    from app.config.settings import ConfigurationError
+
+    engine = create_engine("sqlite:///:memory:")
+    run_migrations(engine)
+    scope = ProjectionArchiveReadScope(
+        provider="dabble", query=NBAMarketQuery(season=SEASON)
+    )
+
+    with pytest.raises(ValueError, match="live windows must have read scopes"):
+        LatestProjectionPlayerPoolReader(
+            engine, scope, provider_live_max_age={"prizepicks": timedelta(minutes=90)}
+        )
+    with pytest.raises(ConfigurationError, match="dabble projection live window"):
+        LatestProjectionPlayerPoolReader(
+            engine, scope, provider_live_max_age={"dabble": timedelta(hours=7)}
+        )
+    LatestProjectionPlayerPoolReader(  # the fallback itself is the longest allowed
+        engine, scope, provider_live_max_age={"Dabble": timedelta(hours=6)}
+    )
