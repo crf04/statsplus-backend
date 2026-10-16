@@ -393,6 +393,23 @@ def test_a_read_failure_opens_the_breaker_so_redis_is_not_asked_again():
     assert redis_client.gets == 1
 
 
+def test_nothing_is_written_while_the_breaker_is_open():
+    class FailingGet(DictRedis):
+        sets = 0
+
+        def get(self, key):
+            raise redis_package.exceptions.ConnectionError("down")
+
+        def setex(self, key, ttl, payload):
+            type(self).sets += 1
+
+    redis_client, composer = FailingGet(), Composer()
+
+    first = _read(ComposedMatchupCache(redis_client), composer)
+
+    assert (first["compose"], FailingGet.sets) == (1, 0)
+
+
 @pytest.mark.parametrize(
     "error",
     [redis_package.exceptions.ConnectionError("down"), redis_package.exceptions.TimeoutError("slow")],
@@ -562,6 +579,28 @@ def test_a_retained_publication_is_part_of_the_key_and_its_read_is_current():
     assert [e["publication_id"] for e in after["provenance"]["generation"]] == [
         "ret-2", "pub-1",
     ]
+
+
+def test_either_half_of_the_retained_identity_alone_misses():
+    composer = ProvenanceComposer()
+    cache = ComposedMatchupCache(DictRedis())
+    snapshot = _real_snapshot(age=0)
+    game = {**GAME, "game_id": "0022400001"}
+
+    def read(publication_id, fence):
+        composer.retained.update(
+            found=(publication_id, fence, _read_of(
+                "player_game_logs", publication_id, age=9, season="2024-25"
+            ))
+        )
+        return SnapshotMatchups(
+            composer, snapshot, object(), season="2025-26",
+            cache=cache, settings=RuntimeSettings(environment="testing"),
+        ).get_matchup(game_id=game["game_id"], game=game)["compose"]
+
+    assert [
+        read("ret-1", 4), read("ret-1", 4), read("ret-1", 5), read("ret-2", 5),
+    ] == [1, 1, 2, 3]
 
 
 def test_an_earlier_season_game_whose_retained_read_cannot_be_named_is_not_cached():
