@@ -90,3 +90,29 @@ def test_live_nba_game_logs_record_a_provider_event():
     assert event["outcome"] == telemetry.OUTCOME_SUCCESS
     assert event["cache_status"] == telemetry.CACHE_MISS
     assert isinstance(event["duration_ms"], float)
+
+@pytest.mark.skipif(
+    not _live_enabled(),
+    reason="LIVE_CONTRACT_TESTS=true required",
+)
+def test_live_pbp_wowy_returns_teammate_rows_and_records_a_provider_event():
+    from app.services.pbp_stats_adapter import PBPTotalsAdapter
+
+    adapter = PBPTotalsAdapter(settings=_live_settings())
+    # Nuggets (1610612743) with Jokic (203999) off the floor.
+    rows = adapter.fetch_wowy_rows(
+        team_id=1610612743, season="2025-26", off_player_ids=[203999]
+    )
+
+    assert len(rows) >= 5
+    assert all(row.player_id > 0 and row.name for row in rows)
+    assert 1627750 in {row.player_id for row in rows}  # Jamal Murray
+    assert 203999 not in {row.player_id for row in rows}
+    assert sum(1 for row in rows if row.minutes > 0) >= 5
+
+    events = telemetry.get_recorded_provider_events()
+    assert len(events) == 1
+    assert events[0]["provider"] == telemetry.PROVIDER_PBP_STATS
+    assert events[0]["operation"] == "get_wowy_player"
+    assert events[0]["outcome"] == telemetry.OUTCOME_SUCCESS
+    assert events[0]["status_code"] == 200

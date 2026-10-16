@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
@@ -19,7 +19,10 @@ import requests
 
 from app.config.settings import RuntimeSettings
 from app.errors import ProviderUnavailableError
-from app.services.pbp_stats_adapter import PBPTotalsAdapter as _InstrumentedPBPTotalsAdapter
+from app.services.pbp_stats_adapter import (
+    PBPTotalsAdapter as _InstrumentedPBPTotalsAdapter,
+    WowyPlayerRow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,17 @@ class PBPStatsProvider(Protocol):
         season_type: str = "Regular Season",
     ) -> pd.DataFrame:
         """Fetch and normalize player or opponent totals."""
+
+    def get_wowy(
+        self,
+        *,
+        team_id: int,
+        season: str,
+        on_player_ids: Sequence[int] = (),
+        off_player_ids: Sequence[int] = (),
+        season_type: str = "Regular Season",
+    ) -> tuple[WowyPlayerRow, ...]:
+        """Fetch one team's on/off-floor (WOWY) totals per teammate."""
 
     def health_check(self) -> dict[str, Any]:
         """Check the provider using the totals endpoint."""
@@ -100,6 +114,37 @@ class PBPStatsAdapter(_InstrumentedPBPTotalsAdapter):
             season_type=season_type,
         )
         return self._normalize_payload(payload)
+
+    def get_wowy(
+        self,
+        *,
+        team_id: int,
+        season: str,
+        on_player_ids: Sequence[int] = (),
+        off_player_ids: Sequence[int] = (),
+        season_type: str = "Regular Season",
+    ) -> tuple[WowyPlayerRow, ...]:
+        """Fetch WOWY rows; every failure is ``ProviderUnavailableError``.
+
+        StatsPlus player ids go in and come out; the translation to PBP's
+        ``EntityId`` happens in the shared adapter.  Timeouts, HTTP errors,
+        invalid JSON and malformed rows are all provider unavailability, the
+        same contract ``get_totals`` gives route handlers.
+        """
+
+        try:
+            return self.fetch_wowy_rows(
+                team_id=team_id,
+                season=season,
+                on_player_ids=on_player_ids,
+                off_player_ids=off_player_ids,
+                season_type=season_type,
+            )
+        except Exception as error:
+            logger.warning("PBP Stats WOWY request failed: %s", error)
+            raise ProviderUnavailableError(
+                "PBP Stats could not provide on/off splits.", detail=error
+            ) from error
 
     def health_check(self) -> dict[str, Any]:
         """Check PBP Stats using the same request and response validation.

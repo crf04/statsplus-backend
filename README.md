@@ -84,6 +84,9 @@ the most important variables:
 | `TARGET_BACKTEST_PRECOMPUTE_BUDGET_SECONDS` | No | `180`; wall-clock cap on the `player_shooting_refresh` cron's result-cache precompute (#363), checked between Targets |
 | `SLATE_EDGES_CACHE_ENABLED` | No | `true`; the `/api/games/slate/edges` response cache (#402) in Redis, keyed on the Publication generation and the slate's game states |
 | `SLATE_EDGES_CACHE_TTL_SECONDS` | No | `300`; TTL of each cached edges response, which also bounds how long a stored injury or Player Pool change can go unseen |
+| `ON_OFF_CACHE_ENABLED` | No | `true`; the `/api/on_off` PBPStats WOWY cache (#424) in Redis, keyed by team, season, on-set and off-set |
+| `ON_OFF_CACHE_TTL_SECONDS` | No | `86400`; how long an entry is fresh. It is kept 7 days longer as the stale fallback for a failed fetch |
+| `ON_OFF_MIN_INTERVAL_SECONDS` | No | `2`; minimum spacing between upstream PBPStats WOWY calls |
 | `NBA_STATS_TIMEOUT_SECONDS` | No | `10`; timeout for `stats.nba.com` requests |
 | `CORS_ALLOWED_ORIGINS` | Local default only; required in production | Comma-separated exact `http://` or `https://` origins; local default is `http://localhost:3000` |
 | `NBA_STATS_MAX_CONCURRENCY` | No | `10`; process-shared bound for in-flight NBA Stats calls |
