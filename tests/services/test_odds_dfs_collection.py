@@ -631,6 +631,108 @@ def test_a_resolver_fault_does_not_retire_lines_the_response_still_carries(world
     assert dict(_players(closing)[LEBRON].lines["prizepicks"]) == PP_LEBRON
 
 
+def test_a_quota_fault_after_the_purchase_still_costs_fourteen_calls_a_game(world):
+    from app.services.odds_collection import run_once
+
+    client = _dfs_client()
+    coordinator = world.dfs_coordinator(client)
+    save = coordinator._save_quota
+    failed = []
+
+    def fail_once(quota, *, now):
+        if quota.last_cost and not failed:
+            failed.append(now)
+            raise RuntimeError("quota persistence interrupted after the paid response")
+        return save(quota, now=now)
+
+    coordinator._save_quota = fail_once
+    now = TIP - timedelta(hours=13)
+    while now < TIP:
+        world.clock[0] = now
+        run_once(coordinator)
+        now += timedelta(minutes=5)
+
+    assert failed
+    assert len(client.event_calls) == 14
+    assert 20000 - client.remaining == 70  # what the vendor charged
+    assert sum(poll["cost"] for poll in _rows(world, OddsApiPoll)) == 70  # what the ledger says
+
+
+def test_a_worker_superseded_just_before_the_archive_write_publishes_nothing(world):
+    stale = world.dfs_coordinator(_dfs_client())
+    successor = world.dfs_coordinator(_dfs_client())
+    record = stale.dfs_writer.record
+
+    def pause_then_write(*args, **kwargs):
+        # The stale worker stalls; its lease lapses and the successor runs a
+        # whole beat.  The purchase is in the ledger, so the successor makes
+        # no call of its own.
+        world.clock[0] = NOW + timedelta(minutes=6)
+        assert successor.run().calls == 0
+        return record(*args, **kwargs)
+
+    stale.dfs_writer.record = pause_then_write
+
+    result = stale.run()
+
+    assert (result.status, result.reason) == ("failed", "lease_lost")
+    assert _rows(world, LatestPlayerProjection) == []
+    assert _rows(world, ProviderPoll) == []
+
+
+def test_a_stalled_closing_fetch_cannot_publish_after_the_successor_closed_the_game(world):
+    world.clock[0] = TIP - timedelta(minutes=9)
+    stale = world.dfs_coordinator(_dfs_client())
+    successor = world.dfs_coordinator(_dfs_client())
+    record = stale.dfs_writer.record
+
+    def stall_past_tip(*args, **kwargs):
+        _start_lakers_game(world)
+        world.clock[0] = TIP + timedelta(minutes=3)
+        assert successor.run().calls == 0
+        assert len(_rows(world, ClosingProjectionSet)) == 1  # frozen, empty
+        return record(*args, **kwargs)
+
+    stale.dfs_writer.record = stall_past_tip
+
+    result = stale.run()
+
+    assert (result.status, result.reason) == ("failed", "lease_lost")
+    # Nothing slipped into Latest behind the frozen closing set.
+    assert _rows(world, LatestPlayerProjection) == []
+    assert _rows(world, ProviderPoll) == []
+
+
+def test_a_mapping_store_fault_on_the_closing_fetch_keeps_the_players_closing_lines(world):
+    from app.services.athlete_mapping_errors import AthleteMappingPersistenceError
+
+    coordinator = world.dfs_coordinator(_dfs_client())
+    coordinator.run()
+    record = world.athlete_repository.record_resolution
+
+    def fail_for_lebron(resolution, **kwargs):
+        if resolution.provider_evidence.name == "LeBron James":
+            raise AthleteMappingPersistenceError("injected transient mapping write failure")
+        return record(resolution, **kwargs)
+
+    world.athlete_repository.record_resolution = fail_for_lebron
+    world.clock[0] = TIP - timedelta(minutes=9)
+    assert coordinator.run().calls == 1  # the same response, LeBron's name unresolved
+
+    assert not [
+        r for r in _rows(world, ProjectionObservation) if r["market_status"] == "suspended"
+    ]
+    world.athlete_repository.record_resolution = record
+    _start_lakers_game(world)
+    world.clock[0] = TIP + timedelta(minutes=3)
+    coordinator.run()
+    closing, is_closing = world.pool_reader().get_pool_for_game_with_closing_state(
+        season=SEASON, game_id=GAME_ID
+    )
+    assert is_closing is True
+    assert dict(_players(closing)[LEBRON].lines["prizepicks"]) == PP_LEBRON
+
+
 # -- the game starts -----------------------------------------------------------
 
 

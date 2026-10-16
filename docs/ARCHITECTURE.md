@@ -4561,8 +4561,9 @@ beat (every 5 min, the odds cron service, ODDS_API_REGIONS=us_dfs)
   afterwards: `quote_count`, `unresolved_count` and no reason once the lines are
   in the archive, or `storage_error` if publication failed (logged, mirrored to
   Sentry, and no call for 30 minutes). A fault after the purchase therefore
-  costs at most an hour of fresh lines for that game, never a second purchase;
-  a crash leaves an `unpublished` row and the next hour's poll republishes.
+  costs at most an hour of fresh lines for that game (for the closing fetch, its
+  snapshot: the last hourly lines stand), never a second purchase; a crash
+  leaves an `unpublished` row and the next hour's poll republishes.
 * **Authorization.** `build_odds_collection` builds its own
   `ProjectionRecordingService` for the single `prizepicks` scope, so the
   application's recording service (authorized for `DFS_ENABLED_PROVIDERS` only)
